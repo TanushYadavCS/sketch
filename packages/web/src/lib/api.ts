@@ -88,6 +88,7 @@ export interface SetupStatus {
   slackConnected: boolean;
   llmConnected: boolean;
   llmProvider: "anthropic" | "bedrock" | null;
+  managedUrl?: string;
 }
 
 export interface ConnectorConfig {

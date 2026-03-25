@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
  * Follows the designer's sidebar structure with Phosphor icons.
  */
 import {
+  ArrowSquareOutIcon,
   BrainIcon,
   CalendarDotsIcon,
   CaretUpDownIcon,
@@ -87,6 +88,11 @@ export function AppSidebar({
     queryFn: () => api.settings.identity(),
   });
 
+  const { data: setupStatus } = useQuery({
+    queryKey: ["setup", "status"],
+    queryFn: () => api.setup.status(),
+  });
+
   const logoutMutation = useMutation({
     mutationFn: () => api.auth.logout(),
     onSuccess: () => {
@@ -134,6 +140,16 @@ export function AppSidebar({
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
+              {setupStatus?.managedUrl ? (
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild tooltip="Account">
+                    <a href={setupStatus.managedUrl} target="_blank" rel="noopener noreferrer">
+                      <ArrowSquareOutIcon size={18} />
+                      <span>Account</span>
+                    </a>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ) : null}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

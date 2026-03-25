@@ -85,6 +85,7 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
 interface SetupDeps {
+  managedUrl?: string;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
 }
@@ -113,6 +114,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       slackConnected: hasSlack,
       llmConnected: hasLlm,
       llmProvider: row?.llm_provider === "bedrock" ? "bedrock" : row?.llm_provider === "anthropic" ? "anthropic" : null,
+      ...(deps.managedUrl ? { managedUrl: deps.managedUrl } : {}),
     });
   });
 

@@ -217,9 +217,7 @@ describe("createSlackStartupManager", () => {
 
       await start();
 
-      const passedTokens = createBot.mock.calls[0][0];
-      expect(passedTokens.botToken).toBe("xoxb-db");
-      expect(passedTokens).not.toHaveProperty("appToken");
+      expect(createBot).toHaveBeenCalledWith({ botToken: "xoxb-db" });
     });
 
     it("socket mode passes appToken to createBot when both tokens present", async () => {
@@ -238,9 +236,7 @@ describe("createSlackStartupManager", () => {
 
       await start();
 
-      const passedTokens = createBot.mock.calls[0][0];
-      expect(passedTokens.botToken).toBe("xoxb-db");
-      expect(passedTokens.appToken).toBe("xapp-db");
+      expect(createBot).toHaveBeenCalledWith({ botToken: "xoxb-db", appToken: "xapp-db" });
     });
   });
 });
