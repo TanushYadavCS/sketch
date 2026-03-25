@@ -21,6 +21,9 @@ export const configSchema = z.object({
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(50),
 
+  // Security
+  ENCRYPTION_KEY: z.string().optional(),
+
   // Server
   // Public-facing base URL (used for OAuth redirect URIs, email links, etc.)
   // e.g. https://sketch.yourcompany.com — no trailing slash

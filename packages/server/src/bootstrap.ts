@@ -66,7 +66,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 3. Repositories
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
-  const settingsRepo = createSettingsRepository(db);
+  const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const outreachRepo = createOutreachRepository(db);

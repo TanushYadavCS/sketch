@@ -50,7 +50,7 @@ interface AppDeps {
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const app = new Hono();
-  const settings = createSettingsRepository(db);
+  const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const users = createUserRepository(db);
   const connectors = createConnectorRepository(db);
   const mcpServers = createMcpServerRepository(db);
