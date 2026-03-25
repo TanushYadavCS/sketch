@@ -35,6 +35,7 @@ export const configSchema = z.object({
 
   // Managed mode
   MANAGED_URL: z.string().optional(),
+  MANAGED_AUTH_SECRET: z.string().optional(),
 
   // Server
   // Public-facing base URL (used for OAuth redirect URIs, email links, etc.)

@@ -81,7 +81,20 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
 
   // Auth middleware on all /api/* routes (with setup mode + auth checks)
-  app.use("/api/*", createAuthMiddleware(settings));
+  app.use(
+    "/api/*",
+    createAuthMiddleware(settings, {
+      managedAuthSecret: config.MANAGED_AUTH_SECRET,
+      managedUrl: config.MANAGED_URL,
+      findUserByEmail: config.MANAGED_AUTH_SECRET
+        ? async (email) => {
+            const user = await users.findByEmail(email);
+            if (!user) return null;
+            return { id: user.id, role: user.role as "admin" | "member" };
+          }
+        : undefined,
+    }),
+  );
 
   // API routes
   app.route("/api/health", healthRoutes(db));

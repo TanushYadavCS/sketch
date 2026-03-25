@@ -35,10 +35,17 @@ const PUBLIC_PATHS = new Set([
 const SETUP_PATHS_PREFIX = "/api/setup";
 const PUBLIC_SETUP_PATHS = new Set(["/api/setup/status", "/api/setup/account"]);
 const ONBOARDING_PATHS_PREFIX = "/api/channels/whatsapp";
+const PLATFORM_COOKIE = "sketch_platform_session";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
-export function createAuthMiddleware(settings: SettingsRepo) {
+export interface AuthMiddlewareOpts {
+  managedAuthSecret?: string;
+  managedUrl?: string;
+  findUserByEmail?: (email: string) => Promise<{ id: string; role: "admin" | "member" } | null>;
+}
+
+export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewareOpts) {
   let cachedSecret: string | null = null;
 
   return async (c: Context, next: Next) => {
@@ -90,6 +97,28 @@ export function createAuthMiddleware(settings: SettingsRepo) {
       return next();
     }
 
+    // Managed SSO: check platform cookie first when configured.
+    if (opts?.managedAuthSecret) {
+      const platformToken = getCookie(c, PLATFORM_COOKIE);
+      if (platformToken) {
+        const payload = await verifyJwt(platformToken, opts.managedAuthSecret);
+        if (!payload) {
+          const loginUrl = opts.managedUrl ? `${opts.managedUrl}/login` : "/login";
+          return c.redirect(loginUrl);
+        }
+
+        const user = await opts.findUserByEmail?.(payload.sub);
+        if (!user) {
+          return c.json({ error: { code: "FORBIDDEN", message: "User not found in this tenant" } }, 403);
+        }
+
+        c.set("role", user.role);
+        c.set("sub", payload.sub);
+        return next();
+      }
+    }
+
+    // Local auth: existing sketch_session cookie.
     const secret = jwtSecret ?? cachedSecret;
     if (!secret) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } }, 401);
