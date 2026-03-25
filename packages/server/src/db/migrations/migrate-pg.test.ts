@@ -132,6 +132,105 @@ describe("runMigrations on Postgres — full sequence", () => {
   });
 });
 
+describe("runMigrations on Postgres — search schema", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestPgDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("indexed_files has a search_vector column of type tsvector", async () => {
+    const result = await sql<{ column_name: string; data_type: string; udt_name: string }>`
+      SELECT column_name, data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'indexed_files'
+        AND column_name = 'search_vector'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].data_type).toBe("tsvector");
+  });
+
+  it("a GIN index exists on the search_vector column of indexed_files", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE tablename = 'indexed_files'
+        AND indexdef LIKE '%gin%'
+    `.execute(db);
+
+    expect(result.rows.length).toBeGreaterThanOrEqual(1);
+    const hasSearchVectorIndex = result.rows.some((r) => r.indexdef.includes("search_vector"));
+    expect(hasSearchVectorIndex).toBe(true);
+  });
+
+  it("chunk_embeddings table exists with chunk_id (text PK) and embedding (vector type) columns", async () => {
+    const pkResult = await sql<{ column_name: string; data_type: string }>`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'chunk_embeddings'
+        AND column_name = 'chunk_id'
+    `.execute(db);
+
+    expect(pkResult.rows).toHaveLength(1);
+    expect(pkResult.rows[0].data_type).toBe("text");
+
+    const vecResult = await sql<{ column_name: string; data_type: string; udt_name: string }>`
+      SELECT column_name, data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'chunk_embeddings'
+        AND column_name = 'embedding'
+    `.execute(db);
+
+    expect(vecResult.rows).toHaveLength(1);
+    expect(vecResult.rows[0].data_type).toBe("USER-DEFINED");
+    expect(vecResult.rows[0].udt_name).toBe("vector");
+  });
+
+  it("file_embeddings table exists with indexed_file_id (text PK) and embedding (vector type) columns", async () => {
+    const pkResult = await sql<{ column_name: string; data_type: string }>`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'file_embeddings'
+        AND column_name = 'indexed_file_id'
+    `.execute(db);
+
+    expect(pkResult.rows).toHaveLength(1);
+    expect(pkResult.rows[0].data_type).toBe("text");
+
+    const vecResult = await sql<{ column_name: string; data_type: string; udt_name: string }>`
+      SELECT column_name, data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'file_embeddings'
+        AND column_name = 'embedding'
+    `.execute(db);
+
+    expect(vecResult.rows).toHaveLength(1);
+    expect(vecResult.rows[0].data_type).toBe("USER-DEFINED");
+    expect(vecResult.rows[0].udt_name).toBe("vector");
+  });
+
+  it("indexed_files_fts table does NOT exist on Postgres (FTS5 is SQLite-only)", async () => {
+    const result = await sql<{ table_name: string }>`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = 'indexed_files_fts'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(0);
+  });
+});
+
 describe("runMigrations on Postgres — chat_sessions schema", () => {
   let db: Kysely<DB>;
 

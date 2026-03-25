@@ -11,7 +11,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { sql } from "kysely";
+import { PostgresAdapter, sql } from "kysely";
 import type { Logger } from "pino";
 import type { DB } from "../db/schema";
 import { chunkText } from "./chunking";
@@ -357,6 +357,8 @@ async function enrichTextDocument(
         .orderBy("chunk_index", "asc")
         .execute();
 
+      const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+
       // Batch embedding inserts — chunk_embeddings is a vec0 virtual table that
       // only supports single-row INSERT, so we must still insert one at a time.
       // We use Promise.all to overlap the async overhead rather than a for-await loop.
@@ -364,9 +366,13 @@ async function enrichTextDocument(
         storedChunks
           .filter((_, i) => !!embeddings[i])
           .map((chunk, i) =>
-            sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (${chunk.id}, ${JSON.stringify(embeddings[i])})`.execute(
-              db,
-            ),
+            isPostgres
+              ? sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (${chunk.id}, ${JSON.stringify(embeddings[i])}::vector)`.execute(
+                  db,
+                )
+              : sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (${chunk.id}, ${JSON.stringify(embeddings[i])})`.execute(
+                  db,
+                ),
           ),
       );
       logger.info({ fileId: file.id, chunks: storedChunks.length }, "Embeddings created");
@@ -410,9 +416,16 @@ async function enrichImage(
   const embedding = await embeddingProvider.embedImage(buffer, mimeType);
 
   // Store embedding
-  await sql`INSERT OR REPLACE INTO file_embeddings (indexed_file_id, embedding) VALUES (${file.id}, ${JSON.stringify(embedding)})`.execute(
-    db,
-  );
+  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  if (isPostgres) {
+    await sql`INSERT INTO file_embeddings (indexed_file_id, embedding)
+      VALUES (${file.id}, ${JSON.stringify(embedding)}::vector)
+      ON CONFLICT (indexed_file_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(db);
+  } else {
+    await sql`INSERT OR REPLACE INTO file_embeddings (indexed_file_id, embedding) VALUES (${file.id}, ${JSON.stringify(embedding)})`.execute(
+      db,
+    );
+  }
 
   // Derive basic tags from file name and path (no LLM needed for images)
   const tags = deriveImageTags(file.file_name, file.source_path);
@@ -534,7 +547,8 @@ async function clearFileChunks(db: Kysely<DB>, fileId: string): Promise<void> {
       )
     `.execute(db);
   } catch (err) {
-    const isNoSuchTable = err instanceof Error && err.message.includes("no such table: chunk_embeddings");
+    const msg = err instanceof Error ? err.message : "";
+    const isNoSuchTable = msg.includes("no such table: chunk_embeddings") || msg.includes("does not exist");
     if (!isNoSuchTable) throw err;
   }
 
@@ -555,7 +569,8 @@ export async function clearEnrichmentData(db: Kysely<DB>, fileId: string): Promi
   try {
     await sql`DELETE FROM file_embeddings WHERE indexed_file_id = ${fileId}`.execute(db);
   } catch (err) {
-    const isNoSuchTable = err instanceof Error && err.message.includes("no such table: file_embeddings");
+    const msg = err instanceof Error ? err.message : "";
+    const isNoSuchTable = msg.includes("no such table: file_embeddings") || msg.includes("does not exist");
     if (!isNoSuchTable) throw err;
   }
 }

@@ -70,7 +70,17 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema.createIndex("idx_indexed_files_not_archived").on("indexed_files").columns(["is_archived"]).execute();
 
   if (isPostgres) {
-    // Postgres: skip FTS5 virtual table and triggers — Phase 2 adds tsvector/GIN support.
+    await sql`ALTER TABLE indexed_files ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+      to_tsvector('english',
+        regexp_replace(coalesce(file_name, ''), '[._\\-/]', ' ', 'g') || ' ' ||
+        coalesce(summary, '') || ' ' ||
+        coalesce(tags, '') || ' ' ||
+        coalesce(source, '') || ' ' ||
+        coalesce(source_path, '')
+      )
+    ) STORED`.execute(db);
+
+    await sql`CREATE INDEX idx_indexed_files_search_vector ON indexed_files USING GIN (search_vector)`.execute(db);
     return;
   }
 

@@ -112,6 +112,16 @@ export interface IndexedFilesTable {
   embedding_status: Generated<string>;
 }
 
+export interface ChunkEmbeddingsTable {
+  chunk_id: string;
+  embedding: string;
+}
+
+export interface FileEmbeddingsTable {
+  indexed_file_id: string;
+  embedding: string;
+}
+
 export interface DocumentChunksTable {
   id: string;
   indexed_file_id: string;
@@ -251,6 +261,8 @@ export interface DB {
   connector_files: ConnectorFilesTable;
   document_chunks: DocumentChunksTable;
   document_timeframes: DocumentTimeframesTable;
+  chunk_embeddings: ChunkEmbeddingsTable;
+  file_embeddings: FileEmbeddingsTable;
   user_provider_identities: UserProviderIdentitiesTable;
   file_access: FileAccessTable;
   email_verification_tokens: EmailVerificationTokensTable;

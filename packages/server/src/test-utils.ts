@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
+import { vector } from "@electric-sql/pglite/vector";
 import Database from "better-sqlite3";
-import { Kysely, SqliteDialect } from "kysely";
+import { Kysely, SqliteDialect, sql } from "kysely";
 import pino from "pino";
 import type { Config } from "./config";
 import { runMigrations } from "./db/migrate";
@@ -43,10 +44,12 @@ export async function createTestDb(): Promise<Kysely<DB>> {
 /**
  * Creates an in-memory Postgres database (via PGlite) with all migrations applied.
  * PGlite instances are cheap enough to create fresh for each test — no template clone needed.
+ * The pgvector extension is loaded via PGlite's built-in vector bundle before migrations run.
  */
 export async function createTestPgDb(): Promise<Kysely<DB>> {
-  const pglite = new PGlite();
+  const pglite = new PGlite({ extensions: { vector } });
   const db = new Kysely<DB>({ dialect: new PGliteDialect({ pglite }) });
+  await sql`CREATE EXTENSION IF NOT EXISTS vector`.execute(db);
   await runMigrations(db);
   return db;
 }

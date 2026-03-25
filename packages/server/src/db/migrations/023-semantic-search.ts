@@ -8,7 +8,7 @@
  * outside of Kysely migrations since they require the sqlite-vec extension to be
  * loaded first. See db/index.ts for vec table initialization.
  */
-import { type Kysely, sql } from "kysely";
+import { type Kysely, PostgresAdapter, sql } from "kysely";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   // ── 1. document_chunks ─────────────────────────────────────
@@ -36,6 +36,26 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await sql`CREATE INDEX idx_timeframes_file ON document_timeframes(indexed_file_id)`.execute(db);
   await sql`CREATE INDEX idx_timeframes_dates ON document_timeframes(start_date, end_date)`.execute(db);
+
+  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+
+  if (isPostgres) {
+    await sql`CREATE TABLE chunk_embeddings (
+      chunk_id TEXT PRIMARY KEY REFERENCES document_chunks(id) ON DELETE CASCADE,
+      embedding vector(3072) NOT NULL
+    )`.execute(db);
+
+    await sql`CREATE INDEX idx_chunk_embeddings_hnsw ON chunk_embeddings
+      USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops)`.execute(db);
+
+    await sql`CREATE TABLE file_embeddings (
+      indexed_file_id TEXT PRIMARY KEY REFERENCES indexed_files(id) ON DELETE CASCADE,
+      embedding vector(3072) NOT NULL
+    )`.execute(db);
+
+    await sql`CREATE INDEX idx_file_embeddings_hnsw ON file_embeddings
+      USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops)`.execute(db);
+  }
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
