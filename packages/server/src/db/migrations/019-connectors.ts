@@ -2,11 +2,13 @@
  * Connectors and indexed files infrastructure.
  *
  * Creates connector_configs, indexed_files (with enrichment + embedding columns),
- * and FTS5 full-text search with triggers.
+ * and FTS5 full-text search with triggers (SQLite only).
  */
-import { type Kysely, sql } from "kysely";
+import { type Kysely, PostgresAdapter, sql } from "kysely";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
+  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+
   await db.schema
     .createTable("connector_configs")
     .addColumn("id", "text", (col) => col.primaryKey())
@@ -67,7 +69,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await db.schema.createIndex("idx_indexed_files_not_archived").on("indexed_files").columns(["is_archived"]).execute();
 
-  // FTS5 virtual table for full-text search over file name, summary, tags, source, and source_path
+  if (isPostgres) {
+    // Postgres: skip FTS5 virtual table and triggers — Phase 2 adds tsvector/GIN support.
+    return;
+  }
+
+  // SQLite: FTS5 virtual table for full-text search over file name, summary, tags, source, and source_path
   await sql`
 		CREATE VIRTUAL TABLE indexed_files_fts USING fts5(
 			file_name,
@@ -106,10 +113,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
-  await sql`DROP TRIGGER IF EXISTS indexed_files_au`.execute(db);
-  await sql`DROP TRIGGER IF EXISTS indexed_files_ad`.execute(db);
-  await sql`DROP TRIGGER IF EXISTS indexed_files_ai`.execute(db);
-  await sql`DROP TABLE IF EXISTS indexed_files_fts`.execute(db);
+  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+
+  if (!isPostgres) {
+    await sql`DROP TRIGGER IF EXISTS indexed_files_au`.execute(db);
+    await sql`DROP TRIGGER IF EXISTS indexed_files_ad`.execute(db);
+    await sql`DROP TRIGGER IF EXISTS indexed_files_ai`.execute(db);
+    await sql`DROP TABLE IF EXISTS indexed_files_fts`.execute(db);
+  }
+
   await db.schema.dropTable("indexed_files").execute();
   await db.schema.dropTable("connector_configs").execute();
 }

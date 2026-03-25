@@ -1,9 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import Database from "better-sqlite3";
-import { Kysely, SqliteDialect } from "kysely";
+import { Kysely, PostgresDialect, SqliteDialect } from "kysely";
 import pino from "pino";
-import * as sqliteVec from "sqlite-vec";
 import type { Config } from "../config";
 import type { DB } from "./schema";
 
@@ -16,8 +14,17 @@ export const EMBEDDING_DIMENSIONS = 3072;
  */
 export let sqliteVecAvailable = false;
 
-export function createDatabase(config: Config): Kysely<DB> {
+export async function createDatabase(config: Config): Promise<Kysely<DB>> {
+  if (config.DB_TYPE === "postgres") {
+    const { Pool } = await import("pg");
+    const pool = new Pool({ connectionString: config.DATABASE_URL, max: 5 });
+    return new Kysely<DB>({
+      dialect: new PostgresDialect({ pool }),
+    });
+  }
+
   const logger = pino({ level: "warn" });
+  const Database = (await import("better-sqlite3")).default;
   mkdirSync(dirname(config.SQLITE_PATH), { recursive: true });
   const sqlite = new Database(config.SQLITE_PATH);
   sqlite.pragma("journal_mode = WAL");
@@ -27,11 +34,13 @@ export function createDatabase(config: Config): Kysely<DB> {
   // extension may not be present in all environments. When unavailable, search
   // falls back to FTS-only and embedding operations are skipped.
   try {
+    const sqliteVec = await import("sqlite-vec");
     sqliteVec.load(sqlite);
     sqliteVecAvailable = true;
 
     // Create vec0 virtual tables. These live outside Kysely migrations because
-    // they require the sqlite-vec extension. Drop and recreate if dimensions changed.
+    // they require the sqlite-vec extension to be loaded first. Drop and recreate
+    // if dimensions changed.
     for (const table of ["chunk_embeddings", "file_embeddings"] as const) {
       const pk = table === "chunk_embeddings" ? "chunk_id" : "indexed_file_id";
       const existingDef = sqlite.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as

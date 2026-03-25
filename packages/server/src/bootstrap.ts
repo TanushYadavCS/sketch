@@ -4,6 +4,7 @@
  * from tests with a custom Config and { connect: false }.
  */
 import { serve } from "@hono/node-server";
+import type { Kysely } from "kysely";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { runAgent } from "./agent/runner";
 import type { McpServerConfig } from "./agent/runner";
@@ -18,6 +19,7 @@ import { createOutreachRepository } from "./db/repositories/outreach";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
+import type { DB } from "./db/schema";
 import { createApp } from "./http";
 import { buildMcpConfig } from "./integrations/factory";
 import { createLogger } from "./logger";
@@ -36,7 +38,7 @@ import { GroupBuffer } from "./whatsapp/group-buffer";
 export interface ServerHandle {
   config: Config;
   server: ReturnType<typeof serve>;
-  db: ReturnType<typeof createDatabase>;
+  db: Kysely<DB>;
   whatsapp: WhatsAppBot;
   getSlack: () => SlackBot | null;
   shutdown: () => Promise<void>;
@@ -54,7 +56,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const logger = createLogger(config);
 
   // 2. Database
-  const db = createDatabase(config);
+  const db = await createDatabase(config);
   await runMigrations(db);
   logger.info("Database ready");
 

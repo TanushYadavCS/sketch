@@ -10,23 +10,38 @@
  * (thread_key IS NULL) and thread-level rows (thread_key = '<threadTs>') are covered by
  * a single unique index — SQLite treats two NULLs as distinct, so a plain UNIQUE on
  * (workspace_key, thread_key) would allow duplicate workspace-level rows.
+ * Migration 014 replaces this with a plain column-based constraint using '' as sentinel.
  *
  * Migration direction: up() migrates files → DB and removes them. down() drops the table
  * only (no attempt to recreate files — this is a one-way data migration).
  */
 import { readFile, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { type Kysely, sql } from "kysely";
+import { type Kysely, PostgresAdapter, sql } from "kysely";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
-  await db.schema
-    .createTable("chat_sessions")
-    .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
-    .addColumn("workspace_key", "text", (col) => col.notNull())
-    .addColumn("thread_key", "text")
-    .addColumn("session_id", "text", (col) => col.notNull())
-    .addColumn("updated_at", "text", (col) => col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`))
-    .execute();
+  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+
+  if (isPostgres) {
+    // Postgres: use serial for auto-incrementing PK (autoIncrement() generates
+    // 'auto_increment' which is not valid Postgres syntax).
+    await sql`CREATE TABLE chat_sessions (
+      id serial PRIMARY KEY,
+      workspace_key text NOT NULL,
+      thread_key text,
+      session_id text NOT NULL,
+      updated_at text NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`.execute(db);
+  } else {
+    await db.schema
+      .createTable("chat_sessions")
+      .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
+      .addColumn("workspace_key", "text", (col) => col.notNull())
+      .addColumn("thread_key", "text")
+      .addColumn("session_id", "text", (col) => col.notNull())
+      .addColumn("updated_at", "text", (col) => col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`))
+      .execute();
+  }
 
   await sql`CREATE UNIQUE INDEX chat_sessions_workspace_thread_uidx ON chat_sessions (workspace_key, COALESCE(thread_key, ''))`.execute(
     db,
