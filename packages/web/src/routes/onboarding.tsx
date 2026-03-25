@@ -230,7 +230,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
           onNext={async ({ organizationName: orgName, botName: name }) => {
             try {
               await persistIdentity(orgName, name);
-              goToStep(3);
+              goToStep(setupStatus.managedUrl ? 4 : 3);
             } catch {
               // Error toast is handled by identity mutation.
             }

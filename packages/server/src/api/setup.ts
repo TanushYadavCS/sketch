@@ -104,7 +104,19 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       Boolean(row?.aws_access_key_id?.trim() && row?.aws_secret_access_key?.trim() && row?.aws_region?.trim());
     const hasLlm = Boolean(hasAnthropic || hasBedrock);
     const isCompleted = Boolean(row?.onboarding_completed_at);
-    const currentStep = isCompleted ? 5 : hasLlm ? 5 : hasSlack ? 4 : hasIdentity ? 3 : hasAdmin ? 2 : 0;
+    const isManaged = Boolean(deps.managedUrl);
+    let currentStep: number;
+    if (isCompleted) {
+      currentStep = 5;
+    } else if (hasLlm) {
+      currentStep = 5;
+    } else if (isManaged) {
+      // Managed: skip Slack step (3), go directly from Identity (2) to LLM (4)
+      currentStep = hasIdentity ? 4 : hasAdmin ? 2 : 0;
+    } else {
+      // Self-hosted: full flow
+      currentStep = hasSlack ? 4 : hasIdentity ? 3 : hasAdmin ? 2 : 0;
+    }
     return c.json({
       completed: isCompleted,
       currentStep,
