@@ -152,6 +152,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   const startSlackBotIfConfigured = createSlackStartupManager({
     logger,
+    slackMode: config.SLACK_MODE,
     getSettingsTokens: async () => {
       const settingsRow = await settingsRepo.get();
       return {

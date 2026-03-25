@@ -52,7 +52,7 @@ export interface SlackAdapterDeps {
   outreachRepo?: OutreachRepository;
 }
 
-export async function validateSlackTokens(botToken: string, appToken: string) {
+export async function validateSlackTokens(botToken: string, appToken?: string) {
   void appToken;
   await slackApiCall(botToken, "auth.test");
 }
@@ -80,7 +80,7 @@ async function downloadSlackFiles(
   return attachments;
 }
 
-export function createConfiguredSlackBot(tokens: { botToken: string; appToken: string }, deps: SlackAdapterDeps) {
+export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: string }, deps: SlackAdapterDeps) {
   const {
     db,
     config,
@@ -96,10 +96,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken: s
   } = deps;
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
+  const mode = config.SLACK_MODE ?? "socket";
   const slackBot = new SlackBot({
-    mode: "socket",
-    appToken: tokens.appToken,
+    mode,
     botToken: tokens.botToken,
+    ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
   });
 
