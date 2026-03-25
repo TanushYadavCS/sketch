@@ -56,6 +56,30 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
 
+  // Slack HTTP events endpoint — must come before auth middleware so it doesn't
+  // require JWT authentication. Only registered when SLACK_MODE=http.
+  if (config.SLACK_MODE === "http") {
+    app.post("/slack/events", async (c) => {
+      const slack = deps?.getSlack?.();
+      if (!slack) {
+        return c.json({ error: "Slack not configured" }, 503);
+      }
+
+      const rawBody = await c.req.text();
+      const headers: Record<string, string> = {};
+      c.req.raw.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+
+      try {
+        const result = await slack.processHttpRequest(rawBody, headers);
+        return c.json(result);
+      } catch (_err) {
+        return c.json({ error: "Invalid request" }, 401);
+      }
+    });
+  }
+
   // Auth middleware on all /api/* routes (with setup mode + auth checks)
   app.use("/api/*", createAuthMiddleware(settings));
 

@@ -154,4 +154,81 @@ describe("validateConfig", () => {
       expect(exitSpy).not.toHaveBeenCalled();
     });
   });
+
+  describe("SLACK_MODE validation", () => {
+    it("exits when SLACK_MODE is http without SLACK_SIGNING_SECRET", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ SLACK_MODE: "http" });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("does not exit when SLACK_MODE is http with SLACK_SIGNING_SECRET set", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ SLACK_MODE: "http", SLACK_SIGNING_SECRET: "secret123" });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not exit when SLACK_MODE is socket without SLACK_SIGNING_SECRET", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ SLACK_MODE: "socket" });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not exit when SLACK_MODE is absent (defaults to socket)", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig();
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("configSchema SLACK_MODE field", () => {
+  it("defaults SLACK_MODE to socket when not set", () => {
+    const result = configSchema.safeParse({});
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.SLACK_MODE).toBe("socket");
+    }
+  });
+
+  it("accepts SLACK_MODE=socket", () => {
+    const result = configSchema.safeParse({ SLACK_MODE: "socket" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.SLACK_MODE).toBe("socket");
+    }
+  });
+
+  it("accepts SLACK_MODE=http", () => {
+    const result = configSchema.safeParse({ SLACK_MODE: "http" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.SLACK_MODE).toBe("http");
+    }
+  });
+
+  it("rejects invalid SLACK_MODE values", () => {
+    const result = configSchema.safeParse({ SLACK_MODE: "websocket" });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts SLACK_SIGNING_SECRET as optional", () => {
+    const result = configSchema.safeParse({});
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.SLACK_SIGNING_SECRET).toBeUndefined();
+    }
+  });
+
+  it("accepts SLACK_SIGNING_SECRET when provided", () => {
+    const result = configSchema.safeParse({ SLACK_SIGNING_SECRET: "abc123secret" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.SLACK_SIGNING_SECRET).toBe("abc123secret");
+    }
+  });
 });

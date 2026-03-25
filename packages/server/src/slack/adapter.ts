@@ -97,6 +97,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken: s
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
   const slackBot = new SlackBot({
+    mode: "socket",
     appToken: tokens.appToken,
     botToken: tokens.botToken,
     logger,

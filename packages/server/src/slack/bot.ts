@@ -1,5 +1,5 @@
 /**
- * Slack adapter wrapping @slack/bolt in Socket Mode.
+ * Slack adapter wrapping @slack/bolt in Socket Mode or HTTP mode.
  *
  * Three event paths:
  * - DMs: `message` event with channel_type "im" → onMessage handler
@@ -9,9 +9,28 @@
  *
  * Bot self-ID resolved at startup via auth.test. Used for mention stripping
  * and to filter out our own messages while letting other bots' messages through.
+ *
+ * In HTTP mode, Bolt's WebSocket connection is skipped; events arrive via
+ * processHttpRequest() which verifies the Slack signature and dispatches
+ * to the Bolt app.
  */
 import { App } from "@slack/bolt";
+import type { Receiver } from "@slack/bolt";
 import type { Logger } from "../logger";
+
+/**
+ * No-op Receiver used in HTTP mode. Bolt requires a receiver instance but we
+ * handle event ingestion ourselves via processHttpRequest().
+ */
+class NoOpReceiver implements Receiver {
+  init(): void {}
+  async start(): Promise<unknown> {
+    return undefined;
+  }
+  async stop(): Promise<unknown> {
+    return undefined;
+  }
+}
 
 export interface SlackFile {
   name: string;
@@ -42,14 +61,18 @@ export interface SlackMessage {
 export type SlackMessageHandler = (message: SlackMessage) => Promise<void>;
 
 export interface SlackBotConfig {
-  appToken: string;
+  mode: "socket" | "http";
   botToken: string;
   logger: Logger;
+  appToken?: string; // Required for socket mode
+  signingSecret?: string; // Required for http mode
 }
 
 export class SlackBot {
   private app: App;
   private logger: Logger;
+  private mode: "socket" | "http";
+  private signingSecret: string | undefined;
   private handler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
   private threadMessageHandler: SlackMessageHandler | null = null;
@@ -57,11 +80,27 @@ export class SlackBot {
 
   constructor(config: SlackBotConfig) {
     this.logger = config.logger;
-    this.app = new App({
-      token: config.botToken,
-      appToken: config.appToken,
-      socketMode: true,
-    });
+    this.mode = config.mode;
+    this.signingSecret = config.signingSecret;
+
+    if (config.mode === "socket") {
+      if (!config.appToken) {
+        throw new Error("SlackBot socket mode requires appToken");
+      }
+      this.app = new App({
+        token: config.botToken,
+        appToken: config.appToken,
+        socketMode: true,
+      });
+    } else {
+      if (!config.signingSecret) {
+        throw new Error("SlackBot http mode requires signingSecret");
+      }
+      this.app = new App({
+        token: config.botToken,
+        receiver: new NoOpReceiver(),
+      });
+    }
   }
 
   static stripBotMention(text: string, botUserId: string): string {
@@ -175,8 +214,59 @@ export class SlackBot {
       });
     });
 
-    await this.app.start();
-    this.logger.info("Slack bot connected (Socket Mode)");
+    if (this.mode === "socket") {
+      await this.app.start();
+      this.logger.info("Slack bot connected (Socket Mode)");
+    } else {
+      this.logger.info("Slack bot ready (HTTP Mode)");
+    }
+  }
+
+  /**
+   * Verifies the Slack request signature, then dispatches the event to the Bolt
+   * app. Used in HTTP mode where events arrive via POST /slack/events instead of
+   * a WebSocket connection.
+   */
+  async processHttpRequest(rawBody: string, headers: Record<string, string>): Promise<Record<string, unknown>> {
+    const timestamp = headers["x-slack-request-timestamp"];
+    const signature = headers["x-slack-signature"];
+
+    if (!timestamp || !signature) {
+      throw new Error("Missing Slack signature headers");
+    }
+
+    const signingSecret = this.signingSecret ?? "";
+    const { createHmac, timingSafeEqual } = await import("node:crypto");
+    const baseString = `v0:${timestamp}:${rawBody}`;
+    const computed = `v0=${createHmac("sha256", signingSecret).update(baseString).digest("hex")}`;
+
+    if (computed.length !== signature.length || !timingSafeEqual(Buffer.from(computed), Buffer.from(signature))) {
+      throw new Error("Invalid Slack signature");
+    }
+
+    const body = JSON.parse(rawBody);
+
+    if (body.type === "url_verification") {
+      return { challenge: body.challenge };
+    }
+
+    if (body.type === "ssl_check") {
+      return {};
+    }
+
+    // processEvent dispatches to registered handlers. Errors (e.g. auth failures
+    // from Bolt's internal authorization) are logged but not surfaced to the
+    // caller — the HTTP 200 has already been committed by the time handlers run.
+    this.app
+      .processEvent({
+        body,
+        ack: async () => {},
+      })
+      .catch((err) => {
+        this.logger.warn({ err }, "Slack processEvent error");
+      });
+
+    return {};
   }
 
   async postMessage(channelId: string, text: string): Promise<string> {

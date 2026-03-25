@@ -21,6 +21,10 @@ export const configSchema = z.object({
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(50),
 
+  // Slack mode
+  SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
+  SLACK_SIGNING_SECRET: z.string().optional(),
+
   // Security
   ENCRYPTION_KEY: z.string().optional(),
 
@@ -71,6 +75,10 @@ export function loadConfig(): Config {
 export function validateConfig(config: Config): void {
   if (config.DB_TYPE === "postgres" && !config.DATABASE_URL) {
     console.error("DB_TYPE=postgres requires DATABASE_URL");
+    process.exit(1);
+  }
+  if (config.SLACK_MODE === "http" && !config.SLACK_SIGNING_SECRET) {
+    console.error("SLACK_MODE=http requires SLACK_SIGNING_SECRET");
     process.exit(1);
   }
 }
