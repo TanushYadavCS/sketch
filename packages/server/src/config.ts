@@ -27,6 +27,7 @@ export const configSchema = z.object({
 
   // Security
   ENCRYPTION_KEY: z.string().optional(),
+  SYSTEM_SECRET: z.string().optional(),
 
   // Bootstrap (managed seed)
   BOOTSTRAP_ADMIN_EMAIL: z.string().email().optional(),

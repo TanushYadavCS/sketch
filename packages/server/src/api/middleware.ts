@@ -50,6 +50,12 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
 
   return async (c: Context, next: Next) => {
     const path = c.req.path;
+
+    // System routes have their own bearer token auth — skip JWT middleware entirely.
+    if (path.startsWith("/api/system/")) {
+      return next();
+    }
+
     const isSetupPath = path.startsWith(SETUP_PATHS_PREFIX);
     const isPublicPath = PUBLIC_PATHS.has(path);
     const isPublicSetupPath = PUBLIC_SETUP_PATHS.has(path);

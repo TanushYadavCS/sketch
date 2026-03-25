@@ -22,6 +22,7 @@ import { setupRoutes } from "./api/setup";
 import { skillsRoutes } from "./api/skills";
 
 import { oauthRoutes } from "./api/oauth";
+import { systemRoutes } from "./api/system";
 import { userRoutes } from "./api/users";
 import { whatsappRoutes } from "./api/whatsapp";
 import { createWorkspaceApi } from "./api/workspace";
@@ -141,6 +142,20 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
   if (deps?.logger) {
     app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
+  }
+
+  if (config.SYSTEM_SECRET) {
+    const onSlackTokensUpdated = deps?.onSlackTokensUpdated;
+    app.route(
+      "/api/system",
+      systemRoutes(settings, {
+        systemSecret: config.SYSTEM_SECRET,
+        onSlackTokensUpdated: onSlackTokensUpdated
+          ? (tokens: { botToken: string; appToken?: string }) =>
+              onSlackTokensUpdated({ botToken: tokens.botToken, appToken: tokens.appToken ?? "" })
+          : undefined,
+      }),
+    );
   }
 
   // Static file serving for the SPA (production only — dev uses Vite dev server)
