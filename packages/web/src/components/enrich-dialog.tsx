@@ -1,10 +1,12 @@
+import { api } from "@/lib/api";
+import { SparkleIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 /**
  * AI Enrichment dialog — select files → provide instruction → trigger enrichment.
  *
  * Level 2 indexing: LLM-powered summaries + context notes, shaped by
  * an admin-provided instruction. One-time, explicit, opt-in activity.
  */
-import { Button } from "@/components/ui/button";
+import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
   DialogClose,
@@ -13,10 +15,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
-import { SparkleIcon, SpinnerGapIcon } from "@phosphor-icons/react";
+} from "@sketch/ui/components/dialog";
+import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";

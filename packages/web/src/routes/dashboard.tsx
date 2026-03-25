@@ -1,6 +1,6 @@
 import { AppSidebar } from "@/components/app-sidebar";
-import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { api } from "@/lib/api";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@sketch/ui/components/sidebar";
 import { Outlet, createRoute, redirect, useRouteContext } from "@tanstack/react-router";
 import { rootRoute } from "./root";
 

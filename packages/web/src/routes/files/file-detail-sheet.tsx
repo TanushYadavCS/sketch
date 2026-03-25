@@ -4,10 +4,6 @@
  * trigger button.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Skeleton } from "@/components/ui/skeleton";
 import type { FileAccess, FileContent } from "@/lib/api";
 import { api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
@@ -19,6 +15,10 @@ import {
   SparkleIcon,
   SpinnerGapIcon,
 } from "@phosphor-icons/react";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@sketch/ui/components/sheet";
+import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";

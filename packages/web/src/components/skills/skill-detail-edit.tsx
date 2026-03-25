@@ -1,15 +1,4 @@
 import { ChannelPlatformIcon } from "@/components/skills/channel-platform-icon";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import type {
   Skill,
   SkillCategory,
@@ -18,7 +7,6 @@ import type {
   SkillStatusConfig,
 } from "@/lib/skills-data";
 import { getCategoryLabel, skillCategories } from "@/lib/skills-data";
-import { cn } from "@/lib/utils";
 import {
   ArrowLeftIcon,
   CaretDownIcon,
@@ -28,6 +16,18 @@ import {
   SpinnerGapIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Switch } from "@sketch/ui/components/switch";
+import { Textarea } from "@sketch/ui/components/textarea";
+import { cn } from "@sketch/ui/lib/utils";
 import { Building2, Download, MessageCircle, Star, Store, User, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 

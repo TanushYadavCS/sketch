@@ -1,7 +1,10 @@
+import { api } from "@/lib/api";
+import { CheckIcon, MagnifyingGlassIcon, SpinnerGapIcon, WarningIcon, XCircleIcon } from "@phosphor-icons/react";
+import type { IntegrationApp } from "@sketch/shared";
 /**
  * Add Integration dialog: catalog search with infinite scroll + OAuth popup flow.
  */
-import { Button } from "@/components/ui/button";
+import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
   DialogClose,
@@ -10,12 +13,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { api } from "@/lib/api";
-import { getAbbreviation } from "@/lib/utils";
-import { CheckIcon, MagnifyingGlassIcon, SpinnerGapIcon, WarningIcon, XCircleIcon } from "@phosphor-icons/react";
-import type { IntegrationApp } from "@sketch/shared";
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { getAbbreviation } from "@sketch/ui/lib/utils";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 

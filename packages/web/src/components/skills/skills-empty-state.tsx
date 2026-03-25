@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import { BrainIcon, FolderOpenIcon, MagnifyingGlassIcon, PlusIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
 
 interface SkillsEmptyStateProps {
   variant: "no-skills" | "no-results" | "no-category";

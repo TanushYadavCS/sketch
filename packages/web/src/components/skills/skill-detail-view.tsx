@@ -1,16 +1,6 @@
 import { ChannelPlatformIcon } from "@/components/skills/channel-platform-icon";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import type { Skill } from "@/lib/skills-data";
 import { getActiveChannels, getActiveIndividuals, getCategoryLabel, isSkillEnabled } from "@/lib/skills-data";
-import { cn } from "@/lib/utils";
 import {
   ArrowLeftIcon,
   CaretRightIcon,
@@ -18,6 +8,16 @@ import {
   MagnifyingGlassIcon,
   PencilSimpleIcon,
 } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
+import { cn } from "@sketch/ui/lib/utils";
 import { Building2, Download, MessageCircle, Star, Store, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";

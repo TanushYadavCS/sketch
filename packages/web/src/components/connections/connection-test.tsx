@@ -1,9 +1,9 @@
+import { api } from "@/lib/api";
+import { CheckIcon, SpinnerGapIcon, XCircleIcon } from "@phosphor-icons/react";
 /**
  * Shared connection-test state machine and UI used by all server/provider dialogs.
  */
-import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
-import { CheckIcon, SpinnerGapIcon, XCircleIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
 import { useCallback, useState } from "react";
 
 export type TestState = "idle" | "testing" | "success" | "fail";

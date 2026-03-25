@@ -1,16 +1,16 @@
+import { CaretDownIcon, MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react";
 /**
  * SearchBar — search input with keyword search and refinement filter dropdowns.
  * All filter state lives in the parent (FilesPage) and is passed down as props.
  */
-import { Button } from "@/components/ui/button";
+import { Button } from "@sketch/ui/components/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { CaretDownIcon, MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react";
+} from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
 
 export function SearchBar({
   search,

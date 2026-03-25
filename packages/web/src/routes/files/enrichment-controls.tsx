@@ -1,8 +1,10 @@
+import { api } from "@/lib/api";
+import { ArrowSquareOutIcon, EyeIcon, EyeSlashIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 /**
  * SearchSettingsSheet — slide-over dialog for configuring AI enrichment
  * and the Gemini API key. Accessible via the gear icon in the page header.
  */
-import { Button } from "@/components/ui/button";
+import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
   DialogContent,
@@ -10,12 +12,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { api } from "@/lib/api";
-import { ArrowSquareOutIcon, EyeIcon, EyeSlashIcon, SpinnerGapIcon } from "@phosphor-icons/react";
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Switch } from "@sketch/ui/components/switch";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";

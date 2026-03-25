@@ -1,10 +1,3 @@
-/**
- * Editor pane — Monaco editor with toolbar, loading skeleton, and error boundary.
- */
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatFileSize } from "@/lib/utils";
 import {
   DownloadSimpleIcon,
   FileTextIcon,
@@ -14,6 +7,13 @@ import {
   UploadSimpleIcon,
 } from "@phosphor-icons/react";
 import type { FileMetadata } from "@sketch/shared";
+/**
+ * Editor pane — Monaco editor with toolbar, loading skeleton, and error boundary.
+ */
+import { Button } from "@sketch/ui/components/button";
+import { Skeleton } from "@sketch/ui/components/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
+import { formatFileSize } from "@sketch/ui/lib/utils";
 import { Component, Suspense, lazy } from "react";
 import { FileIconComponent } from "./utils";
 

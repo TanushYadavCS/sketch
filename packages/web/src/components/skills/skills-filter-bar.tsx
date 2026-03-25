@@ -1,6 +1,6 @@
 import { type SkillCategory, skillCategories } from "@/lib/skills-data";
-import { cn } from "@/lib/utils";
 import { MagnifyingGlass, X } from "@phosphor-icons/react";
+import { cn } from "@sketch/ui/lib/utils";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface SkillsFilterBarProps {

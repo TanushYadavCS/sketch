@@ -1,6 +1,8 @@
 import { ConnectionTestSection, useConnectionTest } from "@/components/connections/connection-test";
 import { CaretIcon } from "@/components/connections/shared";
-import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
+import { SpinnerGapIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
   DialogClose,
@@ -9,11 +11,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { api } from "@/lib/api";
-import { SpinnerGapIcon } from "@phosphor-icons/react";
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";

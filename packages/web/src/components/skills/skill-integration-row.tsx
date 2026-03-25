@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import type { SkillIntegration } from "@/lib/skills-data";
 import { XIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
 
 interface SkillIntegrationRowProps {
   integration: SkillIntegration;

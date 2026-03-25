@@ -1,6 +1,6 @@
 import { CheckIcon } from "@phosphor-icons/react";
 
-import { cn } from "@/lib/utils";
+import { cn } from "@sketch/ui/lib/utils";
 
 const steps = [
   { number: 1, label: "Account" },

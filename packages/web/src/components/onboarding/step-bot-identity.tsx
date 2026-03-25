@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 
 import { ChatCircleIcon } from "@phosphor-icons/react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@sketch/ui/components/button";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
 
 interface StepBotIdentityProps {
   onNext: (data: { organizationName: string; botName: string }) => void;

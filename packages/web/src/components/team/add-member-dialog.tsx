@@ -1,10 +1,14 @@
+import type { User } from "@/lib/api";
+import { api } from "@/lib/api";
+import { SpinnerGapIcon } from "@phosphor-icons/react";
+import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
 /**
  * AddMemberDialog — create a new human member or AI agent.
  * Human members require a name + email; agents require only a name.
  * The toggle between Human/Agent changes which fields are shown and
  * which schema is used for validation.
  */
-import { Button } from "@/components/ui/button";
+import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
   DialogClose,
@@ -13,15 +17,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import type { User } from "@/lib/api";
-import { api } from "@/lib/api";
-import { SpinnerGapIcon } from "@phosphor-icons/react";
-import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
+import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";

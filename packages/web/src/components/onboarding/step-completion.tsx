@@ -1,6 +1,6 @@
 import { CheckIcon, MinusIcon } from "@phosphor-icons/react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@sketch/ui/components/button";
 
 interface OnboardingData {
   organizationName: string;

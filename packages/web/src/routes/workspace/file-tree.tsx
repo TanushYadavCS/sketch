@@ -4,16 +4,6 @@
  */
 import { useFiles } from "@/api/workspace";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
-import {
   CaretDownIcon,
   CaretRightIcon,
   DownloadSimpleIcon,
@@ -23,6 +13,16 @@ import {
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
+import { Skeleton } from "@sketch/ui/components/skeleton";
+import { cn } from "@sketch/ui/lib/utils";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useFileTreeContext } from "./file-tree-context";
 import { FileIconComponent } from "./utils";

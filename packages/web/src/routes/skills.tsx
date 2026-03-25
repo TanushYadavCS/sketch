@@ -5,8 +5,6 @@ import { SkillDetailEdit, type SkillDraft } from "@/components/skills/skill-deta
 import { SkillDetailView } from "@/components/skills/skill-detail-view";
 import { SkillsEmptyState } from "@/components/skills/skills-empty-state";
 import { SkillsFilterBar } from "@/components/skills/skills-filter-bar";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import {
   type Skill,
@@ -16,9 +14,11 @@ import {
   getCategoryLabel,
   isSkillEnabled,
 } from "@/lib/skills-data";
-import { cn } from "@/lib/utils";
 import { useDashboardAuth } from "@/routes/dashboard";
 import { PlusIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import { Skeleton } from "@sketch/ui/components/skeleton";
+import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";

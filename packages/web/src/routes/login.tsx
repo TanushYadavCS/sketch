@@ -1,10 +1,10 @@
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { useTheme } from "@/hooks/use-theme";
 import { api } from "@/lib/api";
 import { ArrowLeftIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon, ShieldIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import { Card, CardContent, CardHeader } from "@sketch/ui/components/card";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { useTheme } from "@sketch/ui/hooks/use-theme";
 import { useMutation } from "@tanstack/react-query";
 import { createRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";

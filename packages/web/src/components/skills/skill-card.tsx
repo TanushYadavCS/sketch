@@ -1,15 +1,15 @@
-import { Button } from "@/components/ui/button";
+import type { Skill } from "@/lib/skills-data";
+import { getCategoryLabel } from "@/lib/skills-data";
+import { DotsThreeIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import type { Skill } from "@/lib/skills-data";
-import { getCategoryLabel } from "@/lib/skills-data";
-import { cn } from "@/lib/utils";
-import { DotsThreeIcon } from "@phosphor-icons/react";
+} from "@sketch/ui/components/dropdown-menu";
+import { cn } from "@sketch/ui/lib/utils";
 import { Download, Star, Store } from "lucide-react";
 
 interface SkillCardProps {

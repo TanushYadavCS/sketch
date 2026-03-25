@@ -3,11 +3,11 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { Button } from "@sketch/ui/components/button";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { cn } from "@sketch/ui/lib/utils";
 
 type Provider = "anthropic" | "bedrock";
 

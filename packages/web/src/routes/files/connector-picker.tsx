@@ -6,8 +6,6 @@
 import { ConnectIntegrationDialog } from "@/components/connect-integration-dialog";
 import { IntegrationIcon } from "@/components/connect-integration-dialog";
 import { ConnectorLogo } from "@/components/connector-logos";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
@@ -22,6 +20,8 @@ import {
   WarningCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";

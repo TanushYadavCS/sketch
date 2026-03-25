@@ -12,13 +12,13 @@ import {
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { WhatsAppQR } from "@/components/whatsapp-qr";
 import { api } from "@/lib/api";
 import { generateSlackManifest } from "@/lib/slack-manifest";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
 
 interface ChannelState {
   slack: {

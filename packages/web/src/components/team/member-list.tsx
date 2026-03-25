@@ -1,20 +1,4 @@
-/**
- * MemberList — renders the team member list with per-row channel badges
- * and a dropdown for edit/remove/link-accounts actions.
- */
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { User } from "@/lib/api";
-import { getInitials } from "@/lib/utils";
 import type { AuthContext } from "@/routes/dashboard";
 import {
   DotsThreeIcon,
@@ -26,6 +10,22 @@ import {
   UserMinusIcon,
   WhatsappLogoIcon,
 } from "@phosphor-icons/react";
+/**
+ * MemberList — renders the team member list with per-row channel badges
+ * and a dropdown for edit/remove/link-accounts actions.
+ */
+import { Avatar, AvatarFallback } from "@sketch/ui/components/avatar";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
+import { getInitials } from "@sketch/ui/lib/utils";
 
 export function MemberList({
   users,

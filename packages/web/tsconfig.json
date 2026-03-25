@@ -14,7 +14,16 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@sketch/shared": ["../shared/src/index.ts"]
+      "@sketch/shared": ["../shared/src/index.ts"],
+      "@sketch/ui": ["../ui/src/index.ts"],
+      "@sketch/ui/components/*": ["../ui/src/components/ui/*"],
+      "@sketch/ui/hooks/*": ["../ui/src/hooks/*"],
+      "@sketch/ui/lib/*": ["../ui/src/lib/*"],
+      "@sketch/ui/*": ["../ui/src/*"],
+      "@ui/*": ["../ui/src/*"],
+      "@ui/components/ui/*": ["../ui/src/components/ui/*"],
+      "@ui/lib/*": ["../ui/src/lib/*"],
+      "@ui/hooks/*": ["../ui/src/hooks/*"]
     }
   },
   "include": ["src", "vite-env.d.ts"]

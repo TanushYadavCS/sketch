@@ -7,8 +7,13 @@
  * the same import surface and are only used together with this dialog.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import type { ProviderIdentity, User } from "@/lib/api";
+import { api } from "@/lib/api";
+import { getIntegration } from "@/lib/integrations";
+import { CheckCircleIcon, ClockIcon, RobotIcon, SlackLogoIcon, SpinnerGapIcon, XIcon } from "@phosphor-icons/react";
+import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
   DialogClose,
@@ -17,17 +22,12 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
-import type { ProviderIdentity, User } from "@/lib/api";
-import { api } from "@/lib/api";
-import { getIntegration } from "@/lib/integrations";
-import { CheckCircleIcon, ClockIcon, RobotIcon, SlackLogoIcon, SpinnerGapIcon, XIcon } from "@phosphor-icons/react";
-import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
+import { Skeleton } from "@sketch/ui/components/skeleton";
+import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";

@@ -1,3 +1,6 @@
+import { api } from "@/lib/api";
+import { SpinnerGapIcon } from "@phosphor-icons/react";
+import type { McpServerRecord } from "@sketch/shared";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -7,10 +10,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { api } from "@/lib/api";
-import { SpinnerGapIcon } from "@phosphor-icons/react";
-import type { McpServerRecord } from "@sketch/shared";
+} from "@sketch/ui/components/alert-dialog";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 

@@ -66,6 +66,24 @@ if (typeof globalThis.EventSource === "undefined") {
   } as unknown as typeof EventSource;
 }
 
+// window.matchMedia is not available in jsdom — stub it so hooks that use
+// matchMedia (useTheme system mode, useIsMobile) do not throw.
+if (typeof window.matchMedia === "undefined") {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+}
+
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => {
   cleanup();

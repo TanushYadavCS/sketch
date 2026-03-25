@@ -15,30 +15,6 @@ import {
   useUploadFile,
 } from "@/api/workspace";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { useIsMobile } from "@/hooks/use-mobile";
-import { useTheme } from "@/hooks/use-theme";
-import { cn } from "@/lib/utils";
-import {
   ArrowClockwiseIcon,
   CaretUpDownIcon,
   CheckIcon,
@@ -50,6 +26,30 @@ import {
 } from "@phosphor-icons/react";
 import type { FileMetadata } from "@sketch/shared";
 import { fileNameSchema } from "@sketch/shared";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
+import { Button } from "@sketch/ui/components/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
+import { Progress } from "@sketch/ui/components/progress";
+import { Skeleton } from "@sketch/ui/components/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
+import { useIsMobile } from "@sketch/ui/hooks/use-mobile";
+import { useTheme } from "@sketch/ui/hooks/use-theme";
+import { cn } from "@sketch/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

@@ -85,7 +85,7 @@ vi.mock("@/api/workspace", () => ({
 // ── Mobile hook mock ─────────────────────────────────────────────────────────
 
 const mockIsMobile = vi.fn(() => false);
-vi.mock("@/hooks/use-mobile", () => ({
+vi.mock("@sketch/ui/hooks/use-mobile", () => ({
   useIsMobile: () => mockIsMobile(),
 }));
 

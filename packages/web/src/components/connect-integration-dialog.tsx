@@ -11,19 +11,6 @@
  * Other integrations connect immediately after credential validation.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import {
@@ -36,6 +23,19 @@ import {
   GoogleLogoIcon,
   SpinnerGapIcon,
 } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";

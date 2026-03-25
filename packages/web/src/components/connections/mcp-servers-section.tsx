@@ -1,17 +1,17 @@
+import { DotsThreeIcon, GearIcon, PencilSimpleIcon, PlugIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
+import type { McpServerRecord } from "@sketch/shared";
 /**
  * MCP Servers section: admin CRUD for workspace-level MCP servers.
  */
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { DotsThreeIcon, GearIcon, PencilSimpleIcon, PlugIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import type { McpServerRecord } from "@sketch/shared";
+} from "@sketch/ui/components/dropdown-menu";
 
 export function McpServersSection({
   servers,

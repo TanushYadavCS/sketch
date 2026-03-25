@@ -1,6 +1,6 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { CheckIcon, MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
 import { useMemo, useState } from "react";
 
 interface IntegrationOption {

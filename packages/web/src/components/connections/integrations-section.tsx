@@ -1,14 +1,14 @@
+import { api } from "@/lib/api";
+import { PlugIcon, PlusIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
+import type { IntegrationConnection, McpServerRecord } from "@sketch/shared";
 /**
  * Integrations section: shows the user's connected apps via an integration provider.
  * Members can add/disconnect apps. Admins see a read-only header.
  */
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { api } from "@/lib/api";
-import { getAbbreviation } from "@/lib/utils";
-import { PlugIcon, PlusIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
-import type { IntegrationConnection, McpServerRecord } from "@sketch/shared";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
+import { Skeleton } from "@sketch/ui/components/skeleton";
+import { getAbbreviation } from "@sketch/ui/lib/utils";
 import { useState } from "react";
 import { toast } from "sonner";
 

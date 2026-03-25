@@ -11,8 +11,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowClockwiseIcon, CheckCircleIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
 import QRCode from "qrcode";
 
-import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { Button } from "@sketch/ui/components/button";
 
 type QrState = "idle" | "generating" | "ready" | "connected" | "expired" | "error";
 

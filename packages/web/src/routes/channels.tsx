@@ -1,36 +1,3 @@
-/**
- * Channels page — displays Slack, WhatsApp, and Email platform cards with connection status.
- * WhatsApp pairing uses SSE-based QR flow via the shared WhatsAppQR component.
- * Email uses SMTP configuration for magic link delivery.
- */
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
 import { WhatsAppQR } from "@/components/whatsapp-qr";
 import type { ChannelStatus } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -48,6 +15,39 @@ import {
   WarningIcon,
   WhatsappLogoIcon,
 } from "@phosphor-icons/react";
+/**
+ * Channels page — displays Slack, WhatsApp, and Email platform cards with connection status.
+ * WhatsApp pairing uses SSE-based QR flow via the shared WhatsAppQR component.
+ * Email uses SMTP configuration for magic link delivery.
+ */
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
+import { Button } from "@sketch/ui/components/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@sketch/ui/components/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useState } from "react";

@@ -6,9 +6,6 @@
  * All data is passed in as props; this component owns no fetch state.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import type { SearchResult, UnifiedFile } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import {
@@ -21,6 +18,9 @@ import {
   SpinnerGapIcon,
   TableIcon,
 } from "@phosphor-icons/react";
+import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
+import { Skeleton } from "@sketch/ui/components/skeleton";
 
 /** Relative time formatter — shared with FileDetailSheet via this module. */
 export function formatRelativeTime(iso: string): string {
