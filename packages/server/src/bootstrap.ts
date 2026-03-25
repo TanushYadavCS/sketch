@@ -23,6 +23,7 @@ import type { DB } from "./db/schema";
 import { createApp } from "./http";
 import { buildMcpConfig } from "./integrations/factory";
 import { createLogger } from "./logger";
+import { runManagedSeed } from "./managed-seed";
 import { QueueManager } from "./queue";
 import { TaskScheduler } from "./scheduler/service";
 import { syncFeaturedSkills } from "./skills/sync";
@@ -67,6 +68,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
+  await runManagedSeed(config, settingsRepo);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const outreachRepo = createOutreachRepository(db);

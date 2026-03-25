@@ -24,6 +24,11 @@ export const configSchema = z.object({
   // Security
   ENCRYPTION_KEY: z.string().optional(),
 
+  // Bootstrap (managed seed)
+  BOOTSTRAP_ADMIN_EMAIL: z.string().email().optional(),
+  BOOTSTRAP_ADMIN_PASSWORD_HASH: z.string().optional(),
+  BOOTSTRAP_SLACK_BOT_TOKEN: z.string().optional(),
+
   // Server
   // Public-facing base URL (used for OAuth redirect URIs, email links, etc.)
   // e.g. https://sketch.yourcompany.com — no trailing slash
