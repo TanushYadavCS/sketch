@@ -159,4 +159,88 @@ describe("createSlackStartupManager", () => {
     expect(currentBot).toBeNull();
     expect(setCurrentBot).toHaveBeenLastCalledWith(null);
   });
+
+  describe("socket vs http mode token requirements", () => {
+    it("socket mode skips startup when only botToken is present (no appToken)", async () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const createBot = vi.fn();
+      const start = createSlackStartupManager({
+        logger,
+        slackMode: "socket",
+        getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
+        validateTokens: vi.fn(),
+        getCurrentBot: () => null,
+        setCurrentBot: vi.fn(),
+        createBot,
+      });
+
+      await start();
+
+      expect(createBot).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith("Slack tokens not configured — skipping Slack bot startup");
+    });
+
+    it("http mode starts when only botToken is present (no appToken needed)", async () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const startBot = vi.fn(async () => {});
+      const createBot = vi.fn(() => ({ start: startBot, stop: vi.fn(async () => {}) }));
+      const start = createSlackStartupManager({
+        logger,
+        slackMode: "http",
+        getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
+        validateTokens: vi.fn(async () => {}),
+        getCurrentBot: () => null,
+        setCurrentBot: vi.fn(),
+        createBot,
+      });
+
+      await start();
+
+      expect(createBot).toHaveBeenCalledWith({ botToken: "xoxb-db" });
+      expect(startBot).toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith("Slack bot connected");
+    });
+
+    it("http mode passes tokens without appToken to createBot", async () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const startBot = vi.fn(async () => {});
+      const createBot = vi.fn(() => ({ start: startBot, stop: vi.fn(async () => {}) }));
+      const start = createSlackStartupManager({
+        logger,
+        slackMode: "http",
+        getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
+        validateTokens: vi.fn(async () => {}),
+        getCurrentBot: () => null,
+        setCurrentBot: vi.fn(),
+        createBot,
+      });
+
+      await start();
+
+      const passedTokens = createBot.mock.calls[0][0];
+      expect(passedTokens.botToken).toBe("xoxb-db");
+      expect(passedTokens).not.toHaveProperty("appToken");
+    });
+
+    it("socket mode passes appToken to createBot when both tokens present", async () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const startBot = vi.fn(async () => {});
+      const createBot = vi.fn(() => ({ start: startBot, stop: vi.fn(async () => {}) }));
+      const start = createSlackStartupManager({
+        logger,
+        slackMode: "socket",
+        getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
+        validateTokens: vi.fn(async () => {}),
+        getCurrentBot: () => null,
+        setCurrentBot: vi.fn(),
+        createBot,
+      });
+
+      await start();
+
+      const passedTokens = createBot.mock.calls[0][0];
+      expect(passedTokens.botToken).toBe("xoxb-db");
+      expect(passedTokens.appToken).toBe("xapp-db");
+    });
+  });
 });
