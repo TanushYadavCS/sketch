@@ -1,0 +1,13 @@
+node_modules
+data
+.env
+.env.*
+.planning
+.git
+*.md
+!packages/*/README.md
+.github
+.husky
+scripts
+*.test.ts
+*.test.js
