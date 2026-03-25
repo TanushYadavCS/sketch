@@ -39,8 +39,6 @@ COPY --from=build /app/packages/server/dist ./dist
 RUN mkdir -p /app/data && chown 1000:1000 /app/data
 
 ENV NODE_ENV=production
-ENV DATA_DIR=/app/data
-ENV SQLITE_PATH=/app/data/sketch.db
 EXPOSE 3000
 
 USER 1000
