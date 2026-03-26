@@ -229,6 +229,8 @@ export class TaskScheduler {
           integrationMcpServers,
           findIntegrationProvider,
           sessionMode: task.session_mode as "fresh" | "persistent" | "chat",
+          contextType: "scheduled_task",
+          currentUserId: task.created_by ?? null,
         });
       } catch (err) {
         logger.error({ err, taskId: task.id }, "Scheduled task execution failed");

@@ -28,6 +28,7 @@ import * as m021 from "./migrations/021-file-access";
 import * as m022 from "./migrations/022-settings-extended";
 import * as m023 from "./migrations/023-semantic-search";
 import * as m024 from "./migrations/024-settings-enrichment";
+import * as m025 from "./migrations/025-agent-usage";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -60,6 +61,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "022-settings-extended": m022,
           "023-semantic-search": m023,
           "024-settings-enrichment": m024,
+          "025-agent-usage": m025,
         };
       },
     },

@@ -20,9 +20,10 @@ export class ChannelQueue {
     if (!work) return;
     try {
       await work();
-    } catch (_err) {
+    } catch (err) {
       // Errors should be handled inside the work function.
       // This catch prevents unhandled promise rejections from blocking the queue.
+      console.error("Unhandled error in queue work item:", err);
     } finally {
       this.processing = false;
       this.processNext();

@@ -119,6 +119,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           botName: currentSettings?.bot_name,
           integrationMcpServers,
           findIntegrationProvider,
+          contextType: "outreach",
           taskContext: {
             platform: "whatsapp" as const,
             contextType: "dm" as const,
@@ -254,6 +255,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             attachments: attachments.length > 0 ? attachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
             findIntegrationProvider,
+            contextType: "dm",
             taskContext: waTaskContext,
             scheduler,
             outreachRepo,
@@ -368,6 +370,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           groupContext: { groupName, groupDescription },
           integrationMcpServers,
           findIntegrationProvider,
+          contextType: "channel_mention",
+          currentUserId: user?.id ?? null,
           taskContext: {
             platform: "whatsapp" as const,
             contextType: "group" as const,

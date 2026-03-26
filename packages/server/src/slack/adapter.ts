@@ -175,6 +175,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           botName: currentSettings?.bot_name,
           integrationMcpServers,
           findIntegrationProvider,
+          contextType: "outreach",
           taskContext: {
             platform: "slack" as const,
             contextType: "dm" as const,
@@ -307,6 +308,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
           findIntegrationProvider,
+          contextType: "dm",
           taskContext: {
             platform: "slack" as const,
             contextType: "dm" as const,
@@ -383,107 +385,110 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     mentionQueue.enqueue(async () => {
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
 
-      const user = await resolveUser(message.userId);
-
-      let channel = await repos.channels.findBySlackChannelId(message.channelId);
-      if (!channel) {
-        const channelInfo = await slackBot.getChannelInfo(message.channelId);
-        channel = await repos.channels.create({
-          slackChannelId: message.channelId,
-          name: channelInfo.name,
-          type: channelInfo.type,
-        });
-        logger.info({ channelId: channel.id, name: channel.name }, "New channel created");
-      }
-
-      const workspaceDir = await ensureChannelWorkspace(config, message.channelId);
-      const settingsRow = await repos.settings.get();
-
-      slackDeps.threadBuffer.register(message.channelId, threadTs);
-
-      // Download any attached files
-      let attachments: Attachment[] = [];
-      if (message.files?.length) {
-        logger.debug(
-          {
-            fileCount: message.files.length,
-            files: message.files.map((f) => ({
-              name: f.name,
-              mime: f.mimetype,
-              size: f.size,
-              url: f.urlPrivate?.slice(0, 80),
-            })),
-          },
-          "Files received from Slack",
-        );
-        const attachDir = join(workspaceDir, "attachments");
-        const maxBytes = maxFileBytes;
-        attachments = await downloadSlackFiles(
-          message.files,
-          settingsRow?.slack_bot_token,
-          attachDir,
-          maxBytes,
-          logger,
-        );
-        logger.debug(
-          {
-            attachmentCount: attachments.length,
-            attachments: attachments.map((a) => ({ name: a.originalName, mime: a.mimeType, size: a.sizeBytes })),
-          },
-          "Files downloaded",
-        );
-      }
-
-      const channelWorkspaceKey = `channel-${message.channelId}`;
-      const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
-      let userMessage = message.text || "See attached files.";
-
-      if (existingSession) {
-        const buffered = slackDeps.threadBuffer.drain(message.channelId, threadTs);
-        logger.debug({ threadTs, bufferedCount: buffered.length }, "Draining thread buffer for subsequent mention");
-        userMessage = buildSketchContext({
-          messages: buffered,
-          currentUserName: user.name,
-          currentMessage: userMessage,
-          currentUserEmail: user.email,
-          isSharedContext: true,
-        });
-      } else {
-        const history = message.threadTs
-          ? await slackBot.getThreadReplies(message.channelId, message.threadTs, config.SLACK_THREAD_HISTORY_LIMIT)
-          : await slackBot.getChannelHistory(message.channelId, config.SLACK_CHANNEL_HISTORY_LIMIT);
-
-        const filtered = history.filter((m) => m.ts !== message.ts);
-
-        logger.debug(
-          { source: message.threadTs ? "thread" : "channel", messageCount: filtered.length },
-          "Bootstrap history fetched",
-        );
-
-        const bootstrapMessages: BufferedMessage[] = [];
-        for (const msg of filtered.reverse()) {
-          const info = await slackDeps.userCache.resolve(msg.userId, (id) => slackBot.getUserInfo(id));
-          bootstrapMessages.push({ userName: info.realName, text: msg.text, ts: msg.ts });
-        }
-        const header = message.threadTs
-          ? "[Thread context before you joined]"
-          : "[Recent channel messages for context]";
-        userMessage = buildSketchContext({
-          messages: bootstrapMessages,
-          currentUserName: user.name,
-          currentMessage: userMessage,
-          currentUserEmail: user.email,
-          header,
-          isSharedContext: true,
-        });
-      }
-
-      const thinkingTs = await slackBot.postThreadReply(message.channelId, threadTs, "_Thinking..._");
-      const onMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs, threadTs);
-
-      const integrationMcpServers = await buildMcpServers(user.email);
+      let user: Awaited<ReturnType<typeof resolveUser>>;
+      let thinkingTs: string | undefined;
 
       try {
+        user = await resolveUser(message.userId);
+
+        let channel = await repos.channels.findBySlackChannelId(message.channelId);
+        if (!channel) {
+          const channelInfo = await slackBot.getChannelInfo(message.channelId);
+          channel = await repos.channels.create({
+            slackChannelId: message.channelId,
+            name: channelInfo.name,
+            type: channelInfo.type,
+          });
+          logger.info({ channelId: channel.id, name: channel.name }, "New channel created");
+        }
+
+        const workspaceDir = await ensureChannelWorkspace(config, message.channelId);
+        const settingsRow = await repos.settings.get();
+
+        slackDeps.threadBuffer.register(message.channelId, threadTs);
+
+        // Download any attached files
+        let attachments: Attachment[] = [];
+        if (message.files?.length) {
+          logger.debug(
+            {
+              fileCount: message.files.length,
+              files: message.files.map((f) => ({
+                name: f.name,
+                mime: f.mimetype,
+                size: f.size,
+                url: f.urlPrivate?.slice(0, 80),
+              })),
+            },
+            "Files received from Slack",
+          );
+          const attachDir = join(workspaceDir, "attachments");
+          const maxBytes = maxFileBytes;
+          attachments = await downloadSlackFiles(
+            message.files,
+            settingsRow?.slack_bot_token,
+            attachDir,
+            maxBytes,
+            logger,
+          );
+          logger.debug(
+            {
+              attachmentCount: attachments.length,
+              attachments: attachments.map((a) => ({ name: a.originalName, mime: a.mimeType, size: a.sizeBytes })),
+            },
+            "Files downloaded",
+          );
+        }
+
+        const channelWorkspaceKey = `channel-${message.channelId}`;
+        const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
+        let userMessage = message.text || "See attached files.";
+
+        if (existingSession) {
+          const buffered = slackDeps.threadBuffer.drain(message.channelId, threadTs);
+          logger.debug({ threadTs, bufferedCount: buffered.length }, "Draining thread buffer for subsequent mention");
+          userMessage = buildSketchContext({
+            messages: buffered,
+            currentUserName: user.name,
+            currentMessage: userMessage,
+            currentUserEmail: user.email,
+            isSharedContext: true,
+          });
+        } else {
+          const history = message.threadTs
+            ? await slackBot.getThreadReplies(message.channelId, message.threadTs, config.SLACK_THREAD_HISTORY_LIMIT)
+            : await slackBot.getChannelHistory(message.channelId, config.SLACK_CHANNEL_HISTORY_LIMIT);
+
+          const filtered = history.filter((m) => m.ts !== message.ts);
+
+          logger.debug(
+            { source: message.threadTs ? "thread" : "channel", messageCount: filtered.length },
+            "Bootstrap history fetched",
+          );
+
+          const bootstrapMessages: BufferedMessage[] = [];
+          for (const msg of filtered.reverse()) {
+            const info = await slackDeps.userCache.resolve(msg.userId, (id) => slackBot.getUserInfo(id));
+            bootstrapMessages.push({ userName: info.realName, text: msg.text, ts: msg.ts });
+          }
+          const header = message.threadTs
+            ? "[Thread context before you joined]"
+            : "[Recent channel messages for context]";
+          userMessage = buildSketchContext({
+            messages: bootstrapMessages,
+            currentUserName: user.name,
+            currentMessage: userMessage,
+            currentUserEmail: user.email,
+            header,
+            isSharedContext: true,
+          });
+        }
+
+        thinkingTs = await slackBot.postThreadReply(message.channelId, threadTs, "_Thinking..._");
+        const onMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs, threadTs);
+
+        const integrationMcpServers = await buildMcpServers(user.email);
+
         const result = await runAgent({
           db,
           workspaceKey: channelWorkspaceKey,
@@ -503,6 +508,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           },
           integrationMcpServers,
           findIntegrationProvider,
+          contextType: "channel_mention",
+          currentUserId: user.id,
           taskContext: {
             platform: "slack" as const,
             contextType: "channel" as const,
@@ -525,8 +532,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           await slackBot.updateMessage(message.channelId, thinkingTs, "_No response_");
         }
       } catch (err) {
-        logger.error({ err, userId: user.id, channelId: message.channelId }, "Agent run failed");
-        await slackBot.updateMessage(message.channelId, thinkingTs, "_Something went wrong, try again_");
+        logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
+        if (thinkingTs) {
+          await slackBot.updateMessage(message.channelId, thinkingTs, "_Something went wrong, try again_");
+        }
       }
     });
   });

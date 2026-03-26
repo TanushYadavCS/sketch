@@ -3,16 +3,19 @@
  * running server. Extracted from index.ts so the full stack can be instantiated
  * from tests with a custom Config and { connect: false }.
  */
+import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Kysely } from "kysely";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
-import { runAgent } from "./agent/runner";
-import type { McpServerConfig } from "./agent/runner";
+import { type AgentResult, runAgent } from "./agent/runner";
+import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import type { Config } from "./config";
 import { createLlmCallFn } from "./connectors/llm";
 import { startSyncScheduler } from "./connectors/sync";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
+import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createOutreachRepository } from "./db/repositories/outreach";
@@ -32,6 +35,8 @@ import type { SlackBot } from "./slack/bot";
 import { createSlackStartupManager } from "./slack/startup";
 import { ThreadBuffer } from "./slack/thread-buffer";
 import { UserCache } from "./slack/user-cache";
+import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
+import { initTelemetry } from "./telemetry/setup";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
 import { GroupBuffer } from "./whatsapp/group-buffer";
@@ -72,6 +77,27 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const outreachRepo = createOutreachRepository(db);
+  const agentRunsRepo = createAgentRunsRepo(db);
+  const telemetry = initTelemetry(agentRunsRepo, logger);
+  const tracer = trace.getTracer("sketch");
+
+  const trackedRunAgent = async (params: RunAgentParams): Promise<AgentResult> => {
+    const runId = randomUUID();
+    const span = tracer.startSpan("invoke_agent sketch");
+    setAgentRunAttributes(span, params, runId);
+
+    try {
+      const result = await runAgent(params);
+      setAgentResultAttributes(span, result);
+      createToolCallSpans(tracer, span, runId, result.toolCalls);
+      span.end();
+      return result;
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      span.end();
+      throw err;
+    }
+  };
 
   // 4. LLM env from DB
   async function applyLlmEnvFromDb() {
@@ -117,7 +143,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     getSlack: () => slack,
     whatsapp,
     settingsRepo,
-    runAgent,
+    runAgent: trackedRunAgent,
     buildMcpServers,
     findIntegrationProvider: async () => {
       const row = await mcpServersRepo.findIntegrationProvider();
@@ -139,7 +165,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     repos: { users, channels, settings: settingsRepo },
     queue: queueManager,
     slack: { threadBuffer, userCache },
-    runAgent,
+    runAgent: trackedRunAgent,
     buildMcpServers,
     findIntegrationProvider: async () => {
       const row = await mcpServersRepo.findIntegrationProvider();
@@ -179,7 +205,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     repos: { users, settings: settingsRepo },
     queue: queueManager,
     groupBuffer,
-    runAgent,
+    runAgent: trackedRunAgent,
     buildMcpServers,
     findIntegrationProvider: async () => {
       const row = await mcpServersRepo.findIntegrationProvider();
@@ -234,6 +260,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    await telemetry.shutdown();
     await syncScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();

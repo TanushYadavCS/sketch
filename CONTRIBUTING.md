@@ -74,6 +74,10 @@ pnpm build         # Production build
 4. Open a PR against `main`
 5. Describe what changed, why, and how to test it
 
+## Community
+
+Join our [Discord](https://getsketch.ai/discord) — ask questions, share ideas, or just say hi.
+
 ## Reporting Issues
 
 Use [GitHub Issues](https://github.com/canvasxai/sketch/issues) for bug reports and feature requests.

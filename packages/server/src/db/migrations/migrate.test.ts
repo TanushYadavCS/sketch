@@ -1,10 +1,10 @@
 /**
  * Integration tests for the full migration sequence.
  *
- * Uses a fresh in-memory SQLite database and runs all 024 migrations through the
+ * Uses a fresh in-memory SQLite database and runs all 025 migrations through the
  * actual runMigrations() function. Tests verify that all migrations are recorded in
  * the kysely_migration table, that key tables exist after migration, and that a DB
- * with migrations 001-018 already applied can be upgraded with only 019-024.
+ * with migrations 001-018 already applied can be upgraded with only 019-025.
  */
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
@@ -29,18 +29,18 @@ describe("runMigrations — full sequence", () => {
     await db.destroy();
   });
 
-  it("runs all 024 migrations on a fresh database without error", async () => {
+  it("runs all migrations on a fresh database without error", async () => {
     await expect(runMigrations(db)).resolves.not.toThrow();
   });
 
-  it("records all 24 migration entries in the kysely_migration table", async () => {
+  it("records all 25 migration entries in the kysely_migration table", async () => {
     await runMigrations(db);
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(24);
+    expect(rows.rows).toHaveLength(25);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -61,6 +61,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[21]).toBe("022-settings-extended");
     expect(names[22]).toBe("023-semantic-search");
     expect(names[23]).toBe("024-settings-enrichment");
+    expect(names[24]).toBe("025-agent-usage");
   });
 
   it("creates the users table", async () => {
@@ -166,8 +167,8 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    // Still exactly 24, not 48
-    expect(rows.rows).toHaveLength(24);
+    // Still exactly 25, not 50
+    expect(rows.rows).toHaveLength(25);
   });
 });
 
@@ -182,14 +183,14 @@ describe("runMigrations — incremental upgrade", () => {
     await db.destroy();
   });
 
-  it("applies only 019-024 when 001-018 are already present", async () => {
+  it("applies only 019-025 when 001-018 are already present", async () => {
     // Simulate a DB that already has 001-018 applied by running the full migration
     // sequence once, then seeding a user row to represent existing data.
     await runMigrations(db);
 
     await db.insertInto("users").values({ id: "existing-user", name: "Alice" }).execute();
 
-    // Running again should be a no-op (all 24 already applied)
+    // Running again should be a no-op (all 25 already applied)
     await runMigrations(db);
 
     const users = await db.selectFrom("users").selectAll().execute();
@@ -199,6 +200,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(24);
+    expect(rows.rows).toHaveLength(25);
   });
 });

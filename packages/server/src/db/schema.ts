@@ -247,6 +247,37 @@ export interface OutreachMessagesTable {
   responded_at: string | null;
 }
 
+export interface AgentRunsTable {
+  id: Generated<string>;
+  trace_id: string;
+  span_id: string | null;
+  user_id: string | null;
+  platform: string;
+  context_type: string;
+  cost_usd: number;
+  is_error: Generated<number>;
+  duration_ms: number | null;
+  created_at: Generated<string>;
+  attributes: Generated<string>;
+}
+
+export interface ToolCallsTable {
+  id: Generated<number>;
+  agent_run_id: string;
+  tool_name: string;
+  skill_name: string | null;
+  attributes: Generated<string>;
+  outcome: string | null;
+  denial_reason: string | null;
+  is_mcp: number | null;
+  mcp_server: string | null;
+  app_slug: string | null;
+  component_key: string | null;
+  component_type: string | null;
+  auth_type: string | null;
+  execution_outcome: string | null;
+}
+
 export interface DB {
   users: UsersTable;
   channels: ChannelsTable;
@@ -271,4 +302,6 @@ export interface DB {
   chat_sessions: ChatSessionsTable;
   scheduled_tasks: ScheduledTasksTable;
   outreach_messages: OutreachMessagesTable;
+  agent_runs: AgentRunsTable;
+  tool_calls: ToolCallsTable;
 }
