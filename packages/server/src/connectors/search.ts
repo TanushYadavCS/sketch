@@ -3,22 +3,23 @@
  *
  * Combines three search layers:
  * 1. Metadata filtering (time, source, content type, tags)
- * 2. FTS5 keyword search (BM25 ranking)
- * 3. Vector similarity search (sqlite-vec, embeddings)
+ * 2. FTS5 keyword search (BM25 ranking) — SQLite only
+ * 3. Vector similarity search (sqlite-vec / pgvector embeddings)
  *
  * Results are merged using reciprocal rank fusion (RRF).
  *
- * Uses raw SQL for FTS5 and vec queries because Kysely's typed query builder
- * doesn't support virtual table joins natively.
+ * Uses raw SQL for the FTS5/tsvector and vec/pgvector queries because:
+ * - Kysely's typed query builder doesn't support virtual table joins (FTS5, sqlite-vec) natively.
+ * - Postgres-specific operators (@@ plainto_tsquery, <=> halfvec cosine distance) have no
+ *   Kysely equivalents. The two dialects use entirely different WHERE clauses, JOIN patterns,
+ *   and ranking functions (bm25 vs ts_rank, sqlite-vec MATCH vs pgvector KNN), so a shared
+ *   query builder abstraction would add complexity without benefit.
  */
 import type { Kysely, SqlBool } from "kysely";
-import { PostgresAdapter, sql } from "kysely";
+import { sql } from "kysely";
+import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import type { DB } from "../db/schema";
-
-function isPg(db: Kysely<DB>): boolean {
-  return db.getExecutor().adapter instanceof PostgresAdapter;
-}
 
 export interface SearchResult {
   id: string;

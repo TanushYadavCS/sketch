@@ -9,14 +9,15 @@
  * Steps: convert existing NULL thread_key rows to '', drop the expression index,
  * set NOT NULL + DEFAULT '' on thread_key, create a plain unique index.
  */
-import { type Kysely, PostgresAdapter, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
+import { isPg } from "../dialect";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`UPDATE chat_sessions SET thread_key = '' WHERE thread_key IS NULL`.execute(db);
 
   await sql`DROP INDEX IF EXISTS chat_sessions_workspace_thread_uidx`.execute(db);
 
-  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  const isPostgres = isPg(db);
 
   if (isPostgres) {
     await sql`ALTER TABLE chat_sessions ALTER COLUMN thread_key SET NOT NULL`.execute(db);

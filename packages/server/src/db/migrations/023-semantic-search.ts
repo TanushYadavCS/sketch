@@ -8,7 +8,8 @@
  * outside of Kysely migrations since they require the sqlite-vec extension to be
  * loaded first. See db/index.ts for vec table initialization.
  */
-import { type Kysely, PostgresAdapter, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
+import { isPg } from "../dialect";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   // ── 1. document_chunks ─────────────────────────────────────
@@ -37,7 +38,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE INDEX idx_timeframes_file ON document_timeframes(indexed_file_id)`.execute(db);
   await sql`CREATE INDEX idx_timeframes_dates ON document_timeframes(start_date, end_date)`.execute(db);
 
-  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  const isPostgres = isPg(db);
 
   if (isPostgres) {
     await sql`CREATE TABLE chunk_embeddings (

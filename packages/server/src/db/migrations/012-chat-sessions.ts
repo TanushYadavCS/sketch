@@ -17,10 +17,11 @@
  */
 import { readFile, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { type Kysely, PostgresAdapter, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
+import { isPg } from "../dialect";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
-  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  const isPostgres = isPg(db);
 
   if (isPostgres) {
     // Postgres: use serial for auto-incrementing PK (autoIncrement() generates

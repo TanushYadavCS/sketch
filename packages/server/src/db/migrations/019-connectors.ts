@@ -4,10 +4,11 @@
  * Creates connector_configs, indexed_files (with enrichment + embedding columns),
  * and FTS5 full-text search with triggers (SQLite only).
  */
-import { type Kysely, PostgresAdapter, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
+import { isPg } from "../dialect";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
-  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  const isPostgres = isPg(db);
 
   await db.schema
     .createTable("connector_configs")
@@ -123,7 +124,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
-  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  const isPostgres = isPg(db);
 
   if (!isPostgres) {
     await sql`DROP TRIGGER IF EXISTS indexed_files_au`.execute(db);

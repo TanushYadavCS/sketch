@@ -11,8 +11,9 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { PostgresAdapter, sql } from "kysely";
+import { sql } from "kysely";
 import type { Logger } from "pino";
+import { isPg } from "../db/dialect";
 import type { DB } from "../db/schema";
 import { chunkText } from "./chunking";
 import type { EmbeddingProvider } from "./embeddings/types";
@@ -357,7 +358,7 @@ async function enrichTextDocument(
         .orderBy("chunk_index", "asc")
         .execute();
 
-      const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+      const isPostgres = isPg(db);
 
       // Batch embedding inserts — chunk_embeddings is a vec0 virtual table that
       // only supports single-row INSERT, so we must still insert one at a time.
@@ -416,7 +417,7 @@ async function enrichImage(
   const embedding = await embeddingProvider.embedImage(buffer, mimeType);
 
   // Store embedding
-  const isPostgres = db.getExecutor().adapter instanceof PostgresAdapter;
+  const isPostgres = isPg(db);
   if (isPostgres) {
     await sql`INSERT INTO file_embeddings (indexed_file_id, embedding)
       VALUES (${file.id}, ${JSON.stringify(embedding)}::vector)

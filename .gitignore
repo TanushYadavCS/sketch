@@ -4,3 +4,4 @@ dist/
 data
 data/
 .claude/
+.agents/

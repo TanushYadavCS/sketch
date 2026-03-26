@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Kysely } from "kysely";
-import { decrypt, encrypt } from "../../utils/encryption";
+import { decrypt, encrypt } from "../../auth/encryption";
 import type { DB } from "../schema";
 
 const SENSITIVE_FIELDS = new Set<string>([
