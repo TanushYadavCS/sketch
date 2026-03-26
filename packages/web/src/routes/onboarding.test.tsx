@@ -346,11 +346,38 @@ describe("OnboardingPage navigation and flow", () => {
     ]);
   });
 
-  it("uses updated identity values in later onboarding steps", async () => {
+  it("edited identity values survive navigation back and forward", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          currentStep: 2,
+          adminEmail: "admin@test.com",
+          orgName: null,
+          botName: "Sketch",
+          slackConnected: false,
+          llmConnected: false,
+          llmProvider: null,
+        }}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Organization Name"), "Acme");
+    await user.clear(screen.getByLabelText("Bot Name"));
+    await user.type(screen.getByLabelText("Bot Name"), "Sketch Pro");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => {
+      expect(screen.getByText("Connect your channels")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Identity" }));
+    expect(screen.getByLabelText("Organization Name")).toHaveValue("Acme");
+    expect(screen.getByLabelText("Bot Name")).toHaveValue("Sketch Pro");
+  });
+
+  it("reaches completion step from LLM with pre-configured earlier steps", async () => {
     server.use(
-      http.post("/api/setup/slack/verify", () => {
-        return HttpResponse.json({ success: true, workspaceName: "Test Workspace" });
-      }),
       http.post("/api/setup/llm/verify", () => {
         return HttpResponse.json({ success: true });
       }),
@@ -360,38 +387,20 @@ describe("OnboardingPage navigation and flow", () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(<OnboardingPage />);
-
-    await user.type(screen.getByLabelText("Email"), "admin@test.com");
-    await user.type(screen.getByLabelText("Password"), "password123");
-    await user.type(screen.getByLabelText("Confirm password"), "password123");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    await user.type(screen.getByLabelText("Organization Name"), "Acme");
-    await user.clear(screen.getByLabelText("Bot Name"));
-    await user.type(screen.getByLabelText("Bot Name"), "Sketch");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => {
-      expect(screen.getByText("Connect your channels")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: "Identity" }));
-    await user.clear(screen.getByLabelText("Organization Name"));
-    await user.type(screen.getByLabelText("Organization Name"), "Acme Labs");
-    await user.clear(screen.getByLabelText("Bot Name"));
-    await user.type(screen.getByLabelText("Bot Name"), "Sketch Pro");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => {
-      expect(screen.getByText("Connect your channels")).toBeInTheDocument();
-    });
-
-    await user.type(screen.getByLabelText("Bot Token"), "xoxb-test-bot-token");
-    await user.type(screen.getByLabelText("App-Level Token"), "xapp-test-app-token");
-    await user.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          currentStep: 4,
+          adminEmail: "admin@test.com",
+          orgName: "Acme",
+          botName: "Sketch",
+          slackConnected: true,
+          llmConnected: false,
+          llmProvider: null,
+        }}
+      />,
+    );
 
     await user.type(screen.getByLabelText("API Key"), "sk-ant-test-key");
     await user.click(screen.getByRole("button", { name: "Connect" }));
