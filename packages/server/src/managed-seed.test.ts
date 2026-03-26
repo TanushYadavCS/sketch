@@ -96,7 +96,7 @@ describe("runManagedSeed", () => {
     expect(row).toBeNull();
   });
 
-  it("stores Slack token even when admin already exists", async () => {
+  it("does NOT store Slack token when admin already exists", async () => {
     const settingsRepo = createSettingsRepository(db);
     await settingsRepo.create({ adminEmail: "existing@test.com", adminPasswordHash: "existing-hash" });
 
@@ -107,6 +107,6 @@ describe("runManagedSeed", () => {
     await runManagedSeed(config, settingsRepo);
 
     const row = await settingsRepo.get();
-    expect(row?.slack_bot_token).toBe("xoxb-bootstrap-token");
+    expect(row?.slack_bot_token).toBeNull();
   });
 });

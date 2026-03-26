@@ -94,6 +94,55 @@ describe("Settings repository encryption", () => {
       expect(row?.slack_bot_token).toBeNull();
     });
 
+    it("stores gemini_api_key encrypted and decrypts on get()", async () => {
+      const settings = createSettingsRepository(db, TEST_KEY);
+      await settings.create(SEED);
+      await settings.update({ geminiApiKey: "gemini-test-key" });
+
+      const raw = await rawField(db, "gemini_api_key");
+      expect((raw as string).startsWith("enc:")).toBe(true);
+
+      const row = await settings.get();
+      expect(row?.gemini_api_key).toBe("gemini-test-key");
+    });
+
+    it("stores smtp_password encrypted and decrypts on get()", async () => {
+      const settings = createSettingsRepository(db, TEST_KEY);
+      await settings.create(SEED);
+      await settings.update({ smtpPassword: "smtp-secret" });
+
+      const raw = await rawField(db, "smtp_password");
+      expect((raw as string).startsWith("enc:")).toBe(true);
+
+      const row = await settings.get();
+      expect(row?.smtp_password).toBe("smtp-secret");
+    });
+
+    it("stores google_oauth_client_secret encrypted and decrypts on get()", async () => {
+      const settings = createSettingsRepository(db, TEST_KEY);
+      await settings.create(SEED);
+      await settings.update({ googleOauthClientSecret: "google-secret" });
+
+      const raw = await rawField(db, "google_oauth_client_secret");
+      expect((raw as string).startsWith("enc:")).toBe(true);
+
+      const row = await settings.get();
+      expect(row?.google_oauth_client_secret).toBe("google-secret");
+    });
+
+    it("stores jwt_secret encrypted at create() time and decrypts on get()", async () => {
+      const settings = createSettingsRepository(db, TEST_KEY);
+      await settings.create(SEED);
+
+      const raw = await rawField(db, "jwt_secret");
+      expect(raw).toBeDefined();
+      expect((raw as string).startsWith("enc:")).toBe(true);
+
+      const row = await settings.get();
+      expect(row?.jwt_secret).toBeDefined();
+      expect((row?.jwt_secret as string).startsWith("enc:")).toBe(false);
+    });
+
     it("does NOT encrypt non-sensitive fields (org_name, bot_name)", async () => {
       const settings = createSettingsRepository(db, TEST_KEY);
       await settings.create(SEED);

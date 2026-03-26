@@ -162,5 +162,13 @@ describe("SlackBot.processHttpRequest", () => {
       };
       await expect(bot.processHttpRequest(body, headers)).rejects.toThrow();
     });
+
+    it("throws for stale timestamps (>5 minutes old)", async () => {
+      const bot = makeBot();
+      const body = JSON.stringify({ type: "url_verification", challenge: "c", token: "t" });
+      const sixMinutesAgo = Math.floor(Date.now() / 1000) - 6 * 60;
+      const headers = makeHeaders(body, TEST_SIGNING_SECRET, sixMinutesAgo);
+      await expect(bot.processHttpRequest(body, headers)).rejects.toThrow();
+    });
   });
 });

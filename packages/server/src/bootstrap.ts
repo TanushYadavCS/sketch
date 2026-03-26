@@ -196,7 +196,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
     getSlack: () => slack,
     scheduler,
     onSlackTokensUpdated: async (tokens) => {
-      if (!tokens) return;
       await startSlackBotIfConfigured(tokens);
     },
     onSlackDisconnect: async () => {

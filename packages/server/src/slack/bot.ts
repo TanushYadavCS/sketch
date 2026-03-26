@@ -14,7 +14,7 @@
  * processHttpRequest() which verifies the Slack signature and dispatches
  * to the Bolt app.
  */
-import { App } from "@slack/bolt";
+import { App, verifySlackRequest } from "@slack/bolt";
 import type { Receiver } from "@slack/bolt";
 import type { Logger } from "../logger";
 
@@ -235,14 +235,14 @@ export class SlackBot {
       throw new Error("Missing Slack signature headers");
     }
 
-    const signingSecret = this.signingSecret ?? "";
-    const { createHmac, timingSafeEqual } = await import("node:crypto");
-    const baseString = `v0:${timestamp}:${rawBody}`;
-    const computed = `v0=${createHmac("sha256", signingSecret).update(baseString).digest("hex")}`;
-
-    if (computed.length !== signature.length || !timingSafeEqual(Buffer.from(computed), Buffer.from(signature))) {
-      throw new Error("Invalid Slack signature");
-    }
+    verifySlackRequest({
+      signingSecret: this.signingSecret ?? "",
+      body: rawBody,
+      headers: {
+        "x-slack-signature": signature,
+        "x-slack-request-timestamp": Number(timestamp),
+      },
+    });
 
     const body = JSON.parse(rawBody);
 

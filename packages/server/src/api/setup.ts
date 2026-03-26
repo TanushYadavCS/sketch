@@ -131,6 +131,10 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/slack/verify", async (c) => {
+    if (deps.managedUrl) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
+    }
+
     const body = await c.req.json().catch(() => ({}));
     const parsed = slackSchema.safeParse(body);
     if (!parsed.success) {
@@ -203,13 +207,17 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
     await settings.update({
       orgName: parsed.data.orgName.trim(),
-      botName: parsed.data.botName.trim(),
+      botName: deps.managedUrl ? "Sketch" : parsed.data.botName.trim(),
     });
 
     return c.json({ success: true });
   });
 
   routes.post("/slack", async (c) => {
+    if (deps.managedUrl) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
+    }
+
     const existing = await settings.get();
     if (!existing?.admin_email) {
       return c.json(

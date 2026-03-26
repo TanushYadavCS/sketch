@@ -15,11 +15,8 @@ export async function runManagedSeed(config: Config, settingsRepo: SettingsRepo)
       adminEmail: config.BOOTSTRAP_ADMIN_EMAIL,
       adminPasswordHash: config.BOOTSTRAP_ADMIN_PASSWORD_HASH,
     });
-  }
 
-  if (config.BOOTSTRAP_SLACK_BOT_TOKEN) {
-    const currentSettings = await settingsRepo.get();
-    if (currentSettings) {
+    if (config.BOOTSTRAP_SLACK_BOT_TOKEN) {
       await settingsRepo.update({ slackBotToken: config.BOOTSTRAP_SLACK_BOT_TOKEN });
     }
   }

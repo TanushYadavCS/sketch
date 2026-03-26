@@ -549,3 +549,82 @@ describe("OnboardingPage navigation and flow", () => {
     ]);
   });
 });
+
+describe("Managed mode onboarding", () => {
+  it("shows only 2 steps (Identity and LLM) in the progress indicator", () => {
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          currentStep: 2,
+          adminEmail: "admin@managed.com",
+          orgName: null,
+          botName: "Sketch",
+          slackConnected: false,
+          llmConnected: false,
+          llmProvider: null,
+          managedUrl: "https://app.getsketch.ai",
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Identity" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "LLM" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Account" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Channels" })).not.toBeInTheDocument();
+  });
+
+  it("renders bot name input as disabled when managedUrl is set", () => {
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          currentStep: 2,
+          adminEmail: "admin@managed.com",
+          orgName: null,
+          botName: "Sketch",
+          slackConnected: false,
+          llmConnected: false,
+          llmProvider: null,
+          managedUrl: "https://app.getsketch.ai",
+        }}
+      />,
+    );
+
+    const botNameInput = screen.getByLabelText("Bot Name");
+    expect(botNameInput).toBeDisabled();
+    expect(botNameInput).toHaveValue("Sketch");
+  });
+
+  it("skips Channels step and goes directly from Identity to LLM", async () => {
+    server.use(
+      http.post("/api/setup/identity", () => {
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          currentStep: 2,
+          adminEmail: "admin@managed.com",
+          orgName: null,
+          botName: "Sketch",
+          slackConnected: false,
+          llmConnected: false,
+          llmProvider: null,
+          managedUrl: "https://app.getsketch.ai",
+        }}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Organization Name"), "Managed Corp");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Connect your LLM")).toBeInTheDocument();
+    });
+  });
+});

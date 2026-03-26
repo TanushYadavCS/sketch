@@ -8,6 +8,10 @@ const SENSITIVE_FIELDS = new Set<string>([
   "slack_app_token",
   "anthropic_api_key",
   "aws_secret_access_key",
+  "gemini_api_key",
+  "smtp_password",
+  "google_oauth_client_secret",
+  "jwt_secret",
 ]);
 
 export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string) {
@@ -28,13 +32,14 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
     },
 
     async create(data: { adminEmail: string; adminPasswordHash: string }) {
+      const jwtSecret = randomBytes(32).toString("hex");
       await db
         .insertInto("settings")
         .values({
           id: "default",
           admin_email: data.adminEmail,
           admin_password_hash: data.adminPasswordHash,
-          jwt_secret: randomBytes(32).toString("hex"),
+          jwt_secret: encryptionKey ? encrypt(jwtSecret, encryptionKey) : jwtSecret,
         })
         .execute();
 

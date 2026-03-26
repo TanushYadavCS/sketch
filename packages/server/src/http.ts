@@ -150,10 +150,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       "/api/system",
       systemRoutes(settings, {
         systemSecret: config.SYSTEM_SECRET,
-        onSlackTokensUpdated: onSlackTokensUpdated
-          ? (tokens: { botToken: string; appToken?: string }) =>
-              onSlackTokensUpdated({ botToken: tokens.botToken, appToken: tokens.appToken ?? "" })
-          : undefined,
+        onSlackTokensUpdated: onSlackTokensUpdated ? () => onSlackTokensUpdated() : undefined,
       }),
     );
   }

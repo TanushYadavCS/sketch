@@ -12,6 +12,7 @@ interface StepBotIdentityProps {
   initialBotName?: string;
   isSubmitting?: boolean;
   onDraftChange?: (data: { organizationName: string; botName: string }) => void;
+  botNameReadOnly?: boolean;
 }
 
 export function StepBotIdentity({
@@ -20,6 +21,7 @@ export function StepBotIdentity({
   initialBotName,
   isSubmitting,
   onDraftChange,
+  botNameReadOnly,
 }: StepBotIdentityProps) {
   const [organizationName, setOrganizationName] = useState(initialOrganizationName ?? "");
   const [botName, setBotName] = useState(initialBotName ?? "Sketch");
@@ -80,11 +82,11 @@ export function StepBotIdentity({
           <Label htmlFor="botName">Bot Name</Label>
           <Input
             id="botName"
-            value={botName}
+            value={botNameReadOnly ? "Sketch" : botName}
             onChange={(e) => setBotName(e.target.value)}
             placeholder="Sketch"
             aria-invalid={!!errors.botName}
-            disabled={Boolean(isSubmitting)}
+            disabled={Boolean(isSubmitting) || Boolean(botNameReadOnly)}
           />
           {errors.botName && <p className="text-xs text-destructive">{errors.botName}</p>}
         </div>

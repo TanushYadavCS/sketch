@@ -2,7 +2,7 @@ import { CheckIcon } from "@phosphor-icons/react";
 
 import { cn } from "@sketch/ui/lib/utils";
 
-const steps = [
+export const defaultSteps = [
   { number: 1, label: "Account" },
   { number: 2, label: "Identity" },
   { number: 3, label: "Channels" },
@@ -13,9 +13,15 @@ interface ProgressIndicatorProps {
   currentStep: number;
   maxStepReached?: number;
   onStepClick?: (step: number) => void;
+  steps?: Array<{ number: number; label: string }>;
 }
 
-export function ProgressIndicator({ currentStep, maxStepReached, onStepClick }: ProgressIndicatorProps) {
+export function ProgressIndicator({
+  currentStep,
+  maxStepReached,
+  onStepClick,
+  steps = defaultSteps,
+}: ProgressIndicatorProps) {
   const effectiveMaxStep = maxStepReached ?? currentStep;
 
   return (

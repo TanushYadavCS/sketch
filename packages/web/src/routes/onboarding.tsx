@@ -1,4 +1,4 @@
-import { ProgressIndicator } from "@/components/onboarding/progress-indicator";
+import { ProgressIndicator, defaultSteps } from "@/components/onboarding/progress-indicator";
 import { StepBotIdentity } from "@/components/onboarding/step-bot-identity";
 import { StepCompletion } from "@/components/onboarding/step-completion";
 import { StepConfigureLLM } from "@/components/onboarding/step-configure-llm";
@@ -49,7 +49,26 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
   const navigate = useNavigate();
   const { logoSrc } = useTheme();
   const setupStatus = initialSetupStatus ?? defaultSetupStatus;
-  const initialStep = setupStatus.currentStep > 0 ? setupStatus.currentStep : 1;
+  const isManaged = Boolean(setupStatus.managedUrl);
+
+  const managedInternalSteps = [2, 4] as const;
+  const managedDisplaySteps = [
+    { number: 1, label: "Identity" },
+    { number: 2, label: "LLM" },
+  ];
+
+  function internalToDisplay(internalStep: number): number {
+    if (!isManaged) return internalStep;
+    const idx = managedInternalSteps.indexOf(internalStep as 2 | 4);
+    return idx >= 0 ? idx + 1 : internalStep;
+  }
+
+  function displayToInternal(displayStep: number): number {
+    if (!isManaged) return displayStep;
+    return managedInternalSteps[displayStep - 1] ?? displayStep;
+  }
+
+  const initialStep = setupStatus.currentStep > 0 ? setupStatus.currentStep : isManaged ? 2 : 1;
 
   const [currentStep, setCurrentStep] = useState(initialStep);
   const [maxStepReached, setMaxStepReached] = useState(Math.min(initialStep, 4));
@@ -182,14 +201,15 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
     return true;
   }
 
-  const handleStepClick = async (step: number) => {
-    if (step === currentStep || isStepAutosaving) return;
+  const handleStepClick = async (displayStep: number) => {
+    const internalStep = displayToInternal(displayStep);
+    if (internalStep === currentStep || isStepAutosaving) return;
 
     setIsStepAutosaving(true);
     const canNavigate = await maybeAutosaveCurrentStep();
     setIsStepAutosaving(false);
     if (canNavigate) {
-      goToStep(step);
+      goToStep(internalStep);
     }
   };
 
@@ -223,6 +243,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
           initialOrganizationName={draftOrganizationName}
           initialBotName={draftBotName}
           isSubmitting={identityMutation.isPending || isStepAutosaving}
+          botNameReadOnly={isManaged}
           onDraftChange={({ organizationName: orgName, botName: name }) => {
             setDraftOrganizationName(orgName);
             setDraftBotName(name);
@@ -230,7 +251,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
           onNext={async ({ organizationName: orgName, botName: name }) => {
             try {
               await persistIdentity(orgName, name);
-              goToStep(setupStatus.managedUrl ? 4 : 3);
+              goToStep(isManaged ? 4 : 3);
             } catch {
               // Error toast is handled by identity mutation.
             }
@@ -293,9 +314,10 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
 
       {currentStep <= 4 && (
         <ProgressIndicator
-          currentStep={Math.min(currentStep, 4)}
-          maxStepReached={Math.min(maxStepReached, 4)}
+          currentStep={Math.min(internalToDisplay(currentStep), isManaged ? 2 : 4)}
+          maxStepReached={Math.min(internalToDisplay(maxStepReached), isManaged ? 2 : 4)}
           onStepClick={handleStepClick}
+          steps={isManaged ? managedDisplaySteps : defaultSteps}
         />
       )}
       {content}
