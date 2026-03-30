@@ -77,6 +77,8 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     SLACK_CHANNEL_HISTORY_LIMIT: 5,
     SLACK_THREAD_HISTORY_LIMIT: 50,
     MAX_FILE_SIZE_MB: 20,
+    MAX_UPLOAD_SIZE_MB: 50,
+    EXPERIMENTAL_FLAG: true,
     DATA_DIR: "./data",
     PORT: 3000,
     LOG_LEVEL: "info",
