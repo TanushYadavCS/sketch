@@ -213,6 +213,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const sketchServer = createSketchMcpServer({
     uploadCollector,
     workspaceDir: absWorkspace,
+    db: params.db,
     findIntegrationProvider: params.findIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,

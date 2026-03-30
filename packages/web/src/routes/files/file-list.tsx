@@ -131,7 +131,7 @@ export function FileList({
         <span className="w-16 text-center">Type</span>
         <span className="w-20 text-center">Access</span>
         <span className="w-20 text-center">Status</span>
-        <span className="w-24 text-right">Synced</span>
+        <span className="w-24 text-right">Updated</span>
         <span className="w-5" />
       </div>
       {filteredFiles.map((file) => (
@@ -294,7 +294,9 @@ function UnifiedFileRow({ file, onView }: { file: UnifiedFile; onView: () => voi
         )}
       </span>
 
-      <span className="w-24 text-right text-xs text-muted-foreground">{formatRelativeTime(file.syncedAt)}</span>
+      <span className="w-24 text-right text-xs text-muted-foreground">
+        {formatRelativeTime(file.sourceUpdatedAt ?? file.sourceCreatedAt ?? file.syncedAt)}
+      </span>
 
       {file.providerUrl ? (
         <a

@@ -544,6 +544,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           "indexed_files.source_path",
           "indexed_files.provider_url",
           "indexed_files.synced_at",
+          "indexed_files.source_created_at",
           "indexed_files.source_updated_at",
           "indexed_files.summary",
           "indexed_files.access_scope_id",

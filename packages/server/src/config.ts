@@ -21,6 +21,12 @@ export const configSchema = z.object({
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(50),
 
+  // Feature flags
+  EXPERIMENTAL_FLAG: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+
   // Slack mode
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
   SLACK_SIGNING_SECRET: z.string().optional(),

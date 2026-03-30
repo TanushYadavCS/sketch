@@ -15,7 +15,14 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SyncedItem } from "./types";
+import type {
+  Connector,
+  ConnectorCredentials,
+  EntitySeedCallback,
+  OAuthCredentials,
+  PersonEntitySeedCallback,
+  SyncedItem,
+} from "./types";
 
 const CLICKUP_API = "https://api.clickup.com/api/v2";
 const TOKEN_ENDPOINT = "https://app.clickup.com/api/v2/oauth/token";
@@ -172,6 +179,7 @@ function taskToSyncedItem(
     sourceCreatedAt: parseClickUpTimestamp(task.date_created ?? null),
     sourceUpdatedAt: parseClickUpTimestamp(task.date_updated ?? null),
     accessScope,
+    assignees: task.assignees.filter((a) => a.username).map((a) => ({ name: a.username })),
   };
 }
 
@@ -214,9 +222,10 @@ export function createClickUpConnector(): Connector {
       await clickupRequest("/user", token, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, scopeConfig, logger }) {
+    async *sync({ credentials, scopeConfig, logger, onEntitySeed, onPersonSeed }) {
       const token = getAccessToken(credentials);
       const allowedSpaces = (scopeConfig.spaces as string[] | undefined) ?? [];
+      const seenAssignees = new Map<string, { username: string; email?: string }>();
 
       const teamsRes = (await clickupRequest("/team", token, logger)) as {
         teams: Array<{ id: string; members: ClickUpMember[] }>;
@@ -226,6 +235,21 @@ export function createClickUpConnector(): Connector {
         const workspaceEmails = extractMemberEmails(team.members);
         logger.info({ teamId: team.id, memberCount: workspaceEmails.length }, "Workspace members resolved");
 
+        // Seed workspace members as person entities
+        if (onPersonSeed) {
+          for (const member of team.members) {
+            if (member.user.username) {
+              await onPersonSeed({
+                name: member.user.username,
+                email: member.user.email,
+                subtype: "internal",
+                source: "clickup",
+                sourceId: `user:${member.user.id}`,
+              });
+            }
+          }
+        }
+
         const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
           spaces: ClickUpSpace[];
         };
@@ -233,6 +257,17 @@ export function createClickUpConnector(): Connector {
         for (const space of spacesRes.spaces) {
           if (allowedSpaces.length > 0 && !allowedSpaces.includes(space.id)) {
             continue;
+          }
+
+          // Seed space as entity
+          if (onEntitySeed) {
+            await onEntitySeed({
+              name: space.name,
+              sourceType: "clickup_space",
+              source: "clickup",
+              sourceId: space.id,
+              metadata: { private: space.private },
+            });
           }
 
           // Build access scope for this space.
@@ -267,11 +302,22 @@ export function createClickUpConnector(): Connector {
             folders: ClickUpFolder[];
           };
           for (const folder of foldersRes.folders) {
+            // Seed folder as entity
+            if (onEntitySeed) {
+              await onEntitySeed({
+                name: folder.name,
+                sourceType: "clickup_folder",
+                source: "clickup",
+                sourceId: folder.id,
+                metadata: { spaceName: space.name, path: `${space.name} / ${folder.name}` },
+              });
+            }
+
             const listsRes = (await clickupRequest(`/folder/${folder.id}/list`, token, logger)) as {
               lists: ClickUpList[];
             };
             for (const list of listsRes.lists) {
-              yield* fetchTasksFromList(list.id, space.name, folder.name, token, logger, spaceScope);
+              yield* fetchTasksFromList(list.id, space.name, folder.name, token, logger, spaceScope, seenAssignees);
             }
           }
 
@@ -279,8 +325,21 @@ export function createClickUpConnector(): Connector {
             lists: ClickUpList[];
           };
           for (const list of folderlessListsRes.lists) {
-            yield* fetchTasksFromList(list.id, space.name, undefined, token, logger, spaceScope);
+            yield* fetchTasksFromList(list.id, space.name, undefined, token, logger, spaceScope, seenAssignees);
           }
+        }
+      }
+
+      // Seed assignees collected during task traversal as person entities
+      if (onPersonSeed) {
+        for (const [, assignee] of seenAssignees) {
+          await onPersonSeed({
+            name: assignee.username,
+            email: assignee.email,
+            subtype: "internal",
+            source: "clickup",
+            sourceId: `assignee:${assignee.username}`,
+          });
         }
       }
     },
@@ -305,6 +364,7 @@ async function* fetchTasksFromList(
   token: string,
   logger: Logger,
   accessScope?: SyncedItem["accessScope"],
+  seenAssignees?: Map<string, { username: string; email?: string }>,
 ): AsyncGenerator<SyncedItem> {
   try {
     const tasksRes = (await clickupRequest(
@@ -314,6 +374,13 @@ async function* fetchTasksFromList(
     )) as { tasks: ClickUpTask[] };
 
     for (const task of tasksRes.tasks) {
+      if (seenAssignees) {
+        for (const assignee of task.assignees) {
+          if (assignee.username && !seenAssignees.has(assignee.username)) {
+            seenAssignees.set(assignee.username, { username: assignee.username });
+          }
+        }
+      }
       yield taskToSyncedItem(task, spaceName, folderName, accessScope);
     }
   } catch (err) {

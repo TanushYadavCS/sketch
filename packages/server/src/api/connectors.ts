@@ -199,6 +199,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
           sourcePath: f.source_path,
           providerUrl: f.provider_url,
           syncedAt: f.synced_at,
+          sourceCreatedAt: f.source_created_at,
           sourceUpdatedAt: f.source_updated_at,
           hasSummary: !!f.summary,
           accessScope: accessInfo ? "restricted" : "unrestricted",
@@ -252,7 +253,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     return c.json({ results });
   });
 
-  /** Get full content of a file, including who has access. */
+  /** Get full content of a file, including who has access and linked entities. */
   routes.get("/files/:fileId/content", async (c) => {
     const fileId = c.req.param("fileId");
     const file = await getFileContent(db, fileId);
@@ -261,6 +262,36 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     const accessDetails = await connectorRepo.getFileAccessDetails(fileId);
+
+    // Get entities linked to this file via entity_mentions
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .select([
+        "entities.id",
+        "entities.name",
+        "entities.source_type",
+        "entities.subtype",
+        "entity_mentions.context_snippet",
+      ])
+      .where("entity_mentions.indexed_file_id", "=", fileId)
+      .execute();
+
+    // Dedupe entities (a file may mention same entity in multiple chunks)
+    const seenIds = new Set<string>();
+    const linkedEntities = mentions
+      .filter((m) => {
+        if (seenIds.has(m.id)) return false;
+        seenIds.add(m.id);
+        return true;
+      })
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        sourceType: m.source_type,
+        subtype: m.subtype,
+      }));
+
     return c.json({
       file,
       access: {
@@ -273,6 +304,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
           mapped: !!a.userId,
         })),
       },
+      entities: linkedEntities,
     });
   });
 
@@ -509,6 +541,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
           sourcePath: f.source_path,
           providerUrl: f.provider_url,
           syncedAt: f.synced_at,
+          sourceCreatedAt: f.source_created_at,
           sourceUpdatedAt: f.source_updated_at,
           hasSummary: !!f.summary,
           accessScope: accessInfo ? "restricted" : "unrestricted",

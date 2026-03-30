@@ -79,6 +79,11 @@ export interface SyncedItem {
    * null → no per-file restrictions.
    */
   accessEmails?: string[] | null;
+  /**
+   * Structured assignee data for deterministic entity linking.
+   * Each assignee is matched to a person entity and linked via entity_mentions.
+   */
+  assignees?: Array<{ name: string; email?: string }>;
 }
 
 /**
@@ -92,6 +97,31 @@ export interface SyncResult {
   newCursor: string | null;
   errors: Array<{ fileId: string; error: string }>;
 }
+
+/**
+ * Entity seed data emitted by connectors during sync.
+ * Used to create entities from structural objects (spaces, folders, projects)
+ * and people (assignees, attendees) without creating indexed_files.
+ */
+export interface EntitySeed {
+  name: string;
+  sourceType: string;
+  source: string;
+  sourceId: string;
+  sourceUrl?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PersonEntitySeed {
+  name: string;
+  email?: string;
+  subtype: "internal" | "external";
+  source: string;
+  sourceId: string;
+}
+
+export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
+export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
 /**
  * Base interface all connectors must implement.
@@ -108,6 +138,8 @@ export interface Connector {
     scopeConfig: Record<string, unknown>;
     cursor: string | null;
     logger: Logger;
+    onEntitySeed?: EntitySeedCallback;
+    onPersonSeed?: PersonEntitySeedCallback;
   }): AsyncGenerator<SyncedItem>;
 
   /** Return the new sync cursor after a sync run. */

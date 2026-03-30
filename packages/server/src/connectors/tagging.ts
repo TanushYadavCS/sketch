@@ -26,6 +26,20 @@ export interface TaggingResult {
     endDate?: string;
     context?: string;
   }>;
+  entityLinks: Array<{
+    entityName: string;
+    entityId: string;
+    chunkIndex: number;
+  }>;
+  newPeople: Array<{
+    name: string;
+    contextHint: string;
+  }>;
+  newEntities: Array<{
+    name: string;
+    type: string;
+    contextHint: string;
+  }>;
 }
 
 /**
@@ -40,7 +54,14 @@ export function tagStructuredContent(content: string, fileName: string, sourcePa
   const allLines = content.split("\n");
 
   if (allLines.length === 0 || !allLines.some((l) => l.trim())) {
-    return { tags: [], summary: `Empty spreadsheet: ${fileName}`, timeframes: [] };
+    return {
+      tags: [],
+      summary: `Empty spreadsheet: ${fileName}`,
+      timeframes: [],
+      entityLinks: [],
+      newPeople: [],
+      newEntities: [],
+    };
   }
 
   // First pass: find all sheets, capture header + sample rows, count total rows per sheet
@@ -100,6 +121,9 @@ export function tagStructuredContent(content: string, fileName: string, sourcePa
     tags: [...tags].slice(0, 30),
     summary: summary.slice(0, 1000),
     timeframes,
+    entityLinks: [],
+    newPeople: [],
+    newEntities: [],
   };
 }
 
@@ -142,6 +166,9 @@ export function tagShortContent(content: string, fileName: string, _sourcePath?:
     tags: [...tags].slice(0, 15),
     summary,
     timeframes,
+    entityLinks: [],
+    newPeople: [],
+    newEntities: [],
   };
 }
 
@@ -153,6 +180,7 @@ export function buildTaggingPrompt(
   fileName: string,
   orgContext?: string,
   fileContext?: FileContext,
+  knownEntitiesBlock?: string,
 ): string {
   const chunkTexts = chunks.map((c) => `--- Section ${c.index + 1} ---\n${c.content}`).join("\n\n");
 
@@ -173,40 +201,44 @@ export function buildTaggingPrompt(
       ? `\nContext (use this to understand what the document means to the team):\n${contextLines.join("\n")}\n`
       : "";
 
-  return `Extract metadata from this document "${fileName}". Focus on information that a keyword search CANNOT find.
-${contextBlock}
+  const entityBlock = knownEntitiesBlock ?? "";
 
+  return `Extract metadata from this document "${fileName}".
+${contextBlock}${entityBlock}
 Respond with ONLY valid JSON matching this schema:
 {
-  "tags": ["tag1", "tag2", ...],
-  "summary": "1-2 sentence summary",
+  "summary": "2-3 sentence summary",
   "temporal_references": [
     { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD or null", "context": "what this date refers to" }
+  ],
+  "entity_links": [
+    { "entity_name": "name from known entities list", "entity_id": "id from known entities list", "chunk_index": 0 }
+  ],
+  "new_people": [
+    { "name": "Person Name", "context_hint": "mentioned as assignee / discussed as stakeholder / etc." }
+  ],
+  "new_entities": [
+    { "name": "Entity Name", "type": "company | product | project | team | client", "context_hint": "described as client / mentioned as partner / etc." }
   ]
 }
 
-Tag rules (IMPORTANT — these make or break search quality):
-- Extract 3-8 tags. Quality over quantity. Each tag must add search value beyond what keyword search already provides.
-- Tag categories (in priority order):
-  1. **Document type**: Determine this from the CONTENT STRUCTURE, not the title. Titles are often misleading. Look for signals:
-     - Bullet points, pros/cons, "options" → discussion notes, meeting notes, decision log
-     - Slides with headers → presentation, pitch deck
-     - Step-by-step instructions → tutorial, how-to guide
-     - Formal sections with requirements → technical spec, proposal
-     - Narrative paragraphs with arguments → blog post, strategy doc, memo
-     Examples: "pitch deck", "blog post", "meeting notes", "technical spec", "decision log", "discussion notes", "tutorial", "case study", "proposal"
-  2. **Primary subject**: what/who is this document ABOUT? Only the main subject, not every entity mentioned. (e.g. if a pitch deck mentions 3 clients as examples, the primary subject is the company pitching, NOT the clients)
-  3. **Intent/purpose**: why does this document exist? (e.g. "investor pitch", "internal planning", "how-to guide", "competitive analysis", "architecture decision")
-  4. **Domain**: the specific field or discipline, but only if non-obvious from the title (e.g. "remarketing automation" not "marketing")
-- Do NOT include:
-  - Words already in the document title (keyword search handles that)
-  - Names of entities that are merely mentioned/referenced (they're in the content, FTS5 finds them)
-  - Generic topic words (e.g. "data", "analytics", "automation" — too broad to be useful)
-- Lowercase, no special characters.
-
-Summary: 2-3 sentences written from the perspective of someone inside the organisation who created this document. What role does this document play — is it a pitch to investors, a spec for engineers, notes from a meeting, a blog post for marketing? What key decisions, conclusions, or outcomes does it capture? Write it so a teammate can decide "yes, this is the doc I was looking for" without opening it.
+Summary: 2-3 sentences written from the perspective of someone inside the organisation. What role does this document play? What key decisions, conclusions, or outcomes does it capture? Write it so a teammate can decide "yes, this is the doc I was looking for" without opening it.
 
 Temporal references: any specific dates, quarters, months, or time periods mentioned. Use ISO format. Q1 2025 = start 2025-01-01, end 2025-03-31. Empty array if none found.
+
+Entity linking: Match the document content to known entities listed above. For each match, include the entity_name, entity_id, and the chunk_index (0-based) where the entity is most relevant. Consider abbreviations, acronyms, and informal references. Only include entities that are genuinely relevant to this document — not every mention.
+
+New people: List any person names mentioned in the document that do NOT appear in the known entities list. Include a context_hint explaining how they're referenced (e.g. "assignee", "attendee", "stakeholder", "author"). Skip generic roles like "the team" or "everyone".
+
+New entities: List companies, products, projects, clients, or teams that the ORGANISATION DIRECTLY WORKS WITH — clients, partners, internal projects, owned products. Use the file location, org name, and document context to judge relevance.
+
+Rules:
+- A blog post at "Marketing / Blog Calendar" comparing competitor tools → the competitors are NOT new entities (they're just referenced). Only the org's own product is relevant.
+- A meeting note mentioning "call with Acme Corp about SOW" → Acme Corp IS a new entity (client relationship).
+- A task description referencing Slack/Jira/Google Sheets as tools used → NOT new entities (generic tooling, not business relationships).
+- When in doubt, DO NOT include. False positives are worse than missing an entity.
+
+Skip: entities already in the known entities list, generic SaaS products merely referenced or compared, industry terms, media platforms used as sources (Reddit, LinkedIn, G2).
 
 Document content:
 ${chunkTexts}`;
@@ -226,14 +258,22 @@ ${JSON.stringify(batchResults, null, 2)}
 
 Respond with ONLY valid JSON:
 {
-  "tags": ["merged unique tags, max 15"],
-  "summary": "1-2 sentence document summary combining all batches",
+  "summary": "2-3 sentence document summary combining all batches",
   "temporal_references": [
     { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD or null", "context": "description" }
+  ],
+  "entity_links": [
+    { "entity_name": "name", "entity_id": "id", "chunk_index": 0 }
+  ],
+  "new_people": [
+    { "name": "Person Name", "context_hint": "role or context" }
+  ],
+  "new_entities": [
+    { "name": "Entity Name", "type": "company | product | project | team | client", "context_hint": "context" }
   ]
 }
 
-Deduplicate tags and temporal references. Keep the most specific and useful tags. Prefer entities, document type, and intent tags over generic topic words.`;
+Deduplicate temporal references, entity links, new_people, and new_entities. Keep the most relevant entity links.`;
 }
 
 /**
@@ -258,6 +298,34 @@ export function parseTaggingResponse(response: string): TaggingResult | null {
               startDate: t.start_date as string,
               endDate: typeof t.end_date === "string" ? t.end_date : undefined,
               context: typeof t.context === "string" ? t.context : undefined,
+            }))
+        : [],
+      entityLinks: Array.isArray(parsed.entity_links)
+        ? parsed.entity_links
+            .filter(
+              (e: Record<string, unknown>) => e && typeof e.entity_name === "string" && typeof e.entity_id === "string",
+            )
+            .map((e: Record<string, unknown>) => ({
+              entityName: e.entity_name as string,
+              entityId: e.entity_id as string,
+              chunkIndex: typeof e.chunk_index === "number" ? e.chunk_index : 0,
+            }))
+        : [],
+      newPeople: Array.isArray(parsed.new_people)
+        ? parsed.new_people
+            .filter((p: Record<string, unknown>) => p && typeof p.name === "string")
+            .map((p: Record<string, unknown>) => ({
+              name: p.name as string,
+              contextHint: typeof p.context_hint === "string" ? p.context_hint : "",
+            }))
+        : [],
+      newEntities: Array.isArray(parsed.new_entities)
+        ? parsed.new_entities
+            .filter((e: Record<string, unknown>) => e && typeof e.name === "string")
+            .map((e: Record<string, unknown>) => ({
+              name: e.name as string,
+              type: typeof e.type === "string" ? e.type : "unknown",
+              contextHint: typeof e.context_hint === "string" ? e.context_hint : "",
             }))
         : [],
     };

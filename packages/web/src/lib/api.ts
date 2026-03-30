@@ -89,6 +89,22 @@ export interface SetupStatus {
   llmConnected: boolean;
   llmProvider: "anthropic" | "bedrock" | null;
   managedUrl?: string;
+  experimentalFlag?: boolean;
+}
+
+export interface EntityListItem {
+  id: string;
+  name: string;
+  sourceType: string;
+  subtype: string | null;
+  aliases: string[];
+  metadata: Record<string, unknown> | null;
+  status: string;
+  hotness: number;
+  mentionCount: number;
+  lastMentionAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ConnectorConfig {
@@ -114,6 +130,7 @@ export interface ConnectorFile {
   sourcePath: string | null;
   providerUrl: string | null;
   syncedAt: string;
+  sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
   hasSummary: boolean;
   accessScope: "restricted" | "unrestricted";
@@ -140,6 +157,13 @@ export interface FileAccessMember {
   userId: string | null;
   source: "scope" | "file";
   mapped: boolean;
+}
+
+export interface LinkedEntity {
+  id: string;
+  name: string;
+  sourceType: string;
+  subtype: string | null;
 }
 
 /** A file returned by the paginated all-files endpoint. */
@@ -377,7 +401,9 @@ export const api = {
       return request<{ results: SearchResult[] }>(`/api/connectors/search?${params.toString()}`);
     },
     fileContent(fileId: string) {
-      return request<{ file: FileContent; access: FileAccess }>(`/api/connectors/files/${fileId}/content`);
+      return request<{ file: FileContent; access: FileAccess; entities: LinkedEntity[] }>(
+        `/api/connectors/files/${fileId}/content`,
+      );
     },
     enrich(id: string, data: { fileIds: string[]; instruction: string }) {
       return request<{ enrichment: { jobId: string; connectorId: string; fileCount: number } }>(
@@ -624,6 +650,77 @@ export const api = {
       return request<void>(`/api/mcp-servers/${providerId}/connections/${connectionId}`, {
         method: "DELETE",
       });
+    },
+  },
+  entities: {
+    get(id: string) {
+      return request<{
+        entity: EntityListItem;
+        sourceRefs: Array<{
+          id: string;
+          source: string;
+          sourceId: string;
+          sourceUrl: string | null;
+          lastSeenAt: string;
+        }>;
+      }>(`/api/entities/${id}`);
+    },
+    mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.source) params.set("source", opts.source);
+      if (opts?.since) params.set("since", opts.since);
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{
+        mentions: Array<{
+          id: string;
+          contextSnippet: string | null;
+          chunkIndex: number | null;
+          mentionedAt: string;
+          file: {
+            id: string;
+            fileName: string;
+            fileType: string | null;
+            source: string;
+            sourcePath: string | null;
+            providerUrl: string | null;
+          };
+        }>;
+        total: number;
+      }>(`/api/entities/${id}/mentions${qs ? `?${qs}` : ""}`);
+    },
+    create(data: { name: string; sourceType: string; subtype?: string; aliases?: string[] }) {
+      return request<{ entity: EntityListItem }>("/api/entities", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    deleteTentative() {
+      return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
+    },
+    update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
+      return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    remove(id: string) {
+      return request<{ success: boolean }>(`/api/entities/${id}`, { method: "DELETE" });
+    },
+    list(opts?: { type?: string; source?: string; search?: string; sort?: string; limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.type) params.set("type", opts.type);
+      if (opts?.source) params.set("source", opts.source);
+      if (opts?.search) params.set("search", opts.search);
+      if (opts?.sort) params.set("sort", opts.sort);
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{
+        entities: EntityListItem[];
+        total: number;
+      }>(`/api/entities${qs ? `?${qs}` : ""}`);
     },
   },
   usage: {

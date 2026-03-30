@@ -18,10 +18,11 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import type { Selectable } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
+import { createEntityRepository } from "../db/repositories/entities";
 import type { createOutreachRepository } from "../db/repositories/outreach";
-import type { UsersTable } from "../db/schema";
+import type { DB, UsersTable } from "../db/schema";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import { buildSketchContext } from "./prompt";
@@ -45,6 +46,7 @@ export class UploadCollector {
 export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
   workspaceDir: string;
+  db?: Kysely<DB>;
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
@@ -523,6 +525,149 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           .describe("The answer or information gathered from the user. Summarize the key points clearly."),
       },
       async (params) => handleRespondToOutreach(params, deps),
+    ),
+
+    tool(
+      "SearchEntities",
+      `Search for entities (projects, people, teams, databases) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
+
+Use this when the user asks about a project, person, or any named thing tracked across the org's tools. Pass multiple name variations (e.g. ["Beetu", "B2", "beetu app"]) to maximize matches.`,
+      {
+        queries: z
+          .array(z.string())
+          .describe("Array of name variations to search for. Runs substring match per query, dedupes results."),
+        types: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Filter by entity source_type. Examples: 'person', 'clickup_space', 'clickup_folder', 'linear_project', 'notion_database'.",
+          ),
+      },
+      async ({ queries, types }) => {
+        if (!deps.db) {
+          return { content: [{ type: "text" as const, text: "Entity search not available." }] };
+        }
+        const entityRepo = createEntityRepository(deps.db);
+        const seen = new Set<string>();
+        const results: Array<Record<string, unknown>> = [];
+
+        for (const query of queries) {
+          const matches = await entityRepo.searchEntities(query, {
+            sourceTypes: types,
+            limit: 20,
+          });
+          for (const entity of matches) {
+            if (!seen.has(entity.id)) {
+              seen.add(entity.id);
+              results.push({
+                id: entity.id,
+                name: entity.name,
+                sourceType: entity.source_type,
+                subtype: entity.subtype,
+                aliases: entity.aliases ? JSON.parse(entity.aliases) : [],
+                status: entity.status,
+                hotness: entity.hotness,
+              });
+            }
+          }
+        }
+
+        // Layer 2: users table fallback if no entity matches
+        if (results.length === 0 && deps.userRepo) {
+          const users = await deps.userRepo.list();
+          for (const query of queries) {
+            const q = query.toLowerCase();
+            for (const user of users) {
+              if (user.name.toLowerCase().includes(q) && !seen.has(user.id)) {
+                seen.add(user.id);
+                results.push({
+                  id: user.id,
+                  name: user.name,
+                  sourceType: "person",
+                  subtype: "internal",
+                  aliases: [],
+                  status: "confirmed",
+                  source: "team_directory",
+                });
+              }
+            }
+          }
+        }
+
+        if (results.length === 0) {
+          return { content: [{ type: "text" as const, text: "No entities found matching those queries." }] };
+        }
+
+        return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+      },
+    ),
+
+    tool(
+      "GetEntityContext",
+      `Get cross-source context for an entity — all recent mentions across meetings, tasks, docs, and other indexed content. Returns a formatted timeline showing where and when this entity was referenced.
+
+Use this after SearchEntities to dive deeper into a specific entity. The response is a human-readable summary, not raw data.`,
+      {
+        entityId: z.string().describe("The entity ID from SearchEntities results."),
+        limit: z.number().optional().describe("Max mentions to return. Default 20. Agent can request more if needed."),
+        since: z
+          .string()
+          .optional()
+          .describe("ISO date string. Only return mentions after this date. Example: '2026-03-01'."),
+      },
+      async ({ entityId, limit, since }) => {
+        if (!deps.db) {
+          return { content: [{ type: "text" as const, text: "Entity context not available." }] };
+        }
+        const entityRepo = createEntityRepository(deps.db);
+        const entity = await entityRepo.getEntity(entityId);
+        if (!entity) {
+          return { content: [{ type: "text" as const, text: `Entity ${entityId} not found.` }] };
+        }
+
+        const mentions = await entityRepo.getMentionsForEntity(entityId, {
+          limit: limit ?? 20,
+          since,
+        });
+
+        // Enrich mentions with file metadata
+        const lines: string[] = [];
+        const aliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
+        const aliasStr = aliases.length > 0 ? ` (aliases: ${aliases.join(", ")})` : "";
+        lines.push(`## ${entity.name}${aliasStr}`);
+        lines.push(
+          `Type: ${entity.source_type}${entity.subtype ? ` (${entity.subtype})` : ""} | Status: ${entity.status}`,
+        );
+        lines.push(
+          `Total mentions found: ${mentions.length}${mentions.length === (limit ?? 20) ? " (limit reached, use 'since' or increase 'limit' for more)" : ""}`,
+        );
+        lines.push("");
+
+        for (const mention of mentions) {
+          const file = await deps.db
+            .selectFrom("indexed_files")
+            .select(["file_name", "file_type", "source", "source_path", "provider_url"])
+            .where("id", "=", mention.indexed_file_id)
+            .executeTakeFirst();
+
+          if (!file) continue;
+
+          const date = new Date(mention.mentioned_at).toISOString().split("T")[0];
+          const sourceLabel = file.source.charAt(0).toUpperCase() + file.source.slice(1);
+          const urlSuffix = file.provider_url ? ` (${file.provider_url})` : "";
+          lines.push(`**${date}** — ${sourceLabel}: "${file.file_name}"${urlSuffix}`);
+          if (mention.context_snippet) {
+            lines.push(`  ${mention.context_snippet.slice(0, 200)}`);
+          }
+          lines.push("");
+        }
+
+        if (mentions.length === 0) {
+          lines.push("No mentions found for this entity.");
+        }
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      },
     ),
   ];
 

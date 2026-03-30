@@ -23,6 +23,7 @@ import { toast } from "sonner";
 import { dashboardRoute } from "../dashboard";
 import { ConnectorPicker } from "./connector-picker";
 import { SearchSettingsSheet } from "./enrichment-controls";
+import { EntityExplorer } from "./entity-explorer";
 import { FileDetailSheet } from "./file-detail-sheet";
 import { FileList } from "./file-list";
 import { ManageConnectorDialog } from "./manage-connector-dialog";
@@ -36,9 +37,12 @@ export const filesRoute = createRoute({
 
 const PAGE_SIZE = 50;
 
+type FilesTab = "files" | "entities";
+
 function FilesPage() {
   const queryClient = useQueryClient();
 
+  const [activeTab, setActiveTab] = useState<FilesTab>("files");
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilterRaw] = useState<string | null>(null);
   const setSourceFilter = useCallback((value: string | null) => {
@@ -219,47 +223,79 @@ function FilesPage() {
         </div>
       </div>
 
-      <ConnectorPicker
-        connectors={connectors}
-        totalFiles={totalFiles}
-        localFileCount={localFileCount}
-        sourceFilter={sourceFilter}
-        onSourceFilterChange={setSourceFilter}
-        onConnected={handleConnected}
-        onManageConnector={(def, connector) => setManagingConnector({ definition: def, connector })}
-        forcedConnectIntegration={reconnectTarget}
-        onForcedConnectDone={() => setReconnectTarget(null)}
-      />
-
-      <SearchBar
-        search={search}
-        onSearchChange={setSearch}
-        typeFilter={typeFilter}
-        accessFilter={accessFilter}
-        statusFilter={statusFilter}
-        onTypeChange={setTypeFilter}
-        onAccessChange={setAccessFilter}
-        onStatusChange={setStatusFilter}
-      />
-
-      <div className="mt-4">
-        <FileList
-          isLoading={isLoading}
-          isSearching={isSearching}
-          isInSearchMode={isInSearchMode}
-          isFetchingFiles={isFetchingFiles}
-          filteredFiles={filteredFiles}
-          searchResults={searchResults}
-          debouncedSearch={debouncedSearch}
-          hasAnyFilter={hasAnyFilter}
-          hasMore={hasMore}
-          hasClientOnlyFilter={hasClientOnlyFilter}
-          allFilesCount={allFiles.length}
-          totalFiles={totalFiles}
-          onView={setViewingFile}
-          onLoadMore={loadMore}
-        />
+      {/* Tab switcher */}
+      <div className="mt-4 flex gap-1 border-b border-border">
+        <button
+          type="button"
+          onClick={() => setActiveTab("files")}
+          className={`px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === "files"
+              ? "border-b-2 border-foreground text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          All Files
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("entities")}
+          className={`px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === "entities"
+              ? "border-b-2 border-foreground text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Entity Explorer
+        </button>
       </div>
+
+      {activeTab === "entities" ? (
+        <EntityExplorer />
+      ) : (
+        <>
+          <ConnectorPicker
+            connectors={connectors}
+            totalFiles={totalFiles}
+            localFileCount={localFileCount}
+            sourceFilter={sourceFilter}
+            onSourceFilterChange={setSourceFilter}
+            onConnected={handleConnected}
+            onManageConnector={(def, connector) => setManagingConnector({ definition: def, connector })}
+            forcedConnectIntegration={reconnectTarget}
+            onForcedConnectDone={() => setReconnectTarget(null)}
+          />
+
+          <SearchBar
+            search={search}
+            onSearchChange={setSearch}
+            typeFilter={typeFilter}
+            accessFilter={accessFilter}
+            statusFilter={statusFilter}
+            onTypeChange={setTypeFilter}
+            onAccessChange={setAccessFilter}
+            onStatusChange={setStatusFilter}
+          />
+
+          <div className="mt-4">
+            <FileList
+              isLoading={isLoading}
+              isSearching={isSearching}
+              isInSearchMode={isInSearchMode}
+              isFetchingFiles={isFetchingFiles}
+              filteredFiles={filteredFiles}
+              searchResults={searchResults}
+              debouncedSearch={debouncedSearch}
+              hasAnyFilter={hasAnyFilter}
+              hasMore={hasMore}
+              hasClientOnlyFilter={hasClientOnlyFilter}
+              allFilesCount={allFiles.length}
+              totalFiles={totalFiles}
+              onView={setViewingFile}
+              onLoadMore={loadMore}
+            />
+          </div>
+        </>
+      )}
 
       <ManageConnectorDialog
         definition={managingConnector?.definition ?? null}

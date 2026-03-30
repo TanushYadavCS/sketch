@@ -54,7 +54,9 @@ interface NavItem {
   disabled?: boolean;
 }
 
-const primaryNav: NavItem[] = [
+const experimentalNavLabels = new Set(["Files", "Connections"]);
+
+const allPrimaryNav: NavItem[] = [
   { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
@@ -88,6 +90,10 @@ export function AppSidebar({
     queryKey: ["setup", "status"],
     queryFn: () => api.setup.status(),
   });
+
+  const primaryNav = setupStatus?.experimentalFlag
+    ? allPrimaryNav
+    : allPrimaryNav.filter((item) => !experimentalNavLabels.has(item.label));
 
   const logoutMutation = useMutation({
     mutationFn: () => api.auth.logout(),

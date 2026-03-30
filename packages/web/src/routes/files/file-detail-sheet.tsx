@@ -4,7 +4,7 @@
  * trigger button.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import type { FileAccess, FileContent } from "@/lib/api";
+import type { FileAccess, FileContent, LinkedEntity } from "@/lib/api";
 import { api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import {
@@ -32,6 +32,7 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
 
   const file = data?.file;
   const access = data?.access;
+  const entities = data?.entities ?? [];
 
   return (
     <Sheet open={!!fileId} onOpenChange={(open) => !open && onClose()}>
@@ -48,7 +49,7 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
               <Skeleton className="h-48 rounded-lg" />
             </div>
           ) : file ? (
-            <FileDetailContent file={file} access={access ?? null} />
+            <FileDetailContent file={file} access={access ?? null} entities={entities} />
           ) : (
             <div className="flex items-center justify-center py-12">
               <p className="text-sm text-muted-foreground">File not found.</p>
@@ -62,7 +63,11 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
   );
 }
 
-function FileDetailContent({ file, access }: { file: FileContent; access: FileAccess | null }) {
+function FileDetailContent({
+  file,
+  access,
+  entities,
+}: { file: FileContent; access: FileAccess | null; entities: LinkedEntity[] }) {
   const def = getIntegration(file.source as IntegrationType);
 
   return (
@@ -159,6 +164,24 @@ function FileDetailContent({ file, access }: { file: FileContent; access: FileAc
         </div>
       )}
 
+      {entities.length > 0 && (
+        <div>
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Linked Entities ({entities.length})
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {entities.map((entity) => (
+              <Badge key={entity.id} variant="outline" className="gap-1 text-[10px]">
+                {entity.name}
+                <span className="text-muted-foreground">
+                  {entity.sourceType === "person" ? (entity.subtype === "internal" ? "(int)" : "(ext)") : ""}
+                </span>
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
       {access && access.members.length > 0 && <AccessSection access={access} />}
 
       {file.content && (
@@ -202,7 +225,7 @@ function FileDetailFooter({ fileId }: { fileId: string }) {
         ) : (
           <>
             <SparkleIcon size={12} />
-            Generate Summary & Embeddings
+            Enrich File
           </>
         )}
       </Button>

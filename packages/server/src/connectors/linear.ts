@@ -199,6 +199,7 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
     contentHash: contentHash(content),
     sourceCreatedAt: issue.createdAt,
     sourceUpdatedAt: issue.updatedAt,
+    assignees: issue.assignee ? [{ name: issue.assignee.displayName }] : [],
     // TODO: populate access scope from team membership + privacy
   };
 }

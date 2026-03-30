@@ -247,6 +247,38 @@ export interface OutreachMessagesTable {
   responded_at: string | null;
 }
 
+export interface EntitiesTable {
+  id: string;
+  name: string;
+  source_type: string;
+  subtype: string | null;
+  aliases: string | null;
+  metadata: string | null;
+  source_ref_id: string | null;
+  status: string;
+  hotness: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EntitySourceRefsTable {
+  id: string;
+  entity_id: string;
+  source: string;
+  source_id: string;
+  source_url: string | null;
+  last_seen_at: string;
+}
+
+export interface EntityMentionsTable {
+  id: string;
+  entity_id: string;
+  indexed_file_id: string;
+  chunk_index: number | null;
+  context_snippet: string | null;
+  mentioned_at: string;
+}
+
 export interface AgentRunsTable {
   id: Generated<string>;
   trace_id: string;
@@ -302,6 +334,9 @@ export interface DB {
   chat_sessions: ChatSessionsTable;
   scheduled_tasks: ScheduledTasksTable;
   outreach_messages: OutreachMessagesTable;
+  entities: EntitiesTable;
+  entity_source_refs: EntitySourceRefsTable;
+  entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;
 }

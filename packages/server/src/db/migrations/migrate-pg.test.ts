@@ -38,7 +38,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(25);
+    expect(rows.rows).toHaveLength(26);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -65,7 +65,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(25);
+    expect(rows.rows).toHaveLength(26);
   });
 
   it("creates the users table", async () => {
