@@ -20,6 +20,7 @@ import { sql } from "kysely";
 import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import type { DB } from "../db/schema";
+import { createQueryEmbedder } from "./embeddings";
 
 export interface SearchResult {
   id: string;
@@ -338,6 +339,8 @@ export interface HybridSearchOptions extends SearchOptions {
   contentTypes?: string[];
   /** Embed the query for vector search. If null, only FTS5 is used. */
   queryEmbedding?: number[];
+  /** Restrict search to these file IDs only (entity-scoped search). */
+  fileIds?: string[];
 }
 
 export interface HybridSearchResult {
@@ -380,6 +383,15 @@ export async function hybridSearch(
   const ftsResults = new Map<string, { rank: number; snippet: string | null }>();
   const vecResults = new Map<string, { rank: number; similarity: number; snippet: string | null }>();
 
+  // ── 0. Build file ID filter (entity-scoped search) ──────────
+  const fileIdFilter =
+    opts?.fileIds && opts.fileIds.length > 0
+      ? sql`AND indexed_files.id IN (${sql.join(
+          opts.fileIds.map((id) => sql`${id}`),
+          sql`,`,
+        )})`
+      : sql``;
+
   // ── 1. FTS keyword search ───────────────────────────────────
   if (isPg(db)) {
     const tsQuery = sanitizeTsQuery(query);
@@ -389,6 +401,7 @@ export async function hybridSearch(
         FROM indexed_files
         WHERE indexed_files.search_vector @@ plainto_tsquery('english', ${query})
         AND indexed_files.is_archived = 0
+        ${fileIdFilter}
         ORDER BY rank DESC
         LIMIT ${limit * 3}
       `.execute(db);
@@ -411,6 +424,7 @@ export async function hybridSearch(
         INNER JOIN indexed_files_fts ON indexed_files.rowid = indexed_files_fts.rowid
         WHERE indexed_files_fts MATCH ${ftsQuery}
         AND indexed_files.is_archived = 0
+        ${fileIdFilter}
         ORDER BY rank
         LIMIT ${limit * 3}
       `.execute(db);
@@ -513,9 +527,15 @@ export async function hybridSearch(
       }
     }
 
+    // Filter by file IDs if entity-scoped
+    const filteredVecResults =
+      opts?.fileIds && opts.fileIds.length > 0
+        ? allVecResults.filter((r) => opts.fileIds?.includes(r.fileId))
+        : allVecResults;
+
     // Sort by distance (ascending) and assign ranks
-    allVecResults.sort((a, b) => a.distance - b.distance);
-    for (const item of allVecResults) {
+    filteredVecResults.sort((a, b) => a.distance - b.distance);
+    for (const item of filteredVecResults) {
       // Convert distance to similarity (cosine distance → similarity)
       const similarity = 1 - item.distance;
       vecResults.set(item.fileId, {
@@ -743,4 +763,62 @@ export async function browseFiles(
     contentCategory: r.content_category,
     sourceUpdatedAt: r.source_updated_at,
   }));
+}
+
+/**
+ * High-level search: embeds the query (best-effort) then runs hybridSearch.
+ * Shared by the API endpoint and the agent Search tool.
+ *
+ * When entityId is provided, search is hard-filtered to files linked to that entity
+ * via entity_mentions (entity-scoped search).
+ */
+export async function search(
+  db: Kysely<DB>,
+  query: string,
+  opts?: {
+    source?: string;
+    category?: string;
+    limit?: number;
+    after?: string;
+    before?: string;
+    userEmails?: string[];
+    entityId?: string;
+  },
+): Promise<HybridSearchResult[]> {
+  let queryEmbedding: number[] | undefined;
+  try {
+    const settings = await db
+      .selectFrom("settings")
+      .select(["gemini_api_key", "enrichment_enabled"])
+      .where("id", "=", "default")
+      .executeTakeFirst();
+    if (settings?.gemini_api_key && settings.enrichment_enabled !== 0) {
+      const embedQuery = createQueryEmbedder({ provider: "gemini", apiKey: settings.gemini_api_key });
+      queryEmbedding = await embedQuery(query);
+    }
+  } catch {
+    // Vector search is best-effort — fall back to FTS5 only
+  }
+
+  // Resolve entityId to file IDs for scoped search
+  let fileIds: string[] | undefined;
+  if (opts?.entityId) {
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select("indexed_file_id")
+      .where("entity_id", "=", opts.entityId)
+      .execute();
+    fileIds = mentions.map((m) => m.indexed_file_id);
+    if (fileIds.length === 0) return [];
+  }
+
+  return hybridSearch(db, query, {
+    source: opts?.source,
+    category: opts?.category,
+    limit: opts?.limit ?? 10,
+    queryEmbedding,
+    userEmails: opts?.userEmails,
+    fileIds,
+    timeFilter: opts?.after || opts?.before ? { after: opts?.after, before: opts?.before } : undefined,
+  });
 }

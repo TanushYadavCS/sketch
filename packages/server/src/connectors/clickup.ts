@@ -80,7 +80,6 @@ const RETRY_BASE_MS = 1000;
 
 async function clickupRequest(path: string, token: string, logger: Logger, attempt = 1): Promise<unknown> {
   const url = `${CLICKUP_API}${path}`;
-
   let response: Response;
   try {
     response = await fetch(url, {

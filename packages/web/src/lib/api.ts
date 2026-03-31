@@ -379,6 +379,20 @@ export const api = {
         method: "POST",
       });
     },
+    progress() {
+      return request<{
+        active: Array<{
+          connectorId: string;
+          connectorType: string;
+          phase: "syncing" | "enriching";
+          itemsProcessed: number;
+          itemsCreated: number;
+          itemsSkipped: number;
+          startedAt: string;
+        }>;
+        pendingEnrichment: number;
+      }>("/api/connectors/progress");
+    },
     files(id: string) {
       return request<{ files: ConnectorFile[] }>(`/api/connectors/${id}/files`);
     },

@@ -14,12 +14,12 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
-import { createEmbeddingProvider, createQueryEmbedder } from "../connectors/embeddings";
+import { createEmbeddingProvider } from "../connectors/embeddings";
 import { runEnrichment } from "../connectors/enrichment";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { createLlmCallFn } from "../connectors/llm";
-import { browseFiles, getFileContent, hybridSearch, listIndexedSources, searchFiles } from "../connectors/search";
-import { getConnector, runConnectorSync } from "../connectors/sync";
+import { browseFiles, getFileContent, listIndexedSources, search, searchFiles } from "../connectors/search";
+import { getConnector, getSyncProgress, runConnectorSync } from "../connectors/sync";
 import type { ConnectorCredentials, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import type { DB } from "../db/schema";
@@ -27,32 +27,11 @@ import { requireAdmin } from "./middleware";
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 
-/** Run sync then enrichment (tagging + embedding) in background. */
-function syncThenEnrich(db: Kysely<DB>, connectorId: string, logger: Logger) {
-  runConnectorSync(db, connectorId, logger)
-    .then(async () => {
-      const settings = await db
-        .selectFrom("settings")
-        .select(["gemini_api_key", "enrichment_enabled"])
-        .where("id", "=", "default")
-        .executeTakeFirst();
-      if (settings?.enrichment_enabled === 0) {
-        logger.info("Enrichment disabled, skipping post-sync enrichment");
-        return;
-      }
-      const embeddingProvider = settings?.gemini_api_key
-        ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
-        : null;
-      return runEnrichment({
-        db,
-        logger: logger.child({ component: "enrichment" }),
-        embeddingProvider,
-        llmCall: createLlmCallFn(),
-      });
-    })
-    .catch((err) => {
-      logger.error({ err, connectorId }, "Background sync/enrichment failed");
-    });
+/** Run sync in background. Enrichment runs separately on the scheduled sync cycle. */
+function syncInBackground(db: Kysely<DB>, connectorId: string, logger: Logger) {
+  runConnectorSync(db, connectorId, logger).catch((err) => {
+    logger.error({ err, connectorId }, "Background sync failed");
+  });
 }
 
 const VALID_CONNECTOR_TYPES = ["google_drive", "clickup", "notion", "linear"] as const;
@@ -156,7 +135,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     });
 
     // Auto-trigger first sync + enrichment in background (non-blocking)
-    syncThenEnrich(db, config.id, logger);
+    syncInBackground(db, config.id, logger);
 
     return c.json(
       {
@@ -226,29 +205,12 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    // Try to embed the query for vector search (if Gemini key is configured)
-    let queryEmbedding: number[] | undefined;
-    try {
-      const settings = await db
-        .selectFrom("settings")
-        .select(["gemini_api_key", "enrichment_enabled"])
-        .where("id", "=", "default")
-        .executeTakeFirst();
-      if (settings?.gemini_api_key && settings.enrichment_enabled !== 0) {
-        const embedQuery = createQueryEmbedder({ provider: "gemini", apiKey: settings.gemini_api_key });
-        queryEmbedding = await embedQuery(parsed.data.query);
-      }
-    } catch (err) {
-      // Vector search is best-effort — fall back to FTS5 only
-      logger.warn({ err }, "Failed to embed search query, falling back to FTS5");
-    }
-
-    const results = await hybridSearch(db, parsed.data.query, {
+    const results = await search(db, parsed.data.query, {
       source: parsed.data.source,
       category: parsed.data.category,
       limit: parsed.data.limit,
-      queryEmbedding,
-      timeFilter: after || before ? { after: after ?? undefined, before: before ?? undefined } : undefined,
+      after: after ?? undefined,
+      before: before ?? undefined,
     });
     return c.json({ results });
   });
@@ -312,6 +274,20 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
   routes.get("/sources", async (c) => {
     const sources = await listIndexedSources(db);
     return c.json({ sources });
+  });
+
+  /** Live sync/enrichment progress + pending enrichment count. */
+  routes.get("/progress", async (c) => {
+    const pendingResult = await db
+      .selectFrom("indexed_files")
+      .select(db.fn.count("id").as("count"))
+      .where("embedding_status", "in", ["pending", "failed"])
+      .where("is_archived", "=", 0)
+      .executeTakeFirst();
+    return c.json({
+      active: getSyncProgress(),
+      pendingEnrichment: Number(pendingResult?.count ?? 0),
+    });
   });
 
   /** Browse Google Drive shared drives for the folder picker. */
@@ -483,7 +459,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     });
 
     // Auto-trigger re-sync + enrichment in background
-    syncThenEnrich(db, config.id, logger);
+    syncInBackground(db, config.id, logger);
 
     const updated = await connectorRepo.findConfigById(config.id);
     if (!updated) {
@@ -513,7 +489,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     // Run sync then enrichment in background
-    syncThenEnrich(db, config.id, logger);
+    syncInBackground(db, config.id, logger);
 
     return c.json({ sync: { connectorId: config.id, status: "started" } }, 201);
   });

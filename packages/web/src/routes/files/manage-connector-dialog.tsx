@@ -84,6 +84,18 @@ export function ManageConnectorDialog({
     onError: (error: Error) => toast.error(error.message),
   });
 
+  const isSyncing = connector?.syncStatus === "syncing";
+
+  // Poll progress while syncing
+  const { data: progressData } = useQuery({
+    queryKey: ["sync-progress"],
+    queryFn: () => api.integrations.progress(),
+    refetchInterval: isSyncing ? 2000 : false,
+    enabled: isSyncing,
+  });
+
+  const myProgress = progressData?.active.find((p) => p.connectorId === connector?.id);
+
   if (!definition || !connector) return null;
 
   const isError = connector.syncStatus === "error";
@@ -110,13 +122,23 @@ export function ManageConnectorDialog({
               <SyncStatusDot status={connector.syncStatus} />
               <span className="font-medium capitalize">{connector.syncStatus}</span>
             </div>
-            {connector.fileCount != null && (
+            {isSyncing && myProgress ? (
               <span className="text-muted-foreground">
-                {connector.fileCount.toLocaleString()} {definition.itemNoun}
+                {myProgress.itemsProcessed} items processed
+                {myProgress.itemsCreated > 0 && `, ${myProgress.itemsCreated} new`}
+                {myProgress.itemsSkipped > 0 && `, ${myProgress.itemsSkipped} unchanged`}
               </span>
-            )}
-            {connector.lastSyncedAt && (
-              <span className="text-muted-foreground">Synced {formatRelativeTime(connector.lastSyncedAt)}</span>
+            ) : (
+              <>
+                {connector.fileCount != null && (
+                  <span className="text-muted-foreground">
+                    {connector.fileCount.toLocaleString()} {definition.itemNoun}
+                  </span>
+                )}
+                {connector.lastSyncedAt && (
+                  <span className="text-muted-foreground">Synced {formatRelativeTime(connector.lastSyncedAt)}</span>
+                )}
+              </>
             )}
           </div>
 

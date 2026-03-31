@@ -790,9 +790,10 @@ describe("buildSystemContext Information Discovery section", () => {
       userName: "Alice",
       workspaceDir: "/data/workspaces/u123",
     });
-    expect(result).toContain("find it yourself first");
+    expect(result).toContain("search for it before asking others");
     expect(result).toContain("workspace files");
     expect(result).toContain("org directory (~/.claude/)");
+    expect(result).toContain("Use Search to find relevant docs");
     expect(result).toContain("reach out to team members");
   });
 

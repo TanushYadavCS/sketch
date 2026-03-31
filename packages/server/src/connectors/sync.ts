@@ -18,6 +18,23 @@ import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
 import type { Connector, ConnectorCredentials, ConnectorType, SyncResult } from "./types";
 
+// ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
+export interface SyncProgress {
+  connectorId: string;
+  connectorType: string;
+  phase: "syncing" | "enriching";
+  itemsProcessed: number;
+  itemsCreated: number;
+  itemsSkipped: number;
+  startedAt: string;
+}
+
+const activeSyncs = new Map<string, SyncProgress>();
+
+export function getSyncProgress(): SyncProgress[] {
+  return [...activeSyncs.values()];
+}
+
 /**
  * Extract a useful error message from fetch/network errors.
  * Node.js fetch errors bury the real cause (ECONNREFUSED, ETIMEDOUT, etc.)
@@ -75,6 +92,17 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 
   await repo.updateConfig(config.id, { syncStatus: "syncing", errorMessage: null });
 
+  const progress: SyncProgress = {
+    connectorId: config.id,
+    connectorType: config.connector_type,
+    phase: "syncing",
+    itemsProcessed: 0,
+    itemsCreated: 0,
+    itemsSkipped: 0,
+    startedAt: new Date().toISOString(),
+  };
+  activeSyncs.set(config.id, progress);
+
   try {
     if (credentials.type === "oauth" && connector.refreshTokens) {
       const refreshed = await connector.refreshTokens(credentials);
@@ -98,6 +126,35 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 
     const seenProviderFileIds = new Set<string>();
 
+    // Pre-load existing content hashes for this connector to skip unchanged items
+    const existingHashes = new Map<string, { id: string; contentHash: string | null }>();
+    const existingFiles = await db
+      .selectFrom("indexed_files")
+      .select(["id", "provider_file_id", "content_hash"])
+      .where("source", "=", config.connector_type)
+      .where("is_archived", "=", 0)
+      .execute();
+    for (const f of existingFiles) {
+      existingHashes.set(f.provider_file_id, { id: f.id, contentHash: f.content_hash });
+    }
+
+    // Pre-load person entities for assignee linking (avoids per-assignee queries)
+    const personEntities = await db.selectFrom("entities").selectAll().where("source_type", "=", "person").execute();
+    const personBySourceRef = new Map<string, (typeof personEntities)[0]>();
+    const personByNameLower = new Map<string, (typeof personEntities)[0]>();
+    for (const p of personEntities) {
+      personByNameLower.set(p.name.toLowerCase(), p);
+    }
+    const sourceRefs = await db
+      .selectFrom("entity_source_refs")
+      .select(["entity_id", "source", "source_id"])
+      .where("source", "=", config.connector_type)
+      .execute();
+    for (const ref of sourceRefs) {
+      const entity = personEntities.find((p) => p.id === ref.entity_id);
+      if (entity) personBySourceRef.set(`${ref.source}:${ref.source_id}`, entity);
+    }
+
     for await (const item of connector.sync({
       credentials,
       scopeConfig,
@@ -114,6 +171,24 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
         seenProviderFileIds.add(item.providerFileId);
 
         if (!item.fileName && !item.content) {
+          continue;
+        }
+
+        // Skip unchanged items early — just update synced_at timestamp
+        const existing = existingHashes.get(item.providerFileId);
+        if (existing && existing.contentHash === item.contentHash) {
+          await db
+            .updateTable("indexed_files")
+            .set({ synced_at: new Date().toISOString() })
+            .where("id", "=", existing.id)
+            .execute();
+          result.itemsProcessed++;
+          progress.itemsProcessed = result.itemsProcessed;
+          progress.itemsSkipped++;
+          // Yield every item (better-sqlite3 is synchronous)
+          if (result.itemsProcessed % 5 === 0) {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
           continue;
         }
 
@@ -148,58 +223,6 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           // Track which connector discovered this file
           await txRepo.linkConnectorFile(config.id, upsertResult.id);
 
-          // Promote items to entities (Linear projects, Notion databases)
-          const ENTITY_PROMOTING_TYPES: Record<string, string[]> = {
-            linear: ["project"],
-            notion: ["database"],
-          };
-          const promotable = ENTITY_PROMOTING_TYPES[config.connector_type] ?? [];
-          if (item.fileType && promotable.includes(item.fileType)) {
-            await entityRepo.upsertEntityFromTool({
-              name: item.fileName,
-              sourceType: `${config.connector_type}_${item.fileType}`,
-              source: config.connector_type,
-              sourceId: item.providerFileId,
-              sourceUrl: item.providerUrl ?? undefined,
-              sourceRefId: upsertResult.id,
-              metadata: item.sourcePath ? { path: item.sourcePath } : undefined,
-            });
-          }
-
-          // Seed person entities from Fireflies attendee emails
-          if (config.connector_type === "fireflies" && item.accessEmails) {
-            for (const email of item.accessEmails) {
-              await entityRepo.upsertPersonEntity({
-                name: email,
-                email,
-                subtype: "external",
-                source: "fireflies",
-                sourceId: `${item.providerFileId}:${email}`,
-              });
-            }
-          }
-
-          // Link assignees to person entities (deterministic, no LLM)
-          if (item.assignees && item.assignees.length > 0) {
-            for (const assignee of item.assignees) {
-              const personEntity = await entityRepo.getEntityBySourceRef(
-                config.connector_type,
-                config.connector_type === "clickup" ? `assignee:${assignee.name}` : `user:${assignee.name}`,
-              );
-              // Fall back to name search if source ref doesn't match
-              const entity =
-                personEntity ??
-                (await entityRepo.searchEntities(assignee.name, { sourceTypes: ["person"], limit: 1 }))[0];
-              if (entity) {
-                await entityRepo.createMention({
-                  entityId: entity.id,
-                  indexedFileId: upsertResult.id,
-                  contextSnippet: `Assigned to ${assignee.name}`,
-                });
-              }
-            }
-          }
-
           // Set access: scope-level or per-file emails
           if (item.accessScope) {
             const scopeId = await txRepo.upsertAccessScope(config.id, item.accessScope);
@@ -211,12 +234,69 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           return upsertResult;
         });
 
+        // Entity operations AFTER transaction — entityRepo uses the outer db connection.
+        // Calling it inside a transaction deadlocks on better-sqlite3 (single-connection,
+        // exclusive write lock).
+
+        // Promote items to entities (Linear projects, Notion databases)
+        const ENTITY_PROMOTING_TYPES: Record<string, string[]> = {
+          linear: ["project"],
+          notion: ["database"],
+        };
+        const promotable = ENTITY_PROMOTING_TYPES[config.connector_type] ?? [];
+        if (item.fileType && promotable.includes(item.fileType)) {
+          await entityRepo.upsertEntityFromTool({
+            name: item.fileName,
+            sourceType: `${config.connector_type}_${item.fileType}`,
+            source: config.connector_type,
+            sourceId: item.providerFileId,
+            sourceUrl: item.providerUrl ?? undefined,
+            sourceRefId: itemResult.id,
+            metadata: item.sourcePath ? { path: item.sourcePath } : undefined,
+          });
+        }
+        if (config.connector_type === "fireflies" && item.accessEmails) {
+          for (const email of item.accessEmails) {
+            await entityRepo.upsertPersonEntity({
+              name: email,
+              email,
+              subtype: "external",
+              source: "fireflies",
+              sourceId: `${item.providerFileId}:${email}`,
+            });
+          }
+        }
+
+        if (item.assignees && item.assignees.length > 0) {
+          for (const assignee of item.assignees) {
+            const sourceRefKey =
+              config.connector_type === "clickup"
+                ? `${config.connector_type}:assignee:${assignee.name}`
+                : `${config.connector_type}:user:${assignee.name}`;
+            const entity = personBySourceRef.get(sourceRefKey) ?? personByNameLower.get(assignee.name.toLowerCase());
+            if (entity) {
+              await entityRepo.createMention({
+                entityId: entity.id,
+                indexedFileId: itemResult.id,
+                contextSnippet: `Assigned to ${assignee.name}`,
+              });
+            }
+          }
+        }
+
         if (itemResult.created) {
           result.itemsCreated++;
+          progress.itemsCreated++;
         } else {
           result.itemsUpdated++;
         }
         result.itemsProcessed++;
+        progress.itemsProcessed = result.itemsProcessed;
+
+        // Sleep briefly between items — better-sqlite3 is fully synchronous so
+        // each transaction blocks the event loop. A real sleep (not just yield)
+        // gives the HTTP server time to handle requests between DB writes.
+        await new Promise((resolve) => setTimeout(resolve, 50));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result.errors.push({ fileId: item.providerFileId, error: message });
@@ -245,6 +325,8 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       errorMessage: null,
     });
 
+    activeSyncs.delete(config.id);
+
     syncLogger.info(
       {
         processed: result.itemsProcessed,
@@ -258,6 +340,7 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 
     return result;
   } catch (err) {
+    activeSyncs.delete(config.id);
     const message = extractErrorMessage(err);
     syncLogger.error({ err }, "Sync failed");
 
@@ -411,40 +494,11 @@ export function startSyncScheduler(
     logger.error({ err }, "Failed to recover stale syncs on startup");
   });
 
-  // Run enrichment immediately for any pending files (without triggering a full sync).
-  // We track the promise so stop() can await it before the DB is destroyed.
-  const startupPromise = (async () => {
-    try {
-      const settings = await db
-        .selectFrom("settings")
-        .select(["gemini_api_key", "org_name", "enrichment_enabled"])
-        .where("id", "=", "default")
-        .executeTakeFirst();
-      if (aborted) return;
-      if (settings?.enrichment_enabled === 0) {
-        logger.info("Enrichment disabled, skipping startup enrichment");
-        return;
-      }
-      const embeddingProvider = settings?.gemini_api_key
-        ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
-        : null;
-      const orgContext = buildOrgContext(settings?.org_name ?? null);
-      const result = await runEnrichment({
-        db,
-        logger: logger.child({ component: "enrichment" }),
-        embeddingProvider,
-        llmCall: deps?.llmCall ?? (async () => ({ text: "{}", inputTokens: 0, outputTokens: 0 })),
-        orgContext,
-      });
-      if (result.filesProcessed > 0 || result.filesFailed > 0) {
-        logger.info({ enriched: result.filesProcessed, failed: result.filesFailed }, "Startup enrichment complete");
-      }
-    } catch (err) {
-      if (!aborted) {
-        logger.error({ err }, "Startup enrichment failed");
-      }
-    }
-  })();
+  // Startup enrichment disabled — enrichment now runs only when explicitly
+  // triggered from the UI or during the scheduled sync cycle. This prevents
+  // DB contention between enrichment and manual syncs.
+  const startupPromise = Promise.resolve();
+  logger.info("Startup enrichment skipped (trigger manually from UI)");
 
   const timer = setInterval(() => {
     if (aborted) return;

@@ -198,8 +198,11 @@ export function buildSystemContext(params: {
 
   sections.push(
     "## Information Discovery",
-    "When you need information on something, find it yourself first.",
-    "Check workspace files, org directory (~/.claude/), and if not found locally, reach out to team members (max 2) who can help.",
+    "When you need information, search for it before asking others.",
+    "1. Check workspace files and org directory (~/.claude/)",
+    "2. Use Search to find relevant docs, tasks, meetings, and past conversations across all connected sources",
+    "3. Use SearchEntities + GetEntityContext for entity-specific context (who/what is this?)",
+    "4. Only if not found: reach out to team members (max 2) who can help",
     "Set up a one-time scheduled task to follow up after an hour or next morning in case they don't respond.",
     "Failing to follow this process is considered a failure.",
   );

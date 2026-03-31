@@ -15,8 +15,9 @@ import { api } from "@/lib/api";
 import type { SearchResult, UnifiedFile } from "@/lib/api";
 import type { IntegrationDefinition, IntegrationType } from "@/lib/integrations";
 import { getIntegration } from "@/lib/integrations";
-import { GearIcon, SparkleIcon } from "@phosphor-icons/react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { GearIcon, SparkleIcon, SpinnerGapIcon } from "@phosphor-icons/react";
+import { Button } from "@sketch/ui/components/button";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -188,6 +189,22 @@ function FilesPage() {
 
   const isLoading = isLoadingConnectors || isLoadingFiles;
 
+  const { data: progressData } = useQuery({
+    queryKey: ["sync-progress"],
+    queryFn: () => api.integrations.progress(),
+    refetchInterval: 10000,
+  });
+
+  const pendingEnrichment = progressData?.pendingEnrichment ?? 0;
+
+  const enrichMutation = useMutation({
+    mutationFn: () => api.settings.runEnrichment(),
+    onSuccess: () => {
+      toast.success("Enrichment started — files will be processed in the background.");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
       <div className="flex items-center justify-between">
@@ -264,6 +281,26 @@ function FilesPage() {
             forcedConnectIntegration={reconnectTarget}
             onForcedConnectDone={() => setReconnectTarget(null)}
           />
+
+          {pendingEnrichment > 0 && (
+            <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
+              <span className="text-muted-foreground">
+                <SparkleIcon size={12} weight="fill" className="mr-1 inline text-primary" />
+                {pendingEnrichment} file{pendingEnrichment !== 1 ? "s" : ""} pending enrichment (tagging, summaries
+                &amp; embeddings)
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 gap-1 text-xs"
+                onClick={() => enrichMutation.mutate()}
+                disabled={enrichMutation.isPending}
+              >
+                {enrichMutation.isPending && <SpinnerGapIcon size={12} className="animate-spin" />}
+                Enrich now
+              </Button>
+            </div>
+          )}
 
           <SearchBar
             search={search}

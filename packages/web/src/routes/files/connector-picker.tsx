@@ -22,7 +22,7 @@ import {
 } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -289,6 +289,7 @@ function ConnectorRow({
 }) {
   const queryClient = useQueryClient();
   const isConnected = !!connector;
+  const isSyncing = connector?.syncStatus === "syncing";
 
   const syncMutation = useMutation({
     mutationFn: () => api.integrations.sync(connector?.id ?? ""),
@@ -299,6 +300,16 @@ function ConnectorRow({
     onError: (error: Error) => toast.error(error.message),
   });
 
+  // Poll progress while syncing
+  const { data: progressData } = useQuery({
+    queryKey: ["sync-progress"],
+    queryFn: () => api.integrations.progress(),
+    refetchInterval: isSyncing ? 2000 : false,
+    enabled: isSyncing,
+  });
+
+  const myProgress = progressData?.active.find((p) => p.connectorId === connector?.id);
+
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border p-3">
       <IntegrationIcon color={definition.color} name={definition.name} type={definition.type} size="sm" />
@@ -306,7 +317,13 @@ function ConnectorRow({
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium">{definition.name}</p>
         <p className="text-xs text-muted-foreground">
-          {isConnected ? (
+          {isSyncing && myProgress ? (
+            <>
+              Syncing — {myProgress.itemsProcessed} items processed
+              {myProgress.itemsCreated > 0 && `, ${myProgress.itemsCreated} new`}
+              {myProgress.itemsSkipped > 0 && `, ${myProgress.itemsSkipped} unchanged`}
+            </>
+          ) : isConnected ? (
             <>
               {connector.fileCount != null && `${connector.fileCount.toLocaleString()} ${definition.itemNoun}`}
               {connector.lastSyncedAt && ` · Synced ${formatRelativeTime(connector.lastSyncedAt)}`}
@@ -325,9 +342,9 @@ function ConnectorRow({
             size="icon"
             className="size-7"
             onClick={() => syncMutation.mutate()}
-            disabled={connector.syncStatus === "syncing" || syncMutation.isPending}
+            disabled={isSyncing || syncMutation.isPending}
           >
-            <ArrowsClockwiseIcon size={14} className={connector.syncStatus === "syncing" ? "animate-spin" : ""} />
+            <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
           </Button>
           <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onManage}>
             Manage

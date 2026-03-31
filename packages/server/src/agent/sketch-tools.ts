@@ -20,6 +20,7 @@ import { resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
+import { search } from "../connectors/search";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createOutreachRepository } from "../db/repositories/outreach";
 import type { DB, UsersTable } from "../db/schema";
@@ -525,6 +526,107 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           .describe("The answer or information gathered from the user. Summarize the key points clearly."),
       },
       async (params) => handleRespondToOutreach(params, deps),
+    ),
+
+    tool(
+      "Search",
+      `Search across all indexed knowledge — docs, tasks, meetings, conversations, and workspace files. Uses hybrid search (keyword + semantic) for best results. Automatically surfaces matching entities for context.
+
+When results mention a specific entity (project, client, person), results linked to that entity are boosted to the top. For hard-scoped search within a single entity's files, pass the entityId from a previous Search result.
+
+Use this to find information before asking others. Examples:
+- "What did we decide about the auth approach?"
+- "Epik demo playbook"
+- "API migration status"
+- "standup notes from last week"`,
+      {
+        query: z.string().describe("Natural language search query"),
+        entityId: z
+          .string()
+          .optional()
+          .describe(
+            "Hard-filter search to files linked to this entity only. Use the entity ID from a previous Search result's matching entities.",
+          ),
+        source: z
+          .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "local"])
+          .optional()
+          .describe("Filter to a specific source. Omit to search all."),
+        after: z.string().optional().describe("Only results updated after this ISO date"),
+        before: z.string().optional().describe("Only results updated before this ISO date"),
+        limit: z.number().optional().describe("Max results (default 10)"),
+      },
+      async ({ query: searchQuery, entityId, source, after, before, limit: resultLimit }) => {
+        if (!deps.db) {
+          return { content: [{ type: "text" as const, text: "Search not available." }] };
+        }
+
+        const lines: string[] = [];
+
+        // Auto-search entities matching the query for context
+        const entityRepo = createEntityRepository(deps.db);
+        const entityMatches = entityId ? [] : await entityRepo.searchEntities(searchQuery, { limit: 5 });
+        if (entityMatches.length > 0) {
+          const entityParts = entityMatches.map((e) => {
+            const aliases = e.aliases ? (JSON.parse(e.aliases) as string[]) : [];
+            const aliasStr = aliases.length > 0 ? `, aliases: ${aliases.join(", ")}` : "";
+            const subtypeStr = e.subtype ? ` (${e.subtype})` : "";
+            return `${e.name} (${e.id}) [${e.source_type}${subtypeStr}${aliasStr}]`;
+          });
+          lines.push(`**Matching entities**: ${entityParts.join(" | ")}`);
+          lines.push("");
+        }
+
+        // Get entity-linked file IDs for auto-boost (when not hard-filtered)
+        let entityFileIds: Set<string> | undefined;
+        if (!entityId && entityMatches.length > 0) {
+          const entityIds = entityMatches.map((e) => e.id);
+          const mentions = await deps.db
+            .selectFrom("entity_mentions")
+            .select("indexed_file_id")
+            .where("entity_id", "in", entityIds)
+            .execute();
+          entityFileIds = new Set(mentions.map((m) => m.indexed_file_id));
+        }
+
+        // Hybrid search for documents/content
+        const results = await search(deps.db, searchQuery, {
+          source,
+          limit: resultLimit ?? 10,
+          after,
+          before,
+          entityId,
+        });
+
+        // Auto-boost: rank entity-linked files higher when not hard-filtered
+        if (entityFileIds && entityFileIds.size > 0) {
+          results.sort((a, b) => {
+            const aLinked = entityFileIds?.has(a.id) ? 1 : 0;
+            const bLinked = entityFileIds?.has(b.id) ? 1 : 0;
+            if (aLinked !== bLinked) return bLinked - aLinked;
+            return b.score - a.score;
+          });
+        }
+
+        if (results.length === 0 && entityMatches.length === 0) {
+          return { content: [{ type: "text" as const, text: `No results found for "${searchQuery}".` }] };
+        }
+
+        for (const r of results) {
+          const sourceLabel = r.source.charAt(0).toUpperCase() + r.source.slice(1).replace(/_/g, " ");
+          const date = r.sourceUpdatedAt ? new Date(r.sourceUpdatedAt).toISOString().split("T")[0] : "";
+          const urlSuffix = r.providerUrl ? ` — ${r.providerUrl}` : "";
+
+          lines.push(`**${r.fileName}** (${sourceLabel}${date ? `, ${date}` : ""}${urlSuffix})`);
+          if (r.summary) {
+            lines.push(`> ${r.summary.slice(0, 200)}${r.summary.length > 200 ? "..." : ""}`);
+          } else if (r.snippet) {
+            lines.push(`> ${r.snippet.slice(0, 200)}${r.snippet.length > 200 ? "..." : ""}`);
+          }
+          lines.push("");
+        }
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      },
     ),
 
     tool(
