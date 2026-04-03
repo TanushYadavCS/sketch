@@ -158,6 +158,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     botName: params.botName,
     channelContext: params.channelContext,
     groupContext: params.groupContext,
+    experimentalFlag: params.experimentalFlag,
   });
 
   let sessionId = "";
