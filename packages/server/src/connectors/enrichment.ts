@@ -179,7 +179,14 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
             try {
               const generator = createGeminiGenerator(deps.geminiApiKey);
               await smartEnrichFile(
-                { db, logger, generator, embeddingProvider: deps.embeddingProvider, orgContext: deps.orgContext, knownEntities: deps.knownEntities },
+                {
+                  db,
+                  logger,
+                  generator,
+                  embeddingProvider: deps.embeddingProvider,
+                  orgContext: deps.orgContext,
+                  knownEntities: deps.knownEntities,
+                },
                 {
                   id: file.id,
                   fileName: file.file_name,

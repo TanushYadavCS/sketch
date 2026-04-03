@@ -389,7 +389,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             aliases.push(data.name);
             changed = true;
           }
-          if (data.email && !aliases.some((a) => a.toLowerCase() === data.email!.toLowerCase())) {
+          if (data.email && !aliases.some((a) => a.toLowerCase() === data.email?.toLowerCase())) {
             aliases.push(data.email);
             changed = true;
           }
@@ -445,7 +445,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             meta.email = data.email;
             changed = true;
           }
-          if (!aliases.some((a) => a.toLowerCase() === data.email!.toLowerCase())) {
+          if (!aliases.some((a) => a.toLowerCase() === data.email?.toLowerCase())) {
             aliases.push(data.email);
             changed = true;
           }

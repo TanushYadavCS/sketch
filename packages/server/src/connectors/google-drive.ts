@@ -629,9 +629,16 @@ export function createGoogleDriveConnector(): Connector {
       return {
         type: "tree" as const,
         items: rootFolders.map((f) => ({ id: f.id, name: f.name, hasChildren: true })),
-        groups: sharedDrives.length > 0
-          ? [{ id: "shared-drives", name: "Shared Drives", items: sharedDrives.map((d) => ({ id: d.id, name: d.name })) }]
-          : undefined,
+        groups:
+          sharedDrives.length > 0
+            ? [
+                {
+                  id: "shared-drives",
+                  name: "Shared Drives",
+                  items: sharedDrives.map((d) => ({ id: d.id, name: d.name })),
+                },
+              ]
+            : undefined,
       };
     },
 

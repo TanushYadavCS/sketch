@@ -9,9 +9,7 @@
  * Simple date pattern extraction from text.
  * Finds ISO dates, MM/DD/YYYY, and quarter references.
  */
-export function extractDatesFromText(
-  text: string,
-): Array<{ startDate: string; endDate?: string; context?: string }> {
+export function extractDatesFromText(text: string): Array<{ startDate: string; endDate?: string; context?: string }> {
   const timeframes: Array<{ startDate: string; endDate?: string; context?: string }> = [];
   const seen = new Set<string>();
 

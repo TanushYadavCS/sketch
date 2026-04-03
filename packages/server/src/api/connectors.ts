@@ -419,7 +419,10 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
 
       const result = connector.browseExisting
         ? await connector.browseExisting({ credentials, logger })
-        : await connector.browse!({ credentials, logger });
+        : await connector.browse?.({ credentials, logger });
+      if (!result) {
+        return c.json({ error: "Connector does not support browsing" }, 400);
+      }
       if (result.type === "async") {
         return c.json(result);
       }

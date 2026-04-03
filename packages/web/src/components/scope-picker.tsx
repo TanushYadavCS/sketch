@@ -236,11 +236,23 @@ export function GenericScopePicker({
 
   return (
     <div className="space-y-1.5">
-      <ScopeSelectAll allSelected={allSelected} totalCount={allItems.length} onToggle={toggleAll} disabled={disabled} noun={noun} />
+      <ScopeSelectAll
+        allSelected={allSelected}
+        totalCount={allItems.length}
+        onToggle={toggleAll}
+        disabled={disabled}
+        noun={noun}
+      />
       <ScopeList>
         {data.type === "flat" &&
           data.items.map((item) => (
-            <ScopeItem key={item.id} checked={selectedIds.has(item.id)} label={item.name} onToggle={() => onToggle(item.id)} disabled={disabled} />
+            <ScopeItem
+              key={item.id}
+              checked={selectedIds.has(item.id)}
+              label={item.name}
+              onToggle={() => onToggle(item.id)}
+              disabled={disabled}
+            />
           ))}
         {data.type === "nested" &&
           data.groups.map((group) => (
@@ -260,7 +272,13 @@ export function GenericScopePicker({
               defaultExpanded={group.items.some((i) => selectedIds.has(i.id))}
             >
               {group.items.map((item) => (
-                <ScopeSubItem key={item.id} checked={selectedIds.has(item.id)} label={item.name} onToggle={() => onToggle(item.id)} disabled={disabled} />
+                <ScopeSubItem
+                  key={item.id}
+                  checked={selectedIds.has(item.id)}
+                  label={item.name}
+                  onToggle={() => onToggle(item.id)}
+                  disabled={disabled}
+                />
               ))}
             </ScopeGroup>
           ))}
@@ -282,12 +300,24 @@ export function GenericScopePicker({
                 defaultExpanded
               >
                 {group.items.map((item) => (
-                  <ScopeSubItem key={item.id} checked={selectedIds.has(item.id)} label={item.name} onToggle={() => onToggle(item.id)} disabled={disabled} />
+                  <ScopeSubItem
+                    key={item.id}
+                    checked={selectedIds.has(item.id)}
+                    label={item.name}
+                    onToggle={() => onToggle(item.id)}
+                    disabled={disabled}
+                  />
                 ))}
               </ScopeGroup>
             ))}
             {data.items.map((item) => (
-              <ScopeItem key={item.id} checked={selectedIds.has(item.id)} label={item.name} onToggle={() => onToggle(item.id)} disabled={disabled} />
+              <ScopeItem
+                key={item.id}
+                checked={selectedIds.has(item.id)}
+                label={item.name}
+                onToggle={() => onToggle(item.id)}
+                disabled={disabled}
+              />
             ))}
           </>
         )}
@@ -304,10 +334,7 @@ function getAllItemIds(data: BrowseResult): string[] {
     case "nested":
       return data.groups.flatMap((g) => g.items.map((i) => i.id));
     case "tree":
-      return [
-        ...(data.groups?.flatMap((g) => g.items.map((i) => i.id)) ?? []),
-        ...data.items.map((i) => i.id),
-      ];
+      return [...(data.groups?.flatMap((g) => g.items.map((i) => i.id)) ?? []), ...data.items.map((i) => i.id)];
   }
 }
 
@@ -412,7 +439,9 @@ export function GenericScopeEditor({
     return (
       <div className="rounded-lg border border-border bg-muted/20 px-3 py-3">
         <p className="text-xs font-medium">No {noun} found</p>
-        <p className="mt-0.5 text-[11px] text-muted-foreground">Check that the connected account has accessible content.</p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          Check that the connected account has accessible content.
+        </p>
       </div>
     );
   }
@@ -432,7 +461,13 @@ export function GenericScopeEditor({
           {isCached ? "Refresh" : ""}
         </button>
       </div>
-      <GenericScopePicker data={browseData} selectedIds={effectiveIds} onToggle={toggle} disabled={saveMutation.isPending || refreshing} noun={noun} />
+      <GenericScopePicker
+        data={browseData}
+        selectedIds={effectiveIds}
+        onToggle={toggle}
+        disabled={saveMutation.isPending || refreshing}
+        noun={noun}
+      />
       {hasChanges && (
         <Button
           size="sm"
