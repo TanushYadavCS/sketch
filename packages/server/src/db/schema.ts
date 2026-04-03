@@ -65,6 +65,8 @@ export interface SettingsTable {
   google_oauth_client_secret: string | null;
   gemini_api_key: string | null;
   enrichment_enabled: Generated<number>;
+  sync_interval_minutes: Generated<number>;
+  org_context: string | null;
   onboarding_completed_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
@@ -81,6 +83,7 @@ export interface ConnectorConfigsTable {
   sync_cursor: string | null;
   last_synced_at: string | null;
   error_message: string | null;
+  browse_cache: string | null;
   created_by: string;
   created_at: Generated<string>;
   updated_at: Generated<string>;
@@ -96,7 +99,6 @@ export interface IndexedFilesTable {
   content_category: string;
   content: string | null;
   summary: string | null;
-  tags: string | null;
   source: string;
   source_path: string | null;
   content_hash: string | null;
@@ -110,6 +112,7 @@ export interface IndexedFilesTable {
   access_scope_id: string | null;
   mime_type: string | null;
   embedding_status: Generated<string>;
+  summary_status: Generated<string>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -310,6 +313,19 @@ export interface ToolCallsTable {
   execution_outcome: string | null;
 }
 
+export interface EntityCandidatesTable {
+  id: string;
+  name: string;
+  type: string;
+  variations: string | null;
+  first_seen_file_id: string;
+  seen_file_ids: string;
+  seen_count: number;
+  promoted_entity_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DB {
   users: UsersTable;
   channels: ChannelsTable;
@@ -339,4 +355,5 @@ export interface DB {
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;
+  entity_candidates: EntityCandidatesTable;
 }

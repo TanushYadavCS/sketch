@@ -185,12 +185,29 @@ export function createEntityRepository(db: Kysely<DB>) {
     async getMentionsForEntity(entityId: string, opts?: { limit?: number; since?: string }) {
       let query = db
         .selectFrom("entity_mentions")
-        .selectAll()
-        .where("entity_id", "=", entityId)
-        .orderBy("mentioned_at", "desc");
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select([
+          "entity_mentions.id",
+          "entity_mentions.entity_id",
+          "entity_mentions.indexed_file_id",
+          "entity_mentions.chunk_index",
+          "entity_mentions.context_snippet",
+          "entity_mentions.mentioned_at",
+          "indexed_files.source_updated_at",
+          "indexed_files.source_created_at",
+        ])
+        .where("entity_mentions.entity_id", "=", entityId)
+        .orderBy(
+          sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+          "desc",
+        );
 
       if (opts?.since) {
-        query = query.where("mentioned_at", ">=", opts.since);
+        query = query.where(
+          sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+          ">=",
+          opts.since,
+        );
       }
       if (opts?.limit) {
         query = query.limit(opts.limit);
@@ -362,13 +379,21 @@ export function createEntityRepository(db: Kysely<DB>) {
           .executeTakeFirst();
 
         if (byEmail) {
-          // Add alias if name differs
+          // Add alias if name differs, and ensure email is in aliases for entity linking
           const aliases: string[] = JSON.parse(byEmail.aliases || "[]");
+          let changed = false;
           if (
             byEmail.name.toLowerCase() !== data.name.toLowerCase() &&
             !aliases.some((a) => a.toLowerCase() === data.name.toLowerCase())
           ) {
             aliases.push(data.name);
+            changed = true;
+          }
+          if (data.email && !aliases.some((a) => a.toLowerCase() === data.email!.toLowerCase())) {
+            aliases.push(data.email);
+            changed = true;
+          }
+          if (changed) {
             await db
               .updateTable("entities")
               .set({ aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
@@ -411,14 +436,27 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirst();
 
       if (byName) {
-        // Update email in metadata if we have one and they don't
+        // Update email in metadata + aliases if we have one and they don't
         if (data.email) {
           const meta = JSON.parse(byName.metadata || "{}");
+          const aliases: string[] = JSON.parse(byName.aliases || "[]");
+          let changed = false;
           if (!meta.email) {
             meta.email = data.email;
+            changed = true;
+          }
+          if (!aliases.some((a) => a.toLowerCase() === data.email!.toLowerCase())) {
+            aliases.push(data.email);
+            changed = true;
+          }
+          if (changed) {
             await db
               .updateTable("entities")
-              .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
+              .set({
+                metadata: JSON.stringify(meta),
+                aliases: JSON.stringify(aliases),
+                updated_at: new Date().toISOString(),
+              })
               .where("id", "=", byName.id)
               .execute();
           }
@@ -452,6 +490,7 @@ export function createEntityRepository(db: Kysely<DB>) {
       const id = randomUUID();
       const now = new Date().toISOString();
       const metadata = data.email ? { email: data.email } : {};
+      const initialAliases = data.email ? JSON.stringify([data.email]) : null;
 
       await db
         .insertInto("entities")
@@ -460,7 +499,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           name: data.name,
           source_type: "person",
           subtype: data.subtype,
-          aliases: null,
+          aliases: initialAliases,
           metadata: JSON.stringify(metadata),
           source_ref_id: null,
           status: "confirmed",
@@ -485,7 +524,7 @@ export function createEntityRepository(db: Kysely<DB>) {
       return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
     },
 
-    // ── Archive ──
+    // ── Archive / Cleanup ──
 
     async archiveEntitiesForArchivedFiles() {
       await db
@@ -495,6 +534,67 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where("status", "!=", "archived")
         .where("source_ref_id", "in", db.selectFrom("indexed_files").select("id").where("is_archived", "=", 1))
         .execute();
+    },
+
+    /**
+     * Count entities associated with a connector's files.
+     * Includes entities sourced from those files (source_ref_id) and entities
+     * only mentioned in those files (entity_mentions).
+     */
+    async countEntitiesForFiles(fileIds: string[]): Promise<number> {
+      if (fileIds.length === 0) return 0;
+
+      // Entities whose source_ref_id points to one of these files
+      const bySourceRef = db.selectFrom("entities").select("id").where("source_ref_id", "in", fileIds);
+
+      // Entities that are only mentioned in these files (no mentions in other files)
+      const byMentionOnly = db
+        .selectFrom("entity_mentions")
+        .select("entity_id as id")
+        .where("indexed_file_id", "in", fileIds)
+        .where(
+          "entity_id",
+          "not in",
+          db.selectFrom("entity_mentions").select("entity_id").where("indexed_file_id", "not in", fileIds),
+        );
+
+      const result = await db
+        .selectFrom(bySourceRef.union(byMentionOnly).as("combined"))
+        .select(db.fn.count<number>("id").as("count"))
+        .executeTakeFirst();
+
+      return Number(result?.count ?? 0);
+    },
+
+    /**
+     * Delete entities associated with a connector's files.
+     * Removes entities sourced from those files and entities only mentioned in those files.
+     * Cascade deletes handle entity_source_refs and entity_mentions.
+     */
+    async deleteEntitiesForFiles(fileIds: string[]): Promise<number> {
+      if (fileIds.length === 0) return 0;
+
+      // Entities whose source_ref_id points to one of these files
+      const bySourceRef = db.selectFrom("entities").select("id").where("source_ref_id", "in", fileIds);
+
+      // Entities that are only mentioned in these files
+      const byMentionOnly = db
+        .selectFrom("entity_mentions")
+        .select("entity_id as id")
+        .where("indexed_file_id", "in", fileIds)
+        .where(
+          "entity_id",
+          "not in",
+          db.selectFrom("entity_mentions").select("entity_id").where("indexed_file_id", "not in", fileIds),
+        );
+
+      const toDelete = await bySourceRef.union(byMentionOnly).execute();
+      const ids = [...new Set(toDelete.map((r) => r.id))];
+
+      if (ids.length === 0) return 0;
+
+      await db.deleteFrom("entities").where("id", "in", ids).execute();
+      return ids.length;
     },
   };
 }

@@ -11,7 +11,6 @@ import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type AgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import type { Config } from "./config";
-import { createLlmCallFn } from "./connectors/llm";
 import { startSyncScheduler } from "./connectors/sync";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
@@ -84,10 +83,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const trackedRunAgent = async (params: RunAgentParams): Promise<AgentResult> => {
     const runId = randomUUID();
     const span = tracer.startSpan("invoke_agent sketch");
-    setAgentRunAttributes(span, params, runId);
+    const enrichedParams = { ...params, experimentalFlag: config.EXPERIMENTAL_FLAG };
+    setAgentRunAttributes(span, enrichedParams, runId);
 
     try {
-      const result = await runAgent(params);
+      const result = await runAgent(enrichedParams);
       setAgentResultAttributes(span, result);
       createToolCallSpans(tracer, span, runId, result.toolCalls);
       span.end();
@@ -154,9 +154,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, {
-    llmCall: createLlmCallFn(),
-  });
+  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000);
 
   const slackAdapterDeps = {
     db,

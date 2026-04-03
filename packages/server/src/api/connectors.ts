@@ -11,17 +11,20 @@
  * must be registered before dynamic /:id to prevent param capture.
  */
 import { Hono } from "hono";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
+import { browseClickUpWorkspaces } from "../connectors/clickup";
 import { createEmbeddingProvider } from "../connectors/embeddings";
-import { runEnrichment } from "../connectors/enrichment";
+import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
-import { createLlmCallFn } from "../connectors/llm";
+import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
+import { VALID_CONNECTOR_TYPES, getConnector } from "../connectors/registry";
 import { browseFiles, getFileContent, listIndexedSources, search, searchFiles } from "../connectors/search";
-import { getConnector, getSyncProgress, runConnectorSync } from "../connectors/sync";
-import type { ConnectorCredentials, OAuthCredentials } from "../connectors/types";
+import { getSyncProgress, runConnectorSync } from "../connectors/sync";
+import type { ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
+import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { requireAdmin } from "./middleware";
 
@@ -34,11 +37,10 @@ function syncInBackground(db: Kysely<DB>, connectorId: string, logger: Logger) {
   });
 }
 
-const VALID_CONNECTOR_TYPES = ["google_drive", "clickup", "notion", "linear"] as const;
 const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account"] as const;
 
 const createConnectorSchema = z.object({
-  connectorType: z.enum(VALID_CONNECTOR_TYPES),
+  connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
   authType: z.enum(VALID_AUTH_TYPES),
   credentials: z.record(z.string(), z.unknown()),
   scopeConfig: z.record(z.string(), z.unknown()).optional(),
@@ -61,6 +63,18 @@ const browseGoogleDriveSchema = z.object({
     client_id: z.string().min(1),
     client_secret: z.string().min(1),
     refresh_token: z.string().min(1),
+  }),
+});
+
+const browseNotionSchema = z.object({
+  credentials: z.object({
+    api_key: z.string().min(1),
+  }),
+});
+
+const browseClickUpSchema = z.object({
+  credentials: z.object({
+    api_key: z.string().min(1),
   }),
 });
 
@@ -111,7 +125,8 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     // For OAuth, also refresh the token so we store a valid access_token.
     let credentials = { type: parsed.data.authType, ...parsed.data.credentials } as ConnectorCredentials;
     try {
-      const connector = getConnector(parsed.data.connectorType);
+      const connectorType = parsed.data.connectorType as ConnectorType;
+      const connector = getConnector(connectorType);
       if (credentials.type === "oauth" && connector.refreshTokens) {
         const refreshed = await connector.refreshTokens(credentials);
         if (refreshed) credentials = refreshed;
@@ -127,7 +142,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     const config = await connectorRepo.createConfig({
-      connectorType: parsed.data.connectorType,
+      connectorType: parsed.data.connectorType as ConnectorType,
       authType: parsed.data.authType,
       credentials: JSON.stringify(credentials),
       scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,
@@ -154,10 +169,14 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
     const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
     const source = c.req.query("source") || undefined;
+    const category = c.req.query("category") || undefined;
+    const status = c.req.query("status") || undefined;
+    const access = c.req.query("access") || undefined;
 
+    const filters = { connectorType: source, category, status, access };
     const [files, total] = await Promise.all([
-      connectorRepo.listAllFiles({ limit, offset, connectorType: source }),
-      connectorRepo.countAllFiles(source),
+      connectorRepo.listAllFiles({ limit, offset, ...filters }),
+      connectorRepo.countAllFiles(filters),
     ]);
 
     const fileIds = files.map((f) => f.id);
@@ -181,6 +200,8 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
           sourceCreatedAt: f.source_created_at,
           sourceUpdatedAt: f.source_updated_at,
           hasSummary: !!f.summary,
+          summaryStatus: f.summary_status,
+          embeddingStatus: f.embedding_status,
           accessScope: accessInfo ? "restricted" : "unrestricted",
           accessCount: accessInfo?.count ?? null,
         };
@@ -278,17 +299,177 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
 
   /** Live sync/enrichment progress + pending enrichment count. */
   routes.get("/progress", async (c) => {
-    const pendingResult = await db
-      .selectFrom("indexed_files")
-      .select(db.fn.count("id").as("count"))
-      .where("embedding_status", "in", ["pending", "failed"])
-      .where("is_archived", "=", 0)
-      .executeTakeFirst();
+    const [pendingResult, summaryStats] = await Promise.all([
+      db
+        .selectFrom("indexed_files")
+        .select(db.fn.count("id").as("count"))
+        .where((eb) =>
+          eb.or([
+            eb("embedding_status", "in", ["pending", "failed"]),
+            eb("summary_status", "in", ["pending", "failed"]),
+          ]),
+        )
+        .where("is_archived", "=", 0)
+        .executeTakeFirst(),
+      db
+        .selectFrom("indexed_files")
+        .select([
+          db.fn.count("id").as("total"),
+          sql<number>`sum(case when summary_status = 'done' then 1 else 0 end)`.as("summarized"),
+          sql<number>`sum(case when embedding_status = 'done' then 1 else 0 end)`.as("enriched"),
+        ])
+        .where("is_archived", "=", 0)
+        .executeTakeFirst(),
+    ]);
     return c.json({
       active: getSyncProgress(),
       pendingEnrichment: Number(pendingResult?.count ?? 0),
+      enrichmentActive: isEnrichmentActive(),
+      enrichmentStats: {
+        total: Number(summaryStats?.total ?? 0),
+        enriched: Number(summaryStats?.enriched ?? 0),
+        summarized: Number(summaryStats?.summarized ?? 0),
+      },
     });
   });
+
+  /* ── Generic browse endpoints ──────────────────────────── */
+
+  /** Browse scope items for a new connection (generic). */
+  routes.post("/browse", requireAdmin(), async (c) => {
+    const body = await c.req.json();
+    const parsed = z
+      .object({
+        connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
+        credentials: z.record(z.string(), z.unknown()),
+      })
+      .safeParse(body);
+
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const connector = getConnector(parsed.data.connectorType as ConnectorType);
+    if (!connector.browse) {
+      return c.json(
+        { error: { code: "NOT_SUPPORTED", message: "This connector does not support scope browsing" } },
+        400,
+      );
+    }
+
+    try {
+      const credentials = { type: "api_key", ...parsed.data.credentials } as ConnectorCredentials;
+      await connector.validateCredentials(credentials);
+      const result = await connector.browse({ credentials, logger });
+      return c.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Browse failed";
+      logger.warn({ err, connectorType: parsed.data.connectorType }, "Generic browse failed");
+      return c.json({ error: { code: "BROWSE_FAILED", message } }, 400);
+    }
+  });
+
+  /** Poll async browse status (e.g. Notion). */
+  routes.get("/browse-status/:jobId", async (c) => {
+    const status = getBrowseStatus(c.req.param("jobId"));
+    if (!status) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Browse job not found or expired" } }, 404);
+    }
+    return c.json(status);
+  });
+
+  /** Browse scope items for an existing connector (generic). */
+  routes.get("/:id/browse", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+
+    const connector = getConnector(config.connector_type as ConnectorType);
+    if (!connector.browseExisting && !connector.browse) {
+      return c.json(
+        { error: { code: "NOT_SUPPORTED", message: "This connector does not support scope browsing" } },
+        400,
+      );
+    }
+
+    const currentScope = JSON.parse(config.scope_config) as Record<string, unknown>;
+    const refresh = c.req.query("refresh") === "true";
+
+    // Return cached browse data if available (unless explicit refresh requested)
+    if (!refresh && config.browse_cache) {
+      try {
+        const cached = JSON.parse(config.browse_cache);
+        return c.json({ ...cached, scopeConfig: currentScope, cached: true });
+      } catch {
+        // Invalid cache — fall through to live browse
+      }
+    }
+
+    try {
+      let credentials = JSON.parse(config.credentials) as ConnectorCredentials;
+      if (credentials.type === "oauth" && connector.refreshTokens) {
+        const refreshed = await connector.refreshTokens(credentials as OAuthCredentials);
+        if (refreshed) {
+          credentials = refreshed;
+          await connectorRepo.updateConfig(config.id, { credentials: JSON.stringify(credentials) });
+        }
+      }
+
+      const result = connector.browseExisting
+        ? await connector.browseExisting({ credentials, logger })
+        : await connector.browse!({ credentials, logger });
+      if (result.type === "async") {
+        return c.json(result);
+      }
+
+      // Cache the browse result for instant loading next time
+      await connectorRepo.updateConfig(config.id, { browseCache: JSON.stringify(result) });
+
+      return c.json({ ...result, scopeConfig: currentScope });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Browse failed";
+      logger.warn({ err, connectorId: config.id }, "Generic browse failed for existing connector");
+      return c.json({ error: { code: "BROWSE_FAILED", message } }, 400);
+    }
+  });
+
+  /** Browse folder/subtree children for tree-type pickers (e.g. Google Drive). */
+  routes.get("/:id/browse-children/:parentId", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+
+    const connector = getConnector(config.connector_type as ConnectorType);
+    if (!connector.browseChildren) {
+      return c.json(
+        { error: { code: "NOT_SUPPORTED", message: "This connector does not support subtree browsing" } },
+        400,
+      );
+    }
+
+    try {
+      let credentials = JSON.parse(config.credentials) as ConnectorCredentials;
+      if (credentials.type === "oauth" && connector.refreshTokens) {
+        const refreshed = await connector.refreshTokens(credentials as OAuthCredentials);
+        if (refreshed) {
+          credentials = refreshed;
+          await connectorRepo.updateConfig(config.id, { credentials: JSON.stringify(credentials) });
+        }
+      }
+
+      const items = await connector.browseChildren({ credentials, parentId: c.req.param("parentId"), logger });
+      return c.json({ items });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Browse failed";
+      logger.warn({ err, connectorId: config.id }, "Browse children failed");
+      return c.json({ error: { code: "BROWSE_FAILED", message } }, 400);
+    }
+  });
+
+  /* ── Per-connector browse routes (legacy, kept for backward compat) ── */
 
   /** Browse Google Drive shared drives for the folder picker. */
   routes.post("/google-drive/browse", requireAdmin(), async (c) => {
@@ -401,6 +582,129 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
   });
 
+  /** Browse ClickUp workspaces and spaces for the scope picker (new connection). */
+  routes.post("/clickup/browse", requireAdmin(), async (c) => {
+    const body = await c.req.json();
+    const parsed = browseClickUpSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    try {
+      const connector = getConnector("clickup");
+      await connector.validateCredentials({ type: "api_key", api_key: parsed.data.credentials.api_key });
+      const workspaces = await browseClickUpWorkspaces(parsed.data.credentials.api_key);
+      return c.json({ workspaces });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to browse ClickUp";
+      logger.warn({ err }, "ClickUp browse failed");
+      return c.json({ error: { code: "BROWSE_FAILED", message } }, 400);
+    }
+  });
+
+  /** Browse ClickUp workspaces for an existing connector (uses stored credentials). */
+  routes.get("/clickup/browse/:connectorId", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    if (config.connector_type !== "clickup") {
+      return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not ClickUp" } }, 400);
+    }
+
+    try {
+      const credentials = JSON.parse(config.credentials) as { type: string; api_key?: string; access_token?: string };
+      const token = credentials.api_key ?? credentials.access_token ?? "";
+      const workspaces = await browseClickUpWorkspaces(token);
+      const currentScope = JSON.parse(config.scope_config) as Record<string, unknown>;
+      const selectedWorkspaceIds = (currentScope.workspaces as string[] | undefined) ?? [];
+      const selectedSpaceIds = (currentScope.spaces as string[] | undefined) ?? [];
+
+      return c.json({
+        workspaces: workspaces.map((w) => ({
+          ...w,
+          selected: selectedWorkspaceIds.length === 0 || selectedWorkspaceIds.includes(w.id),
+          spaces: w.spaces.map((s) => ({
+            ...s,
+            selected: selectedSpaceIds.length === 0 || selectedSpaceIds.includes(s.id),
+          })),
+        })),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to browse ClickUp";
+      logger.warn({ err, connectorId: config.id }, "ClickUp browse failed for existing connector");
+      return c.json({ error: { code: "BROWSE_FAILED", message } }, 400);
+    }
+  });
+
+  /** Start scanning Notion workspace for root pages. Returns a browseId to poll. */
+  routes.post("/notion/browse", requireAdmin(), async (c) => {
+    const body = await c.req.json();
+    const parsed = browseNotionSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    try {
+      // Validate credentials first (quick /users/me call)
+      const connector = getConnector("notion");
+      await connector.validateCredentials({ type: "api_key", api_key: parsed.data.credentials.api_key });
+
+      // Start background scan
+      const browseId = startNotionBrowse(parsed.data.credentials.api_key);
+      return c.json({ browseId });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid credentials";
+      logger.warn({ err }, "Notion credential validation failed");
+      return c.json(
+        { error: { code: "INVALID_CREDENTIALS", message: `Credential validation failed: ${message}` } },
+        400,
+      );
+    }
+  });
+
+  /** Poll Notion browse progress. Returns root pages found so far. */
+  routes.get("/notion/browse-status/:browseId", async (c) => {
+    const status = getBrowseStatus(c.req.param("browseId"));
+    if (!status) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Browse job not found or expired" } }, 404);
+    }
+    return c.json(status);
+  });
+
+  /** Browse Notion root pages for an existing connector (uses stored credentials). */
+  routes.get("/notion/browse/:connectorId", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    if (config.connector_type !== "notion") {
+      return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Notion" } }, 400);
+    }
+
+    try {
+      const credentials = JSON.parse(config.credentials) as { type: string; api_key?: string; access_token?: string };
+      const token = credentials.api_key ?? credentials.access_token ?? "";
+
+      const rootPages = await browseNotionRootPages(token);
+      const currentScope = JSON.parse(config.scope_config) as Record<string, unknown>;
+      const selectedPageIds = (currentScope.rootPages as string[] | undefined) ?? [];
+
+      return c.json({
+        rootPages: rootPages.map((p) => ({
+          ...p,
+          selected: selectedPageIds.includes(p.id),
+        })),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to browse Notion";
+      logger.warn({ err, connectorId: config.id }, "Notion browse failed for existing connector");
+      return c.json({ error: { code: "BROWSE_FAILED", message } }, 400);
+    }
+  });
+
   /* ── Dynamic :id routes ─────────────────────────────── */
 
   /** Get a single connector. */
@@ -427,12 +731,32 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     });
   });
 
-  /** Delete a connector. */
+  /** Count entities associated with a connector's files (for disconnect confirmation). */
+  routes.get("/:id/entity-count", requireAdmin(), async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
+    const entityRepo = createEntityRepository(db);
+    const count = await entityRepo.countEntitiesForFiles(fileIds);
+    return c.json({ count });
+  });
+
+  /** Delete a connector and optionally its associated entities. */
   routes.delete("/:id", requireAdmin(), async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
     if (!config) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
+
+    const deleteEntities = c.req.query("deleteEntities") === "true";
+    if (deleteEntities) {
+      const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
+      const entityRepo = createEntityRepository(db);
+      await entityRepo.deleteEntitiesForFiles(fileIds);
+    }
+
     await connectorRepo.deleteConfig(config.id);
     return c.json({ success: true });
   });
@@ -577,7 +901,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       db,
       logger: logger.child({ component: "enrichment", fileId }),
       embeddingProvider,
-      llmCall: createLlmCallFn(),
+      geminiApiKey: settings?.gemini_api_key,
       fileIds: [fileId],
     }).catch((err) => {
       logger.error({ err, fileId }, "Single file enrichment failed");

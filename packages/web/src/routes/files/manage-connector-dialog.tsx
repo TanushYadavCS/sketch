@@ -1,3 +1,4 @@
+import { IntegrationIcon } from "@/components/connect-integration-dialog";
 /**
  * ManageConnectorDialog — status summary, sync scope configuration, credential
  * update, and disconnect flow for a connected integration.
@@ -5,17 +6,14 @@
  * Google Drive gets a drive/folder picker. Other connectors show a generic
  * read-only scope display. Disconnect triggers a confirmation alert dialog.
  */
-import { FolderContents, IntegrationIcon } from "@/components/connect-integration-dialog";
+import { GenericScopeEditor } from "@/components/scope-picker";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import {
   ArrowsClockwiseIcon,
-  CaretRightIcon,
   CheckCircleIcon,
   CircleNotchIcon,
-  FolderIcon,
-  FolderOpenIcon,
   SpinnerGapIcon,
   TrashIcon,
   WarningCircleIcon,
@@ -34,7 +32,7 @@ import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 export function ManageConnectorDialog({
@@ -54,6 +52,21 @@ export function ManageConnectorDialog({
 }) {
   const queryClient = useQueryClient();
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
+  const [deleteEntities, setDeleteEntities] = useState(false);
+  const [isBrowsingScope, setIsBrowsingScope] = useState(false);
+
+  // Reset checkbox when dialog closes
+  useEffect(() => {
+    if (!showDisconnectConfirm) setDeleteEntities(false);
+  }, [showDisconnectConfirm]);
+
+  // Fetch entity count when disconnect confirmation opens
+  const { data: entityCountData } = useQuery({
+    queryKey: ["connector-entity-count", connector?.id],
+    queryFn: () => api.integrations.entityCount(connector?.id ?? ""),
+    enabled: showDisconnectConfirm && !!connector?.id,
+  });
+  const entityCount = entityCountData?.count ?? 0;
 
   const syncMutation = useMutation({
     mutationFn: () => api.integrations.sync(connector?.id ?? ""),
@@ -65,7 +78,7 @@ export function ManageConnectorDialog({
   });
 
   const disconnectMutation = useMutation({
-    mutationFn: () => api.integrations.disconnect(connector?.id ?? ""),
+    mutationFn: () => api.integrations.disconnect(connector?.id ?? "", { deleteEntities }),
     onSuccess: () => {
       toast.success(`${definition?.name ?? "Connector"} disconnected.`);
       setShowDisconnectConfirm(false);
@@ -99,7 +112,6 @@ export function ManageConnectorDialog({
   if (!definition || !connector) return null;
 
   const isError = connector.syncStatus === "error";
-  const isGoogleDrive = definition.type === "google_drive";
 
   const scopeEntries = Object.entries(connector.scopeConfig ?? {}).filter(
     ([, v]) => v != null && v !== "" && !(Array.isArray(v) && v.length === 0),
@@ -167,30 +179,15 @@ export function ManageConnectorDialog({
             </div>
           )}
 
-          {isGoogleDrive ? (
-            <GoogleDriveScopeEditor connectorId={connector.id} scopeConfig={connector.scopeConfig} />
-          ) : (
-            <div>
-              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                Sync scope — {definition.scopeLabel}
-              </p>
-              <div className="mt-1.5">
-                {scopeEntries.length > 0 ? (
-                  <div className="flex flex-wrap gap-1.5">
-                    {scopeEntries.map(([key, value]) => (
-                      <Badge key={key} variant="secondary" className="text-[10px]">
-                        {Array.isArray(value) ? value.join(", ") : String(value)}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    All accessible {definition.scopeLabel} are being synced.
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
+          <ScopeEditorDispatch
+            scopeType={definition.scopeType}
+            connectorId={connector.id}
+            connectorType={connector.connectorType}
+            scopeConfig={connector.scopeConfig}
+            scopeLabel={definition.scopeLabel}
+            scopeEntries={scopeEntries}
+            onBrowsingChange={setIsBrowsingScope}
+          />
 
           <div className="flex items-center justify-between border-t border-border pt-3">
             <Button
@@ -226,7 +223,7 @@ export function ManageConnectorDialog({
                 size="sm"
                 className="h-7 gap-1.5 text-xs"
                 onClick={() => syncMutation.mutate()}
-                disabled={connector.syncStatus === "syncing" || syncMutation.isPending}
+                disabled={connector.syncStatus === "syncing" || syncMutation.isPending || isBrowsingScope}
               >
                 <ArrowsClockwiseIcon size={12} className={connector.syncStatus === "syncing" ? "animate-spin" : ""} />
                 {connector.syncStatus === "syncing" ? "Syncing..." : "Sync now"}
@@ -245,6 +242,21 @@ export function ManageConnectorDialog({
               cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {entityCount > 0 && (
+            <label className="flex items-start gap-2.5 rounded-md border border-border bg-muted/30 px-3 py-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={deleteEntities}
+                onChange={(e) => setDeleteEntities(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-border accent-destructive"
+              />
+              <span className="text-xs text-muted-foreground">
+                Also delete <span className="font-medium text-foreground">{entityCount}</span>{" "}
+                {entityCount === 1 ? "entity" : "entities"} created from {definition.name} data (people, companies, and
+                other extracted records)
+              </span>
+            </label>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={disconnectMutation.isPending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -261,6 +273,56 @@ export function ManageConnectorDialog({
   );
 }
 
+function ScopeEditorDispatch({
+  scopeType,
+  connectorId,
+  connectorType,
+  scopeConfig,
+  scopeLabel,
+  scopeEntries,
+  onBrowsingChange,
+}: {
+  scopeType: "none" | "flat" | "nested" | "tree";
+  connectorId: string;
+  connectorType: string;
+  scopeConfig: Record<string, unknown>;
+  scopeLabel: string;
+  scopeEntries: [string, unknown][];
+  onBrowsingChange?: (browsing: boolean) => void;
+}) {
+  if (scopeType === "none") {
+    return (
+      <div>
+        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          Sync scope — {scopeLabel}
+        </p>
+        <div className="mt-1.5">
+          {scopeEntries.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {scopeEntries.map(([key, value]) => (
+                <Badge key={key} variant="secondary" className="text-[10px]">
+                  {Array.isArray(value) ? value.join(", ") : String(value)}
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">All accessible {scopeLabel} are being synced.</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <GenericScopeEditor
+      connectorId={connectorId}
+      scopeConfig={scopeConfig}
+      noun={scopeLabel}
+      onBrowsingChange={onBrowsingChange}
+    />
+  );
+}
+
 function SyncStatusDot({ status }: { status: string }) {
   switch (status) {
     case "active":
@@ -272,314 +334,6 @@ function SyncStatusDot({ status }: { status: string }) {
     default:
       return null;
   }
-}
-
-function GoogleDriveScopeEditor({
-  connectorId,
-  scopeConfig,
-}: {
-  connectorId: string;
-  scopeConfig: Record<string, unknown>;
-}) {
-  const queryClient = useQueryClient();
-  const currentDriveIds = (scopeConfig?.sharedDrives as string[] | undefined) ?? [];
-  const currentFolderIds = (scopeConfig?.folders as string[] | undefined) ?? [];
-
-  const { data: browseData, isLoading: isBrowsing } = useQuery({
-    queryKey: ["google-drive-browse", connectorId],
-    queryFn: () => api.integrations.browseGoogleDriveExisting(connectorId),
-  });
-
-  const drives = browseData?.sharedDrives ?? [];
-  const folders = browseData?.rootFolders ?? [];
-
-  const [selectedDriveIds, setSelectedDriveIds] = useState<Set<string> | null>(null);
-  const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string> | null>(null);
-
-  const effectiveDriveIds = selectedDriveIds ?? new Set(drives.filter((d) => d.selected).map((d) => d.id));
-  const effectiveFolderIds = selectedFolderIds ?? new Set(folders.filter((f) => f.selected).map((f) => f.id));
-
-  const toggleDrive = (driveId: string) => {
-    setSelectedDriveIds((prev) => {
-      const base = prev ?? new Set(drives.filter((d) => d.selected).map((d) => d.id));
-      const next = new Set(base);
-      if (next.has(driveId)) next.delete(driveId);
-      else next.add(driveId);
-      return next;
-    });
-  };
-
-  const toggleFolder = (folderId: string) => {
-    setSelectedFolderIds((prev) => {
-      const base = prev ?? new Set(folders.filter((f) => f.selected).map((f) => f.id));
-      const next = new Set(base);
-      if (next.has(folderId)) next.delete(folderId);
-      else next.add(folderId);
-      return next;
-    });
-  };
-
-  const currentDriveSet = new Set(currentDriveIds);
-  const currentFolderSet = new Set(currentFolderIds);
-
-  const hasDriveChanges =
-    selectedDriveIds !== null &&
-    (effectiveDriveIds.size !== currentDriveSet.size || [...effectiveDriveIds].some((id) => !currentDriveSet.has(id)));
-
-  const hasFolderChanges =
-    selectedFolderIds !== null &&
-    (effectiveFolderIds.size !== currentFolderSet.size ||
-      [...effectiveFolderIds].some((id) => !currentFolderSet.has(id)));
-
-  const hasChanges = hasDriveChanges || hasFolderChanges;
-
-  const saveMutation = useMutation({
-    mutationFn: () => {
-      const newScope: Record<string, string[]> = {};
-      if (drives.length > 0) newScope.sharedDrives = Array.from(effectiveDriveIds);
-      if (folders.length > 0) newScope.folders = Array.from(effectiveFolderIds);
-      return api.integrations.updateScope(connectorId, newScope);
-    },
-    onSuccess: () => {
-      toast.success("Scope updated. Re-sync started.");
-      setSelectedDriveIds(null);
-      setSelectedFolderIds(null);
-      queryClient.invalidateQueries({ queryKey: ["integrations"] });
-      queryClient.invalidateQueries({ queryKey: ["google-drive-browse", connectorId] });
-    },
-    onError: (error: Error) => toast.error(error.message),
-  });
-
-  const totalSelected = effectiveDriveIds.size + effectiveFolderIds.size;
-
-  return (
-    <div className="space-y-4">
-      {isBrowsing ? (
-        <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
-          <SpinnerGapIcon size={14} className="animate-spin" />
-          Loading...
-        </div>
-      ) : (
-        <>
-          {(drives.length > 0 || folders.length > 0) && (
-            <CombinedDrivePicker
-              drives={drives}
-              folders={folders}
-              selectedDriveIds={effectiveDriveIds}
-              selectedFolderIds={effectiveFolderIds}
-              onToggleDrive={toggleDrive}
-              onToggleFolder={toggleFolder}
-              disabled={saveMutation.isPending}
-              connectorId={connectorId}
-            />
-          )}
-          {drives.length === 0 && folders.length === 0 && (
-            <div className="rounded-lg border border-border bg-muted/20 px-3 py-3">
-              <p className="text-xs font-medium">No drives or folders found</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                Check that the connected Google account has access to Drive content.
-              </p>
-            </div>
-          )}
-          {hasChanges && (
-            <Button
-              size="sm"
-              className="mt-2 h-7 w-full gap-1.5 text-xs"
-              onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending || totalSelected === 0}
-            >
-              {saveMutation.isPending ? (
-                <>
-                  <SpinnerGapIcon size={12} className="animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                `Save & re-sync (${totalSelected} item${totalSelected === 1 ? "" : "s"})`
-              )}
-            </Button>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function CombinedDrivePicker({
-  drives,
-  folders,
-  selectedDriveIds,
-  selectedFolderIds,
-  onToggleDrive,
-  onToggleFolder,
-  disabled,
-  connectorId,
-}: {
-  drives: Array<{ id: string; name: string }>;
-  folders: Array<{ id: string; name: string }>;
-  selectedDriveIds: Set<string>;
-  selectedFolderIds: Set<string>;
-  onToggleDrive: (id: string) => void;
-  onToggleFolder: (id: string) => void;
-  disabled?: boolean;
-  connectorId: string;
-}) {
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-
-  const toggleExpand = (id: string) => {
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const totalItems = drives.length + folders.length;
-  const totalSelected = selectedDriveIds.size + selectedFolderIds.size;
-  const allSelected = totalSelected === totalItems && totalItems > 0;
-
-  const selectAll = () => {
-    for (const d of drives) {
-      if (!selectedDriveIds.has(d.id)) onToggleDrive(d.id);
-    }
-    for (const f of folders) {
-      if (!selectedFolderIds.has(f.id)) onToggleFolder(f.id);
-    }
-  };
-
-  const deselectAll = () => {
-    for (const d of drives) {
-      if (selectedDriveIds.has(d.id)) onToggleDrive(d.id);
-    }
-    for (const f of folders) {
-      if (selectedFolderIds.has(f.id)) onToggleFolder(f.id);
-    }
-  };
-
-  return (
-    <div className="space-y-1.5">
-      <button
-        type="button"
-        onClick={() => (allSelected ? deselectAll() : selectAll())}
-        disabled={disabled}
-        className="flex w-full items-center gap-2 px-1 py-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-      >
-        <span className="inline-flex size-4 items-center justify-center rounded border border-border">
-          {allSelected && <span className="size-2 rounded-sm bg-foreground" />}
-        </span>
-        {allSelected ? "Deselect all" : "Select all"} ({totalItems})
-      </button>
-
-      <div className="max-h-80 space-y-0.5 overflow-y-auto rounded-lg border border-border">
-        {drives.map((drive) => {
-          const isSelected = selectedDriveIds.has(drive.id);
-          const isExpanded = expandedIds.has(drive.id);
-          return (
-            <div key={`drive-${drive.id}`}>
-              <div
-                className={`flex w-full items-center gap-1 px-1 py-2 text-left text-sm transition-colors hover:bg-muted/50 ${
-                  isSelected ? "bg-muted/30" : ""
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => toggleExpand(drive.id)}
-                  className="flex shrink-0 items-center justify-center size-6 rounded hover:bg-muted/80 text-muted-foreground"
-                  title="Preview drive contents"
-                >
-                  <CaretRightIcon size={12} className={`transition-transform ${isExpanded ? "rotate-90" : ""}`} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onToggleDrive(drive.id)}
-                  disabled={disabled}
-                  className="flex flex-1 items-center gap-2.5 disabled:opacity-50"
-                >
-                  <CheckboxIndicator checked={isSelected} />
-                  {isExpanded ? (
-                    <FolderOpenIcon size={16} className="shrink-0 text-muted-foreground" />
-                  ) : (
-                    <FolderIcon size={16} className="shrink-0 text-muted-foreground" />
-                  )}
-                  <span className="truncate">{drive.name}</span>
-                  <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">Shared</span>
-                </button>
-              </div>
-              {isExpanded && <FolderContents connectorId={connectorId} folderId={drive.id} />}
-            </div>
-          );
-        })}
-        {folders.map((folder) => {
-          const isSelected = selectedFolderIds.has(folder.id);
-          const isExpanded = expandedIds.has(folder.id);
-          return (
-            <div key={`folder-${folder.id}`}>
-              <div
-                className={`flex w-full items-center gap-1 px-1 py-2 text-left text-sm transition-colors hover:bg-muted/50 ${
-                  isSelected ? "bg-muted/30" : ""
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => toggleExpand(folder.id)}
-                  className="flex shrink-0 items-center justify-center size-6 rounded hover:bg-muted/80 text-muted-foreground"
-                  title="Preview folder contents"
-                >
-                  <CaretRightIcon size={12} className={`transition-transform ${isExpanded ? "rotate-90" : ""}`} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onToggleFolder(folder.id)}
-                  disabled={disabled}
-                  className="flex flex-1 items-center gap-2.5 disabled:opacity-50"
-                >
-                  <CheckboxIndicator checked={isSelected} />
-                  {isExpanded ? (
-                    <FolderOpenIcon size={16} className="shrink-0 text-muted-foreground" />
-                  ) : (
-                    <FolderIcon size={16} className="shrink-0 text-muted-foreground" />
-                  )}
-                  <span className="truncate">{folder.name}</span>
-                </button>
-              </div>
-              {isExpanded && <FolderContents connectorId={connectorId} folderId={folder.id} />}
-            </div>
-          );
-        })}
-      </div>
-
-      <p className="text-[11px] text-muted-foreground">
-        {totalSelected} of {totalItems} item{totalItems === 1 ? "" : "s"} selected
-      </p>
-    </div>
-  );
-}
-
-function CheckboxIndicator({ checked }: { checked: boolean }) {
-  return (
-    <span
-      className={`inline-flex size-4 shrink-0 items-center justify-center rounded border ${
-        checked ? "border-primary bg-primary" : "border-border"
-      }`}
-    >
-      {checked && (
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={3}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="size-3 text-primary-foreground"
-          role="img"
-          aria-label="Selected"
-        >
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      )}
-    </span>
-  );
 }
 
 function formatRelativeTime(iso: string): string {

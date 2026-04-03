@@ -8,7 +8,7 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear";
+export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
@@ -84,6 +84,12 @@ export interface SyncedItem {
    * Each assignee is matched to a person entity and linked via entity_mentions.
    */
   assignees?: Array<{ name: string; email?: string }>;
+  /**
+   * Parent structural entities this item belongs to (e.g., ClickUp folder/space,
+   * Google Drive folder). Linked via entity_mentions during sync.
+   * `source` + `sourceId` are used to look up the entity.
+   */
+  parentEntities?: Array<{ source: string; sourceId: string; contextSnippet?: string }>;
 }
 
 /**
@@ -129,6 +135,26 @@ export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>
 export interface Connector {
   readonly type: ConnectorType;
 
+  /**
+   * File types that should be promoted to entities during sync.
+   * e.g. Linear returns ["project"] — synced Linear projects become entities.
+   * Connectors that seed entities directly via onEntitySeed (e.g. Notion) leave this empty.
+   */
+  readonly promotableFileTypes?: string[];
+
+  /**
+   * Build the source ref key for an assignee (used to match against person entities).
+   * Default: `{connectorType}:user:{name}`. Override for connectors with
+   * different conventions (e.g. ClickUp uses `clickup:assignee:{name}`).
+   */
+  assigneeSourceRefKey?(assigneeName: string): string;
+
+  /**
+   * Whether this connector seeds person entities from file access lists.
+   * If true, sync will create person entities from item.accessEmails.
+   */
+  readonly seedPersonsFromAccess?: boolean;
+
   /** Validate credentials work (test API call). */
   validateCredentials(credentials: ConnectorCredentials): Promise<void>;
 
@@ -155,4 +181,59 @@ export interface Connector {
    * Returns updated credentials or null if no refresh needed.
    */
   refreshTokens?(credentials: OAuthCredentials): Promise<OAuthCredentials | null>;
+
+  /**
+   * Browse available scope items (workspaces, pages, drives, etc.).
+   * Returns immediately for sync connectors, or a BrowseJob for async ones (e.g. Notion).
+   * Optional — connectors without scope selection don't implement this.
+   */
+  browse?(opts: { credentials: ConnectorCredentials; logger: Logger }): Promise<BrowseResult | BrowseJob>;
+
+  /**
+   * Browse for an existing connector — always returns sync results.
+   * Used by the manage dialog. If not implemented, falls back to browse().
+   * Connectors with async browse (e.g. Notion) should implement this
+   * to return results directly without starting a background job.
+   */
+  browseExisting?(opts: { credentials: ConnectorCredentials; logger: Logger }): Promise<BrowseResult>;
+
+  /**
+   * Browse folder/subtree contents for tree-type scope pickers (e.g. Google Drive).
+   * Only needed for connectors with scopeType "tree".
+   */
+  browseChildren?(opts: {
+    credentials: ConnectorCredentials;
+    parentId: string;
+    logger: Logger;
+  }): Promise<BrowseTreeItem[]>;
+}
+
+// ── Browse types ──────────────────────────────────────────────────────────────
+
+export interface BrowseFlatItem {
+  id: string;
+  name: string;
+  url?: string;
+}
+
+export interface BrowseNestedGroup {
+  id: string;
+  name: string;
+  items: BrowseFlatItem[];
+}
+
+export interface BrowseTreeItem {
+  id: string;
+  name: string;
+  hasChildren?: boolean;
+}
+
+export type BrowseResult =
+  | { type: "flat"; items: BrowseFlatItem[] }
+  | { type: "nested"; groups: BrowseNestedGroup[] }
+  | { type: "tree"; items: BrowseTreeItem[]; groups?: BrowseNestedGroup[] };
+
+export interface BrowseJob {
+  type: "async";
+  jobId: string;
 }

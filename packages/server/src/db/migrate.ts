@@ -30,6 +30,11 @@ import * as m023 from "./migrations/023-semantic-search";
 import * as m024 from "./migrations/024-settings-enrichment";
 import * as m025 from "./migrations/025-agent-usage";
 import * as m026 from "./migrations/026-entities";
+import * as m027 from "./migrations/027-drop-tags-from-fts";
+import * as m028 from "./migrations/028-smart-enrichment";
+import * as m029 from "./migrations/029-org-context";
+import * as m030 from "./migrations/030-browse-cache";
+import * as m031 from "./migrations/031-sync-interval";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -64,6 +69,11 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "024-settings-enrichment": m024,
           "025-agent-usage": m025,
           "026-entities": m026,
+          "027-drop-tags-from-fts": m027,
+          "028-smart-enrichment": m028,
+          "029-org-context": m029,
+          "030-browse-cache": m030,
+          "031-sync-interval": m031,
         };
       },
     },

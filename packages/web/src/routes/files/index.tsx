@@ -15,7 +15,7 @@ import { api } from "@/lib/api";
 import type { SearchResult, UnifiedFile } from "@/lib/api";
 import type { IntegrationDefinition, IntegrationType } from "@/lib/integrations";
 import { getIntegration } from "@/lib/integrations";
-import { GearIcon, SparkleIcon, SpinnerGapIcon } from "@phosphor-icons/react";
+import { SparkleIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
@@ -23,7 +23,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "../dashboard";
 import { ConnectorPicker } from "./connector-picker";
-import { SearchSettingsSheet } from "./enrichment-controls";
 import { EntityExplorer } from "./entity-explorer";
 import { FileDetailSheet } from "./file-detail-sheet";
 import { FileList } from "./file-list";
@@ -54,7 +53,6 @@ function FilesPage() {
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [accessFilter, setAccessFilter] = useState<string | null>(null);
   const [viewingFile, setViewingFile] = useState<string | null>(null);
-  const [showSearchSettings, setShowSearchSettings] = useState(false);
   const [managingConnector, setManagingConnector] = useState<{
     definition: IntegrationDefinition;
     connector: ConnectorConfig;
@@ -118,14 +116,25 @@ function FilesPage() {
   }, [connectors]);
 
   const serverSource = sourceFilter && sourceFilter !== "local" ? sourceFilter : undefined;
+  const serverCategory = typeFilter || undefined;
+  const serverStatus = statusFilter || undefined;
+  const serverAccess = accessFilter || undefined;
 
   const {
     data: filesData,
     isLoading: isLoadingFiles,
     isFetching: isFetchingFiles,
   } = useQuery({
-    queryKey: ["all-files", pageSize, serverSource],
-    queryFn: () => api.integrations.allFiles({ limit: pageSize, offset: 0, source: serverSource }),
+    queryKey: ["all-files", pageSize, serverSource, serverCategory, serverStatus, serverAccess],
+    queryFn: () =>
+      api.integrations.allFiles({
+        limit: pageSize,
+        offset: 0,
+        source: serverSource,
+        category: serverCategory,
+        status: serverStatus,
+        access: serverAccess,
+      }),
     enabled: !!connectorsData,
     refetchInterval: 30000,
   });
@@ -148,28 +157,8 @@ function FilesPage() {
     setPageSize((prev) => prev + PAGE_SIZE);
   }, []);
 
-  const filteredFiles = useMemo(() => {
-    if (isInSearchMode) return allFiles;
-
-    let result = allFiles;
-
-    if (sourceFilter === "local") {
-      result = result.filter((f) => f.source === "local");
-    }
-    if (typeFilter) {
-      result = result.filter((f) => f.contentCategory === typeFilter);
-    }
-    if (statusFilter === "enriched") {
-      result = result.filter((f) => f.hasSummary);
-    } else if (statusFilter === "raw") {
-      result = result.filter((f) => !f.hasSummary);
-    }
-    if (accessFilter) {
-      result = result.filter((f) => f.accessScope === accessFilter);
-    }
-
-    return result;
-  }, [allFiles, isInSearchMode, sourceFilter, typeFilter, statusFilter, accessFilter]);
+  // Filtering is now server-side — allFiles already contains filtered results
+  const filteredFiles = allFiles;
 
   const enrichedCount = allFiles.filter((f) => f.hasSummary).length;
   const localFileCount = allFiles.filter((f) => f.source === "local").length;
@@ -196,6 +185,8 @@ function FilesPage() {
   });
 
   const pendingEnrichment = progressData?.pendingEnrichment ?? 0;
+  const enrichmentStats = progressData?.enrichmentStats;
+  const enrichmentActive = progressData?.enrichmentActive ?? false;
 
   const enrichMutation = useMutation({
     mutationFn: () => api.settings.runEnrichment(),
@@ -229,14 +220,6 @@ function FilesPage() {
               )}
             </div>
           )}
-          <button
-            type="button"
-            onClick={() => setShowSearchSettings(true)}
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            title="Search & enrichment settings"
-          >
-            <GearIcon size={16} />
-          </button>
         </div>
       </div>
 
@@ -282,22 +265,29 @@ function FilesPage() {
             onForcedConnectDone={() => setReconnectTarget(null)}
           />
 
-          {pendingEnrichment > 0 && (
+          {totalFiles > 0 && (
             <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
-              <span className="text-muted-foreground">
-                <SparkleIcon size={12} weight="fill" className="mr-1 inline text-primary" />
-                {pendingEnrichment} file{pendingEnrichment !== 1 ? "s" : ""} pending enrichment (tagging, summaries
-                &amp; embeddings)
-              </span>
+              <div className="flex items-center gap-4 text-muted-foreground">
+                <span>
+                  <SparkleIcon size={12} weight="fill" className="mr-1 inline text-primary" />
+                  {enrichmentStats
+                    ? `${enrichmentStats.total - pendingEnrichment}/${enrichmentStats.total} indexed`
+                    : pendingEnrichment > 0
+                      ? `${pendingEnrichment} file${pendingEnrichment !== 1 ? "s" : ""} need to be indexed`
+                      : "All files indexed"}
+                </span>
+              </div>
               <Button
                 variant="outline"
                 size="sm"
                 className="h-6 gap-1 text-xs"
                 onClick={() => enrichMutation.mutate()}
-                disabled={enrichMutation.isPending}
+                disabled={enrichMutation.isPending || enrichmentActive}
               >
-                {enrichMutation.isPending && <SpinnerGapIcon size={12} className="animate-spin" />}
-                Enrich now
+                {(enrichMutation.isPending || enrichmentActive) && (
+                  <SpinnerGapIcon size={12} className="animate-spin" />
+                )}
+                {enrichmentActive ? "Indexing..." : "Enrich now"}
               </Button>
             </div>
           )}
@@ -348,8 +338,6 @@ function FilesPage() {
       />
 
       <FileDetailSheet fileId={viewingFile} onClose={() => setViewingFile(null)} />
-
-      <SearchSettingsSheet open={showSearchSettings} onOpenChange={setShowSearchSettings} />
     </div>
   );
 }

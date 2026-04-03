@@ -1,17 +1,16 @@
 /**
  * ClickUp connector.
  *
- * Uses the ClickUp v2 REST API via direct HTTP calls.
+ * Uses the ClickUp v2 REST API for tasks and v3 API for Docs.
  * Auth: API key (personal or workspace token) or OAuth.
  *
  * Sync strategy:
  * - Full hierarchical traversal: Workspace → Space → Folder → List → Task
- * - No incremental sync API available — every sync is a full crawl
- * - Tasks stored as structured metadata (title, status, assignee, etc.)
- * - Task descriptions stored as document content when present
- *
- * ClickUp has no real change detection API, so we rely on content hashing
- * to detect updates and avoid redundant writes.
+ * - Docs fetched at workspace level via v3 API
+ * - Includes closed/completed tasks for full historical context
+ * - Incremental sync via `date_updated_gt` timestamp filter on tasks;
+ *   Docs filtered client-side by `date_updated` against cursor
+ * - Content hashing for change detection on unchanged items
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
@@ -25,6 +24,7 @@ import type {
 } from "./types";
 
 const CLICKUP_API = "https://api.clickup.com/api/v2";
+const CLICKUP_API_V3 = "https://api.clickup.com/api/v3";
 const TOKEN_ENDPOINT = "https://app.clickup.com/api/v2/oauth/token";
 
 interface ClickUpTask {
@@ -33,7 +33,7 @@ interface ClickUpTask {
   description?: string;
   status: { status: string; type: string };
   priority?: { priority: string } | null;
-  assignees: Array<{ username: string; profilePicture?: string }>;
+  assignees: Array<{ id?: number; username: string; email?: string; profilePicture?: string }>;
   tags: Array<{ name: string }>;
   date_created?: string;
   date_updated?: string;
@@ -66,6 +66,25 @@ interface ClickUpList {
   id: string;
   name: string;
   task_count?: number;
+}
+
+interface ClickUpDoc {
+  id: string;
+  name: string;
+  date_created?: string;
+  date_updated?: string;
+  parent?: { id: string; type: number };
+  workspace_id: string;
+}
+
+interface ClickUpDocPage {
+  id: string;
+  name: string;
+  content?: string;
+  order_index?: number;
+  date_created?: string;
+  date_updated?: string;
+  pages?: ClickUpDocPage[];
 }
 
 function getAccessToken(credentials: ConnectorCredentials): string {
@@ -129,6 +148,55 @@ async function clickupRequest(path: string, token: string, logger: Logger, attem
   return response.json();
 }
 
+async function clickupRequestV3(path: string, token: string, logger: Logger, attempt = 1): Promise<unknown> {
+  const url = `${CLICKUP_API_V3}${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { Authorization: token },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const cause = err instanceof Error && "cause" in err ? ((err.cause as Error)?.message ?? "") : "";
+    const detail = cause ? `${(err as Error).message} (${cause})` : (err as Error).message;
+
+    if (attempt < MAX_RETRIES) {
+      const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+      logger.warn({ path, attempt, detail, waitMs }, "v3 network error, retrying");
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return clickupRequestV3(path, token, logger, attempt + 1);
+    }
+
+    throw new Error(`ClickUp v3 API ${path} network error after ${MAX_RETRIES} attempts: ${detail}`);
+  }
+
+  if (response.status === 429) {
+    if (attempt >= MAX_RETRIES) {
+      throw new Error(`ClickUp v3 API ${path} rate limited after ${MAX_RETRIES} attempts`);
+    }
+    const retryAfter = response.headers.get("Retry-After");
+    const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : 5000;
+    logger.debug({ path, waitMs }, "v3 rate limited, waiting");
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return clickupRequestV3(path, token, logger, attempt + 1);
+  }
+
+  if (!response.ok) {
+    const body = await response.text();
+
+    if (response.status >= 500 && attempt < MAX_RETRIES) {
+      const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+      logger.warn({ path, status: response.status, attempt, waitMs }, "v3 server error, retrying");
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return clickupRequestV3(path, token, logger, attempt + 1);
+    }
+
+    throw new Error(`ClickUp v3 API ${path} failed (${response.status}): ${body}`);
+  }
+
+  return response.json();
+}
+
 function parseClickUpTimestamp(ms: string | null | undefined): string | null {
   if (!ms) return null;
   const num = Number.parseInt(ms, 10);
@@ -143,8 +211,12 @@ function contentHash(content: string): string {
 
 function taskToSyncedItem(
   task: ClickUpTask,
+  workspaceName: string,
+  workspaceId: string,
   spaceName: string,
+  spaceId: string,
   folderName: string | undefined,
+  folderId: string | undefined,
   accessScope?: SyncedItem["accessScope"],
 ): SyncedItem {
   const hasDescription = task.description && task.description.trim().length > 0;
@@ -158,13 +230,23 @@ function taskToSyncedItem(
     `List: ${task.list.name}`,
     folderName ? `Folder: ${folderName}` : null,
     `Space: ${spaceName}`,
+    `Workspace: ${workspaceName}`,
   ]
     .filter(Boolean)
     .join(" | ");
 
   const content = hasDescription ? `${task.name}\n\n${metadata}\n\n${task.description}` : `${task.name}\n\n${metadata}`;
 
-  const sourcePath = [spaceName, folderName, task.list.name].filter(Boolean).join(" / ");
+  // Full hierarchical path: Workspace / Space / Folder / List
+  const sourcePath = [workspaceName, spaceName, folderName, task.list.name].filter(Boolean).join(" / ");
+
+  const parentEntities: SyncedItem["parentEntities"] = [
+    { source: "clickup", sourceId: workspaceId, contextSnippet: `In workspace: ${workspaceName}` },
+    { source: "clickup", sourceId: spaceId, contextSnippet: `In space: ${spaceName}` },
+  ];
+  if (folderId && folderName) {
+    parentEntities.push({ source: "clickup", sourceId: folderId, contextSnippet: `In folder: ${folderName}` });
+  }
 
   return {
     providerFileId: task.id,
@@ -179,6 +261,52 @@ function taskToSyncedItem(
     sourceUpdatedAt: parseClickUpTimestamp(task.date_updated ?? null),
     accessScope,
     assignees: task.assignees.filter((a) => a.username).map((a) => ({ name: a.username })),
+    parentEntities,
+  };
+}
+
+/** Flatten nested doc pages into a single ordered list. */
+function flattenPages(pages: ClickUpDocPage[], depth = 0): Array<ClickUpDocPage & { depth: number }> {
+  const result: Array<ClickUpDocPage & { depth: number }> = [];
+  const sorted = [...pages].sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+  for (const page of sorted) {
+    result.push({ ...page, depth });
+    if (page.pages?.length) {
+      result.push(...flattenPages(page.pages, depth + 1));
+    }
+  }
+  return result;
+}
+
+function docToSyncedItem(
+  doc: ClickUpDoc,
+  pages: ClickUpDocPage[],
+  accessScope?: SyncedItem["accessScope"],
+): SyncedItem {
+  const flat = flattenPages(pages);
+  const pageContent = flat
+    .map((p) => {
+      const level = Math.min(p.depth + 2, 6); // ## for top-level, ### for nested, etc.
+      const header = p.name ? `${"#".repeat(level)} ${p.name}` : "";
+      return [header, p.content?.trim()].filter(Boolean).join("\n\n");
+    })
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+
+  const content = pageContent ? `# ${doc.name}\n\n${pageContent}` : `# ${doc.name}`;
+
+  return {
+    providerFileId: `doc:${doc.id}`,
+    providerUrl: `https://app.clickup.com/${doc.workspace_id}/docs/${doc.id}`,
+    fileName: doc.name,
+    fileType: "doc",
+    contentCategory: "document",
+    content,
+    sourcePath: null,
+    contentHash: contentHash(content),
+    sourceCreatedAt: parseClickUpTimestamp(doc.date_created ?? null),
+    sourceUpdatedAt: parseClickUpTimestamp(doc.date_updated ?? null),
+    accessScope,
   };
 }
 
@@ -216,23 +344,53 @@ export function createClickUpConnector(): Connector {
   return {
     type: "clickup",
 
+    assigneeSourceRefKey(name: string) {
+      return `clickup:assignee:${name}`;
+    },
+
     async validateCredentials(credentials) {
       const token = getAccessToken(credentials);
       await clickupRequest("/user", token, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, scopeConfig, logger, onEntitySeed, onPersonSeed }) {
+    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed, onPersonSeed }) {
       const token = getAccessToken(credentials);
+      const allowedWorkspaces = (scopeConfig.workspaces as string[] | undefined) ?? [];
       const allowedSpaces = (scopeConfig.spaces as string[] | undefined) ?? [];
       const seenAssignees = new Map<string, { username: string; email?: string }>();
 
+      // Incremental: convert cursor to Unix ms for date_updated_gt filter
+      const sinceMs = cursor ? new Date(cursor).getTime() : undefined;
+      if (sinceMs) {
+        logger.info({ cursor, sinceMs }, "Incremental sync — filtering tasks updated after cursor");
+      }
+
       const teamsRes = (await clickupRequest("/team", token, logger)) as {
-        teams: Array<{ id: string; members: ClickUpMember[] }>;
+        teams: Array<{ id: string; name: string; members: ClickUpMember[] }>;
       };
 
       for (const team of teamsRes.teams) {
+        // Workspace filter: skip workspaces not in scope
+        if (allowedWorkspaces.length > 0 && !allowedWorkspaces.includes(team.id)) {
+          continue;
+        }
+        const workspaceName = team.name.trim();
         const workspaceEmails = extractMemberEmails(team.members);
-        logger.info({ teamId: team.id, memberCount: workspaceEmails.length }, "Workspace members resolved");
+        logger.info(
+          { teamId: team.id, workspaceName, memberCount: workspaceEmails.length },
+          "Workspace members resolved",
+        );
+
+        // Seed workspace as top-level entity
+        if (onEntitySeed) {
+          await onEntitySeed({
+            name: workspaceName,
+            sourceType: "clickup_workspace",
+            source: "clickup",
+            sourceId: team.id,
+            metadata: { memberCount: workspaceEmails.length },
+          });
+        }
 
         // Seed workspace members as person entities
         if (onPersonSeed) {
@@ -249,6 +407,14 @@ export function createClickUpConnector(): Connector {
           }
         }
 
+        // Workspace-level access scope (used for docs and public spaces)
+        const workspaceScope: SyncedItem["accessScope"] = {
+          scopeType: "workspace",
+          providerScopeId: team.id,
+          label: workspaceName,
+          memberEmails: workspaceEmails,
+        };
+
         const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
           spaces: ClickUpSpace[];
         };
@@ -258,14 +424,14 @@ export function createClickUpConnector(): Connector {
             continue;
           }
 
-          // Seed space as entity
+          // Seed space as entity with workspace context
           if (onEntitySeed) {
             await onEntitySeed({
               name: space.name,
               sourceType: "clickup_space",
               source: "clickup",
               sourceId: space.id,
-              metadata: { private: space.private },
+              metadata: { private: space.private, workspaceName, workspaceId: team.id },
             });
           }
 
@@ -285,12 +451,7 @@ export function createClickUpConnector(): Connector {
               "Private space — using space members",
             );
           } else {
-            spaceScope = {
-              scopeType: "workspace",
-              providerScopeId: team.id,
-              label: "Workspace",
-              memberEmails: workspaceEmails,
-            };
+            spaceScope = workspaceScope;
             logger.debug(
               { spaceId: space.id, spaceName: space.name, memberCount: workspaceEmails.length },
               "Public space — using workspace members",
@@ -301,14 +462,20 @@ export function createClickUpConnector(): Connector {
             folders: ClickUpFolder[];
           };
           for (const folder of foldersRes.folders) {
-            // Seed folder as entity
+            // Seed folder as entity with workspace + space context
             if (onEntitySeed) {
               await onEntitySeed({
                 name: folder.name,
                 sourceType: "clickup_folder",
                 source: "clickup",
                 sourceId: folder.id,
-                metadata: { spaceName: space.name, path: `${space.name} / ${folder.name}` },
+                metadata: {
+                  workspaceName,
+                  workspaceId: team.id,
+                  spaceName: space.name,
+                  spaceId: space.id,
+                  path: `${workspaceName} / ${space.name} / ${folder.name}`,
+                },
               });
             }
 
@@ -316,7 +483,20 @@ export function createClickUpConnector(): Connector {
               lists: ClickUpList[];
             };
             for (const list of listsRes.lists) {
-              yield* fetchTasksFromList(list.id, space.name, folder.name, token, logger, spaceScope, seenAssignees);
+              yield* fetchTasksFromList(
+                list.id,
+                workspaceName,
+                team.id,
+                space.name,
+                space.id,
+                folder.name,
+                folder.id,
+                token,
+                logger,
+                spaceScope,
+                seenAssignees,
+                sinceMs,
+              );
             }
           }
 
@@ -324,9 +504,25 @@ export function createClickUpConnector(): Connector {
             lists: ClickUpList[];
           };
           for (const list of folderlessListsRes.lists) {
-            yield* fetchTasksFromList(list.id, space.name, undefined, token, logger, spaceScope, seenAssignees);
+            yield* fetchTasksFromList(
+              list.id,
+              workspaceName,
+              team.id,
+              space.name,
+              space.id,
+              undefined,
+              undefined,
+              token,
+              logger,
+              spaceScope,
+              seenAssignees,
+              sinceMs,
+            );
           }
         }
+
+        // Sync ClickUp Docs at workspace level
+        yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
       }
 
       // Seed assignees collected during task traversal as person entities
@@ -344,7 +540,8 @@ export function createClickUpConnector(): Connector {
     },
 
     async getCursor() {
-      return null;
+      // 1-minute overlap buffer to handle items updated during sync
+      return new Date(Date.now() - 60_000).toISOString();
     },
 
     async refreshTokens(credentials) {
@@ -353,36 +550,150 @@ export function createClickUpConnector(): Connector {
       }
       return refreshClickUpToken(credentials);
     },
+
+    async browse({ credentials }) {
+      const token = getAccessToken(credentials);
+      const workspaces = await browseClickUpWorkspaces(token);
+      return {
+        type: "nested" as const,
+        groups: workspaces.map((w) => ({
+          id: w.id,
+          name: w.name,
+          items: w.spaces.map((s) => ({ id: s.id, name: s.name })),
+        })),
+      };
+    },
   };
 }
 
 async function* fetchTasksFromList(
   listId: string,
+  workspaceName: string,
+  workspaceId: string,
   spaceName: string,
+  spaceId: string,
   folderName: string | undefined,
+  folderId: string | undefined,
   token: string,
   logger: Logger,
   accessScope?: SyncedItem["accessScope"],
   seenAssignees?: Map<string, { username: string; email?: string }>,
+  sinceMs?: number,
 ): AsyncGenerator<SyncedItem> {
   try {
-    const tasksRes = (await clickupRequest(
-      `/list/${listId}/task?include_subtasks=true&subtasks=true`,
-      token,
-      logger,
-    )) as { tasks: ClickUpTask[] };
+    let url = `/list/${listId}/task?include_subtasks=true&subtasks=true&include_closed=true`;
+    if (sinceMs) {
+      url += `&date_updated_gt=${sinceMs}`;
+    }
+
+    const tasksRes = (await clickupRequest(url, token, logger)) as { tasks: ClickUpTask[] };
 
     for (const task of tasksRes.tasks) {
       if (seenAssignees) {
         for (const assignee of task.assignees) {
           if (assignee.username && !seenAssignees.has(assignee.username)) {
-            seenAssignees.set(assignee.username, { username: assignee.username });
+            seenAssignees.set(assignee.username, { username: assignee.username, email: assignee.email });
           }
         }
       }
-      yield taskToSyncedItem(task, spaceName, folderName, accessScope);
+      yield taskToSyncedItem(task, workspaceName, workspaceId, spaceName, spaceId, folderName, folderId, accessScope);
     }
   } catch (err) {
     logger.warn({ err, listId }, "Failed to fetch tasks from list");
   }
+}
+
+async function* fetchDocsFromWorkspace(
+  workspaceId: string,
+  token: string,
+  logger: Logger,
+  accessScope?: SyncedItem["accessScope"],
+  since?: string,
+): AsyncGenerator<SyncedItem> {
+  try {
+    // Paginate through all docs using cursor
+    let docCursor: string | undefined;
+    const allDocs: ClickUpDoc[] = [];
+    do {
+      const url = docCursor ? `/workspaces/${workspaceId}/docs?cursor=${docCursor}` : `/workspaces/${workspaceId}/docs`;
+      const docsRes = (await clickupRequestV3(url, token, logger)) as {
+        docs: ClickUpDoc[];
+        next_cursor?: string;
+      };
+      if (docsRes.docs?.length) allDocs.push(...docsRes.docs);
+      docCursor = docsRes.next_cursor || undefined;
+    } while (docCursor);
+
+    logger.info({ workspaceId, docCount: allDocs.length }, "Fetched workspace docs");
+
+    for (const doc of allDocs) {
+      // Incremental: skip docs not updated since last sync
+      if (since && doc.date_updated) {
+        const updatedAt = parseClickUpTimestamp(doc.date_updated);
+        if (updatedAt && updatedAt < since) {
+          continue;
+        }
+      }
+
+      try {
+        // v3 pages endpoint returns a flat array, not { pages: [...] }
+        const pages = (await clickupRequestV3(
+          `/workspaces/${workspaceId}/docs/${doc.id}/pages`,
+          token,
+          logger,
+        )) as ClickUpDocPage[];
+
+        logger.debug({ docId: doc.id, docName: doc.name, pageCount: pages.length }, "Doc pages fetched");
+
+        yield docToSyncedItem(doc, pages, accessScope);
+      } catch (err) {
+        logger.warn({ err, docId: doc.id, docName: doc.name }, "Failed to fetch doc pages");
+        // Yield doc without page content rather than skipping entirely
+        yield docToSyncedItem(doc, [], accessScope);
+      }
+    }
+  } catch (err) {
+    logger.warn({ err, workspaceId }, "Failed to fetch docs from workspace");
+  }
+}
+
+// ── Browse API (for scope selection) ────────────────────────────────────────
+
+export interface ClickUpWorkspaceInfo {
+  id: string;
+  name: string;
+  memberCount: number;
+  spaces: Array<{ id: string; name: string; private: boolean }>;
+}
+
+/**
+ * List workspaces and their spaces for the scope picker.
+ * Fast — just 1 + N API calls (1 for workspaces, 1 per workspace for spaces).
+ */
+export async function browseClickUpWorkspaces(token: string): Promise<ClickUpWorkspaceInfo[]> {
+  const logger = pino({ level: "silent" });
+  const teamsRes = (await clickupRequest("/team", token, logger)) as {
+    teams: Array<{ id: string; name: string; members: ClickUpMember[] }>;
+  };
+
+  const workspaces: ClickUpWorkspaceInfo[] = [];
+
+  for (const team of teamsRes.teams) {
+    const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
+      spaces: Array<{ id: string; name: string; private?: boolean }>;
+    };
+
+    workspaces.push({
+      id: team.id,
+      name: team.name.trim(),
+      memberCount: team.members.length,
+      spaces: spacesRes.spaces.map((s) => ({
+        id: s.id,
+        name: s.name,
+        private: s.private ?? false,
+      })),
+    });
+  }
+
+  return workspaces;
 }

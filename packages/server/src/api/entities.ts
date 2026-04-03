@@ -69,7 +69,7 @@ export function entityRoutes(db: Kysely<DB>) {
         ),
       )
       .select(
-        sql<string>`(SELECT mentioned_at FROM entity_mentions WHERE entity_mentions.entity_id = entities.id ORDER BY mentioned_at DESC LIMIT 1)`.as(
+        sql<string>`(SELECT COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at) FROM entity_mentions INNER JOIN indexed_files ON indexed_files.id = entity_mentions.indexed_file_id WHERE entity_mentions.entity_id = entities.id ORDER BY COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at) DESC LIMIT 1)`.as(
           "last_mention_at",
         ),
       );
@@ -140,6 +140,78 @@ export function entityRoutes(db: Kysely<DB>) {
         updatedAt: e.updated_at,
       })),
       total: Number(countResult?.total ?? 0),
+    });
+  });
+
+  /**
+   * POST /api/entities/reset
+   * Delete entities by category. Body: { categories: ["manual", "connectors", "ai"] }
+   * - manual: org-type entities NOT created by AI (no metadata.origin = "ai")
+   * - connectors: entities with non-org source_types (clickup_*, notion_*, etc.)
+   * - ai: entities with metadata.origin = "ai"
+   * Must be registered before /:id to prevent param capture.
+   */
+  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
+
+  routes.post("/reset", async (c) => {
+    const body = (await c.req.json()) as { categories?: string[] };
+    const categories = new Set(body.categories ?? []);
+
+    if (categories.size === 0) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "At least one category is required" } }, 400);
+    }
+
+    const includeConnectors = categories.has("connectors");
+    const includeAi = categories.has("ai");
+    const includeManual = categories.has("manual");
+
+    const toDelete = await db
+      .selectFrom("entities")
+      .select("id")
+      .where((eb) => {
+        const parts = [];
+        if (includeConnectors) {
+          parts.push(eb("source_type", "not in", ORG_SOURCE_TYPES));
+        }
+        if (includeAi) {
+          parts.push(eb(sql`json_extract(metadata, '$.origin')`, "=", "ai"));
+        }
+        if (includeManual) {
+          parts.push(
+            eb.and([
+              eb("source_type", "in", ORG_SOURCE_TYPES),
+              eb.or([
+                eb(sql`json_extract(metadata, '$.origin')`, "is", null),
+                eb(sql`json_extract(metadata, '$.origin')`, "!=", "ai"),
+              ]),
+            ]),
+          );
+        }
+        return parts.length === 1 ? parts[0] : eb.or(parts);
+      })
+      .execute();
+
+    if (toDelete.length === 0) {
+      return c.json({ message: "No entities matched.", entitiesDeleted: 0, candidatesCleared: 0 });
+    }
+
+    const ids = toDelete.map((e) => e.id);
+
+    await db.deleteFrom("entity_mentions").where("entity_id", "in", ids).execute();
+    await db.deleteFrom("entity_source_refs").where("entity_id", "in", ids).execute();
+    await db.deleteFrom("entities").where("id", "in", ids).execute();
+
+    // Clear candidates when connectors or AI selected (they get re-discovered)
+    let candidatesCleared = 0;
+    if (includeConnectors || includeAi) {
+      const result = await db.deleteFrom("entity_candidates").execute();
+      candidatesCleared = Number(result[0]?.numDeletedRows ?? 0);
+    }
+
+    return c.json({
+      message: `Deleted ${ids.length} entities.`,
+      entitiesDeleted: ids.length,
+      candidatesCleared,
     });
   });
 
@@ -297,15 +369,24 @@ export function entityRoutes(db: Kysely<DB>) {
         "indexed_files.source",
         "indexed_files.source_path",
         "indexed_files.provider_url",
+        "indexed_files.source_updated_at",
+        "indexed_files.source_created_at",
       ])
       .where("entity_mentions.entity_id", "=", entityId)
-      .orderBy("entity_mentions.mentioned_at", "desc");
+      .orderBy(
+        sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+        "desc",
+      );
 
     if (sourceFilter && sourceFilter.length > 0) {
       query = query.where("indexed_files.source", "in", sourceFilter);
     }
     if (since) {
-      query = query.where("entity_mentions.mentioned_at", ">=", since);
+      query = query.where(
+        sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+        ">=",
+        since,
+      );
     }
 
     query = query.limit(limit).offset(offset);
@@ -321,7 +402,11 @@ export function entityRoutes(db: Kysely<DB>) {
       countQuery = countQuery.where("indexed_files.source", "in", sourceFilter);
     }
     if (since) {
-      countQuery = countQuery.where("entity_mentions.mentioned_at", ">=", since);
+      countQuery = countQuery.where(
+        sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+        ">=",
+        since,
+      );
     }
     const countResult = await countQuery.executeTakeFirst();
 
@@ -331,6 +416,7 @@ export function entityRoutes(db: Kysely<DB>) {
         contextSnippet: m.context_snippet,
         chunkIndex: m.chunk_index,
         mentionedAt: m.mentioned_at,
+        sourceDate: m.source_updated_at ?? m.source_created_at ?? m.mentioned_at,
         file: {
           id: m.file_id,
           fileName: m.file_name,

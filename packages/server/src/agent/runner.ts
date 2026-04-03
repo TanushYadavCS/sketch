@@ -114,6 +114,7 @@ export interface RunAgentParams {
     messageRef: string;
   }>;
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
+  experimentalFlag?: boolean;
 }
 
 /**
@@ -222,6 +223,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
+    experimentalFlag: params.experimentalFlag,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger);

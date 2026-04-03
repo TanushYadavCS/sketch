@@ -11,6 +11,7 @@
  */
 import { Hono } from "hono";
 import { z } from "zod";
+import { VALID_CONNECTOR_TYPES } from "../connectors/registry";
 import type { ConnectorType } from "../connectors/types";
 import type { createProviderIdentityRepository } from "../db/repositories/provider-identities";
 import type { createUserRepository } from "../db/repositories/users";
@@ -19,17 +20,15 @@ import { requireAdmin } from "./middleware";
 type IdentityRepo = ReturnType<typeof createProviderIdentityRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
-const VALID_PROVIDERS = ["google_drive", "clickup", "notion", "linear"] as const;
-
 const connectSchema = z.object({
   userId: z.string().min(1, "User ID is required"),
-  provider: z.enum(VALID_PROVIDERS),
+  provider: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
   providerUserId: z.string().min(1, "Provider user ID is required"),
   providerEmail: z.string().email().optional().nullable(),
 });
 
 const disconnectSchema = z.object({
-  provider: z.enum(VALID_PROVIDERS),
+  provider: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
 });
 
 export function providerIdentityRoutes(identityRepo: IdentityRepo, userRepo: UserRepo) {
@@ -101,7 +100,7 @@ export function providerIdentityRoutes(identityRepo: IdentityRepo, userRepo: Use
     }
 
     const provider = c.req.param("provider") as ConnectorType;
-    if (!VALID_PROVIDERS.includes(provider as (typeof VALID_PROVIDERS)[number])) {
+    if (!VALID_CONNECTOR_TYPES.includes(provider as ConnectorType)) {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid provider" } }, 400);
     }
 
@@ -112,7 +111,7 @@ export function providerIdentityRoutes(identityRepo: IdentityRepo, userRepo: Use
   /** List all users connected to a specific provider (admin overview). */
   routes.get("/provider/:provider", async (c) => {
     const provider = c.req.param("provider") as ConnectorType;
-    if (!VALID_PROVIDERS.includes(provider as (typeof VALID_PROVIDERS)[number])) {
+    if (!VALID_CONNECTOR_TYPES.includes(provider as ConnectorType)) {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid provider" } }, 400);
     }
 

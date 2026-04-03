@@ -71,6 +71,8 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         googleOauthClientSecret: string | null;
         geminiApiKey: string | null;
         enrichmentEnabled: number | null;
+        syncIntervalMinutes: number | null;
+        orgContext: string | null;
       }>,
     ) {
       const updates: Record<string, string | number | null> = {};
@@ -78,6 +80,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       if (data.adminPasswordHash !== undefined) updates.admin_password_hash = data.adminPasswordHash;
       if (data.jwtSecret !== undefined) updates.jwt_secret = data.jwtSecret;
       if (data.orgName !== undefined) updates.org_name = data.orgName;
+      if (data.orgContext !== undefined) updates.org_context = data.orgContext;
       if (data.botName !== undefined) updates.bot_name = data.botName;
       if (data.onboardingCompletedAt !== undefined) updates.onboarding_completed_at = data.onboardingCompletedAt;
       if (data.slackBotToken !== undefined) updates.slack_bot_token = data.slackBotToken;
@@ -97,6 +100,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       if (data.googleOauthClientSecret !== undefined) updates.google_oauth_client_secret = data.googleOauthClientSecret;
       if (data.geminiApiKey !== undefined) updates.gemini_api_key = data.geminiApiKey;
       if (data.enrichmentEnabled !== undefined) updates.enrichment_enabled = data.enrichmentEnabled;
+      if (data.syncIntervalMinutes !== undefined) updates.sync_interval_minutes = data.syncIntervalMinutes;
 
       if (Object.keys(updates).length === 0) return;
 

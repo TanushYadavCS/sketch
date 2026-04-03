@@ -11,6 +11,7 @@
  * Other integrations connect immediately after credential validation.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
+import { ScopeCount, ScopeGroup, ScopeItem, ScopeList, ScopeSelectAll, ScopeSubItem } from "@/components/scope-picker";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import {
@@ -45,6 +46,19 @@ interface SharedDrive {
   name: string;
 }
 
+interface NotionPage {
+  id: string;
+  title: string;
+  url: string;
+}
+
+interface ClickUpWorkspace {
+  id: string;
+  name: string;
+  memberCount: number;
+  spaces: Array<{ id: string; name: string; private: boolean }>;
+}
+
 interface ConnectIntegrationDialogProps {
   integration: IntegrationDefinition | null;
   open: boolean;
@@ -61,13 +75,61 @@ export function ConnectIntegrationDialog({
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
 
   // Google Drive OAuth state
-  const [step, setStep] = useState<"credentials" | "drives" | "oauth-config">("credentials");
+  const [step, setStep] = useState<"credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "oauth-config">(
+    "credentials",
+  );
   const [sharedDrives, setSharedDrives] = useState<SharedDrive[]>([]);
   const [selectedDriveIds, setSelectedDriveIds] = useState<Set<string>>(new Set());
   const [rootFolders, setRootFolders] = useState<SharedDrive[]>([]);
   const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string>>(new Set());
 
+  // ClickUp scope state
+  const [clickUpWorkspaces, setClickUpWorkspaces] = useState<ClickUpWorkspace[]>([]);
+  const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState<Set<string>>(new Set());
+  const [selectedSpaceIds, setSelectedSpaceIds] = useState<Set<string>>(new Set());
+
+  // Notion scope state
+  const [notionRootPages, setNotionRootPages] = useState<NotionPage[]>([]);
+  const [selectedNotionPageIds, setSelectedNotionPageIds] = useState<Set<string>>(new Set());
+  const [notionBrowseId, setNotionBrowseId] = useState<string | null>(null);
+  const [notionPagesScanned, setNotionPagesScanned] = useState(0);
+  const [notionScanDone, setNotionScanDone] = useState(false);
+
   const isOAuthRedirect = integration?.oauthRedirect === true;
+
+  // Notion browse polling — updates root pages list in real-time as scan progresses
+  useEffect(() => {
+    if (!notionBrowseId) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const status = await api.integrations.browseNotionStatus(notionBrowseId);
+          if (cancelled) break;
+
+          setNotionPagesScanned(status.pagesScanned);
+          setNotionRootPages(status.rootPages.map((p) => ({ id: p.id, title: p.title, url: p.url })));
+
+          if (!status.scanning) {
+            setNotionScanDone(true);
+            if (status.error) {
+              toast.error(`Notion scan failed: ${status.error}`);
+            }
+            break;
+          }
+        } catch {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    };
+
+    poll();
+    return () => {
+      cancelled = true;
+    };
+  }, [notionBrowseId]);
 
   // Check if Google OAuth is configured (for OAuth redirect integrations)
   const oauthStatus = useQuery({
@@ -105,15 +167,65 @@ export function ConnectIntegrationDialog({
     },
   });
 
-  /** For non-OAuth-redirect integrations: connect directly. */
+  /** For non-OAuth-redirect integrations: connect directly (or browse scope first). */
   const validateMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
       const credentials = buildCredentials();
+
+      // ClickUp: browse workspaces and spaces, show picker
+      if (integration.type === "clickup") {
+        const apiKey = (credentials.api_key as string) ?? "";
+        const result = await api.integrations.browseClickUp({ api_key: apiKey });
+        setClickUpWorkspaces(result.workspaces);
+        setSelectedWorkspaceIds(new Set());
+        setSelectedSpaceIds(new Set());
+        setStep("clickup-workspaces");
+        return;
+      }
+
+      // Notion: validate creds, start background scan, show picker immediately
+      if (integration.type === "notion") {
+        const apiKey = (credentials.api_key as string) ?? "";
+        const result = await api.integrations.browseNotionStart({ api_key: apiKey });
+        setNotionBrowseId(result.browseId);
+        setNotionRootPages([]);
+        setNotionPagesScanned(0);
+        setNotionScanDone(false);
+        setSelectedNotionPageIds(new Set());
+        setStep("notion-pages");
+        return;
+      }
+
       await api.integrations.connect({
         connectorType: integration.type,
         authType: integration.authType,
         credentials,
+      });
+    },
+    onSuccess: () => {
+      // For Notion/ClickUp, success means we loaded the scope picker — don't close
+      if (integration?.type === "notion" || integration?.type === "clickup") return;
+      toast.success(`${integration?.name} connected successfully.`);
+      resetAndClose();
+      onConnected();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to connect. Check your credentials and try again.");
+    },
+  });
+
+  /** Notion: connect with selected root pages. */
+  const connectWithNotionPagesMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration) throw new Error("No integration selected");
+      const credentials = buildCredentials();
+      const scopeConfig = { rootPages: Array.from(selectedNotionPageIds) };
+      return api.integrations.connect({
+        connectorType: integration.type,
+        authType: integration.authType,
+        credentials,
+        scopeConfig,
       });
     },
     onSuccess: () => {
@@ -122,7 +234,33 @@ export function ConnectIntegrationDialog({
       onConnected();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to connect. Check your credentials and try again.");
+      toast.error(error.message || "Failed to connect.");
+    },
+  });
+
+  /** ClickUp: connect with selected workspaces + spaces. */
+  const connectWithClickUpMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration) throw new Error("No integration selected");
+      const credentials = buildCredentials();
+      const scopeConfig = {
+        workspaces: Array.from(selectedWorkspaceIds),
+        spaces: Array.from(selectedSpaceIds),
+      };
+      return api.integrations.connect({
+        connectorType: integration.type,
+        authType: integration.authType,
+        credentials,
+        scopeConfig,
+      });
+    },
+    onSuccess: () => {
+      toast.success(`${integration?.name} connected successfully.`);
+      resetAndClose();
+      onConnected();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to connect.");
     },
   });
 
@@ -167,6 +305,14 @@ export function ConnectIntegrationDialog({
     setSelectedDriveIds(new Set());
     setRootFolders([]);
     setSelectedFolderIds(new Set());
+    setClickUpWorkspaces([]);
+    setSelectedWorkspaceIds(new Set());
+    setSelectedSpaceIds(new Set());
+    setNotionRootPages([]);
+    setSelectedNotionPageIds(new Set());
+    setNotionBrowseId(null);
+    setNotionPagesScanned(0);
+    setNotionScanDone(false);
     onOpenChange(false);
   };
 
@@ -198,8 +344,21 @@ export function ConnectIntegrationDialog({
   };
 
   const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
+  const toggleNotionPage = (pageId: string) => {
+    setSelectedNotionPageIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(pageId)) next.delete(pageId);
+      else next.add(pageId);
+      return next;
+    });
+  };
+
   const isPending =
-    validateMutation.isPending || connectWithDrivesMutation.isPending || configureOAuthMutation.isPending;
+    validateMutation.isPending ||
+    connectWithDrivesMutation.isPending ||
+    connectWithNotionPagesMutation.isPending ||
+    connectWithClickUpMutation.isPending ||
+    configureOAuthMutation.isPending;
 
   if (!integration) return null;
 
@@ -390,10 +549,158 @@ export function ConnectIntegrationDialog({
                 {isPending ? (
                   <>
                     <SpinnerGapIcon size={14} className="animate-spin" />
-                    Connecting...
+                    {integration.type === "notion" ? "Validating..." : "Connecting..."}
                   </>
                 ) : (
                   "Connect"
+                )}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : step === "clickup-workspaces" ? (
+          /* ClickUp: Workspace + space picker */
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Select Workspaces
+              </DialogTitle>
+              <DialogDescription>
+                Choose which workspaces and spaces to sync. You can change this later.
+              </DialogDescription>
+            </DialogHeader>
+
+            <ClickUpWorkspacePicker
+              workspaces={clickUpWorkspaces}
+              selectedWorkspaceIds={selectedWorkspaceIds}
+              selectedSpaceIds={selectedSpaceIds}
+              onToggleWorkspace={(id) => {
+                setSelectedWorkspaceIds((prev) => {
+                  const next = new Set(prev);
+                  const ws = clickUpWorkspaces.find((w) => w.id === id);
+                  if (next.has(id)) {
+                    next.delete(id);
+                    // Deselect all spaces in this workspace
+                    if (ws) {
+                      setSelectedSpaceIds((sp) => {
+                        const n = new Set(sp);
+                        for (const s of ws.spaces) n.delete(s.id);
+                        return n;
+                      });
+                    }
+                  } else {
+                    next.add(id);
+                    // Select all spaces in this workspace
+                    if (ws) {
+                      setSelectedSpaceIds((sp) => {
+                        const n = new Set(sp);
+                        for (const s of ws.spaces) n.add(s.id);
+                        return n;
+                      });
+                    }
+                  }
+                  return next;
+                });
+              }}
+              onToggleSpace={(id) => {
+                setSelectedSpaceIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                });
+              }}
+              disabled={connectWithClickUpMutation.isPending}
+            />
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setStep("credentials")}
+                disabled={connectWithClickUpMutation.isPending}
+              >
+                <ArrowLeftIcon size={14} />
+                Back
+              </Button>
+              <Button
+                onClick={() => connectWithClickUpMutation.mutate()}
+                disabled={connectWithClickUpMutation.isPending || selectedSpaceIds.size === 0}
+              >
+                {connectWithClickUpMutation.isPending ? (
+                  <>
+                    <SpinnerGapIcon size={14} className="animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  `Connect ${selectedSpaceIds.size} space${selectedSpaceIds.size === 1 ? "" : "s"}`
+                )}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : step === "notion-pages" ? (
+          /* Notion: Root page picker with live scanning */
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Select Pages to Sync
+              </DialogTitle>
+              <DialogDescription>
+                Choose which top-level pages to sync. Only content under selected pages will be indexed.
+              </DialogDescription>
+            </DialogHeader>
+
+            {/* Scanning status bar */}
+            {!notionScanDone && (
+              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <SpinnerGapIcon size={14} className="shrink-0 animate-spin" />
+                <span>
+                  Scanning workspace...{" "}
+                  {notionPagesScanned > 0 && `${notionPagesScanned.toLocaleString()} pages scanned`}
+                  {notionRootPages.length > 0 && `, ${notionRootPages.length} top-level pages found`}
+                </span>
+              </div>
+            )}
+
+            {notionRootPages.length > 0 ? (
+              <NotionRootPagePicker
+                pages={notionRootPages}
+                selectedIds={selectedNotionPageIds}
+                onToggle={toggleNotionPage}
+                disabled={connectWithNotionPagesMutation.isPending}
+              />
+            ) : notionScanDone ? (
+              <div className="rounded-lg border border-border bg-muted/20 px-4 py-6 text-center">
+                <p className="text-sm text-muted-foreground">No top-level pages found.</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Make sure you've shared pages with the Notion integration.
+                </p>
+              </div>
+            ) : null}
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setNotionBrowseId(null);
+                  setStep("credentials");
+                }}
+                disabled={connectWithNotionPagesMutation.isPending}
+              >
+                <ArrowLeftIcon size={14} />
+                Back
+              </Button>
+              <Button
+                onClick={() => connectWithNotionPagesMutation.mutate()}
+                disabled={connectWithNotionPagesMutation.isPending || selectedNotionPageIds.size === 0}
+              >
+                {connectWithNotionPagesMutation.isPending ? (
+                  <>
+                    <SpinnerGapIcon size={14} className="animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  `Connect ${selectedNotionPageIds.size} page${selectedNotionPageIds.size === 1 ? "" : "s"}`
                 )}
               </Button>
             </DialogFooter>
@@ -756,6 +1063,118 @@ export function FolderPicker({
       <p className="text-[11px] text-muted-foreground">
         {selectedIds.size} of {folders.length} folder{folders.length === 1 ? "" : "s"} selected
       </p>
+    </div>
+  );
+}
+
+/** ClickUp workspace + space picker. Workspaces are top-level, spaces are nested. */
+export function ClickUpWorkspacePicker({
+  workspaces,
+  selectedWorkspaceIds,
+  selectedSpaceIds,
+  onToggleWorkspace,
+  onToggleSpace,
+  disabled,
+}: {
+  workspaces: ClickUpWorkspace[];
+  selectedWorkspaceIds: Set<string>;
+  selectedSpaceIds: Set<string>;
+  onToggleWorkspace: (id: string) => void;
+  onToggleSpace: (id: string) => void;
+  disabled?: boolean;
+}) {
+  if (workspaces.length === 0) {
+    return (
+      <div className="rounded-lg border border-border bg-muted/20 px-4 py-6 text-center">
+        <FolderIcon size={24} className="mx-auto mb-2 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">No workspaces found.</p>
+      </div>
+    );
+  }
+
+  const totalSpaces = workspaces.reduce((sum, w) => sum + w.spaces.length, 0);
+
+  return (
+    <div className="space-y-1.5">
+      <ScopeList>
+        {workspaces.map((ws) => (
+          <ScopeGroup
+            key={ws.id}
+            checked={selectedWorkspaceIds.has(ws.id)}
+            label={ws.name}
+            sublabel={`${ws.memberCount} members`}
+            onToggle={() => onToggleWorkspace(ws.id)}
+            disabled={disabled}
+            defaultExpanded={selectedWorkspaceIds.has(ws.id)}
+          >
+            {ws.spaces.map((space) => (
+              <ScopeSubItem
+                key={space.id}
+                checked={selectedSpaceIds.has(space.id)}
+                label={space.name}
+                sublabel={space.private ? "private" : undefined}
+                onToggle={() => onToggleSpace(space.id)}
+                disabled={disabled}
+              />
+            ))}
+          </ScopeGroup>
+        ))}
+      </ScopeList>
+      <ScopeCount selected={selectedSpaceIds.size} total={totalSpaces} noun="spaces" />
+    </div>
+  );
+}
+
+/** Notion root page picker — select which top-level pages to sync. */
+export function NotionRootPagePicker({
+  pages,
+  selectedIds,
+  onToggle,
+  disabled,
+}: {
+  pages: NotionPage[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+  disabled?: boolean;
+}) {
+  if (pages.length === 0) {
+    return (
+      <div className="rounded-lg border border-border bg-muted/20 px-4 py-6 text-center">
+        <FolderIcon size={24} className="mx-auto mb-2 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">No pages found.</p>
+        <p className="mt-1 text-xs text-muted-foreground">Make sure you've shared pages with the Notion integration.</p>
+      </div>
+    );
+  }
+
+  const allSelected = pages.every((p) => selectedIds.has(p.id));
+
+  return (
+    <div className="space-y-1.5">
+      <ScopeSelectAll
+        allSelected={allSelected}
+        totalCount={pages.length}
+        onToggle={() => {
+          for (const p of pages) {
+            if (allSelected || !selectedIds.has(p.id)) onToggle(p.id);
+          }
+        }}
+        disabled={disabled}
+        noun="pages"
+      />
+      <ScopeList>
+        {pages.map((page) => (
+          <ScopeItem
+            key={page.id}
+            checked={selectedIds.has(page.id)}
+            label={page.title}
+            icon={<FileIcon size={16} className="shrink-0 text-muted-foreground" />}
+            onToggle={() => onToggle(page.id)}
+            disabled={disabled}
+          />
+        ))}
+      </ScopeList>
+      <ScopeCount selected={selectedIds.size} total={pages.length} noun="pages" />
     </div>
   );
 }

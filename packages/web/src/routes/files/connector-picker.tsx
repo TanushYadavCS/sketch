@@ -10,21 +10,40 @@ import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
 import {
+  ArrowSquareOutIcon,
   ArrowsClockwiseIcon,
   CheckCircleIcon,
   CircleNotchIcon,
+  EyeIcon,
+  EyeSlashIcon,
   FileTextIcon,
   FolderSimpleIcon,
   GridFourIcon,
   PlusIcon,
+  SpinnerGapIcon,
   WarningCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
+import { Switch } from "@sketch/ui/components/switch";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+
+const SYNC_INTERVAL_OPTIONS = [
+  { value: 5, label: "Every 5 minutes" },
+  { value: 15, label: "Every 15 minutes" },
+  { value: 30, label: "Every 30 minutes" },
+  { value: 60, label: "Every hour" },
+  { value: 120, label: "Every 2 hours" },
+  { value: 360, label: "Every 6 hours" },
+  { value: 720, label: "Every 12 hours" },
+  { value: 1440, label: "Every 24 hours" },
+];
 
 export function ConnectorPicker({
   connectors,
@@ -227,6 +246,8 @@ export function SyncStatusDot({ status }: { status: string }) {
   }
 }
 
+type BrowseTab = "connectors" | "settings";
+
 function BrowseConnectorsDialog({
   open,
   onOpenChange,
@@ -240,39 +261,230 @@ function BrowseConnectorsDialog({
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
 }) {
+  const [tab, setTab] = useState<BrowseTab>("connectors");
+
   const connectedByType = new Map<string, ConnectorConfig>();
   for (const c of connectors) {
     connectedByType.set(c.connectorType, c);
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) setTab("connectors");
+        onOpenChange(v);
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>All connectors</DialogTitle>
           <DialogDescription>Connect external sources to sync files into your knowledge base.</DialogDescription>
         </DialogHeader>
 
-        <div className="mt-2 space-y-2">
-          {INTEGRATIONS.map((def) => {
-            const connector = connectedByType.get(def.type);
-            return (
-              <ConnectorRow
-                key={def.type}
-                definition={def}
-                connector={connector ?? null}
-                onConnect={() => onConnect(def)}
-                onManage={() => {
-                  if (connector) onManage(def, connector);
-                }}
-              />
-            );
-          })}
+        <div className="flex gap-1 border-b border-border">
+          <button
+            type="button"
+            onClick={() => setTab("connectors")}
+            className={`px-3 py-2 text-sm font-medium transition-colors ${
+              tab === "connectors"
+                ? "border-b-2 border-foreground text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Connectors
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("settings")}
+            className={`px-3 py-2 text-sm font-medium transition-colors ${
+              tab === "settings"
+                ? "border-b-2 border-foreground text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Settings
+          </button>
         </div>
 
-        <p className="mt-4 text-center text-xs text-muted-foreground">More connectors coming soon</p>
+        {tab === "connectors" ? (
+          <>
+            <div className="mt-2 space-y-2">
+              {INTEGRATIONS.map((def) => {
+                const connector = connectedByType.get(def.type);
+                return (
+                  <ConnectorRow
+                    key={def.type}
+                    definition={def}
+                    connector={connector ?? null}
+                    onConnect={() => onConnect(def)}
+                    onManage={() => {
+                      if (connector) onManage(def, connector);
+                    }}
+                  />
+                );
+              })}
+            </div>
+            <p className="mt-4 text-center text-xs text-muted-foreground">More connectors coming soon</p>
+          </>
+        ) : (
+          <ConnectorSettings />
+        )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ConnectorSettings() {
+  const queryClient = useQueryClient();
+
+  const { data } = useQuery({
+    queryKey: ["settings", "search"],
+    queryFn: () => api.settings.searchConfig(),
+  });
+
+  const [syncInterval, setSyncInterval] = useState(30);
+  const [enrichmentEnabled, setEnrichmentEnabled] = useState(true);
+  const [geminiKey, setGeminiKey] = useState("");
+  const [keyConfigured, setKeyConfigured] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (data) {
+      setSyncInterval(data.syncIntervalMinutes);
+      setEnrichmentEnabled(data.enrichmentEnabled === 1);
+      setKeyConfigured(data.geminiApiKeyConfigured);
+      setGeminiKey("");
+      setDirty(false);
+    }
+  }, [data]);
+
+  const mutation = useMutation({
+    mutationFn: (updates: {
+      syncIntervalMinutes?: number;
+      enrichmentEnabled?: boolean;
+      geminiApiKey?: string | null;
+    }) => api.settings.updateSearchConfig(updates),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings", "search"] });
+      setDirty(false);
+      toast.success("Settings saved");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  function handleSave() {
+    const updates: { syncIntervalMinutes?: number; enrichmentEnabled?: boolean; geminiApiKey?: string | null } = {};
+    if (syncInterval !== data?.syncIntervalMinutes) updates.syncIntervalMinutes = syncInterval;
+    if (enrichmentEnabled !== (data?.enrichmentEnabled === 1)) updates.enrichmentEnabled = enrichmentEnabled;
+    if (geminiKey.trim()) updates.geminiApiKey = geminiKey;
+    mutation.mutate(updates);
+  }
+
+  const needsKey = enrichmentEnabled && !keyConfigured && !geminiKey.trim();
+
+  return (
+    <div className="mt-2 space-y-4">
+      {/* Sync frequency */}
+      <div className="rounded-lg border border-border p-3 space-y-2">
+        <div className="flex items-center justify-between gap-4">
+          <Label htmlFor="sync-interval" className="text-sm font-medium">
+            Sync frequency
+          </Label>
+          <Select
+            value={String(syncInterval)}
+            onValueChange={(v) => {
+              setSyncInterval(Number(v));
+              setDirty(true);
+            }}
+          >
+            <SelectTrigger id="sync-interval" className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SYNC_INTERVAL_OPTIONS.map((opt) => (
+                <SelectItem key={opt.value} value={String(opt.value)}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <p className="text-xs text-muted-foreground">How often all connectors sync, followed by enrichment</p>
+      </div>
+
+      {/* AI Enrichment */}
+      <div className="rounded-lg border border-border p-3 space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <Label htmlFor="enrichment-toggle" className="text-sm font-medium">
+              AI Enrichment
+            </Label>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {enrichmentEnabled
+                ? "Files are tagged, summarized & embedded for semantic search"
+                : "Search uses keyword matching only (FTS5)"}
+            </p>
+          </div>
+          <Switch
+            id="enrichment-toggle"
+            checked={enrichmentEnabled}
+            onCheckedChange={(checked) => {
+              setEnrichmentEnabled(checked);
+              setDirty(true);
+            }}
+          />
+        </div>
+
+        {enrichmentEnabled && (
+          <div className="space-y-1.5 border-t border-border pt-3">
+            <Label htmlFor="gemini-key" className="text-xs">
+              Gemini API Key
+            </Label>
+            <div className="relative">
+              <Input
+                id="gemini-key"
+                type={showKey ? "text" : "password"}
+                value={geminiKey}
+                onChange={(e) => {
+                  setGeminiKey(e.target.value);
+                  setDirty(true);
+                }}
+                placeholder={keyConfigured ? "Key configured (enter new to replace)" : "AIza..."}
+                className="pr-10"
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                {showKey ? <EyeSlashIcon size={16} /> : <EyeIcon size={16} />}
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Used for generating vector embeddings.{" "}
+              <a
+                href="https://aistudio.google.com/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-0.5 underline hover:text-foreground"
+              >
+                Get API key
+                <ArrowSquareOutIcon size={12} />
+              </a>
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-end">
+        <Button onClick={handleSave} disabled={!dirty || mutation.isPending || needsKey} size="sm">
+          {mutation.isPending && <SpinnerGapIcon size={14} className="mr-1.5 animate-spin" />}
+          Save
+        </Button>
+      </div>
+    </div>
   );
 }
 
