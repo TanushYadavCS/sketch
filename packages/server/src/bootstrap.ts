@@ -16,6 +16,8 @@ import { startSyncScheduler } from "./connectors/sync";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
 import { createAgentRunsRepo } from "./db/repositories/agent-runs";
+import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
+import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createOutreachRepository } from "./db/repositories/outreach";
@@ -77,6 +79,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const outreachRepo = createOutreachRepository(db);
+  const automationRunsRepo = createAutomationRunsRepository(db);
+  const stepContentRepo = createAutomationStepContentRepository(db);
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
   const tracer = trace.getTracer("sketch");
@@ -150,6 +154,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
       if (!row || row.type == null) return null;
       return { type: row.type, credentials: row.credentials };
     },
+    automationRunsRepo,
+    stepContentRepo,
+    userRepo: users,
   });
   await scheduler.start();
 

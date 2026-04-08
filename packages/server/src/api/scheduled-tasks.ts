@@ -1,5 +1,7 @@
 import { type Context, Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
@@ -12,6 +14,7 @@ interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
   resumeTask: (id: string) => Promise<void>;
   removeTask: (id: string) => Promise<boolean>;
+  executeTaskById: (id: string) => Promise<void>;
 }
 
 interface ScheduledTaskListItem {
@@ -37,6 +40,14 @@ interface ScheduledTaskListItem {
   canPause: boolean;
   canResume: boolean;
   canDelete: boolean;
+  title: string | null;
+  description: string | null;
+  steps: string | null;
+  stepCount: number;
+  outputTarget: string | null;
+  outputPlatform: string | null;
+  lastRunStatus: string | null;
+  runCount: number;
 }
 
 function compareNewestFirst(a: ScheduledTaskRow, b: ScheduledTaskRow): number {
@@ -102,6 +113,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
+  const runsRepo = createAutomationRunsRepository(db);
 
   const userIds = [...new Set(rows.map((row) => row.created_by).filter((id): id is string => Boolean(id)))];
   const slackChannelIds = [
@@ -142,6 +154,16 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
   const channelNames = new Map(channelEntries);
   const groupNames = new Map(groupEntries);
 
+  // Fetch latest run and run count for each task
+  const runDataEntries = await Promise.all(
+    rows.map(async (row) => {
+      const latest = await runsRepo.getLatest(row.id);
+      const runs = await runsRepo.list(row.id, 1000);
+      return [row.id, { lastRunStatus: latest?.status ?? null, runCount: runs.length }] as const;
+    }),
+  );
+  const runData = new Map(runDataEntries);
+
   return rows.map((row) => {
     const creatorName = row.created_by ? (creatorNames.get(row.created_by) ?? null) : null;
 
@@ -155,6 +177,15 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
     } else if (row.platform === "whatsapp" && row.context_type === "group") {
       targetLabel = groupNames.get(row.delivery_target) ?? row.delivery_target;
     }
+
+    let stepCount = 0;
+    if (row.steps) {
+      try {
+        stepCount = JSON.parse(row.steps).length;
+      } catch {}
+    }
+
+    const rd = runData.get(row.id);
 
     return {
       id: row.id,
@@ -179,6 +210,14 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       canPause: row.status === "active",
       canResume: row.status === "paused",
       canDelete: true,
+      title: row.title,
+      description: row.description,
+      steps: row.steps,
+      stepCount,
+      outputTarget: row.output_target,
+      outputPlatform: row.output_platform,
+      lastRunStatus: rd?.lastRunStatus ?? null,
+      runCount: rd?.runCount ?? 0,
     };
   });
 }
@@ -244,8 +283,54 @@ export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMuta
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
 
+    // Cascade delete runs and step content
+    const runsRepo2 = createAutomationRunsRepository(db);
+    const stepContentRepo = createAutomationStepContentRepository(db);
+    await runsRepo2.deleteByTaskId(id);
+    await stepContentRepo.deleteByTaskId(id);
+
     await scheduler.removeTask(id);
     return c.json({ success: true });
+  });
+
+  // --- Automation runs endpoints ---
+
+  routes.get("/:id/runs", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    const runsRepo2 = createAutomationRunsRepository(db);
+    const runs = await runsRepo2.list(id);
+    return c.json({ runs });
+  });
+
+  routes.get("/:id/runs/:runId", async (c) => {
+    const id = c.req.param("id");
+    const runId = c.req.param("runId");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    const runsRepo2 = createAutomationRunsRepository(db);
+    const run = await runsRepo2.getById(runId);
+    if (!run || run.task_id !== id) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Run not found" } }, 404);
+    }
+    return c.json({ run });
+  });
+
+  routes.post("/:id/run", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    if (result.row.status !== "active") {
+      return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
+    }
+
+    // Fire and forget — enqueue execution
+    scheduler.executeTaskById(id).catch(() => {});
+    return c.json({ status: "triggered" });
   });
 
   return routes;

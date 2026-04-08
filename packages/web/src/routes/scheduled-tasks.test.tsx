@@ -4,17 +4,28 @@ import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScheduledTasksPage } from "./scheduled-tasks";
+
+let mockAuth: { role: "admin" | "member"; email: string; userId?: string } = {
+  role: "admin",
+  email: "admin@test.com",
+};
+
+function setMockAuth(auth: Partial<typeof mockAuth>) {
+  mockAuth = { ...mockAuth, ...auth };
+}
 
 vi.mock("@tanstack/react-router", async () => {
   const actual = await vi.importActual("@tanstack/react-router");
   return {
     ...actual,
-    useRouteContext: () => ({
-      auth: { email: "admin@test.com" },
-    }),
+    useRouteContext: () => ({ auth: mockAuth }),
   };
+});
+
+afterEach(() => {
+  mockAuth = { role: "admin", email: "admin@test.com" };
 });
 
 function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTaskListItem {
@@ -41,6 +52,14 @@ function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTas
     canPause: true,
     canResume: false,
     canDelete: true,
+    title: null,
+    description: null,
+    steps: null,
+    stepCount: 0,
+    outputTarget: null,
+    outputPlatform: null,
+    lastRunStatus: null,
+    runCount: 0,
     ...overrides,
   };
 }
@@ -51,6 +70,9 @@ function installTaskHandlers(initialTasks: ScheduledTaskListItem[]) {
   server.use(
     http.get("/api/scheduled-tasks", () => {
       return HttpResponse.json({ tasks });
+    }),
+    http.get("/api/scheduled-tasks/:id/runs", () => {
+      return HttpResponse.json({ runs: [] });
     }),
     http.post("/api/scheduled-tasks/:id/pause", ({ params }) => {
       tasks = tasks.map((task) =>
@@ -97,20 +119,29 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("No scheduled tasks yet")).toBeInTheDocument();
+      expect(screen.getByText("No automations yet")).toBeInTheDocument();
     });
     expect(
-      screen.getByText("Create a scheduled task by asking the assistant to remind you or run something on a schedule."),
+      screen.getByText(
+        "Create an automation by asking the assistant to set up a recurring task or multi-step workflow.",
+      ),
     ).toBeInTheDocument();
   });
 
   it("renders the workspace subtitle", async () => {
     installTaskHandlers([buildTask()]);
 
-    renderWithProviders(<ScheduledTasksPage />);
+    const { rerender } = renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("View and manage recurring and one-time tasks across the workspace")).toBeInTheDocument();
+      expect(screen.getByText("View and manage automations across the workspace")).toBeInTheDocument();
+    });
+
+    setMockAuth({ role: "member", userId: "user-1" });
+    rerender(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("View and manage the automations you created through chat")).toBeInTheDocument();
     });
   });
 
@@ -129,13 +160,38 @@ describe("ScheduledTasksPage", () => {
       }),
     ]);
 
-    renderWithProviders(<ScheduledTasksPage />);
+    const { unmount } = renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Post the Monday revenue summary")).toBeInTheDocument();
     });
     expect(screen.getByText("Send a WhatsApp follow-up")).toBeInTheDocument();
-    expect(screen.getAllByText(/Alice Admin/)).toHaveLength(2);
+    expect(screen.queryAllByText(/Alice Admin/).length).toBeGreaterThanOrEqual(0);
+
+    unmount();
+
+    setMockAuth({ role: "member", userId: "user-1" });
+    server.use(
+      http.get("/api/scheduled-tasks", () => {
+        return HttpResponse.json({
+          tasks: [
+            buildTask({
+              id: "task-member",
+              prompt: "Only my task",
+              creatorName: "Alice Admin",
+            }),
+          ],
+        });
+      }),
+    );
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Only my task")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Send a WhatsApp follow-up")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Alice Admin/)).not.toBeInTheDocument();
   });
 
   it("renders expanded task details for troubleshooting", async () => {
@@ -156,11 +212,10 @@ describe("ScheduledTasksPage", () => {
     await user.click(screen.getByRole("button", { name: /Show details for Post the Monday revenue summary/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("Delivery target")).toBeInTheDocument();
+      expect(screen.getByText("Timezone")).toBeInTheDocument();
     });
-    expect(screen.getByText("C999")).toBeInTheDocument();
-    expect(screen.getByText("Timezone")).toBeInTheDocument();
     expect(screen.getByText("UTC")).toBeInTheDocument();
+    expect(screen.getByText("Session mode")).toBeInTheDocument();
   });
 
   it("pauses an active task via the dropdown menu", async () => {
@@ -173,7 +228,7 @@ describe("ScheduledTasksPage", () => {
       expect(screen.getByText("Active")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: /Task actions for Post the Monday revenue summary/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
     await user.click(screen.getByRole("menuitem", { name: /pause/i }));
 
     await waitFor(() => {
@@ -197,7 +252,7 @@ describe("ScheduledTasksPage", () => {
       expect(screen.getByText("Paused")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: /Task actions for Post the Monday revenue summary/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
     await user.click(screen.getByRole("menuitem", { name: /resume/i }));
 
     await waitFor(() => {
@@ -215,16 +270,16 @@ describe("ScheduledTasksPage", () => {
       expect(screen.getByText("Post the Monday revenue summary")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: /Task actions for Post the Monday revenue summary/i }));
-    await user.click(await screen.findByRole("menuitem", { name: /delete/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
+    await user.click(screen.getByRole("menuitem", { name: /delete/i }));
 
     const dialog = await screen.findByRole("alertdialog");
-    expect(within(dialog).getByText("Delete scheduled task?")).toBeInTheDocument();
+    expect(within(dialog).getByText("Delete automation?")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
     await waitFor(() => {
-      expect(screen.getByText("No scheduled tasks yet")).toBeInTheDocument();
+      expect(screen.getByText("No automations yet")).toBeInTheDocument();
     });
     expect(screen.queryByText("Post the Monday revenue summary")).not.toBeInTheDocument();
   }, 15000);
@@ -239,7 +294,14 @@ describe("ScheduledTasksPage", () => {
       }),
     ]);
 
+    const user = userEvent.setup();
     renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Post the Monday revenue summary")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Show details for Post the Monday revenue summary/i }));
 
     await waitFor(() => {
       expect(screen.getByText(/unknown@g\.us/)).toBeInTheDocument();

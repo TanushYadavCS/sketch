@@ -53,7 +53,7 @@ interface AppDeps {
   onSlackDisconnect?: () => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
-  scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask">;
+  scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {

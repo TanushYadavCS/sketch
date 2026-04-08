@@ -1,5 +1,5 @@
 /**
- * Shared types for the scheduled tasks feature.
+ * Shared types for the scheduled tasks / automations feature.
  *
  * ScheduledTask is the camelCase application-level interface returned by the repository.
  * TaskContext carries the ambient message context (platform, channel, user) that is
@@ -23,6 +23,12 @@ export interface ScheduledTask {
   status: "active" | "paused" | "completed";
   createdBy: string | null;
   createdAt: string;
+  title: string | null;
+  description: string | null;
+  steps: string | null;
+  edges: string | null;
+  outputTarget: string | null;
+  outputPlatform: string | null;
 }
 
 export interface TaskContext {

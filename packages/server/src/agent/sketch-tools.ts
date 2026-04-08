@@ -20,11 +20,14 @@ import { resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
+import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createOutreachRepository } from "../db/repositories/outreach";
 import type { DB, UsersTable } from "../db/schema";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
+import type { WorkflowStep } from "../workflows/types";
 import { buildSketchContext } from "./prompt";
 
 type SelectableUser = Selectable<UsersTable>;
@@ -60,20 +63,53 @@ export interface SketchMcpDeps {
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
 }
 
+const workflowStepSchema = z.object({
+  id: z.string(),
+  type: z.enum(["trigger", "action", "agent"]),
+  label: z.string(),
+  icon: z.string(),
+  position: z.object({ x: z.number(), y: z.number() }),
+  script: z
+    .string()
+    .optional()
+    .describe("Script content for action steps. Stored in automation_step_content, not in steps JSON."),
+  agentPrompt: z
+    .string()
+    .optional()
+    .describe("Prompt content for agent steps. Stored in automation_step_content, not in steps JSON."),
+  apps: z.array(z.string()).optional().describe("MCP server slugs this step uses (e.g. ['clickup', 'slack'])."),
+  agentMode: z.enum(["light", "sketch"]).optional(),
+  agentSkills: z.array(z.string()).optional(),
+  agentModel: z.string().optional(),
+  agentMcpServers: z.array(z.string()).optional(),
+  timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
+  triggerConfig: z
+    .object({
+      type: z.enum(["webhook", "schedule"]),
+      scheduleType: z.enum(["cron", "interval", "once"]).optional(),
+      scheduleValue: z.string().optional(),
+      timezone: z.string().optional(),
+    })
+    .optional(),
+});
+
 const manageScheduledTasksSchema = {
-  action: z.enum(["list", "add", "update", "remove", "pause", "resume"]).describe(
+  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"]).describe(
     `Action to perform.
-- 'add': create a new task (requires prompt, schedule_type, schedule_value)
-- 'list': list tasks in this context (no other params needed)
-- 'update': modify a task (requires task_id, plus fields to change)
-- 'remove': delete a task (requires task_id)
-- 'pause': pause a task (requires task_id)
-- 'resume': resume a paused task (requires task_id)`,
+- 'add': create an automation (simple: prompt + schedule_type + schedule_value; multi-step: title + steps)
+- 'list': list automations in this context
+- 'update': modify an automation (requires task_id)
+- 'remove': delete an automation (requires task_id)
+- 'pause': pause an automation (requires task_id)
+- 'resume': resume a paused automation (requires task_id)
+- 'run': manually trigger an automation (requires task_id)
+- 'getRun': inspect run results (requires task_id, optional run_id for specific run)
+- 'updateStepContent': update a single step's prompt or script (requires task_id, step_id, step_content)`,
   ),
   prompt: z
     .string()
     .optional()
-    .describe("The instruction the agent executes each run. Be specific and self-contained."),
+    .describe("The instruction the agent executes each run. For simple automations (no steps array)."),
   schedule_type: z
     .enum(["cron", "interval", "once"])
     .optional()
@@ -96,22 +132,64 @@ For once: ISO 8601 datetime string (e.g. '2026-03-14T15:00:00'). The task runs o
 - 'persistent': task remembers its own previous runs, isolated from user chat
 - 'chat': continues the user's conversation session`,
     ),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume."),
+  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun."),
+  title: z.string().optional().describe("Human-readable name. Required for multi-step automations."),
+  description: z.string().optional().describe("Description of what this automation does."),
+  steps: z
+    .array(workflowStepSchema)
+    .optional()
+    .describe("Workflow steps. When provided, creates a multi-step automation."),
+  edges: z
+    .array(z.object({ id: z.string(), from: z.string(), to: z.string() }))
+    .optional()
+    .describe("Connections between workflow steps (optional in Phase 1)."),
+  output_target: z.string().optional().describe("Channel/DM to send final output to."),
+  output_platform: z.enum(["slack", "whatsapp"]).optional(),
+  run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
+  step_id: z.string().optional().describe("Step ID for updateStepContent action."),
+  step_content: z.string().optional().describe("New prompt or script content for updateStepContent action."),
+  step_apps: z.array(z.string()).optional().describe("Updated MCP server slugs for updateStepContent action."),
 };
 
+type WorkflowStepInput = z.infer<typeof workflowStepSchema>;
+
 type ManageScheduledTasksParams = {
-  action: "list" | "add" | "update" | "remove" | "pause" | "resume";
+  action: "list" | "add" | "update" | "remove" | "pause" | "resume" | "run" | "getRun" | "updateStepContent";
   prompt?: string;
   schedule_type?: "cron" | "interval" | "once";
   schedule_value?: string;
   timezone?: string;
   session_mode?: "fresh" | "persistent" | "chat";
   task_id?: string;
+  title?: string;
+  description?: string;
+  steps?: WorkflowStepInput[];
+  edges?: { id: string; from: string; to: string }[];
+  output_target?: string;
+  output_platform?: "slack" | "whatsapp";
+  run_id?: string;
+  step_id?: string;
+  step_content?: string;
+  step_apps?: string[];
 };
+
+export interface ManageScheduledTasksDeps {
+  scheduler: TaskScheduler;
+  taskContext: TaskContext;
+  automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
+  stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  config?: { BASE_URL?: string; PORT: number };
+}
+
+function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
+  return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
+}
 
 export async function handleManageScheduledTasks(
   params: ManageScheduledTasksParams,
-  deps: { scheduler: TaskScheduler; taskContext: TaskContext },
+  deps: ManageScheduledTasksDeps,
 ): Promise<{ content: { type: "text"; text: string }[] }> {
   const { action, task_id } = params;
   const ctx = deps.taskContext;
@@ -128,10 +206,83 @@ export async function handleManageScheduledTasks(
     }
 
     case "add": {
-      if (!params.prompt || !params.schedule_type || !params.schedule_value) {
-        return text("Error: prompt, schedule_type, and schedule_value are required for add action.");
+      // Multi-step: explicit steps array
+      if (params.steps) {
+        if (!params.title) {
+          return text("Error: title is required when creating a multi-step automation.");
+        }
+        if (!params.schedule_type || !params.schedule_value) {
+          return text("Error: schedule_type and schedule_value are required for add action.");
+        }
+
+        // Validate action steps require an integration provider
+        if (params.steps.some((s) => s.type === "action")) {
+          if (!deps.findIntegrationProvider) {
+            return text(
+              "Error: Action steps require an integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.",
+            );
+          }
+          const provider = await deps.findIntegrationProvider();
+          if (!provider) {
+            return text(
+              "Error: Action steps require an integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.",
+            );
+          }
+        }
+      } else if (params.prompt) {
+        // Sugar: expand simple prompt into a single-step workflow
+        if (!params.schedule_type || !params.schedule_value) {
+          return text("Error: prompt, schedule_type, and schedule_value are required for add action.");
+        }
+        params.title = params.title ?? params.prompt;
+        params.steps = [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Schedule",
+            icon: "clock",
+            triggerConfig: { type: "schedule" },
+            position: { x: 0, y: 0 },
+          },
+          {
+            id: "step1",
+            type: "agent",
+            label: params.prompt.slice(0, 80),
+            icon: "sketch-ai",
+            agentPrompt: params.prompt,
+            position: { x: 0, y: 100 },
+          },
+        ];
+      } else {
+        return text("Error: prompt or steps are required for add action.");
       }
 
+      // Step structure validation
+      {
+        const stepIds = new Set<string>();
+        for (const step of params.steps) {
+          if (stepIds.has(step.id)) {
+            return text(`Error: duplicate step ID '${step.id}'.`);
+          }
+          stepIds.add(step.id);
+        }
+
+        const executionSteps = params.steps.filter((s) => s.type !== "trigger");
+        if (executionSteps.length === 0) {
+          return text("Error: workflow must have at least one non-trigger step.");
+        }
+
+        for (const step of executionSteps) {
+          if (step.type === "action" && !step.script) {
+            return text(`Error: action step '${step.label}' requires a script.`);
+          }
+          if (step.type === "agent" && !step.agentPrompt) {
+            return text(`Error: agent step '${step.label}' requires an agentPrompt.`);
+          }
+        }
+      }
+
+      // Schedule validation
       if (params.schedule_type === "interval") {
         const seconds = Number(params.schedule_value);
         if (!Number.isFinite(seconds) || seconds < 60) {
@@ -139,9 +290,24 @@ export async function handleManageScheduledTasks(
             "Error: interval schedule_value must be a number of seconds (at least 60). Example: '120' for every 2 minutes.",
           );
         }
+        if (seconds > 86400) {
+          return text(
+            "Error: interval schedule_value must be in seconds, not milliseconds. For 1 hour use '3600', not '3600000'.",
+          );
+        }
       }
 
-      if (params.schedule_type === "once") {
+      if (params.schedule_type === "cron") {
+        try {
+          const { Cron } = await import("croner");
+          new Cron(params.schedule_value as string, { timezone: params.timezone ?? "UTC" });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return text(`Error: invalid cron expression '${params.schedule_value}': ${msg}`);
+        }
+      }
+
+      if (params.schedule_type === "once" && params.schedule_value) {
         const runAt = new Date(params.schedule_value);
         if (Number.isNaN(runAt.getTime())) {
           return text(
@@ -170,48 +336,139 @@ export async function handleManageScheduledTasks(
         );
       }
 
+      // Strip content from steps (stored separately in automation_step_content)
+      const steps = params.steps as NonNullable<typeof params.steps>;
+      const title = params.title as string;
+      const scheduleType = params.schedule_type as NonNullable<typeof params.schedule_type>;
+      const scheduleValue = params.schedule_value as string;
+      const stepsForDb = stripContentFromSteps(steps);
+
       const task = await deps.scheduler.addTask({
         platform: ctx.platform,
         contextType: ctx.contextType,
         deliveryTarget: ctx.deliveryTarget,
         threadTs: ctx.threadTs ?? null,
-        prompt: params.prompt,
-        scheduleType: params.schedule_type,
-        scheduleValue: params.schedule_value,
+        prompt: title,
+        scheduleType,
+        scheduleValue,
         timezone: params.timezone,
         sessionMode,
         createdBy: ctx.createdBy,
+        title: params.title,
+        description: params.description,
+        steps: JSON.stringify(stepsForDb),
+        edges: params.edges ? JSON.stringify(params.edges) : null,
+        outputTarget: params.output_target,
+        outputPlatform: params.output_platform,
       });
 
-      return text(`Task created:\n${JSON.stringify(task, null, 2)}`);
+      // Store step content
+      if (deps.stepContentRepo) {
+        for (const step of steps) {
+          if (step.agentPrompt) {
+            await deps.stepContentRepo.upsert({
+              taskId: task.id,
+              stepId: step.id,
+              contentType: "prompt",
+              content: step.agentPrompt,
+              apps: step.apps,
+            });
+          } else if (step.script) {
+            await deps.stepContentRepo.upsert({
+              taskId: task.id,
+              stepId: step.id,
+              contentType: "script",
+              content: step.script,
+              apps: step.apps,
+            });
+          }
+        }
+      }
+
+      // Build webhook URL for webhook triggers
+      const triggerStep = steps.find((s) => s.triggerConfig?.type === "webhook");
+      let webhookUrl: string | undefined;
+      if (triggerStep && deps.config) {
+        const baseUrl = deps.config.BASE_URL ?? `http://localhost:${deps.config.PORT}`;
+        webhookUrl = `${baseUrl}/api/webhooks/wf/${task.id}`;
+      }
+
+      const response: Record<string, unknown> = { ...task };
+      if (webhookUrl) response.webhookUrl = webhookUrl;
+      return text(`Automation created:\n${JSON.stringify(response, null, 2)}`);
     }
 
     case "update": {
       if (!task_id) {
         return text("Error: task_id is required for update action.");
       }
-      const updated = await deps.scheduler.updateTask(task_id, {
-        prompt: params.prompt,
-        scheduleType: params.schedule_type,
-        scheduleValue: params.schedule_value,
-        timezone: params.timezone,
-        sessionMode: params.session_mode,
-      });
+
+      // Build update fields for the scheduler
+      const updateFields: Record<string, string | null | undefined> = {};
+      if (params.prompt !== undefined) updateFields.prompt = params.prompt;
+      if (params.schedule_type !== undefined) updateFields.scheduleType = params.schedule_type;
+      if (params.schedule_value !== undefined) updateFields.scheduleValue = params.schedule_value;
+      if (params.timezone !== undefined) updateFields.timezone = params.timezone;
+      if (params.session_mode !== undefined) updateFields.sessionMode = params.session_mode;
+      if (params.title !== undefined) updateFields.title = params.title;
+      if (params.description !== undefined) updateFields.description = params.description;
+      if (params.output_target !== undefined) updateFields.outputTarget = params.output_target;
+      if (params.output_platform !== undefined) updateFields.outputPlatform = params.output_platform;
+
+      // Handle steps update
+      if (params.steps) {
+        const stepsForDb = stripContentFromSteps(params.steps);
+        updateFields.steps = JSON.stringify(stepsForDb);
+
+        // Sync step content
+        if (deps.stepContentRepo) {
+          const keepStepIds = params.steps.filter((s) => s.agentPrompt || s.script).map((s) => s.id);
+          await deps.stepContentRepo.deleteOrphanedSteps(task_id, keepStepIds);
+
+          for (const step of params.steps) {
+            if (step.agentPrompt) {
+              await deps.stepContentRepo.upsert({
+                taskId: task_id,
+                stepId: step.id,
+                contentType: "prompt",
+                content: step.agentPrompt,
+                apps: step.apps,
+              });
+            } else if (step.script) {
+              await deps.stepContentRepo.upsert({
+                taskId: task_id,
+                stepId: step.id,
+                contentType: "script",
+                content: step.script,
+                apps: step.apps,
+              });
+            }
+          }
+        }
+      }
+
+      if (params.edges !== undefined) updateFields.edges = JSON.stringify(params.edges);
+
+      const updated = await deps.scheduler.updateTask(task_id, updateFields);
       if (!updated) {
         return text(`Error: task ${task_id} not found.`);
       }
-      return text(`Task updated:\n${JSON.stringify(updated, null, 2)}`);
+      return text(`Automation updated:\n${JSON.stringify(updated, null, 2)}`);
     }
 
     case "remove": {
       if (!task_id) {
         return text("Error: task_id is required for remove action.");
       }
+      // Cascade delete step content and runs
+      if (deps.stepContentRepo) await deps.stepContentRepo.deleteByTaskId(task_id);
+      if (deps.automationRunsRepo) await deps.automationRunsRepo.deleteByTaskId(task_id);
+
       const removed = await deps.scheduler.removeTask(task_id);
       if (!removed) {
         return text(`Error: task ${task_id} not found.`);
       }
-      return text(`Task ${task_id} removed.`);
+      return text(`Automation ${task_id} removed.`);
     }
 
     case "pause": {
@@ -219,7 +476,7 @@ export async function handleManageScheduledTasks(
         return text("Error: task_id is required for pause action.");
       }
       await deps.scheduler.pauseTask(task_id);
-      return text(`Task ${task_id} paused.`);
+      return text(`Automation ${task_id} paused.`);
     }
 
     case "resume": {
@@ -227,7 +484,63 @@ export async function handleManageScheduledTasks(
         return text("Error: task_id is required for resume action.");
       }
       await deps.scheduler.resumeTask(task_id);
-      return text(`Task ${task_id} resumed.`);
+      return text(`Automation ${task_id} resumed.`);
+    }
+
+    case "run": {
+      if (!task_id) {
+        return text("Error: task_id is required for run action.");
+      }
+      if (!deps.queueManager) {
+        return text("Error: manual trigger is not available in this context.");
+      }
+      deps.queueManager.getQueue(`task-${task_id}`).enqueue(async () => {
+        await deps.scheduler.executeTaskById(task_id);
+      });
+      return text(`Automation ${task_id} triggered. Check run history for results.`);
+    }
+
+    case "getRun": {
+      if (!task_id) {
+        return text("Error: task_id is required for getRun action.");
+      }
+      if (!deps.automationRunsRepo) {
+        return text("Error: run history is not available in this context.");
+      }
+      const run = params.run_id
+        ? await deps.automationRunsRepo.getById(params.run_id)
+        : await deps.automationRunsRepo.getLatest(task_id);
+      if (!run) {
+        return text(params.run_id ? `Error: run ${params.run_id} not found.` : "No runs found for this automation.");
+      }
+      return text(JSON.stringify(run, null, 2));
+    }
+
+    case "updateStepContent": {
+      if (!task_id) {
+        return text("Error: task_id is required for updateStepContent action.");
+      }
+      if (!params.step_id || !params.step_content) {
+        return text("Error: step_id and step_content are required for updateStepContent action.");
+      }
+      if (!deps.stepContentRepo) {
+        return text("Error: step content updates are not available in this context.");
+      }
+
+      const existing = await deps.stepContentRepo.getByStep(task_id, params.step_id);
+      if (!existing) {
+        return text(`Error: step ${params.step_id} not found for task ${task_id}.`);
+      }
+
+      await deps.stepContentRepo.upsert({
+        taskId: task_id,
+        stepId: params.step_id,
+        contentType: existing.content_type as "prompt" | "script",
+        content: params.step_content,
+        apps: params.step_apps ?? (existing.apps ? JSON.parse(existing.apps) : null),
+      });
+
+      return text(`Step ${params.step_id} content updated.`);
     }
   }
 }

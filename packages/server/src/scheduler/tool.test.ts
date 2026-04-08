@@ -28,6 +28,12 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     status: "active",
     createdBy: "U123",
     createdAt: "2025-01-01T00:00:00.000Z",
+    title: null,
+    description: null,
+    steps: null,
+    edges: null,
+    outputTarget: null,
+    outputPlatform: null,
     ...overrides,
   };
 }
@@ -226,7 +232,7 @@ describe("handleManageScheduledTasks — add", () => {
       { scheduler, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("new-task");
-    expect(result.content[0].text).toContain("Task created:");
+    expect(result.content[0].text).toContain("Automation created:");
   });
 });
 
@@ -273,7 +279,7 @@ describe("handleManageScheduledTasks — update", () => {
       { action: "update", task_id: "task-1", prompt: "Updated" },
       { scheduler, taskContext: dmContext },
     );
-    expect(result.content[0].text).toContain("Task updated:");
+    expect(result.content[0].text).toContain("Automation updated:");
   });
 });
 
@@ -354,7 +360,7 @@ describe("handleManageScheduledTasks — add with once schedule type", () => {
       { scheduler, taskContext: dmContext },
     );
     expect(result.content[0].text).not.toContain("Error:");
-    expect(result.content[0].text).toContain("Task created:");
+    expect(result.content[0].text).toContain("Automation created:");
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ scheduleType: "once" }));
   });
 

@@ -191,10 +191,11 @@ export function buildSystemContext(params: {
   }
 
   sections.push(
-    "## Scheduled Tasks",
+    "## Automations",
     "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder.",
     "Platform and delivery target are filled in automatically from context. Do not ask the user for these.",
     "Session mode defaults: DM and threads default to 'chat', top-level channel and group default to 'fresh'. Usually omit session_mode.",
+    "For multi-step workflows involving integrations (email, CRM, project tools), check the user's connected apps first by calling getProviderConfig and then listing their accounts.",
   );
 
   sections.push(

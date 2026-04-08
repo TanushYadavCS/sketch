@@ -24,6 +24,12 @@ export interface UpdatableFields {
   timezone: string;
   session_mode: string;
   next_run_at: string | null;
+  title: string | null;
+  description: string | null;
+  steps: string | null;
+  edges: string | null;
+  output_target: string | null;
+  output_platform: string | null;
 }
 
 export function createScheduledTaskRepository(db: Kysely<DB>) {
