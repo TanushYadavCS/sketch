@@ -435,7 +435,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
 
     tool(
       "getProviderConfig",
-      "Get the configured integration provider credentials (API key and type). Call this once when you need to use a provider-backed skill like Canvas. Returns null if no provider is configured.",
+      "Check if an integration provider is configured. Credentials and user scoping are injected automatically into integration CLI wrappers at runtime — never set API keys or email addresses manually.",
       {},
       async () => {
         if (!deps.findIntegrationProvider) {
@@ -451,25 +451,17 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           };
         }
 
-        try {
-          const parsed = JSON.parse(provider.credentials) as Record<string, string>;
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  configured: true,
-                  type: provider.type,
-                  apiKey: parsed.apiKey,
-                }),
-              },
-            ],
-          };
-        } catch {
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ configured: false }) }],
-          };
-        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                configured: true,
+                type: provider.type,
+              }),
+            },
+          ],
+        };
       },
     ),
 

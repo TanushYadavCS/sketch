@@ -2,10 +2,11 @@
  * Workspace isolation via canUseTool — factory function that creates the
  * permission callback for the Claude Agent SDK's query().
  *
- * Three security layers:
+ * Four security layers:
  * 1. Tool allowlist — only permitted tools can execute
  * 2. File path validation — file tools restricted to workspace + ~/.claude (read-write)
- * 3. Bash path validation — commands blocked if they reference absolute paths outside workspace/~/.claude
+ * 3. Credential wrapper isolation — block reading /tmp/sketch-int-* wrapper files
+ * 4. Bash path validation — commands blocked if they reference absolute paths outside workspace/~/.claude
  */
 import { resolve } from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
@@ -51,7 +52,23 @@ export function createCanUseTool(absWorkspace: string, logger: Logger, claudeDir
       }
     }
 
-    // Layer 3: bash path validation
+    // Layer 3: block reading credential wrapper files
+    if (FILE_TOOLS.includes(toolName)) {
+      const rawPath = (input.file_path as string) || (input.path as string) || "";
+      if (rawPath.includes("/tmp/sketch-int-")) {
+        logger.warn({ toolName, rawPath }, "Blocked read of integration credential wrapper");
+        return { behavior: "deny", message: "Access denied: cannot read integration credential files" };
+      }
+    }
+    if (toolName === "Bash") {
+      const command = (input.command as string) || "";
+      if (/sketch-int-/.test(command) && /cat |head |tail |less |more |bat |vi |vim |nano /.test(command)) {
+        logger.warn({ toolName, command }, "Blocked bash read of integration credential wrapper");
+        return { behavior: "deny", message: "Access denied: cannot read integration credential files" };
+      }
+    }
+
+    // Layer 4: bash path validation
     if (toolName === "Bash") {
       const command = (input.command as string) || "";
       const hasAbsolutePath = /(?:^|\s)\/(?!dev\/null|tmp\/)/.test(command);
