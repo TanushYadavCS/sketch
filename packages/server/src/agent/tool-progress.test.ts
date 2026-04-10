@@ -10,15 +10,11 @@ describe("buildToolProgressLine", () => {
     });
 
     it("Write shows ✍️ emoji and file_path value", () => {
-      expect(buildToolProgressLine("Write", { file_path: "src/output.ts" })).toBe(
-        '✍️ Write: "src/output.ts"',
-      );
+      expect(buildToolProgressLine("Write", { file_path: "src/output.ts" })).toBe('✍️ Write: "src/output.ts"');
     });
 
     it("Edit shows 🔧 emoji and file_path value", () => {
-      expect(buildToolProgressLine("Edit", { file_path: "src/config.ts" })).toBe(
-        '🔧 Edit: "src/config.ts"',
-      );
+      expect(buildToolProgressLine("Edit", { file_path: "src/config.ts" })).toBe('🔧 Edit: "src/config.ts"');
     });
 
     it("Bash shows 💻 emoji and command value", () => {
@@ -44,9 +40,7 @@ describe("buildToolProgressLine", () => {
     });
 
     it("ManageScheduledTasks shows ⏰ emoji and action value", () => {
-      expect(buildToolProgressLine("ManageScheduledTasks", { action: "list" })).toBe(
-        '⏰ ManageScheduledTasks: "list"',
-      );
+      expect(buildToolProgressLine("ManageScheduledTasks", { action: "list" })).toBe('⏰ ManageScheduledTasks: "list"');
     });
 
     it("SearchEntities shows 🔍 emoji and queries value", () => {
@@ -56,9 +50,7 @@ describe("buildToolProgressLine", () => {
     });
 
     it("GetEntityContext shows 📊 emoji with ellipsis (no primary arg in map)", () => {
-      expect(buildToolProgressLine("GetEntityContext", { entity_id: "123" })).toBe(
-        "📊 GetEntityContext...",
-      );
+      expect(buildToolProgressLine("GetEntityContext", { entity_id: "123" })).toBe("📊 GetEntityContext...");
     });
 
     it("unknown MCP tool shows ⚙️ fallback emoji with ellipsis", () => {

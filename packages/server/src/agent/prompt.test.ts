@@ -9,7 +9,9 @@ describe("buildSystemContext", () => {
         botName: "Atlas",
         orgName: "CanvasX AI",
       });
-      expect(result).toContain("You are Atlas, working for CanvasX AI. An intelligent agent powered by Sketch, created by Canvas AI.");
+      expect(result).toContain(
+        "You are Atlas, working for CanvasX AI. An intelligent agent powered by Sketch, created by Canvas AI.",
+      );
     });
 
     it("uses botName-only identity line when orgName is absent", () => {
@@ -476,9 +478,7 @@ describe("buildSketchContext", () => {
 
   describe("<thread> tag variants", () => {
     it("wraps messages in <thread> by default when no threadTag specified", () => {
-      const messages = [
-        { userName: "Bob", text: "hello there", ts: "1111.0001" },
-      ];
+      const messages = [{ userName: "Bob", text: "hello there", ts: "1111.0001" }];
       const result = buildSketchContext({
         messages,
         currentUserName: "Alice",
@@ -492,9 +492,7 @@ describe("buildSketchContext", () => {
     });
 
     it("wraps messages in <thread> when threadTag is 'thread'", () => {
-      const messages = [
-        { userName: "Bob", text: "hello there", ts: "1111.0001" },
-      ];
+      const messages = [{ userName: "Bob", text: "hello there", ts: "1111.0001" }];
       const result = buildSketchContext({
         messages,
         currentUserName: "Alice",
@@ -509,9 +507,7 @@ describe("buildSketchContext", () => {
     });
 
     it("wraps messages in <channel_history> when threadTag is 'channel_history'", () => {
-      const messages = [
-        { userName: "Bob", text: "a message", ts: "1111.0001" },
-      ];
+      const messages = [{ userName: "Bob", text: "a message", ts: "1111.0001" }];
       const result = buildSketchContext({
         messages,
         currentUserName: "Alice",
@@ -528,9 +524,7 @@ describe("buildSketchContext", () => {
     });
 
     it("wraps messages in <thread_history> when threadTag is 'thread_history'", () => {
-      const messages = [
-        { userName: "Bob", text: "a message", ts: "1111.0001" },
-      ];
+      const messages = [{ userName: "Bob", text: "a message", ts: "1111.0001" }];
       const result = buildSketchContext({
         messages,
         currentUserName: "Alice",
