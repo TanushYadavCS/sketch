@@ -274,8 +274,8 @@ describe("whatsapp/adapter", () => {
 
     it("replies to normalized phone JID when inbound DM uses @lid", async () => {
       const deps = makeDeps({
-        runAgent: vi.fn().mockImplementation(async ({ onMessage }) => {
-          await onMessage("hello back");
+        runAgent: vi.fn().mockImplementation(async ({ onFinalMessage }) => {
+          await onFinalMessage("hello back");
           return {
             messageSent: true,
             sessionId: "s1",

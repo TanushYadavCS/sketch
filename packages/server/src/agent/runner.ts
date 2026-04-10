@@ -22,6 +22,7 @@ import { createCanUseTool } from "./permissions";
 import { buildSystemContext } from "./prompt";
 import { getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
+import { buildToolProgressLine, dedup } from "./tool-progress";
 
 export interface ToolCallRecord {
   toolName: string;
@@ -81,7 +82,8 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
-  onMessage: (text: string) => Promise<void>;
+  onToolProgress: (lines: string[]) => Promise<void>;
+  onFinalMessage: (text: string) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
   orgName?: string | null;
@@ -274,6 +276,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   });
 
   let pendingToolCalls: ToolCallRecord[] = [];
+  let progressLines: string[] = [];
 
   for await (const message of run) {
     // When a new message arrives, any pending tool calls from the previous
@@ -288,32 +291,45 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       sessionId = message.session_id;
     }
 
-    const text = extractAssistantText(message);
-    if (text) {
-      try {
-        await params.onMessage(text);
-        messageSent = true;
-      } catch (err) {
-        logger.warn({ err }, "Failed to deliver assistant message");
-      }
-    }
-
     if (message.type === "assistant") {
       const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
       const content = inner?.content;
       if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-            const name = (block as { name: string }).name;
-            const input = (block as { input?: Record<string, unknown> }).input;
-            const tc: ToolCallRecord = {
-              toolName: name,
-              skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
-              startedAt: now,
-              endedAt: 0,
-            };
-            toolCalls.push(tc);
-            pendingToolCalls.push(tc);
+        const hasToolUse = content.some(
+          (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
+        );
+
+        if (hasToolUse) {
+          for (const block of content) {
+            if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
+              const name = (block as { name: string }).name;
+              const input = (block as { input?: Record<string, unknown> }).input ?? {};
+              const tc: ToolCallRecord = {
+                toolName: name,
+                skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
+                startedAt: now,
+                endedAt: 0,
+              };
+              toolCalls.push(tc);
+              pendingToolCalls.push(tc);
+              progressLines.push(buildToolProgressLine(name, input));
+            }
+          }
+          progressLines = dedup(progressLines);
+          try {
+            await params.onToolProgress(progressLines);
+          } catch (err) {
+            logger.warn({ err }, "Failed to deliver tool progress");
+          }
+        } else {
+          const text = extractAssistantText(message);
+          if (text) {
+            try {
+              await params.onFinalMessage(text);
+              messageSent = true;
+            } catch (err) {
+              logger.warn({ err }, "Failed to deliver assistant message");
+            }
           }
         }
       }

@@ -21,7 +21,7 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile } from "./bot";
-import { createSlackMessageHandler } from "./message-handler";
+import { createSlackMessageHandler, createSlackToolProgressHandler } from "./message-handler";
 import { resolveSlackUser } from "./resolve-user";
 import type { BufferedMessage, ThreadBuffer } from "./thread-buffer";
 import type { UserCache } from "./user-cache";
@@ -156,7 +156,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       const currentSettings = await repos.settings.get();
 
       const thinkingTs = await slackBot.postMessage(dmChannelId, "_Thinking..._");
-      const onMessage = createSlackMessageHandler(slackBot, dmChannelId, thinkingTs);
+      const onFinalMessage = createSlackMessageHandler(slackBot, dmChannelId, thinkingTs);
+      const onToolProgress = createSlackToolProgressHandler(slackBot, dmChannelId);
 
       const integrationMcpServers = await buildMcpServers(requester.email);
 
@@ -171,7 +172,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           userEmail: requester.email,
           logger,
           platform: "slack",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           orgName: currentSettings?.org_name,
           botName: currentSettings?.bot_name,
           integrationMcpServers,
@@ -255,7 +257,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
       // Post thinking indicator
       const thinkingTs = await slackBot.postMessage(message.channelId, "_Thinking..._");
-      const onMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs);
+      const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs);
+      const onToolProgress = createSlackToolProgressHandler(slackBot, message.channelId);
 
       const integrationMcpServers = await buildMcpServers(user.email);
 
@@ -280,7 +283,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           userEmail: user.email,
           logger,
           platform: "slack",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
@@ -467,7 +471,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
 
         thinkingTs = await slackBot.postThreadReply(message.channelId, threadTs, "_Thinking..._");
-        const onMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs, threadTs);
+        const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs, threadTs);
+        const onToolProgress = createSlackToolProgressHandler(slackBot, message.channelId, threadTs);
 
         const integrationMcpServers = await buildMcpServers(user.email);
 
@@ -481,7 +486,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           userEmail: user.email,
           logger,
           platform: "slack",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           threadTs,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,

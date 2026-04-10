@@ -141,7 +141,8 @@ export class TaskScheduler {
       workspaceDir = await ensureWorkspace(config, userId);
     }
 
-    let onMessage: (text: string) => Promise<void>;
+    let onFinalMessage: (text: string) => Promise<void>;
+    const onToolProgress = async () => {};
 
     if (task.platform === "slack") {
       const slack = getSlack();
@@ -152,11 +153,11 @@ export class TaskScheduler {
 
       if (task.context_type === "channel" && task.session_mode !== "fresh" && task.thread_ts) {
         const threadTs = task.thread_ts;
-        onMessage = async (text) => {
+        onFinalMessage = async (text) => {
           await slack.postThreadReply(task.delivery_target, threadTs, text);
         };
       } else {
-        onMessage = async (text) => {
+        onFinalMessage = async (text) => {
           await slack.postMessage(task.delivery_target, text);
         };
       }
@@ -165,7 +166,7 @@ export class TaskScheduler {
         logger.warn({ taskId: task.id }, "TaskScheduler: WhatsApp not connected, skipping task");
         return;
       }
-      onMessage = async (text) => {
+      onFinalMessage = async (text) => {
         await whatsapp.sendText(task.delivery_target, text);
       };
     }
@@ -223,7 +224,8 @@ export class TaskScheduler {
           userName: "System",
           logger,
           platform: task.platform as "slack" | "whatsapp",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           threadTs: threadKey,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,

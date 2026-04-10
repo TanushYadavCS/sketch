@@ -135,7 +135,8 @@ function makeBaseParams(overrides?: Partial<Parameters<typeof runAgent>[0]>): Pa
     userName: "TestUser",
     logger: makeMockLogger(),
     platform: "slack",
-    onMessage: vi.fn().mockResolvedValue(undefined),
+    onToolProgress: vi.fn().mockResolvedValue(undefined),
+    onFinalMessage: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

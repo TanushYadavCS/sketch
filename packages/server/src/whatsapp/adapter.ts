@@ -103,7 +103,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       whatsapp.startComposing(jid);
 
       try {
-        const onMessage = createWhatsAppMessageHandler(whatsapp, jid);
+        const onFinalMessage = createWhatsAppMessageHandler(whatsapp, jid);
+        const onToolProgress = async () => {};
         const integrationMcpServers = await buildMcpServers(requester.email);
 
         const agentResult = await runAgent({
@@ -117,7 +118,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           userPhone: requester.whatsapp_number,
           logger,
           platform: "whatsapp",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           orgName: currentSettings?.org_name,
           botName: currentSettings?.bot_name,
           integrationMcpServers,
@@ -199,7 +201,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             }
           }
 
-          const onMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
+          const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
+          const onToolProgress = async () => {};
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
 
@@ -232,7 +235,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             userPhone: user.whatsapp_number ?? message.phoneNumber,
             logger,
             platform: "whatsapp",
-            onMessage,
+            onToolProgress,
+            onFinalMessage,
             orgName: settingsRow?.org_name,
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
@@ -335,7 +339,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           threadTag: "thread",
         });
 
-        const onMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        const onToolProgress = async () => {};
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
@@ -350,7 +355,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,

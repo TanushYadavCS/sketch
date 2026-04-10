@@ -573,8 +573,8 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 10));
 
-    const onMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onMessage;
-    await onMessage("Hello from task");
+    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
+    await onFinalMessage("Hello from task");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
       "D_DM_CHANNEL",
@@ -597,8 +597,8 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 10));
 
-    const onMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onMessage;
-    await onMessage("Channel update");
+    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
+    await onFinalMessage("Channel update");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
       "C_CHANNEL1",
@@ -623,8 +623,8 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 10));
 
-    const onMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onMessage;
-    await onMessage("Thread reply");
+    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
+    await onFinalMessage("Thread reply");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).toHaveBeenCalledWith(
       "C_CHANNEL1",
@@ -647,8 +647,8 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 10));
 
-    const onMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onMessage;
-    await onMessage("WhatsApp message");
+    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
+    await onFinalMessage("WhatsApp message");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
       "5511999999999@s.whatsapp.net",
