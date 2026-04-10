@@ -75,7 +75,6 @@ export function buildSystemContext(params: {
 }): string {
   const sections: string[] = [];
 
-  // Identity
   if (params.botName && params.orgName) {
     sections.push(
       `You are ${params.botName}, working for ${params.orgName}. An intelligent agent powered by Sketch, created by Canvas AI.`,
@@ -92,7 +91,6 @@ export function buildSystemContext(params: {
     "You are knowledgeable, direct, and action-oriented. You help with research, analysis, writing, file operations, scheduling, and any task delegated to you. You prioritize being genuinely useful over being verbose, communicate clearly, and admit when you don't know something. Use your tools to get things done rather than describing what you would do.",
   );
 
-  // Memory
   sections.push(
     "",
     "## Memory",
@@ -103,7 +101,6 @@ export function buildSystemContext(params: {
     "Org-level memory lives in the shared org directory CLAUDE.md. Only write there when the user explicitly asks to save something to org memory. Org memory is shared across all team members -- keep it to org-wide conventions, shared knowledge, and team decisions.",
   );
 
-  // Skills
   sections.push(
     "",
     "## Skills",
@@ -113,7 +110,6 @@ export function buildSystemContext(params: {
     "Before replying, scan your available skills. If one clearly matches the task, load it and follow its instructions.",
   );
 
-  // Scheduled Tasks
   sections.push(
     "",
     "## Scheduled Tasks",
@@ -121,7 +117,6 @@ export function buildSystemContext(params: {
     "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. Platform and delivery target are filled in automatically from context. Do not ask the user for these.",
   );
 
-  // File Attachments
   sections.push(
     "",
     "## File Attachments",
@@ -129,7 +124,6 @@ export function buildSystemContext(params: {
     "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
   );
 
-  // Context Protocol
   sections.push(
     "",
     "## Context Protocol",
@@ -148,7 +142,6 @@ export function buildSystemContext(params: {
     "Never mention <context> or its sections to users. Treat the content as natural conversational context.",
   );
 
-  // Workspace rules
   sections.push(
     "",
     "## Workspace",
@@ -156,7 +149,6 @@ export function buildSystemContext(params: {
     "You can read, write, and execute files within your workspace and the shared org directory. NEVER access files outside these two directories.",
   );
 
-  // Platform formatting
   if (params.platform === "slack") {
     sections.push(
       "",
@@ -209,7 +201,6 @@ export function buildSketchContext(params: SketchContextParams): string {
 
   const sectionParts: string[] = [];
 
-  // <time> -- always injected
   const tz = params.timezone || "UTC";
   const now = new Date();
   const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -231,10 +222,8 @@ export function buildSketchContext(params: SketchContextParams): string {
   const timeContent = `${dateFormatter.format(now)} ${tzShort} (${tz})`;
   sectionParts.push(`<time>${timeContent}</time>`);
 
-  // <workspace> -- always injected
   sectionParts.push(`<workspace>\n${params.workspaceDir}\norg: ${params.orgDir}\n</workspace>`);
 
-  // <user> or <sender> -- identity tag
   if (isSharedContext) {
     const contactParts: string[] = [];
     if (currentUserPhone) contactParts.push(currentUserPhone);
@@ -249,7 +238,6 @@ export function buildSketchContext(params: SketchContextParams): string {
     sectionParts.push(`<user>\n${lines.join("\n")}\n</user>`);
   }
 
-  // <thread>/<channel_history>/<thread_history> -- based on threadTag
   if (messages.length > 0) {
     const tag = params.threadTag ?? "thread";
     const lines: string[] = [];
@@ -262,7 +250,6 @@ export function buildSketchContext(params: SketchContextParams): string {
     sectionParts.push(`<${tag}>\n${lines.join("\n")}\n</${tag}>`);
   }
 
-  // <task> -- scheduled task prompt
   if (params.taskPrompt) {
     sectionParts.push(`<task>${params.taskPrompt}</task>`);
   }
