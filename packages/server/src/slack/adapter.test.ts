@@ -96,9 +96,11 @@ function freshMockBot() {
     onChannelMention: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
-    postMessage: vi.fn().mockResolvedValue("thinking-ts"),
-    postThreadReply: vi.fn().mockResolvedValue("thinking-ts"),
+    postMessage: vi.fn().mockResolvedValue("new-ts"),
+    postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
     updateMessage: vi.fn().mockResolvedValue(undefined),
+    addReaction: vi.fn().mockResolvedValue(undefined),
+    removeReaction: vi.fn().mockResolvedValue(undefined),
     getUserInfo: vi.fn().mockResolvedValue({ name: "alice", realName: "Alice", email: "alice@test.com" }),
     getChannelInfo: vi.fn().mockResolvedValue({ name: "general", type: "channel" }),
     getChannelHistory: vi.fn().mockResolvedValue([]),
@@ -219,11 +221,8 @@ describe("slack/adapter", () => {
       await dm({ text: "crash", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(mockBotInstance.updateMessage).toHaveBeenCalledWith(
-        "D1",
-        "thinking-ts",
-        "_Something went wrong, try again_",
-      );
+      expect(mockBotInstance.removeReaction).toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_Something went wrong, try again_");
     });
 
     it("shows _No response_ when agent sends nothing", async () => {
@@ -241,7 +240,7 @@ describe("slack/adapter", () => {
       await dm({ text: "quiet", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(mockBotInstance.updateMessage).toHaveBeenCalledWith("D1", "thinking-ts", "_No response_");
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_No response_");
     });
 
     it("passes MCP servers to agent for DMs", async () => {
@@ -353,7 +352,7 @@ describe("slack/adapter", () => {
       expect(agentCall.userMessage).toContain("<sender>Alice (alice@test.com)</sender>");
     });
 
-    it("posts thread reply with thinking indicator", async () => {
+    it("adds eyes reaction on channel mention", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
@@ -361,7 +360,7 @@ describe("slack/adapter", () => {
       await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
       await flush();
 
-      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", "_Thinking..._");
+      expect(mockBotInstance.addReaction).toHaveBeenCalledWith("C1", "1", "eyes");
     });
   });
 

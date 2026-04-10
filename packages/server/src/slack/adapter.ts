@@ -155,8 +155,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       const workspaceDir = await ensureWorkspace(config, requesterUserId);
       const currentSettings = await repos.settings.get();
 
-      const thinkingTs = await slackBot.postMessage(dmChannelId, "_Thinking..._");
-      const onFinalMessage = createSlackMessageHandler(slackBot, dmChannelId, thinkingTs);
+      const onFinalMessage = createSlackMessageHandler(slackBot, dmChannelId);
       const onToolProgress = createSlackToolProgressHandler(slackBot, dmChannelId);
 
       const integrationMcpServers = await buildMcpServers(requester.email);
@@ -202,11 +201,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
 
         if (!agentResult.messageSent) {
-          await slackBot.updateMessage(dmChannelId, thinkingTs, "_No response_");
+          await slackBot.postMessage(dmChannelId, "_No response_");
         }
       } catch (err) {
         logger.error({ err, requesterUserId }, "Outreach response agent run failed");
-        await slackBot.updateMessage(dmChannelId, thinkingTs, "_Something went wrong_");
+        await slackBot.postMessage(dmChannelId, "_Something went wrong_");
       }
     });
   };
@@ -255,9 +254,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         );
       }
 
-      // Post thinking indicator
-      const thinkingTs = await slackBot.postMessage(message.channelId, "_Thinking..._");
-      const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs);
+      await slackBot.addReaction(message.channelId, message.ts, "eyes");
+      const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId);
       const onToolProgress = createSlackToolProgressHandler(slackBot, message.channelId);
 
       const integrationMcpServers = await buildMcpServers(user.email);
@@ -313,12 +311,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           }
         }
 
+        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
         if (!result.messageSent) {
-          await slackBot.updateMessage(message.channelId, thinkingTs, "_No response_");
+          await slackBot.postMessage(message.channelId, "_No response_");
         }
       } catch (err) {
         logger.error({ err, userId: user.id }, "Agent run failed");
-        await slackBot.updateMessage(message.channelId, thinkingTs, "_Something went wrong, try again_");
+        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
+        await slackBot.postMessage(message.channelId, "_Something went wrong, try again_");
       }
     });
   });
@@ -368,7 +368,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
 
       let user: Awaited<ReturnType<typeof resolveUser>>;
-      let thinkingTs: string | undefined;
 
       try {
         user = await resolveUser(message.userId);
@@ -470,8 +469,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           });
         }
 
-        thinkingTs = await slackBot.postThreadReply(message.channelId, threadTs, "_Thinking..._");
-        const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, thinkingTs, threadTs);
+        await slackBot.addReaction(message.channelId, message.ts, "eyes");
+        const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, threadTs);
         const onToolProgress = createSlackToolProgressHandler(slackBot, message.channelId, threadTs);
 
         const integrationMcpServers = await buildMcpServers(user.email);
@@ -517,14 +516,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           }
         }
 
+        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
         if (!result.messageSent) {
-          await slackBot.updateMessage(message.channelId, thinkingTs, "_No response_");
+          await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
       } catch (err) {
         logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
-        if (thinkingTs) {
-          await slackBot.updateMessage(message.channelId, thinkingTs, "_Something went wrong, try again_");
-        }
+        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
+        await slackBot.postThreadReply(message.channelId, threadTs, "_Something went wrong, try again_");
       }
     });
   });
