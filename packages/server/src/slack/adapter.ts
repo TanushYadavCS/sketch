@@ -312,6 +312,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
 
         await slackBot.removeReaction(message.channelId, message.ts, "eyes");
+        await slackBot.addReaction(message.channelId, message.ts, "white_check_mark");
         if (!result.messageSent) {
           await slackBot.postMessage(message.channelId, "_No response_");
         }
@@ -517,6 +518,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
 
         await slackBot.removeReaction(message.channelId, message.ts, "eyes");
+        await slackBot.addReaction(message.channelId, message.ts, "white_check_mark");
         if (!result.messageSent) {
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
