@@ -167,21 +167,21 @@ function makeRichResultMessage(overrides?: Record<string, unknown>) {
 }
 
 describe("runAgent", () => {
-  it("forwards userPhone to buildSystemContext (phone appears in system prompt append)", async () => {
+  it("uses custom string systemPrompt (not preset) with no per-user content", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const capturedOptions: unknown[] = [];
     vi.mocked(query).mockImplementation(((args: unknown) => {
       capturedOptions.push(args);
       return (async function* () {
-        yield { type: "system", subtype: "init", session_id: "sess-phone-test" };
-        yield { type: "result", session_id: "sess-phone-test", total_cost_usd: 0 };
+        yield { type: "system", subtype: "init", session_id: "sess-prompt-test" };
+        yield { type: "result", session_id: "sess-prompt-test", total_cost_usd: 0 };
       })();
     }) as unknown as typeof query);
 
     await runAgent(
       makeBaseParams({
-        workspaceKey: "u-phone-test",
-        workspaceDir: "/tmp/ws-phone-test",
+        workspaceKey: "u-prompt-test",
+        workspaceDir: "/tmp/ws-prompt-test",
         userName: "Alice",
         userEmail: "alice@example.com",
         userPhone: "+1234567890",
@@ -191,9 +191,11 @@ describe("runAgent", () => {
 
     expect(capturedOptions.length).toBeGreaterThan(0);
     const callArgs = capturedOptions[capturedOptions.length - 1] as {
-      options: { systemPrompt: { append: string } };
+      options: { systemPrompt: string };
     };
-    expect(callArgs.options.systemPrompt.append).toContain("Phone: +1234567890");
+    expect(typeof callArgs.options.systemPrompt).toBe("string");
+    expect(callArgs.options.systemPrompt).not.toContain("Phone:");
+    expect(callArgs.options.systemPrompt).not.toContain("Alice");
   });
 
   it("returns enriched AgentResult with SDK telemetry fields", async () => {

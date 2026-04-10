@@ -259,39 +259,15 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
       const integrationMcpServers = await buildMcpServers(user.email);
 
-      // Resolve outreach context: pending inbound (recipient) and pending outbound (requester)
-      const pendingInbound = outreachRepo ? await outreachRepo.findPendingForRecipient(user.id) : [];
-      const pendingOutbound = outreachRepo ? await outreachRepo.findPendingForRequester(user.id) : [];
-      let userMessage = message.text || "See attached files.";
-      if (pendingInbound.length > 0 || pendingOutbound.length > 0) {
-        const allUsers = await repos.users.list();
-        const usersById = new Map(allUsers.map((u) => [u.id, u]));
-        userMessage = buildSketchContext({
-          messages: [],
-          currentUserName: user.name,
-          currentMessage: userMessage,
-          isSharedContext: false,
-          pendingOutreach: pendingInbound.map((o) => ({
-            id: o.id,
-            message: o.message,
-            taskContext: o.task_context,
-            status: o.status,
-            createdAt: o.created_at,
-            respondedAt: o.responded_at,
-            requesterName: usersById.get(o.requester_user_id)?.name ?? "Unknown",
-          })),
-          outreachResponses: pendingOutbound.map((o) => ({
-            id: o.id,
-            message: o.message,
-            taskContext: o.task_context,
-            status: o.status,
-            response: o.response,
-            createdAt: o.created_at,
-            respondedAt: o.responded_at,
-            recipientName: usersById.get(o.recipient_user_id)?.name ?? "Unknown",
-          })),
-        });
-      }
+      const userMessage = buildSketchContext({
+        messages: [],
+        currentUserName: user.name,
+        currentMessage: message.text || "See attached files.",
+        currentUserEmail: user.email,
+        workspaceDir,
+        orgDir: config.CLAUDE_CONFIG_DIR,
+        isSharedContext: false,
+      });
 
       try {
         const result = await runAgent({
@@ -444,7 +420,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
         const channelWorkspaceKey = `channel-${message.channelId}`;
         const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
-        let userMessage = message.text || "See attached files.";
+        const rawText = message.text || "See attached files.";
+        let userMessage: string;
 
         if (existingSession) {
           const buffered = slackDeps.threadBuffer.drain(message.channelId, threadTs);
@@ -452,9 +429,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           userMessage = buildSketchContext({
             messages: buffered,
             currentUserName: user.name,
-            currentMessage: userMessage,
+            currentMessage: rawText,
             currentUserEmail: user.email,
+            workspaceDir,
+            orgDir: config.CLAUDE_CONFIG_DIR,
             isSharedContext: true,
+            threadTag: "thread",
           });
         } else {
           const history = message.threadTs
@@ -473,16 +453,16 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             const info = await slackDeps.userCache.resolve(msg.userId, (id) => slackBot.getUserInfo(id));
             bootstrapMessages.push({ userName: info.realName, text: msg.text, ts: msg.ts });
           }
-          const header = message.threadTs
-            ? "[Thread context before you joined]"
-            : "[Recent channel messages for context]";
+          const threadTag = message.threadTs ? "thread_history" : "channel_history";
           userMessage = buildSketchContext({
             messages: bootstrapMessages,
             currentUserName: user.name,
-            currentMessage: userMessage,
+            currentMessage: rawText,
             currentUserEmail: user.email,
-            header,
+            workspaceDir,
+            orgDir: config.CLAUDE_CONFIG_DIR,
             isSharedContext: true,
+            threadTag,
           });
         }
 

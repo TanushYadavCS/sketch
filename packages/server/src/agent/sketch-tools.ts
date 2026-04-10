@@ -25,7 +25,6 @@ import type { createOutreachRepository } from "../db/repositories/outreach";
 import type { DB, UsersTable } from "../db/schema";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
-import { buildSketchContext } from "./prompt";
 
 type SelectableUser = Selectable<UsersTable>;
 
@@ -369,24 +368,8 @@ export async function handleRespondToOutreach(
   const requester = deps.userRepo ? await deps.userRepo.findById(outreach.requester_user_id) : null;
   const recipientUser = deps.userRepo ? await deps.userRepo.findById(outreach.recipient_user_id) : null;
 
-  const syntheticMessage = buildSketchContext({
-    messages: [],
-    currentUserName: "",
-    currentMessage: "",
-    isSharedContext: false,
-    outreachResponses: [
-      {
-        id: outreach.id,
-        message: outreach.message,
-        taskContext: outreach.task_context,
-        response: params.response,
-        status: "responded",
-        createdAt: outreach.created_at,
-        respondedAt: outreach.responded_at,
-        recipientName: recipientUser?.name ?? "Unknown",
-      },
-    ],
-  });
+  const recipientName = recipientUser?.name ?? "Unknown";
+  const syntheticMessage = `${recipientName} responded to your outreach: "${params.response}"`;
 
   await deps.enqueueMessage({
     requesterUserId: outreach.requester_user_id,
@@ -475,48 +458,6 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         }
         return handleManageScheduledTasks(params, { scheduler: deps.scheduler, taskContext: deps.taskContext });
       },
-    ),
-
-    tool(
-      "GetTeamDirectory",
-      "Discover team members and their roles. Use descriptions to decide who can help with a task. Returns all team members except yourself.",
-      {},
-      async () => handleGetTeamDirectory(deps),
-    ),
-
-    tool(
-      "SendMessageToUser",
-      "Send a tracked DM to a team member to ask a question or request information. The message is delivered via their connected channel (Slack or WhatsApp). The recipient's assistant will see the outreach and help them respond. Use GetTeamDirectory first to find the right person.",
-      {
-        recipientUserId: z.string().describe("The user ID from GetTeamDirectory"),
-        message: z.string().describe("The message to send. Be specific about what you need."),
-        taskContext: z
-          .string()
-          .optional()
-          .describe(
-            "Brief context about why you're asking, so the recipient's assistant understands the broader goal.",
-          ),
-      },
-      async (params) => handleSendMessageToUser(params, deps),
-    ),
-
-    tool(
-      "GetOutreachStatus",
-      "Check the status of all your outreach messages (sent and received). Returns sent messages with their response status, and any pending inbound questions from other team members.",
-      {},
-      async () => handleGetOutreachStatus(deps),
-    ),
-
-    tool(
-      "RespondToOutreach",
-      "Mark a pending outreach question as answered and deliver the response to the person who asked. Call this when the user has provided information relevant to a pending outreach question shown in the <outreach> context section.",
-      {
-        outreachId: z.string().describe("The outreach ID from the <outreach> context section"),
-        response: z
-          .string()
-          .describe("The answer or information gathered from the user. Summarize the key points clearly."),
-      },
-      async (params) => handleRespondToOutreach(params, deps),
     ),
 
     tool(

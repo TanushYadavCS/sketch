@@ -186,7 +186,7 @@ describe("slack/adapter", () => {
 
       expect(deps.runAgent).toHaveBeenCalledOnce();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
-      expect(agentCall.userMessage).toBe("hello");
+      expect(agentCall.userMessage).toContain("hello");
       expect(agentCall.platform).toBe("slack");
       expect(agentCall.userName).toBe("Alice");
     });

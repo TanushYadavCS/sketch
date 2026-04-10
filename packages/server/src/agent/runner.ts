@@ -151,15 +151,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const systemAppend = buildSystemContext({
     platform: params.platform,
-    userName,
-    userEmail: params.userEmail,
-    userPhone: params.userPhone,
-    workspaceDir: absWorkspace,
-    orgDir: params.claudeConfigDir,
     orgName: params.orgName,
     botName: params.botName,
-    channelContext: params.channelContext,
-    groupContext: params.groupContext,
   });
 
   let sessionId = "";
@@ -267,11 +260,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       cwd: workspaceDir,
       resume: existingSessionId,
       env: { ...process.env, ...wrapperResult.envVars },
-      systemPrompt: {
-        type: "preset" as const,
-        preset: "claude_code" as const,
-        append: systemAppend,
-      },
+      systemPrompt: systemAppend,
+      tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
       permissionMode: "default" as const,
       allowDangerouslySkipPermissions: false,
       settingSources: ["project", "user"],

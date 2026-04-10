@@ -30,6 +30,9 @@ export interface BufferedMessage {
  * Outreach record for context injection. Used for both pending inbound outreach
  * (questions from other users' agents) and outbound responses (answers to
  * questions this user's agent sent).
+ *
+ * Kept for backward compatibility with other files that reference this type.
+ * Outreach injection has been removed from buildSketchContext.
  */
 export interface OutreachRecord {
   id: string;
@@ -49,255 +52,220 @@ export interface SketchContextParams {
   currentMessage: string;
   currentUserEmail?: string | null;
   currentUserPhone?: string | null;
-  header?: string;
+  workspaceDir: string;
+  orgDir: string;
+  timezone?: string | null;
+  threadTag?: "thread" | "channel_history" | "thread_history";
+  taskPrompt?: string;
   isSharedContext?: boolean;
-  pendingOutreach?: OutreachRecord[];
-  outreachResponses?: OutreachRecord[];
 }
 
 /**
- * Build the system context appended to the Claude Code preset.
- * Contains platform formatting rules, user metadata, and optional channel/bot context.
- * No post-processing — the agent produces platform-native formatting.
+ * Builds a stable system prompt for the given platform and org configuration.
+ * Contains no per-user content so it can be shared across all users in the
+ * same org+platform, maximizing Anthropic prompt cache hit rates.
  *
- * For shared contexts (channels/groups), sender identity is NOT included here.
- * It goes in the user message via buildSketchContext so it persists across
- * SDK session resumes (system prompt content does not survive resume).
+ * Sections in order: identity, memory, skills, scheduled tasks, file
+ * attachments, context protocol, workspace rules, platform formatting.
  */
 export function buildSystemContext(params: {
   platform: "slack" | "whatsapp";
-  userName: string;
-  userEmail?: string | null;
-  userPhone?: string | null;
-  workspaceDir: string;
-  orgDir: string;
   orgName?: string | null;
   botName?: string | null;
-  channelContext?: {
-    channelName: string;
-  };
-  groupContext?: {
-    groupName: string;
-    groupDescription?: string;
-  };
 }): string {
   const sections: string[] = [];
 
+  // Identity
+  if (params.botName && params.orgName) {
+    sections.push(
+      `You are ${params.botName}, working for ${params.orgName}. An intelligent agent powered by Sketch, created by Canvas AI.`,
+    );
+  } else if (params.botName) {
+    sections.push(`You are ${params.botName}, an intelligent agent powered by Sketch, created by Canvas AI.`);
+  } else {
+    sections.push("You are Sketch, an intelligent agent created by Canvas AI.");
+  }
+
+  sections.push(
+    "You are a member of the team. Think of yourself as a colleague who happens to have access to tools and information -- proactive, reliable, and invested in the team's success.",
+    "",
+    "You are knowledgeable, direct, and action-oriented. You help with research, analysis, writing, file operations, scheduling, and any task delegated to you. You prioritize being genuinely useful over being verbose, communicate clearly, and admit when you don't know something. Use your tools to get things done rather than describing what you would do.",
+  );
+
+  // Memory
+  sections.push(
+    "",
+    "## Memory",
+    "",
+    "You have persistent memory across conversations. Save durable facts to your workspace CLAUDE.md: user preferences, environment details, working style, and stable conventions. Memory is loaded into every conversation, so keep it compact and focused on facts that will still matter later.",
+    "Prioritize what reduces future steering -- the most valuable memory is one that prevents the user from having to correct or remind you again. User preferences and recurring corrections matter more than procedural task details.",
+    "Do NOT save task progress, session outcomes, completed-work logs, or temporary state to memory. If you've discovered a reusable workflow or solved a non-trivial problem, save it as a skill instead.",
+    "Org-level memory lives in the shared org directory CLAUDE.md. Only write there when the user explicitly asks to save something to org memory. Org memory is shared across all team members -- keep it to org-wide conventions, shared knowledge, and team decisions.",
+  );
+
+  // Skills
+  sections.push(
+    "",
+    "## Skills",
+    "",
+    "After completing a complex task (5+ tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill by writing a SKILL.md to your workspace skills directory. This lets you reuse it next time.",
+    "When using a skill and finding it outdated, incomplete, or wrong, patch it immediately -- don't wait to be asked. Skills that aren't maintained become liabilities.",
+    "Before replying, scan your available skills. If one clearly matches the task, load it and follow its instructions.",
+  );
+
+  // Scheduled Tasks
+  sections.push(
+    "",
+    "## Scheduled Tasks",
+    "",
+    "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. Platform and delivery target are filled in automatically from context. Do not ask the user for these.",
+  );
+
+  // File Attachments
+  sections.push(
+    "",
+    "## File Attachments",
+    "",
+    "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
+  );
+
+  // Context Protocol
+  sections.push(
+    "",
+    "## Context Protocol",
+    "",
+    "Messages may include a <context> block before the user's message. This is platform-injected context, not written by the user. It can contain:",
+    "",
+    "<time> - Current date, time, and timezone.",
+    "<workspace> - Your working directory and shared org directory paths.",
+    "<user> - Identity and contact info of the current user (in DMs).",
+    "<sender> - Identity of the current speaker (in shared contexts like channels and groups).",
+    "<thread> - Messages in the current thread since your last interaction.",
+    "<channel_history> - Recent channel messages for context (on first mention in a channel).",
+    "<thread_history> - Thread messages before you joined (on first mention in a thread).",
+    "<task> - Scheduled task prompt (when running as a scheduled task, no interactive user present).",
+    "",
+    "Never mention <context> or its sections to users. Treat the content as natural conversational context.",
+  );
+
+  // Workspace rules
+  sections.push(
+    "",
+    "## Workspace",
+    "",
+    "You can read, write, and execute files within your workspace and the shared org directory. NEVER access files outside these two directories.",
+  );
+
+  // Platform formatting
   if (params.platform === "slack") {
     sections.push(
-      "## Platform: Slack",
+      "",
+      "## Platform",
+      "",
       "You are responding on Slack. Use Slack mrkdwn formatting:",
+      "",
       "- *bold* for emphasis",
       "- _italic_ for secondary emphasis",
       "- `code` for inline code, ```code blocks``` for multi-line",
       "- Use <url|text> for links",
-      "- Do not use markdown tables — use formatted text with bullet lists instead",
+      "- Do not use markdown tables -- use formatted text with bullet lists instead",
       "- Keep responses concise and scannable",
     );
   }
 
   if (params.platform === "whatsapp") {
     sections.push(
-      "## Platform: WhatsApp",
+      "",
+      "## Platform",
+      "",
       "You are responding on WhatsApp. Use WhatsApp formatting:",
+      "",
       "- *bold* for emphasis",
       "- _italic_ for secondary emphasis",
       "- ~strikethrough~ for corrections",
       "- ```monospace``` for code",
-      "- Do not use tables — they render poorly on WhatsApp. Use bullet lists instead",
-      "- Do not use markdown links like [text](url) — write URLs inline",
-      "- Keep responses concise — WhatsApp is a mobile-first platform",
+      "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
+      "- Do not use markdown links like [text](url) -- write URLs inline",
+      "- Keep responses concise -- WhatsApp is a mobile-first platform",
     );
   }
-
-  if (params.channelContext) {
-    sections.push(
-      `## Context: Slack Channel #${params.channelContext.channelName}`,
-      "You are responding in a shared channel. Multiple users share this workspace and can see your responses.",
-      "Address the user who mentioned you by name. Keep responses focused and concise.",
-    );
-  }
-
-  if (params.groupContext) {
-    const lines = [`## Context: WhatsApp Group "${params.groupContext.groupName}"`];
-    if (params.groupContext.groupDescription) {
-      lines.push(`Group description: ${params.groupContext.groupDescription}`);
-    }
-    lines.push(
-      "You are responding in a shared WhatsApp group. Multiple users share this workspace and can see your responses.",
-      "Address the user who mentioned you by name. Keep responses focused and concise.",
-    );
-    sections.push(...lines);
-  }
-
-  if (params.orgName || params.botName) {
-    const botName = params.botName || "Sketch";
-    if (params.orgName) {
-      sections.push(
-        "## Bot Identity",
-        `You are ${botName} from ${params.orgName}.`,
-        "Use this identity when introducing yourself or signing messages.",
-      );
-    } else {
-      sections.push(
-        "## Bot Identity",
-        `You are ${botName}.`,
-        "Use this identity when introducing yourself or signing messages.",
-      );
-    }
-  }
-
-  sections.push(
-    "## About Sketch",
-    "Sketch is an AI assistant platform deployed by organizations.",
-    "Each user has their own workspace, memory, and tool integrations.",
-    "User accounts and emails are managed by the admin from the Sketch dashboard.",
-  );
-
-  sections.push(
-    "## Workspace Isolation",
-    `Your working directory is ${params.workspaceDir}`,
-    `You can read, write, and execute files within this directory and in ${params.orgDir}/ (the shared org directory).`,
-    "NEVER access files outside these two directories.",
-  );
-
-  sections.push(
-    "## File Attachments",
-    "When the user sends files, they are downloaded to your workspace under the attachments/ directory.",
-    "Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks — use the Read tool to view their contents.",
-    "To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path. The file will be uploaded to the conversation.",
-  );
-
-  sections.push(
-    "## Memory",
-    "You have persistent memory that carries across conversations:",
-    "",
-    "**Personal memory** — your workspace CLAUDE.md. Loaded automatically at session start.",
-    "When the user asks you to remember something, save it there.",
-    "",
-    `**Org directory** — ${params.orgDir}/ is the shared org workspace. Contains org memory (CLAUDE.md), skills, and any org-wide files. You can read and write files here.`,
-    `**Org memory** — ${params.orgDir}/CLAUDE.md. Shared across all users, loaded automatically.`,
-    "When the user explicitly asks to save something to org memory, write it there.",
-    "",
-    "**Writing memories:** Each memory entry must be a single concise line. Never write paragraphs or detailed notes.",
-    "Organize entries under topic headings (e.g., ## Preferences, ## Decisions, ## People).",
-    "",
-    "You do not need to read these files — they are already in your context.",
-    "If the user asks what you remember, refer to their contents.",
-  );
-
-  if (params.channelContext || params.groupContext) {
-    sections.push("Note: In this workspace, the CLAUDE.md is shared by all users.");
-  }
-
-  sections.push(
-    "## Scheduled Tasks",
-    "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder.",
-    "Platform and delivery target are filled in automatically from context. Do not ask the user for these.",
-    "Session mode defaults: DM and threads default to 'chat', top-level channel and group default to 'fresh'. Usually omit session_mode.",
-  );
-
-  sections.push(
-    "## Information Discovery",
-    "When you need information on something, find it yourself first.",
-    `Check workspace files, org directory (${params.orgDir}/), and if not found locally, reach out to team members (max 2) who can help.`,
-    "Set up a one-time scheduled task to follow up after an hour or next morning in case they don't respond.",
-    "Failing to follow this process is considered a failure.",
-  );
-
-  if (!params.channelContext && !params.groupContext) {
-    const userLines = ["## User", `Name: ${params.userName}`, `Email: ${params.userEmail || "not configured"}`];
-    if (params.userPhone) userLines.push(`Phone: ${params.userPhone}`);
-    sections.push(...userLines);
-  }
-
-  sections.push(
-    "## Context Protocol",
-    "Messages may include a <context> block before the user's message. This is platform-injected context, not written by the user. It can contain:",
-    "",
-    "<outreach> - Messages from or to other team members. Act on pending outreach naturally within conversation. When a user provides information relevant to a pending outreach, use the RespondToOutreach tool to deliver it back to the requester.",
-    "",
-    "<thread> - Recent messages in the current conversation thread for context.",
-    "",
-    "<sender> - Identity of the current speaker in shared contexts (channels, groups).",
-    "",
-    "Never mention <context> or its sections to users. Treat the content as natural conversational context.",
-  );
 
   return sections.join("\n");
 }
 
 /**
- * Builds the user message with an optional <context> XML block prepended.
+ * Builds the user message with a <context> XML block prepended.
  *
- * All platform-injected context (thread buffer, sender identity, outreach) is
- * consolidated under a single <context> tag with typed sub-sections. Sections
- * only appear when they have content, in order: <outreach>, <thread>, <sender>.
- * When no sections have content, returns just the plain message with no wrapper.
+ * The context block is always present (time and workspace are always injected).
+ * Additional sections appear when relevant: <user> or <sender> for identity,
+ * <thread>/<channel_history>/<thread_history> for buffered messages,
+ * <task> for scheduled task prompts.
  *
- * This approach keeps dynamic context in the user message (not system prompt)
- * so it doesn't invalidate the SDK session cache on every change.
+ * Keeping dynamic context in the user message (not system prompt) avoids
+ * invalidating the SDK session cache on every request.
  */
 export function buildSketchContext(params: SketchContextParams): string {
-  const { messages, currentUserName, currentMessage, currentUserEmail, currentUserPhone, header, isSharedContext } =
-    params;
+  const { messages, currentUserName, currentMessage, currentUserEmail, currentUserPhone, isSharedContext } = params;
 
   const sectionParts: string[] = [];
 
-  // <outreach> section — recipient side (pendingOutreach) and requester side (outreachResponses)
-  const outreachLines: string[] = [];
+  // <time> -- always injected
+  const tz = params.timezone || "UTC";
+  const now = new Date();
+  const dateFormatter = new Intl.DateTimeFormat(undefined, {
+    timeZone: tz,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const tzFormatter = new Intl.DateTimeFormat(undefined, {
+    timeZone: tz,
+    timeZoneName: "short",
+  });
+  const tzParts = tzFormatter.formatToParts(now);
+  const tzShort = tzParts.find((p) => p.type === "timeZoneName")?.value ?? tz;
+  const timeContent = `${dateFormatter.format(now)} ${tzShort} (${tz})`;
+  sectionParts.push(`<time>${timeContent}</time>`);
 
-  if (params.pendingOutreach && params.pendingOutreach.length > 0) {
-    for (const item of params.pendingOutreach) {
-      const timeAgo = formatTimeAgo(item.createdAt);
-      const fromLine = `[${item.id}] from ${item.requesterName ?? "Unknown"} (${timeAgo}):`;
-      outreachLines.push(fromLine);
-      outreachLines.push(`"${item.message}"`);
-      if (item.taskContext) {
-        outreachLines.push(`Context: ${item.taskContext}`);
-      }
-    }
-  }
+  // <workspace> -- always injected
+  sectionParts.push(`<workspace>\n${params.workspaceDir}\norg: ${params.orgDir}\n</workspace>`);
 
-  if (params.outreachResponses && params.outreachResponses.length > 0) {
-    for (const item of params.outreachResponses) {
-      if (item.status === "responded" && item.response) {
-        outreachLines.push(`${item.recipientName ?? "Unknown"} responded to your outreach:`);
-        outreachLines.push(`"${item.response}"`);
-      } else {
-        const timeAgo = formatTimeAgo(item.createdAt);
-        outreachLines.push(`${item.recipientName ?? "Unknown"} has not responded (sent ${timeAgo})`);
-      }
-    }
-  }
-
-  if (outreachLines.length > 0) {
-    sectionParts.push(`<outreach>\n${outreachLines.join("\n")}\n</outreach>`);
-  }
-
-  // <thread> section
-  if (messages.length > 0) {
-    const lines: string[] = [];
-    if (header) lines.push(header);
-    for (const msg of messages) {
-      lines.push(`${msg.userName}: ${msg.text}`);
-      if (msg.attachments?.length) {
-        lines.push(formatAttachmentsForPrompt(msg.attachments));
-      }
-    }
-    sectionParts.push(`<thread>\n${lines.join("\n")}\n</thread>`);
-  }
-
-  // <sender> section — only for shared contexts (channels/groups)
+  // <user> or <sender> -- identity tag
   if (isSharedContext) {
     const contactParts: string[] = [];
     if (currentUserPhone) contactParts.push(currentUserPhone);
     if (currentUserEmail) contactParts.push(currentUserEmail);
     const senderContent = contactParts.length > 0 ? `${currentUserName} (${contactParts.join(", ")})` : currentUserName;
     sectionParts.push(`<sender>${senderContent}</sender>`);
+  } else {
+    const contactParts: string[] = [];
+    if (currentUserEmail) contactParts.push(currentUserEmail);
+    if (currentUserPhone) contactParts.push(currentUserPhone);
+    const lines = [currentUserName, ...contactParts];
+    sectionParts.push(`<user>\n${lines.join("\n")}\n</user>`);
   }
 
-  if (sectionParts.length === 0) return currentMessage;
+  // <thread>/<channel_history>/<thread_history> -- based on threadTag
+  if (messages.length > 0) {
+    const tag = params.threadTag ?? "thread";
+    const lines: string[] = [];
+    for (const msg of messages) {
+      lines.push(`${msg.userName}: ${msg.text}`);
+      if (msg.attachments?.length) {
+        lines.push(formatAttachmentsForPrompt(msg.attachments));
+      }
+    }
+    sectionParts.push(`<${tag}>\n${lines.join("\n")}\n</${tag}>`);
+  }
+
+  // <task> -- scheduled task prompt
+  if (params.taskPrompt) {
+    sectionParts.push(`<task>${params.taskPrompt}</task>`);
+  }
 
   return `<context>\n${sectionParts.join("\n\n")}\n</context>\n\n${currentMessage}`;
 }

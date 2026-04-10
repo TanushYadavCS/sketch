@@ -203,39 +203,16 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
 
-          // Resolve outreach context: pending inbound (recipient) and pending outbound (requester)
-          const pendingInbound = outreachRepo ? await outreachRepo.findPendingForRecipient(user.id) : [];
-          const pendingOutbound = outreachRepo ? await outreachRepo.findPendingForRequester(user.id) : [];
-          let userMessage = message.text || "See attached files.";
-          if (pendingInbound.length > 0 || pendingOutbound.length > 0) {
-            const allUsers = await repos.users.list();
-            const usersById = new Map(allUsers.map((u) => [u.id, u]));
-            userMessage = buildSketchContext({
-              messages: [],
-              currentUserName: user.name,
-              currentMessage: userMessage,
-              isSharedContext: false,
-              pendingOutreach: pendingInbound.map((o) => ({
-                id: o.id,
-                message: o.message,
-                taskContext: o.task_context,
-                status: o.status,
-                createdAt: o.created_at,
-                respondedAt: o.responded_at,
-                requesterName: usersById.get(o.requester_user_id)?.name ?? "Unknown",
-              })),
-              outreachResponses: pendingOutbound.map((o) => ({
-                id: o.id,
-                message: o.message,
-                taskContext: o.task_context,
-                status: o.status,
-                response: o.response,
-                createdAt: o.created_at,
-                respondedAt: o.responded_at,
-                recipientName: usersById.get(o.recipient_user_id)?.name ?? "Unknown",
-              })),
-            });
-          }
+          const userMessage = buildSketchContext({
+            messages: [],
+            currentUserName: user.name,
+            currentMessage: message.text || "See attached files.",
+            currentUserEmail: user.email,
+            currentUserPhone: user.whatsapp_number ?? message.phoneNumber,
+            workspaceDir,
+            orgDir: config.CLAUDE_CONFIG_DIR,
+            isSharedContext: false,
+          });
 
           const waTaskContext = {
             platform: "whatsapp" as const,
@@ -352,7 +329,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           currentMessage: message.text || "See attached files.",
           currentUserEmail: user?.email ?? null,
           currentUserPhone: user?.whatsapp_number ?? null,
+          workspaceDir,
+          orgDir: config.CLAUDE_CONFIG_DIR,
           isSharedContext: true,
+          threadTag: "thread",
         });
 
         const onMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
