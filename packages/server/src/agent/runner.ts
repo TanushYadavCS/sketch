@@ -263,7 +263,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       resume: existingSessionId,
       env: { ...process.env, ...wrapperResult.envVars },
       systemPrompt: systemAppend,
-      tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+      tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
       permissionMode: "default" as const,
       allowDangerouslySkipPermissions: false,
       settingSources: ["project", "user"],
@@ -279,8 +279,6 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   let progressLines: string[] = [];
 
   for await (const message of run) {
-    // When a new message arrives, any pending tool calls from the previous
-    // iteration have finished executing (the SDK blocks until tool completion).
     const now = Date.now();
     for (const tc of pendingToolCalls) {
       tc.endedAt = now;
