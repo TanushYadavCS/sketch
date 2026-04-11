@@ -33,15 +33,22 @@ export async function syncFeaturedSkills(config: Config, logger: Logger): Promis
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     mkdirSync(skillsTarget, { recursive: true });
 
+    let copied = 0;
+    let skipped = 0;
     for (const [id, skill] of Object.entries<{ path: string }>(manifest.skills)) {
       const src = join(skillsCache, skill.path);
       const dest = join(skillsTarget, id);
+      if (existsSync(dest)) {
+        skipped++;
+        continue;
+      }
       if (existsSync(src)) {
         cpSync(src, dest, { recursive: true });
+        copied++;
       }
     }
 
-    logger.info({ count: Object.keys(manifest.skills).length }, "Synced featured skills");
+    logger.info({ copied, skipped, total: Object.keys(manifest.skills).length }, "Synced featured skills");
   } catch (err) {
     logger.warn({ err }, "Failed to sync featured skills, continuing with existing skills");
   }
