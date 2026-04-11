@@ -235,9 +235,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   };
 
   // Generate ephemeral credential wrappers for skill-mode integrations.
-  // Sets env vars (just paths, no credentials) on process.env before query() spawns
-  // the subprocess. The subprocess captures a snapshot of env at spawn time.
-  // JS single-threaded execution guarantees no interleaving between env set and spawn.
+  // The wrapper env vars (just paths, no credentials) are passed to the agent
+  // subprocess via the SDK's per-call `options.env` — never mutated onto
+  // process.env — so concurrent runAgent calls in the same Node process cannot
+  // interleave and leak one user's wrapper path to another user's subprocess.
   let wrapperResult: WrapperResult = { envVars: {}, wrapperPaths: [] };
   if (params.findIntegrationProvider) {
     wrapperResult = await resolveIntegrationWrappers({
@@ -246,20 +247,17 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       findIntegrationProvider: params.findIntegrationProvider,
       logger,
     });
-    for (const [key, value] of Object.entries(wrapperResult.envVars)) {
-      process.env[key] = value;
-    }
     logger.info(
       {
         wrapperEnvKeys: Object.keys(wrapperResult.envVars),
         wrapperPaths: wrapperResult.wrapperPaths,
-        hasCanvasCli: !!process.env.CANVAS_CLI,
-        hasCanvasApiKey: !!process.env.CANVAS_API_KEY_MCP,
-        hasCanvasUserEmail: !!process.env.CANVAS_USER_EMAIL,
-        userEmail: params.userEmail,
+        hasCanvasCli: !!wrapperResult.envVars.CANVAS_CLI,
+        hasCanvasApiKey: !!wrapperResult.envVars.CANVAS_API_KEY_MCP,
+        hasCanvasUserEmail: !!wrapperResult.envVars.CANVAS_USER_EMAIL,
       },
       "Integration wrappers resolved",
     );
+    logger.debug({ userEmail: params.userEmail }, "Integration wrappers resolved (user context)");
   }
 
   const run = query({
@@ -268,6 +266,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       maxTurns: 100,
       cwd: workspaceDir,
       resume: existingSessionId,
+      env: { ...process.env, ...wrapperResult.envVars },
       systemPrompt: {
         type: "preset" as const,
         preset: "claude_code" as const,

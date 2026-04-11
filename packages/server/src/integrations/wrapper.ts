@@ -54,11 +54,11 @@ export async function resolveIntegrationWrappers(params: {
     wrapperPaths.push(wrapperPath);
     envVars.CANVAS_CLI = wrapperPath;
 
-    // Do NOT set CANVAS_API_KEY_MCP or CANVAS_USER_EMAIL on process.env.
+    // Do NOT expose CANVAS_API_KEY_MCP or CANVAS_USER_EMAIL to the agent subprocess.
     // The Canvas CLI embeds an MCP server manifest — if the SDK finds these env vars,
     // it auto-registers Canvas as an MCP server (exposing the API key to the agent).
-    // By keeping them only inside the wrapper, the SDK's MCP registration fails silently
-    // and the agent uses Canvas via $CANVAS_CLI (Bash) only.
+    // By keeping them only inside the wrapper script, the SDK's MCP registration fails
+    // silently and the agent uses Canvas via $CANVAS_CLI (Bash) only.
 
     logger.debug({ wrapperPath }, "Integration wrapper: created for canvas");
   }
@@ -88,15 +88,14 @@ exec node "${config.cliPath}" "$@"
 }
 
 /**
- * Clean up wrapper files and remove env vars from process.env.
+ * Clean up ephemeral wrapper files after an agent run completes.
+ * The env vars are scoped to the SDK subprocess via options.env — nothing
+ * to clean up in the parent process.
  */
 export function cleanupWrappers(result: WrapperResult): void {
   for (const wrapperPath of result.wrapperPaths) {
     try {
       unlinkSync(wrapperPath);
     } catch {}
-  }
-  for (const key of Object.keys(result.envVars)) {
-    delete process.env[key];
   }
 }
