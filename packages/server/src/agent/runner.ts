@@ -14,6 +14,7 @@ import type { createOutreachRepository } from "../db/repositories/outreach";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
+import { type WrapperResult, cleanupWrappers, resolveIntegrationWrappers } from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
@@ -233,12 +234,39 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return baseCanUseTool(toolName, input);
   };
 
+  // Generate ephemeral credential wrappers for skill-mode integrations.
+  // The wrapper env vars (just paths, no credentials) are passed to the agent
+  // subprocess via the SDK's per-call `options.env` — never mutated onto
+  // process.env — so concurrent runAgent calls in the same Node process cannot
+  // interleave and leak one user's wrapper path to another user's subprocess.
+  let wrapperResult: WrapperResult = { envVars: {}, wrapperPaths: [] };
+  if (params.findIntegrationProvider) {
+    wrapperResult = await resolveIntegrationWrappers({
+      runId: existingSessionId ?? crypto.randomUUID().slice(0, 8),
+      userEmail: params.userEmail ?? null,
+      findIntegrationProvider: params.findIntegrationProvider,
+      logger,
+    });
+    logger.info(
+      {
+        wrapperEnvKeys: Object.keys(wrapperResult.envVars),
+        wrapperPaths: wrapperResult.wrapperPaths,
+        hasCanvasCli: !!wrapperResult.envVars.CANVAS_CLI,
+        hasCanvasApiKey: !!wrapperResult.envVars.CANVAS_API_KEY_MCP,
+        hasCanvasUserEmail: !!wrapperResult.envVars.CANVAS_USER_EMAIL,
+      },
+      "Integration wrappers resolved",
+    );
+    logger.debug({ userEmail: params.userEmail }, "Integration wrappers resolved (user context)");
+  }
+
   const run = query({
     prompt,
     options: {
       maxTurns: 100,
       cwd: workspaceDir,
       resume: existingSessionId,
+      env: { ...process.env, ...wrapperResult.envVars },
       systemPrompt: {
         type: "preset" as const,
         preset: "claude_code" as const,
@@ -344,6 +372,9 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   if (sessionId && !isFresh) {
     await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
   }
+
+  // Clean up ephemeral credential wrappers
+  cleanupWrappers(wrapperResult);
 
   const pendingUploads = uploadCollector.drain();
   logger.info({ userId: userName, sessionId, costUsd, pendingUploads: pendingUploads.length }, "Agent run completed");

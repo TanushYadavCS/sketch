@@ -86,12 +86,13 @@ describe("syncFeaturedSkills", () => {
     expect(execSync).not.toHaveBeenCalledWith(expect.stringContaining("git clone"), expect.anything());
   });
 
-  it("copies skill dirs based on manifest entries", async () => {
+  it("copies skill dirs based on manifest entries when destinations do not exist", async () => {
     vi.mocked(existsSync).mockImplementation((p) => {
       const s = String(p);
       if (s === SKILLS_CACHE) return true;
       if (s.endsWith("manifest.json")) return true;
-      if (s.includes("skills/skill-a") || s.includes("skills/skill-b")) return true;
+      // Sources (inside SKILLS_CACHE) exist, destinations (inside SKILLS_TARGET) do not.
+      if (s.startsWith(SKILLS_CACHE) && (s.includes("skills/skill-a") || s.includes("skills/skill-b"))) return true;
       return false;
     });
     vi.mocked(readFileSync).mockReturnValue(MANIFEST_WITH_SKILLS);
@@ -103,6 +104,46 @@ describe("syncFeaturedSkills", () => {
     expect(cpSync).toHaveBeenCalledWith(join(SKILLS_CACHE, "skills/skill-a"), join(SKILLS_TARGET, "skill-a"), {
       recursive: true,
     });
+    expect(cpSync).toHaveBeenCalledWith(join(SKILLS_CACHE, "skills/skill-b"), join(SKILLS_TARGET, "skill-b"), {
+      recursive: true,
+    });
+  });
+
+  it("skips copy when destination dir already exists (preserves local edits)", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      // Both source and destination exist — destination should be preserved.
+      if (s.includes("skills/skill-a") || s.includes("skills/skill-b")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(MANIFEST_WITH_SKILLS);
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).not.toHaveBeenCalled();
+  });
+
+  it("copies only skills whose destinations do not exist (partial preservation)", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      // skill-a destination already exists (preserve), skill-b destination does not (copy).
+      if (s === join(SKILLS_TARGET, "skill-a")) return true;
+      if (s === join(SKILLS_TARGET, "skill-b")) return false;
+      // Both sources exist.
+      if (s.startsWith(SKILLS_CACHE) && (s.includes("skills/skill-a") || s.includes("skills/skill-b"))) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(MANIFEST_WITH_SKILLS);
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).toHaveBeenCalledTimes(1);
     expect(cpSync).toHaveBeenCalledWith(join(SKILLS_CACHE, "skills/skill-b"), join(SKILLS_TARGET, "skill-b"), {
       recursive: true,
     });
