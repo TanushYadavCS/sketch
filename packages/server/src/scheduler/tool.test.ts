@@ -55,6 +55,16 @@ function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskSchedule
   } as unknown as TaskScheduler;
 }
 
+function makeMockStepContentRepo() {
+  return {
+    upsert: vi.fn().mockResolvedValue(undefined),
+    getByTask: vi.fn().mockResolvedValue([]),
+    getByStep: vi.fn().mockResolvedValue(undefined),
+    deleteByTaskId: vi.fn().mockResolvedValue(undefined),
+    deleteOrphanedSteps: vi.fn().mockResolvedValue(undefined),
+  } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["stepContentRepo"]>;
+}
+
 const dmContext: TaskContext = {
   platform: "slack",
   contextType: "dm",
@@ -84,29 +94,31 @@ const whatsappGroupContext: TaskContext = {
   createdBy: "U123",
 };
 
+const stepContentRepo = makeMockStepContentRepo();
+
 describe("handleManageScheduledTasks — list", () => {
   it("scopes by createdBy for DM context", async () => {
     const scheduler = makeMockScheduler();
-    await handleManageScheduledTasks({ action: "list" }, { scheduler, taskContext: dmContext });
+    await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: dmContext });
     expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
   });
 
   it("scopes by deliveryTarget for channel context", async () => {
     const scheduler = makeMockScheduler();
-    await handleManageScheduledTasks({ action: "list" }, { scheduler, taskContext: channelContext });
+    await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: channelContext });
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: "C456" });
   });
 
   it("scopes by deliveryTarget for group context", async () => {
     const scheduler = makeMockScheduler();
-    await handleManageScheduledTasks({ action: "list" }, { scheduler, taskContext: whatsappGroupContext });
+    await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: whatsappGroupContext });
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: "120363000000@g.us" });
   });
 
   it("returns JSON of tasks", async () => {
     const task = makeTask();
     const scheduler = makeMockScheduler({ listTasks: vi.fn().mockResolvedValue([task]) });
-    const result = await handleManageScheduledTasks({ action: "list" }, { scheduler, taskContext: dmContext });
+    const result = await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: dmContext });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed).toHaveLength(1);
     expect(parsed[0].id).toBe("task-1");
@@ -118,7 +130,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.addTask).not.toHaveBeenCalled();
@@ -128,7 +140,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
   });
@@ -137,7 +149,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
   });
@@ -146,7 +158,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "chat" }));
   });
@@ -155,7 +167,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: channelContext },
+      { scheduler, stepContentRepo, taskContext: channelContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
@@ -164,7 +176,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: channelThreadContext },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "chat" }));
   });
@@ -173,7 +185,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "interval", schedule_value: "3600" },
-      { scheduler, taskContext: whatsappGroupContext },
+      { scheduler, stepContentRepo, taskContext: whatsappGroupContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
@@ -182,7 +194,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", session_mode: "chat" },
-      { scheduler, taskContext: channelContext },
+      { scheduler, stepContentRepo, taskContext: channelContext },
     );
     expect(result.content[0].text).toContain("Error:");
     expect(result.content[0].text).toContain("chat");
@@ -193,7 +205,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", session_mode: "chat" },
-      { scheduler, taskContext: channelThreadContext },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(result.content[0].text).not.toContain("Error:");
     expect(scheduler.addTask).toHaveBeenCalled();
@@ -203,7 +215,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -219,7 +231,7 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: channelThreadContext },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ threadTs: "1234567890.123456" }));
   });
@@ -229,10 +241,89 @@ describe("handleManageScheduledTasks — add", () => {
     const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(task) });
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("new-task");
     expect(result.content[0].text).toContain("Automation created:");
+  });
+
+  it("persists agent step prompts via stepContentRepo for multi-step workflows", async () => {
+    const localRepo = makeMockStepContentRepo();
+    const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(makeTask({ id: "wf-1" })) });
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Hourly summary",
+        schedule_type: "cron",
+        schedule_value: "0 * * * *",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Hourly",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "schedule" },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "Summarize",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "Summarize the previous step output into a digest.",
+          },
+        ],
+      },
+      { scheduler, stepContentRepo: localRepo, taskContext: dmContext },
+    );
+    expect(result.content[0].text).toContain("Automation created:");
+    expect(localRepo.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "wf-1",
+        stepId: "agent1",
+        contentType: "prompt",
+        content: "Summarize the previous step output into a digest.",
+      }),
+    );
+    // Steps JSON passed to scheduler.addTask must not contain agentPrompt (stripped)
+    const addTaskCall = (scheduler.addTask as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const stepsJson = JSON.parse(addTaskCall.steps);
+    const agentStep = stepsJson.find((s: { id: string }) => s.id === "agent1");
+    expect(agentStep.agentPrompt).toBeUndefined();
+  });
+
+  it("fails loudly when multi-step workflow is created without stepContentRepo", async () => {
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "No repo",
+        schedule_type: "cron",
+        schedule_value: "0 * * * *",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Hourly",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "schedule" },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "Summarize",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "Summarize.",
+          },
+        ],
+      },
+      { scheduler, taskContext: dmContext },
+    );
+    expect(result.content[0].text).toContain("Error: step content storage is not available");
+    expect(scheduler.addTask).not.toHaveBeenCalled();
   });
 });
 
@@ -241,7 +332,7 @@ describe("handleManageScheduledTasks — update", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "update", prompt: "New prompt" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.updateTask).not.toHaveBeenCalled();
@@ -251,7 +342,7 @@ describe("handleManageScheduledTasks — update", () => {
     const scheduler = makeMockScheduler({ updateTask: vi.fn().mockResolvedValue(null) });
     const result = await handleManageScheduledTasks(
       { action: "update", task_id: "nonexistent", prompt: "New prompt" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
     expect(result.content[0].text).toContain("nonexistent");
@@ -261,7 +352,7 @@ describe("handleManageScheduledTasks — update", () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "update", task_id: "task-1", prompt: "Updated", schedule_value: "0 10 * * 1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(scheduler.updateTask).toHaveBeenCalledWith("task-1", {
       prompt: "Updated",
@@ -277,7 +368,7 @@ describe("handleManageScheduledTasks — update", () => {
     const scheduler = makeMockScheduler({ updateTask: vi.fn().mockResolvedValue(task) });
     const result = await handleManageScheduledTasks(
       { action: "update", task_id: "task-1", prompt: "Updated" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Automation updated:");
   });
@@ -286,7 +377,7 @@ describe("handleManageScheduledTasks — update", () => {
 describe("handleManageScheduledTasks — remove", () => {
   it("returns error when task_id is missing", async () => {
     const scheduler = makeMockScheduler();
-    const result = await handleManageScheduledTasks({ action: "remove" }, { scheduler, taskContext: dmContext });
+    const result = await handleManageScheduledTasks({ action: "remove" }, { scheduler, stepContentRepo, taskContext: dmContext });
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.removeTask).not.toHaveBeenCalled();
   });
@@ -295,7 +386,7 @@ describe("handleManageScheduledTasks — remove", () => {
     const scheduler = makeMockScheduler({ removeTask: vi.fn().mockResolvedValue(false) });
     const result = await handleManageScheduledTasks(
       { action: "remove", task_id: "nonexistent" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
   });
@@ -304,7 +395,7 @@ describe("handleManageScheduledTasks — remove", () => {
     const scheduler = makeMockScheduler({ removeTask: vi.fn().mockResolvedValue(true) });
     const result = await handleManageScheduledTasks(
       { action: "remove", task_id: "task-1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(scheduler.removeTask).toHaveBeenCalledWith("task-1");
     expect(result.content[0].text).toContain("task-1");
@@ -315,7 +406,7 @@ describe("handleManageScheduledTasks — remove", () => {
 describe("handleManageScheduledTasks — pause", () => {
   it("returns error when task_id is missing", async () => {
     const scheduler = makeMockScheduler();
-    const result = await handleManageScheduledTasks({ action: "pause" }, { scheduler, taskContext: dmContext });
+    const result = await handleManageScheduledTasks({ action: "pause" }, { scheduler, stepContentRepo, taskContext: dmContext });
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.pauseTask).not.toHaveBeenCalled();
   });
@@ -324,7 +415,7 @@ describe("handleManageScheduledTasks — pause", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "pause", task_id: "task-1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(scheduler.pauseTask).toHaveBeenCalledWith("task-1");
     expect(result.content[0].text).toContain("paused");
@@ -334,7 +425,7 @@ describe("handleManageScheduledTasks — pause", () => {
 describe("handleManageScheduledTasks — resume", () => {
   it("returns error when task_id is missing", async () => {
     const scheduler = makeMockScheduler();
-    const result = await handleManageScheduledTasks({ action: "resume" }, { scheduler, taskContext: dmContext });
+    const result = await handleManageScheduledTasks({ action: "resume" }, { scheduler, stepContentRepo, taskContext: dmContext });
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.resumeTask).not.toHaveBeenCalled();
   });
@@ -343,7 +434,7 @@ describe("handleManageScheduledTasks — resume", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "resume", task_id: "task-1" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(scheduler.resumeTask).toHaveBeenCalledWith("task-1");
     expect(result.content[0].text).toContain("resumed");
@@ -357,7 +448,7 @@ describe("handleManageScheduledTasks — add with once schedule type", () => {
     const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(task) });
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it once", schedule_type: "once", schedule_value: futureDate },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).not.toContain("Error:");
     expect(result.content[0].text).toContain("Automation created:");
@@ -369,7 +460,7 @@ describe("handleManageScheduledTasks — add with once schedule type", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Too late", schedule_type: "once", schedule_value: pastDate },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
     expect(result.content[0].text).toContain("past");
@@ -380,7 +471,7 @@ describe("handleManageScheduledTasks — add with once schedule type", () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Bad date", schedule_type: "once", schedule_value: "not-a-date" },
-      { scheduler, taskContext: dmContext },
+      { scheduler, stepContentRepo, taskContext: dmContext },
     );
     expect(result.content[0].text).toContain("Error:");
     expect(result.content[0].text).toContain("ISO 8601");
