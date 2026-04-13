@@ -180,6 +180,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { type: row.type, credentials: row.credentials };
     },
     scheduler,
+    stepContentRepo,
+    automationRunsRepo,
     outreachRepo,
   };
 
@@ -220,6 +222,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { type: row.type, credentials: row.credentials };
     },
     scheduler,
+    stepContentRepo,
+    automationRunsRepo,
     outreachRepo,
   });
 

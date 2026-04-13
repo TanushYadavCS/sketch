@@ -53,6 +53,16 @@ export interface SketchMcpDeps {
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
+  /**
+   * Repositories and helpers needed by the ManageScheduledTasks tool for multi-step
+   * workflow persistence (step content), run inspection, and manual triggers.
+   * Must be plumbed through from the adapter deps or multi-step automations silently
+   * lose their prompts/scripts at creation time.
+   */
+  stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
+  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  toolConfig?: { BASE_URL?: string; PORT: number };
   outreachRepo?: ReturnType<typeof createOutreachRepository>;
   userRepo?: { list: () => Promise<SelectableUser[]>; findById: (id: string) => Promise<SelectableUser | undefined> };
   currentUserId?: string;
@@ -343,6 +353,16 @@ export async function handleManageScheduledTasks(
       const scheduleValue = params.schedule_value as string;
       const stepsForDb = stripContentFromSteps(steps);
 
+      // Guard against silently dropping step content if the repo wasn't plumbed
+      // through. Runs after input validation so user-input errors surface first.
+      // Without this guard, prompts/scripts vanish at creation time and the
+      // workflow fails at first run with 'has no prompt'.
+      if (!deps.stepContentRepo && steps.some((s) => s.agentPrompt || s.script)) {
+        return text(
+          "Error: step content storage is not available in this context. Multi-step automations with prompts or scripts cannot be created.",
+        );
+      }
+
       const task = await deps.scheduler.addTask({
         platform: ctx.platform,
         contextType: ctx.contextType,
@@ -417,6 +437,12 @@ export async function handleManageScheduledTasks(
 
       // Handle steps update
       if (params.steps) {
+        if (!deps.stepContentRepo && params.steps.some((s) => s.agentPrompt || s.script)) {
+          return text(
+            "Error: step content storage is not available in this context. Multi-step automations with prompts or scripts cannot be updated.",
+          );
+        }
+
         const stepsForDb = stripContentFromSteps(params.steps);
         updateFields.steps = JSON.stringify(stepsForDb);
 
@@ -786,7 +812,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         if (!deps.scheduler || !deps.taskContext) {
           return { content: [{ type: "text" as const, text: "Scheduled tasks are not available in this context." }] };
         }
-        return handleManageScheduledTasks(params, { scheduler: deps.scheduler, taskContext: deps.taskContext });
+        return handleManageScheduledTasks(params, {
+          scheduler: deps.scheduler,
+          taskContext: deps.taskContext,
+          stepContentRepo: deps.stepContentRepo,
+          automationRunsRepo: deps.automationRunsRepo,
+          findIntegrationProvider: deps.findIntegrationProvider,
+          queueManager: deps.queueManager,
+          config: deps.toolConfig,
+        });
       },
     ),
 

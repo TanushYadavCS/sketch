@@ -10,6 +10,8 @@ import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runn
 import { getSessionId } from "../agent/sessions";
 import { ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
+import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createChannelRepository } from "../db/repositories/channels";
 import type { createOutreachRepository } from "../db/repositories/outreach";
 import type { createSettingsRepository } from "../db/repositories/settings";
@@ -49,6 +51,8 @@ export interface SlackAdapterDeps {
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
   scheduler?: TaskScheduler;
+  stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   outreachRepo?: OutreachRepository;
 }
 
@@ -92,8 +96,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     buildMcpServers,
     findIntegrationProvider,
     scheduler,
+    stepContentRepo,
+    automationRunsRepo,
     outreachRepo,
   } = deps;
+  const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
   const mode = config.SLACK_MODE ?? "socket";
@@ -184,6 +191,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             createdBy: requesterUserId,
           },
           scheduler,
+          stepContentRepo,
+          automationRunsRepo,
+          queueManager: queue,
+          toolConfig,
           outreachRepo,
           userRepo: repos.users,
           currentUserId: requesterUserId,
@@ -318,6 +329,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             createdBy: user.id,
           },
           scheduler,
+          stepContentRepo,
+          automationRunsRepo,
+          queueManager: queue,
+          toolConfig,
           outreachRepo,
           userRepo: repos.users,
           currentUserId: user.id,
@@ -521,6 +536,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             threadTs: message.threadTs ? threadTs : undefined,
           },
           scheduler,
+          stepContentRepo,
+          automationRunsRepo,
+          queueManager: queue,
+          toolConfig,
         });
 
         for (const filePath of result.pendingUploads) {

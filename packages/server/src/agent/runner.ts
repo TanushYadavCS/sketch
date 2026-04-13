@@ -10,6 +10,8 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
+import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createOutreachRepository } from "../db/repositories/outreach";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
@@ -104,6 +106,17 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
+  /**
+   * Repositories and helpers needed by the ManageScheduledTasks tool to persist
+   * multi-step workflow content, inspect run history, and manually trigger runs.
+   * Must flow through from bootstrap via the adapter deps — without them, the
+   * tool silently drops step content at creation time, see sketch-tools.ts.
+   */
+  stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
+  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  /** Narrow config slice used by ManageScheduledTasks to build webhook URLs for webhook-trigger workflows. */
+  toolConfig?: { BASE_URL?: string; PORT: number };
   outreachRepo?: ReturnType<typeof createOutreachRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
@@ -220,6 +233,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     findIntegrationProvider: params.findIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
+    stepContentRepo: params.stepContentRepo,
+    automationRunsRepo: params.automationRunsRepo,
+    queueManager: params.queueManager,
+    toolConfig: params.toolConfig,
     outreachRepo: params.outreachRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
