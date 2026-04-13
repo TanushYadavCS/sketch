@@ -164,6 +164,7 @@ export class WhatsAppBot {
       logger: this.logger as unknown as Parameters<typeof makeWASocket>[0]["logger"],
       printQRInTerminal: false,
       syncFullHistory: false,
+      fireInitQueries: false,
       markOnlineOnConnect: false,
     });
     this.activeSocketGeneration += 1;
@@ -380,6 +381,7 @@ export class WhatsAppBot {
       logger: this.logger as unknown as Parameters<typeof makeWASocket>[0]["logger"],
       printQRInTerminal: false,
       syncFullHistory: false,
+      fireInitQueries: false,
       markOnlineOnConnect: false,
       cachedGroupMetadata: async (jid) => {
         const cached = this.groupMetaCache.get(jid);
