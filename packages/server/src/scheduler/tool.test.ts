@@ -111,14 +111,20 @@ describe("handleManageScheduledTasks — list", () => {
 
   it("scopes by deliveryTarget for group context", async () => {
     const scheduler = makeMockScheduler();
-    await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: whatsappGroupContext });
+    await handleManageScheduledTasks(
+      { action: "list" },
+      { scheduler, stepContentRepo, taskContext: whatsappGroupContext },
+    );
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: "120363000000@g.us" });
   });
 
   it("returns JSON of tasks", async () => {
     const task = makeTask();
     const scheduler = makeMockScheduler({ listTasks: vi.fn().mockResolvedValue([task]) });
-    const result = await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: dmContext });
+    const result = await handleManageScheduledTasks(
+      { action: "list" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed).toHaveLength(1);
     expect(parsed[0].id).toBe("task-1");
@@ -377,7 +383,10 @@ describe("handleManageScheduledTasks — update", () => {
 describe("handleManageScheduledTasks — remove", () => {
   it("returns error when task_id is missing", async () => {
     const scheduler = makeMockScheduler();
-    const result = await handleManageScheduledTasks({ action: "remove" }, { scheduler, stepContentRepo, taskContext: dmContext });
+    const result = await handleManageScheduledTasks(
+      { action: "remove" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.removeTask).not.toHaveBeenCalled();
   });
@@ -406,7 +415,10 @@ describe("handleManageScheduledTasks — remove", () => {
 describe("handleManageScheduledTasks — pause", () => {
   it("returns error when task_id is missing", async () => {
     const scheduler = makeMockScheduler();
-    const result = await handleManageScheduledTasks({ action: "pause" }, { scheduler, stepContentRepo, taskContext: dmContext });
+    const result = await handleManageScheduledTasks(
+      { action: "pause" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.pauseTask).not.toHaveBeenCalled();
   });
@@ -425,7 +437,10 @@ describe("handleManageScheduledTasks — pause", () => {
 describe("handleManageScheduledTasks — resume", () => {
   it("returns error when task_id is missing", async () => {
     const scheduler = makeMockScheduler();
-    const result = await handleManageScheduledTasks({ action: "resume" }, { scheduler, stepContentRepo, taskContext: dmContext });
+    const result = await handleManageScheduledTasks(
+      { action: "resume" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
     expect(result.content[0].text).toContain("Error:");
     expect(scheduler.resumeTask).not.toHaveBeenCalled();
   });

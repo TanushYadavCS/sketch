@@ -526,7 +526,7 @@ describe("executeTask() delivery routing", () => {
     await new Promise<void>((r) => setTimeout(r, 50));
 
     expect(lastExecuteAutomationParams?.sendMessage).toBeDefined();
-    await lastExecuteAutomationParams!.sendMessage!("Hello from task");
+    await lastExecuteAutomationParams?.sendMessage?.("Hello from task");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
       "D_DM_CHANNEL",
@@ -549,7 +549,7 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 50));
 
-    await lastExecuteAutomationParams!.sendMessage!("Channel update");
+    await lastExecuteAutomationParams?.sendMessage?.("Channel update");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
       "C_CHANNEL1",
@@ -574,7 +574,7 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 50));
 
-    await lastExecuteAutomationParams!.sendMessage!("Thread reply");
+    await lastExecuteAutomationParams?.sendMessage?.("Thread reply");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).toHaveBeenCalledWith(
       "C_CHANNEL1",
@@ -597,7 +597,7 @@ describe("executeTask() delivery routing", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
     await new Promise<void>((r) => setTimeout(r, 50));
 
-    await lastExecuteAutomationParams!.sendMessage!("WhatsApp message");
+    await lastExecuteAutomationParams?.sendMessage?.("WhatsApp message");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
       "5511999999999@s.whatsapp.net",

@@ -271,7 +271,6 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.pauseTask).not.toHaveBeenCalled();
   });
 
-
   it("returns the updated task after pause and resume", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

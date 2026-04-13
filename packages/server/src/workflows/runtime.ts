@@ -443,10 +443,7 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
     }
   } catch (err) {
     const stderrText = stderrChunks.join("").slice(0, 2000);
-    logger.error(
-      { err, stepId: step.id, stderrText },
-      "Automation agent: step failed (Claude Code subprocess error)",
-    );
+    logger.error({ err, stepId: step.id, stderrText }, "Automation agent: step failed (Claude Code subprocess error)");
     const baseMsg = err instanceof Error ? err.message : String(err);
     throw new Error(stderrText ? `${baseMsg}\nstderr: ${stderrText}` : baseMsg);
   }

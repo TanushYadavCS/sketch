@@ -1,9 +1,4 @@
-import {
-  type AutomationRunItem,
-  type AutomationStepContentItem,
-  type ScheduledTaskListItem,
-  api,
-} from "@/lib/api";
+import { type AutomationRunItem, type AutomationStepContentItem, type ScheduledTaskListItem, api } from "@/lib/api";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
   CaretRightIcon,
@@ -637,7 +632,7 @@ function formatRunLog(run: AutomationRunItem): string {
       if (result.error) {
         lines.push(`  error: ${result.error.message}`);
         if (result.error.stack) {
-          lines.push(`  stack:`);
+          lines.push("  stack:");
           for (const stackLine of result.error.stack.split("\n")) {
             lines.push(`    ${stackLine}`);
           }
@@ -645,7 +640,7 @@ function formatRunLog(run: AutomationRunItem): string {
       }
       if (result.output != null) {
         const outputStr = typeof result.output === "string" ? result.output : JSON.stringify(result.output, null, 2);
-        lines.push(`  output:`);
+        lines.push("  output:");
         for (const outputLine of outputStr.split("\n")) {
           lines.push(`    ${outputLine}`);
         }
