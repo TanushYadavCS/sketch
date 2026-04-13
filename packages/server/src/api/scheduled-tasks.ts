@@ -305,6 +305,16 @@ export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMuta
     return c.json({ runs });
   });
 
+  routes.get("/:id/step-content", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    const stepContentRepo = createAutomationStepContentRepository(db);
+    const stepContent = await stepContentRepo.getByTask(id);
+    return c.json({ stepContent });
+  });
+
   routes.get("/:id/runs/:runId", async (c) => {
     const id = c.req.param("id");
     const runId = c.req.param("runId");

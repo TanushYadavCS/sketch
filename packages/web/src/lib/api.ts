@@ -70,6 +70,15 @@ export interface AutomationRunItem {
   completed_at: string | null;
 }
 
+export interface AutomationStepContentItem {
+  task_id: string;
+  step_id: string;
+  content_type: "prompt" | "script";
+  content: string;
+  apps: string | null;
+  updated_at: string;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { ...((options?.headers as Record<string, string>) ?? {}) };
   // Skip Content-Type for FormData — the browser sets it automatically with the correct multipart boundary
@@ -576,6 +585,12 @@ export const api = {
     async getRun(taskId: string, runId: string) {
       const res = await request<{ run: AutomationRunItem }>(`/api/scheduled-tasks/${taskId}/runs/${runId}`);
       return res.run;
+    },
+    async getStepContent(taskId: string) {
+      const res = await request<{ stepContent: AutomationStepContentItem[] }>(
+        `/api/scheduled-tasks/${taskId}/step-content`,
+      );
+      return res.stepContent;
     },
     trigger(taskId: string) {
       return request<{ status: string }>(`/api/scheduled-tasks/${taskId}/run`, {

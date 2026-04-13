@@ -1,9 +1,16 @@
-import { type AutomationRunItem, type ScheduledTaskListItem, api } from "@/lib/api";
+import {
+  type AutomationRunItem,
+  type AutomationStepContentItem,
+  type ScheduledTaskListItem,
+  api,
+} from "@/lib/api";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
   CaretRightIcon,
   CheckCircleIcon,
+  CheckIcon,
   ClockIcon,
+  CopySimpleIcon,
   DotsThreeIcon,
   LightningIcon,
   PauseIcon,
@@ -39,7 +46,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketc
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { type MouseEvent, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 
@@ -415,6 +422,13 @@ function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; is
 }
 
 function StepsList({ task }: { task: ScheduledTaskListItem }) {
+  const [expandedStepIds, setExpandedStepIds] = useState<Set<string>>(new Set());
+
+  const stepContentQuery = useQuery({
+    queryKey: ["automation-step-content", task.id],
+    queryFn: () => api.scheduledTasks.getStepContent(task.id),
+  });
+
   if (!task.steps) return null;
 
   let steps: Array<{ id: string; type: string; label: string }>;
@@ -422,6 +436,11 @@ function StepsList({ task }: { task: ScheduledTaskListItem }) {
     steps = JSON.parse(task.steps);
   } catch {
     return null;
+  }
+
+  const contentByStepId = new Map<string, AutomationStepContentItem>();
+  for (const row of stepContentQuery.data ?? []) {
+    contentByStepId.set(row.step_id, row);
   }
 
   const stepTypeIcon = (type: string) => {
@@ -436,19 +455,83 @@ function StepsList({ task }: { task: ScheduledTaskListItem }) {
     return "Code";
   };
 
+  const toggleStep = (stepId: string) => {
+    setExpandedStepIds((current) => {
+      const next = new Set(current);
+      if (next.has(stepId)) {
+        next.delete(stepId);
+      } else {
+        next.add(stepId);
+      }
+      return next;
+    });
+  };
+
   return (
     <div>
       <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Steps</p>
       <div className="space-y-1">
-        {steps.map((step, i) => (
-          <div key={step.id} className="flex items-center gap-2 text-sm">
-            <span className="w-5 text-right text-xs text-muted-foreground">{i + 1}.</span>
-            <span>{stepTypeIcon(step.type)}</span>
-            <span className="text-xs text-muted-foreground">{stepTypeLabel(step.type)}:</span>
-            <span className="text-foreground">{step.label}</span>
-          </div>
-        ))}
+        {steps.map((step, i) => {
+          const content = contentByStepId.get(step.id);
+          const hasContent = !!content;
+          const isExpanded = expandedStepIds.has(step.id);
+
+          return (
+            <div key={step.id}>
+              <button
+                type="button"
+                className={cn(
+                  "flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm",
+                  hasContent && "hover:bg-muted/50",
+                )}
+                onClick={hasContent ? () => toggleStep(step.id) : undefined}
+                disabled={!hasContent}
+                aria-expanded={hasContent ? isExpanded : undefined}
+              >
+                <span className="w-5 text-right text-xs text-muted-foreground">{i + 1}.</span>
+                <span>{stepTypeIcon(step.type)}</span>
+                <span className="text-xs text-muted-foreground">{stepTypeLabel(step.type)}:</span>
+                <span className="flex-1 text-foreground">{step.label}</span>
+                {hasContent ? (
+                  <CaretRightIcon
+                    size={12}
+                    className={cn("text-muted-foreground transition-transform", isExpanded && "rotate-90")}
+                  />
+                ) : null}
+              </button>
+
+              {hasContent && isExpanded ? <StepContentView row={content} /> : null}
+            </div>
+          );
+        })}
       </div>
+      {stepContentQuery.isError ? <p className="mt-2 text-xs text-destructive">Failed to load step content.</p> : null}
+    </div>
+  );
+}
+
+function StepContentView({ row }: { row: AutomationStepContentItem }) {
+  const headerLabel = row.content_type === "prompt" ? "Agent prompt" : "Script";
+  let apps: string[] | null = null;
+  if (row.apps) {
+    try {
+      apps = JSON.parse(row.apps) as string[];
+    } catch {
+      apps = null;
+    }
+  }
+
+  return (
+    <div className="ml-7 mt-1 mb-2 rounded border border-border bg-background">
+      <div className="flex items-center justify-between border-b border-border px-2 py-1">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{headerLabel}</span>
+        {apps && apps.length > 0 ? (
+          <span className="text-[10px] text-muted-foreground">apps: {apps.join(", ")}</span>
+        ) : null}
+      </div>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-xs text-foreground">
+        {row.content}
+      </pre>
     </div>
   );
 }
@@ -515,21 +598,114 @@ function RunStatusIcon({ status }: { status: string }) {
   return <WarningCircleIcon size={14} className="text-muted-foreground" />;
 }
 
-function RunDetail({ taskId: _taskId, runId: _runId, run }: { taskId: string; runId: string; run: AutomationRunItem }) {
-  if (!run.step_outputs) {
-    return run.error_message ? (
-      <div className="ml-7 mb-1 rounded bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error_message}</div>
-    ) : null;
-  }
+type RunStepResult = {
+  status: string;
+  duration_ms: number;
+  output?: unknown;
+  error?: { message: string; stack?: string };
+};
 
-  let stepOutputs: Record<
-    string,
-    { status: string; duration_ms: number; output?: unknown; error?: { message: string } }
-  >;
+function parseStepOutputs(run: AutomationRunItem): Record<string, RunStepResult> | null {
+  if (!run.step_outputs) return null;
   try {
-    stepOutputs = JSON.parse(run.step_outputs);
+    return JSON.parse(run.step_outputs) as Record<string, RunStepResult>;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Build a plain-text log of the run suitable for copy/paste into chat or a bug
+ * report. Includes full (untruncated) step outputs and error messages.
+ */
+function formatRunLog(run: AutomationRunItem): string {
+  const lines: string[] = [];
+  lines.push(`Run ID: ${run.id}`);
+  lines.push(`Task ID: ${run.task_id}`);
+  lines.push(`Status: ${run.status}`);
+  lines.push(`Started: ${run.started_at}`);
+  if (run.completed_at) lines.push(`Completed: ${run.completed_at}`);
+  if (run.trigger_data) lines.push(`Trigger: ${run.trigger_data}`);
+  lines.push("");
+
+  const stepOutputs = parseStepOutputs(run);
+  if (stepOutputs) {
+    lines.push("--- Steps ---");
+    for (const [stepId, result] of Object.entries(stepOutputs)) {
+      lines.push("");
+      lines.push(`[${result.status}] ${stepId} (${(result.duration_ms / 1000).toFixed(1)}s)`);
+      if (result.error) {
+        lines.push(`  error: ${result.error.message}`);
+        if (result.error.stack) {
+          lines.push(`  stack:`);
+          for (const stackLine of result.error.stack.split("\n")) {
+            lines.push(`    ${stackLine}`);
+          }
+        }
+      }
+      if (result.output != null) {
+        const outputStr = typeof result.output === "string" ? result.output : JSON.stringify(result.output, null, 2);
+        lines.push(`  output:`);
+        for (const outputLine of outputStr.split("\n")) {
+          lines.push(`    ${outputLine}`);
+        }
+      }
+    }
+  }
+
+  if (run.error_message) {
+    lines.push("");
+    lines.push("--- Error ---");
+    lines.push(run.error_message);
+  }
+
+  return lines.join("\n");
+}
+
+function CopyLogsButton({ run }: { run: AutomationRunItem }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(formatRunLog(run));
+      setCopied(true);
+      toast.success("Run logs copied to clipboard");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Unable to copy logs");
+    }
+  };
+
+  return (
+    <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-[11px]" onClick={handleCopy}>
+      {copied ? (
+        <>
+          <CheckIcon className="size-3" weight="bold" />
+          Copied
+        </>
+      ) : (
+        <>
+          <CopySimpleIcon className="size-3" />
+          Copy logs
+        </>
+      )}
+    </Button>
+  );
+}
+
+function RunDetail({ taskId: _taskId, runId: _runId, run }: { taskId: string; runId: string; run: AutomationRunItem }) {
+  const stepOutputs = parseStepOutputs(run);
+
+  if (!stepOutputs) {
+    return run.error_message ? (
+      <div className="ml-7 mb-1 space-y-2">
+        <div className="rounded bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error_message}</div>
+        <div className="flex justify-end">
+          <CopyLogsButton run={run} />
+        </div>
+      </div>
+    ) : null;
   }
 
   return (
@@ -541,7 +717,7 @@ function RunDetail({ taskId: _taskId, runId: _runId, run }: { taskId: string; ru
             <span className="font-medium">{stepId}</span>
             <span className="ml-2 text-muted-foreground">({(result.duration_ms / 1000).toFixed(1)}s)</span>
             {result.status === "failed" && result.error ? (
-              <p className="mt-0.5 text-destructive">{result.error.message}</p>
+              <p className="mt-0.5 whitespace-pre-wrap text-destructive">{result.error.message}</p>
             ) : null}
             {result.status === "completed" && result.output ? (
               <p className="mt-0.5 truncate text-muted-foreground">
@@ -556,6 +732,9 @@ function RunDetail({ taskId: _taskId, runId: _runId, run }: { taskId: string; ru
       {run.error_message ? (
         <div className="rounded bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error_message}</div>
       ) : null}
+      <div className="flex justify-end pt-1">
+        <CopyLogsButton run={run} />
+      </div>
     </div>
   );
 }
