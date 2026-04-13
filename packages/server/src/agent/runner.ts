@@ -12,7 +12,7 @@ import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
-import type { createOutreachRepository } from "../db/repositories/outreach";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
@@ -24,6 +24,7 @@ import { createCanUseTool } from "./permissions";
 import { buildSystemContext } from "./prompt";
 import { getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
+import { buildToolProgressLine, dedup } from "./tool-progress";
 
 export interface ToolCallRecord {
   toolName: string;
@@ -83,18 +84,12 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
-  onMessage: (text: string) => Promise<void>;
+  onToolProgress: (lines: string[]) => Promise<void>;
+  onFinalMessage: (text: string) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
   orgName?: string | null;
   botName?: string | null;
-  channelContext?: {
-    channelName: string;
-  };
-  groupContext?: {
-    groupName: string;
-    groupDescription?: string;
-  };
   integrationMcpServers?: Record<string, McpServerConfig>;
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
   /**
@@ -106,29 +101,21 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
-  /**
-   * Repositories and helpers needed by the ManageScheduledTasks tool to persist
-   * multi-step workflow content, inspect run history, and manually trigger runs.
-   * Must flow through from bootstrap via the adapter deps — without them, the
-   * tool silently drops step content at creation time, see sketch-tools.ts.
-   */
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
-  /** Narrow config slice used by ManageScheduledTasks to build webhook URLs for webhook-trigger workflows. */
   toolConfig?: { BASE_URL?: string; PORT: number };
-  outreachRepo?: ReturnType<typeof createOutreachRepository>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
     findById: (id: string) => Promise<Selectable<UsersTable> | undefined>;
   };
-  contextType?: "dm" | "channel_mention" | "scheduled_task" | "outreach";
+  contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
-  enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
 }
 
 /**
@@ -164,15 +151,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const systemAppend = buildSystemContext({
     platform: params.platform,
-    userName,
-    userEmail: params.userEmail,
-    userPhone: params.userPhone,
-    workspaceDir: absWorkspace,
-    orgDir: params.claudeConfigDir,
     orgName: params.orgName,
     botName: params.botName,
-    channelContext: params.channelContext,
-    groupContext: params.groupContext,
   });
 
   let sessionId = "";
@@ -237,11 +217,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,
     toolConfig: params.toolConfig,
-    outreachRepo: params.outreachRepo,
+    inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
-    enqueueMessage: params.enqueueMessage,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir);
@@ -284,11 +263,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       cwd: workspaceDir,
       resume: existingSessionId,
       env: { ...process.env, ...wrapperResult.envVars },
-      systemPrompt: {
-        type: "preset" as const,
-        preset: "claude_code" as const,
-        append: systemAppend,
-      },
+      systemPrompt: systemAppend,
+      tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
       permissionMode: "default" as const,
       allowDangerouslySkipPermissions: false,
       settingSources: ["project", "user"],
@@ -301,10 +277,9 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   });
 
   let pendingToolCalls: ToolCallRecord[] = [];
+  let progressLines: string[] = [];
 
   for await (const message of run) {
-    // When a new message arrives, any pending tool calls from the previous
-    // iteration have finished executing (the SDK blocks until tool completion).
     const now = Date.now();
     for (const tc of pendingToolCalls) {
       tc.endedAt = now;
@@ -315,32 +290,45 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       sessionId = message.session_id;
     }
 
-    const text = extractAssistantText(message);
-    if (text) {
-      try {
-        await params.onMessage(text);
-        messageSent = true;
-      } catch (err) {
-        logger.warn({ err }, "Failed to deliver assistant message");
-      }
-    }
-
     if (message.type === "assistant") {
       const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
       const content = inner?.content;
       if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-            const name = (block as { name: string }).name;
-            const input = (block as { input?: Record<string, unknown> }).input;
-            const tc: ToolCallRecord = {
-              toolName: name,
-              skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
-              startedAt: now,
-              endedAt: 0,
-            };
-            toolCalls.push(tc);
-            pendingToolCalls.push(tc);
+        const hasToolUse = content.some(
+          (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
+        );
+
+        if (hasToolUse) {
+          for (const block of content) {
+            if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
+              const name = (block as { name: string }).name;
+              const input = (block as { input?: Record<string, unknown> }).input ?? {};
+              const tc: ToolCallRecord = {
+                toolName: name,
+                skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
+                startedAt: now,
+                endedAt: 0,
+              };
+              toolCalls.push(tc);
+              pendingToolCalls.push(tc);
+              progressLines.push(buildToolProgressLine(name, input));
+            }
+          }
+          progressLines = dedup(progressLines);
+          try {
+            await params.onToolProgress(progressLines);
+          } catch (err) {
+            logger.warn({ err }, "Failed to deliver tool progress");
+          }
+        } else {
+          const text = extractAssistantText(message);
+          if (text) {
+            try {
+              await params.onFinalMessage(text);
+              messageSent = true;
+            } catch (err) {
+              logger.warn({ err }, "Failed to deliver assistant message");
+            }
           }
         }
       }

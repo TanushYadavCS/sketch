@@ -15,6 +15,10 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     whatsapp_number: null,
     created_at: "2025-01-01",
     email_verified_at: null,
+    description: null,
+    type: "human",
+    role: null,
+    reports_to: null,
     ...overrides,
   };
 }
@@ -43,6 +47,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
     repos: {
       users: {
         findBySlackId: vi.fn().mockResolvedValue(makeUser()),
+        findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
         findByEmail: vi.fn().mockResolvedValue(undefined),
         create: vi.fn().mockImplementation(async (data) => makeUser({ id: "new-u", ...data })),
         update: vi.fn().mockImplementation(async (id, data) => makeUser({ id, ...data })),
@@ -81,6 +86,11 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
     }),
     buildMcpServers: vi.fn().mockResolvedValue({}),
     findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    inboxMessagesRepo: {
+      listPendingForRecipient: vi.fn().mockResolvedValue([]),
+      markConsumed: vi.fn().mockResolvedValue(undefined),
+      create: vi.fn(),
+    } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
     ...overrides,
   };
 }
@@ -96,9 +106,11 @@ function freshMockBot() {
     onChannelMention: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
-    postMessage: vi.fn().mockResolvedValue("thinking-ts"),
-    postThreadReply: vi.fn().mockResolvedValue("thinking-ts"),
+    postMessage: vi.fn().mockResolvedValue("new-ts"),
+    postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
     updateMessage: vi.fn().mockResolvedValue(undefined),
+    addReaction: vi.fn().mockResolvedValue(undefined),
+    removeReaction: vi.fn().mockResolvedValue(undefined),
     getUserInfo: vi.fn().mockResolvedValue({ name: "alice", realName: "Alice", email: "alice@test.com" }),
     getChannelInfo: vi.fn().mockResolvedValue({ name: "general", type: "channel" }),
     getChannelHistory: vi.fn().mockResolvedValue([]),
@@ -186,7 +198,7 @@ describe("slack/adapter", () => {
 
       expect(deps.runAgent).toHaveBeenCalledOnce();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
-      expect(agentCall.userMessage).toBe("hello");
+      expect(agentCall.userMessage).toContain("hello");
       expect(agentCall.platform).toBe("slack");
       expect(agentCall.userName).toBe("Alice");
     });
@@ -219,11 +231,8 @@ describe("slack/adapter", () => {
       await dm({ text: "crash", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(mockBotInstance.updateMessage).toHaveBeenCalledWith(
-        "D1",
-        "thinking-ts",
-        "_Something went wrong, try again_",
-      );
+      expect(mockBotInstance.removeReaction).toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_Something went wrong, try again_");
     });
 
     it("shows _No response_ when agent sends nothing", async () => {
@@ -241,7 +250,7 @@ describe("slack/adapter", () => {
       await dm({ text: "quiet", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(mockBotInstance.updateMessage).toHaveBeenCalledWith("D1", "thinking-ts", "_No response_");
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_No response_");
     });
 
     it("passes MCP servers to agent for DMs", async () => {
@@ -257,6 +266,72 @@ describe("slack/adapter", () => {
 
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
+    });
+
+    it("injects inbox messages into DM context and marks them consumed after success", async () => {
+      const deps = makeDeps({
+        inboxMessagesRepo: {
+          listPendingForRecipient: vi.fn().mockResolvedValue([
+            {
+              id: "inbox-1",
+              sender_user_id: "sender-1",
+              recipient_user_id: "u1",
+              message: "Please send the latest update.",
+              platform: "slack",
+              channel_id: "D123",
+              message_ref: "1111.0001",
+              created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+              consumed_at: null,
+            },
+          ]),
+          markConsumed: vi.fn().mockResolvedValue(undefined),
+          create: vi.fn(),
+        } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
+      });
+      vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>
+        id === "sender-1" ? makeUser({ id, name: "Bob" }) : makeUser({ id }),
+      );
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("<inbox>");
+      expect(agentCall.userMessage).toContain("From Bob, 5m ago:");
+      expect(agentCall.userMessage).toContain("Please send the latest update.");
+      expect(deps.inboxMessagesRepo?.markConsumed).toHaveBeenCalledWith(["inbox-1"]);
+    });
+
+    it("does not mark inbox messages consumed when the DM run fails", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("boom")),
+        inboxMessagesRepo: {
+          listPendingForRecipient: vi.fn().mockResolvedValue([
+            {
+              id: "inbox-1",
+              sender_user_id: "sender-1",
+              recipient_user_id: "u1",
+              message: "Please send the latest update.",
+              platform: "slack",
+              channel_id: "D123",
+              message_ref: "1111.0001",
+              created_at: new Date().toISOString(),
+              consumed_at: null,
+            },
+          ]),
+          markConsumed: vi.fn().mockResolvedValue(undefined),
+          create: vi.fn(),
+        } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.inboxMessagesRepo?.markConsumed).not.toHaveBeenCalled();
     });
   });
 
@@ -288,7 +363,7 @@ describe("slack/adapter", () => {
   });
 
   describe("channel mention handler", () => {
-    it("creates channel if not found, runs agent with channel context", async () => {
+    it("creates channel if not found and injects channel metadata into shared context", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
@@ -299,7 +374,8 @@ describe("slack/adapter", () => {
       expect(deps.repos.channels.create).toHaveBeenCalled();
       expect(deps.runAgent).toHaveBeenCalledOnce();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
-      expect(agentCall.channelContext).toEqual({ channelName: "general" });
+      expect(agentCall.userMessage).toContain("<channel>");
+      expect(agentCall.userMessage).toContain("name: #general");
     });
 
     it("reuses existing channel", async () => {
@@ -353,7 +429,7 @@ describe("slack/adapter", () => {
       expect(agentCall.userMessage).toContain("<sender>Alice (alice@test.com)</sender>");
     });
 
-    it("posts thread reply with thinking indicator", async () => {
+    it("adds eyes reaction on channel mention", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
@@ -361,7 +437,7 @@ describe("slack/adapter", () => {
       await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
       await flush();
 
-      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", "_Thinking..._");
+      expect(mockBotInstance.addReaction).toHaveBeenCalledWith("C1", "1", "eyes");
     });
   });
 

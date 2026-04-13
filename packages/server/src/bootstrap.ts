@@ -19,8 +19,8 @@ import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createChannelRepository } from "./db/repositories/channels";
+import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
-import { createOutreachRepository } from "./db/repositories/outreach";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
@@ -78,19 +78,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await runManagedSeed(config, settingsRepo);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
-  const outreachRepo = createOutreachRepository(db);
   const automationRunsRepo = createAutomationRunsRepository(db);
   const stepContentRepo = createAutomationStepContentRepository(db);
-
-  // Crash recovery: any automation runs left in "running" status belong to a
-  // prior process that exited mid-execution (restart, crash, SIGKILL). Mark
-  // them failed before the scheduler starts so the UI doesn't show them
-  // spinning forever — the task itself stays active and will fire on its next
-  // schedule.
   const staleCount = await automationRunsRepo.markRunningAsFailed("Interrupted by server restart");
   if (staleCount > 0) {
     logger.warn({ staleCount }, "Cleaned up automation runs interrupted by previous shutdown");
   }
+  const inboxMessagesRepo = createInboxMessagesRepository(db);
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
   const tracer = trace.getTracer("sketch");
@@ -192,7 +186,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     scheduler,
     stepContentRepo,
     automationRunsRepo,
-    outreachRepo,
+    inboxMessagesRepo,
   };
 
   const startSlackBotIfConfigured = createSlackStartupManager({
@@ -234,7 +228,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     scheduler,
     stepContentRepo,
     automationRunsRepo,
-    outreachRepo,
+    inboxMessagesRepo,
   });
 
   // 9. HTTP server

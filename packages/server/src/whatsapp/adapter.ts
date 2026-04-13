@@ -5,14 +5,14 @@
 import { basename, join } from "node:path";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
-import type { BufferedMessage } from "../agent/prompt";
+import type { BufferedMessage, InboxMessageContext } from "../agent/prompt";
 import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
-import type { createOutreachRepository } from "../db/repositories/outreach";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -26,7 +26,7 @@ import { createWhatsAppMessageHandler } from "./message-handler";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
-type OutreachRepository = ReturnType<typeof createOutreachRepository>;
+type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 
 export interface WhatsAppAdapterDeps {
   db: Kysely<DB>;
@@ -44,7 +44,7 @@ export interface WhatsAppAdapterDeps {
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
-  outreachRepo?: OutreachRepository;
+  inboxMessagesRepo?: InboxMessagesRepository;
 }
 
 export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapterDeps): void {
@@ -61,7 +61,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     scheduler,
     stepContentRepo,
     automationRunsRepo,
-    outreachRepo,
+    inboxMessagesRepo,
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -83,91 +83,25 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     return { channelId: jid, messageRef: "" };
   };
 
-  /**
-   * Enqueues a synthetic agent run in the requester's queue, delivering an outreach response
-   * as a pre-formatted <context> message. The requester's agent resumes its session and can
-   * continue the original task with the new information.
-   *
-   * Defined at adapter level so the requester's agent run can reference the same function
-   * for any further outreach it initiates.
-   */
-  const enqueueMessageViaWhatsApp = async ({
-    requesterUserId,
-    message,
-  }: { requesterUserId: string; message: string }) => {
-    const requester = await repos.users.findById(requesterUserId);
-    if (!requester?.whatsapp_number) {
-      logger.warn({ requesterUserId }, "Cannot deliver outreach response: requester has no WhatsApp number");
-      return;
-    }
-    const jid = `${requester.whatsapp_number.replace("+", "")}@s.whatsapp.net`;
+  const loadPendingInboxMessages = async (
+    recipientUserId: string,
+  ): Promise<{ ids: string[]; messages: InboxMessageContext[] }> => {
+    if (!inboxMessagesRepo) return { ids: [], messages: [] };
 
-    const requesterQueue = queue.getQueue(requesterUserId);
-    requesterQueue.enqueue(async () => {
-      const workspaceDir = await ensureWorkspace(config, requesterUserId);
-      const currentSettings = await repos.settings.get();
+    const rows = await inboxMessagesRepo.listPendingForRecipient(recipientUserId);
+    const messages = await Promise.all(
+      rows.map(async (row) => {
+        const sender = await repos.users.findById(row.sender_user_id);
+        return {
+          id: row.id,
+          senderName: sender?.name ?? "Unknown",
+          message: row.message,
+          createdAt: row.created_at,
+        };
+      }),
+    );
 
-      whatsapp.startComposing(jid);
-
-      try {
-        const onMessage = createWhatsAppMessageHandler(whatsapp, jid);
-        const integrationMcpServers = await buildMcpServers(requester.email);
-
-        const agentResult = await runAgent({
-          db,
-          workspaceKey: requesterUserId,
-          userMessage: message,
-          workspaceDir,
-          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
-          userName: requester.name,
-          userEmail: requester.email,
-          userPhone: requester.whatsapp_number,
-          logger,
-          platform: "whatsapp",
-          onMessage,
-          orgName: currentSettings?.org_name,
-          botName: currentSettings?.bot_name,
-          integrationMcpServers,
-          findIntegrationProvider,
-          contextType: "outreach",
-          taskContext: {
-            platform: "whatsapp" as const,
-            contextType: "dm" as const,
-            deliveryTarget: jid,
-            createdBy: requesterUserId,
-          },
-          scheduler,
-          stepContentRepo,
-          automationRunsRepo,
-          queueManager: queue,
-          toolConfig,
-          outreachRepo,
-          userRepo: repos.users,
-          currentUserId: requesterUserId,
-          sendDm: sendDmViaWhatsApp,
-          enqueueMessage: enqueueMessageViaWhatsApp,
-        });
-
-        for (const filePath of agentResult.pendingUploads) {
-          try {
-            if (whatsapp.isConnected) {
-              const ext = filePath.split(".").pop() ?? "";
-              const mime = extensionToMime(ext);
-              await whatsapp.sendFile(jid, filePath, mime, basename(filePath));
-            }
-          } catch (err) {
-            logger.warn({ err, filePath }, "Failed to send file via WhatsApp");
-          }
-        }
-      } catch (err) {
-        logger.error({ err, requesterUserId }, "Outreach response agent run failed (WhatsApp)");
-        if (whatsapp.isConnected) {
-          await whatsapp.sendText(jid, "Something went wrong processing an outreach response.");
-        }
-      } finally {
-        whatsapp.stopComposing(jid);
-      }
-    });
+    return { ids: rows.map((row) => row.id), messages };
   };
 
   whatsapp.onMessage(async (message) => {
@@ -210,43 +144,23 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             }
           }
 
-          const onMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
+          const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
+          const onToolProgress = async () => {};
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
+          const pendingInbox = await loadPendingInboxMessages(user.id);
 
-          // Resolve outreach context: pending inbound (recipient) and pending outbound (requester)
-          const pendingInbound = outreachRepo ? await outreachRepo.findPendingForRecipient(user.id) : [];
-          const pendingOutbound = outreachRepo ? await outreachRepo.findPendingForRequester(user.id) : [];
-          let userMessage = message.text || "See attached files.";
-          if (pendingInbound.length > 0 || pendingOutbound.length > 0) {
-            const allUsers = await repos.users.list();
-            const usersById = new Map(allUsers.map((u) => [u.id, u]));
-            userMessage = buildSketchContext({
-              messages: [],
-              currentUserName: user.name,
-              currentMessage: userMessage,
-              isSharedContext: false,
-              pendingOutreach: pendingInbound.map((o) => ({
-                id: o.id,
-                message: o.message,
-                taskContext: o.task_context,
-                status: o.status,
-                createdAt: o.created_at,
-                respondedAt: o.responded_at,
-                requesterName: usersById.get(o.requester_user_id)?.name ?? "Unknown",
-              })),
-              outreachResponses: pendingOutbound.map((o) => ({
-                id: o.id,
-                message: o.message,
-                taskContext: o.task_context,
-                status: o.status,
-                response: o.response,
-                createdAt: o.created_at,
-                respondedAt: o.responded_at,
-                recipientName: usersById.get(o.recipient_user_id)?.name ?? "Unknown",
-              })),
-            });
-          }
+          const userMessage = buildSketchContext({
+            messages: [],
+            currentUserName: user.name,
+            currentMessage: message.text || "See attached files.",
+            currentUserEmail: user.email,
+            currentUserPhone: user.whatsapp_number ?? message.phoneNumber,
+            workspaceDir,
+            orgDir: config.CLAUDE_CONFIG_DIR,
+            isSharedContext: false,
+            inboxMessages: pendingInbox.messages,
+          });
 
           const waTaskContext = {
             platform: "whatsapp" as const,
@@ -266,7 +180,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             userPhone: user.whatsapp_number ?? message.phoneNumber,
             logger,
             platform: "whatsapp",
-            onMessage,
+            onToolProgress,
+            onFinalMessage,
             orgName: settingsRow?.org_name,
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
@@ -279,11 +194,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             automationRunsRepo,
             queueManager: queue,
             toolConfig,
-            outreachRepo,
+            inboxMessagesRepo,
             userRepo: repos.users,
             currentUserId: user.id,
             sendDm: sendDmViaWhatsApp,
-            enqueueMessage: enqueueMessageViaWhatsApp,
           });
 
           for (const filePath of result.pendingUploads) {
@@ -296,6 +210,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             } catch (err) {
               logger.warn({ err, filePath }, "Failed to send file via WhatsApp");
             }
+          }
+
+          if (pendingInbox.ids.length > 0 && inboxMessagesRepo) {
+            await inboxMessagesRepo.markConsumed(pendingInbox.ids);
           }
         } catch (err) {
           logger.error({ err, userId: user.id }, "Agent run failed (WhatsApp)");
@@ -367,10 +285,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           currentMessage: message.text || "See attached files.",
           currentUserEmail: user?.email ?? null,
           currentUserPhone: user?.whatsapp_number ?? null,
+          workspaceDir,
+          orgDir: config.CLAUDE_CONFIG_DIR,
           isSharedContext: true,
+          threadTag: "thread",
+          groupContext: { groupName, groupDescription },
         });
 
-        const onMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        const onToolProgress = async () => {};
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
@@ -385,11 +308,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
-          onMessage,
+          onToolProgress,
+          onFinalMessage,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
-          groupContext: { groupName, groupDescription },
           integrationMcpServers,
           findIntegrationProvider,
           contextType: "channel_mention",
