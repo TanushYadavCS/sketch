@@ -54,7 +54,6 @@ async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
       content: "test content",
       summary: null,
       context_note: null,
-      tags: null,
       access_scope_id: null,
       source_updated_at: new Date().toISOString(),
       synced_at: new Date().toISOString(),

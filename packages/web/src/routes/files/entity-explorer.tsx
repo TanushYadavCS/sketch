@@ -1,3 +1,4 @@
+import { ConnectorLogo } from "@/components/connector-logos";
 /**
  * EntityExplorer — basic entity list for verifying entity seeding.
  * Simple table: name, type, source, aliases, created_at.
@@ -9,11 +10,23 @@ import {
   ArrowSquareOutIcon,
   CaretDownIcon,
   CubeIcon,
+  DotsThreeIcon,
   MagnifyingGlassIcon,
   PlusIcon,
+  TrashIcon,
   UserIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
@@ -32,20 +45,73 @@ import { toast } from "sonner";
 import { formatRelativeTime } from "./file-list";
 
 const TYPE_GROUPS: { label: string; types: string[] }[] = [
-  { label: "Projects", types: ["clickup_space", "clickup_folder", "linear_project"] },
+  { label: "Projects", types: ["clickup_space", "clickup_folder", "linear_project", "project"] },
   { label: "People", types: ["person"] },
+  { label: "Companies", types: ["company"] },
+  { label: "Products", types: ["product"] },
+  { label: "Teams", types: ["team"] },
   { label: "Databases", types: ["notion_database"] },
+  { label: "Pages", types: ["notion_page"] },
 ];
 
 function humanSourceType(sourceType: string): string {
   const map: Record<string, string> = {
-    clickup_space: "ClickUp Space",
-    clickup_folder: "ClickUp Folder",
-    linear_project: "Linear Project",
-    notion_database: "Notion Database",
+    clickup_space: "Space",
+    clickup_folder: "Folder",
+    clickup_workspace: "Workspace",
+    linear_project: "Project",
+    notion_database: "Database",
+    notion_page: "Page",
     person: "Person",
+    project: "Project",
+    company: "Company",
+    product: "Product",
+    team: "Team",
+    other: "Other",
   };
   return map[sourceType] ?? sourceType;
+}
+
+/** Derive the connector source from entity sourceType (e.g., "clickup_space" → "clickup"). */
+function sourceFromType(sourceType: string): string | null {
+  if (sourceType.startsWith("clickup_")) return "clickup";
+  if (sourceType.startsWith("notion_")) return "notion";
+  if (sourceType.startsWith("linear_")) return "linear";
+  if (sourceType.startsWith("google_drive")) return "google_drive";
+  return null;
+}
+
+/**
+ * Extract a disambiguation context line from entity metadata.
+ * Shows the parent workspace/page so same-name entities from different
+ * sources are distinguishable (e.g., "Engineering" in getEpik vs Habuild).
+ */
+function entityContext(entity: EntityListItem): string | null {
+  const m = entity.metadata;
+  if (!m) return null;
+
+  // ClickUp: workspaceName is on spaces/folders
+  if (m.workspaceName) {
+    if (m.spaceName) return `${m.workspaceName} / ${m.spaceName}`;
+    return m.workspaceName as string;
+  }
+  // ClickUp workspace itself — no parent context needed
+  if (entity.sourceType === "clickup_workspace") return null;
+
+  // Notion: parentPage or path
+  if (m.path) return m.path as string;
+  if (m.parentPage) return m.parentPage as string;
+
+  // Person: show email if available
+  if (entity.sourceType === "person" && entity.subtype) {
+    return entity.subtype === "internal" ? "Internal" : "External";
+  }
+
+  return null;
+}
+
+function isAiDiscovered(entity: EntityListItem): boolean {
+  return entity.metadata?.origin === "ai";
 }
 
 export function EntityExplorer() {
@@ -55,6 +121,8 @@ export function EntityExplorer() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  const [resetCategories, setResetCategories] = useState<Set<string>>(new Set(["connectors", "ai"]));
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("company");
 
@@ -74,6 +142,16 @@ export function EntityExplorer() {
     mutationFn: () => api.entities.deleteTentative(),
     onSuccess: (result) => {
       toast.success(`Removed ${result.count} tentative entities.`);
+      queryClient.invalidateQueries({ queryKey: ["entities"] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const resetMutation = useMutation({
+    mutationFn: (categories: string[]) => api.entities.reset(categories),
+    onSuccess: (result) => {
+      toast.success(`Deleted ${result.entitiesDeleted} entities.`);
+      setShowResetDialog(false);
       queryClient.invalidateQueries({ queryKey: ["entities"] });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -150,6 +228,26 @@ export function EntityExplorer() {
           Add Entity
         </Button>
 
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" className="h-7 w-7 p-0">
+              <DotsThreeIcon size={16} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              onClick={() => {
+                setResetCategories(new Set(["connectors", "ai"]));
+                setShowResetDialog(true);
+              }}
+            >
+              <TrashIcon size={14} className="mr-1.5" />
+              Reset Entities...
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
         {tentativeCount > 0 && (
           <Button
             variant="outline"
@@ -195,7 +293,7 @@ export function EntityExplorer() {
             {/* Header */}
             <div className="flex items-center gap-3 border-b border-border bg-muted/30 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
               <span className="min-w-0 flex-1">Name</span>
-              <span className="w-28 text-center">Type</span>
+              <span className="w-32 text-center">Type</span>
               <span className="w-16 text-center">Mentions</span>
               <span className="w-20 text-center">Status</span>
               <span className="w-24 text-right">Last Active</span>
@@ -251,6 +349,66 @@ export function EntityExplorer() {
         </DialogContent>
       </Dialog>
 
+      <AlertDialog open={showResetDialog} onOpenChange={setShowResetDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset entities</AlertDialogTitle>
+            <AlertDialogDescription>
+              Select which entity categories to delete. Their mentions, source refs, and candidates will also be
+              removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 py-2">
+            {[
+              {
+                key: "connectors",
+                label: "Connector entities",
+                desc: "Spaces, folders, pages, databases from connected sources",
+              },
+              {
+                key: "ai",
+                label: "AI-discovered entities",
+                desc: "Companies, products, projects, teams found by enrichment",
+              },
+              { key: "manual", label: "Manually created", desc: "Entities you added by hand" },
+            ].map((cat) => (
+              <label
+                key={cat.key}
+                className="flex cursor-pointer items-start gap-3 rounded-md border border-border px-3 py-2.5 hover:bg-muted/30"
+              >
+                <input
+                  type="checkbox"
+                  checked={resetCategories.has(cat.key)}
+                  onChange={() => {
+                    setResetCategories((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(cat.key)) next.delete(cat.key);
+                      else next.add(cat.key);
+                      return next;
+                    });
+                  }}
+                  className="mt-0.5 h-4 w-4 rounded border-border accent-destructive"
+                />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{cat.label}</p>
+                  <p className="text-xs text-muted-foreground">{cat.desc}</p>
+                </div>
+              </label>
+            ))}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resetMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => resetMutation.mutate([...resetCategories])}
+              disabled={resetMutation.isPending || resetCategories.size === 0}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {resetMutation.isPending ? "Deleting..." : `Delete${resetCategories.size === 3 ? " All" : ""}`}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <EntityDetailSheet entityId={selectedEntityId} onClose={() => setSelectedEntityId(null)} />
     </div>
   );
@@ -258,6 +416,8 @@ export function EntityExplorer() {
 
 function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id: string) => void }) {
   const isPerson = entity.sourceType === "person";
+  const source = sourceFromType(entity.sourceType);
+  const context = entityContext(entity);
 
   return (
     <button
@@ -273,18 +433,30 @@ function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id
         )}
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{entity.name}</p>
-          {entity.aliases.length > 0 && (
-            <p className="truncate text-[11px] text-muted-foreground">aka {entity.aliases.join(", ")}</p>
+          {context ? (
+            <p className="truncate text-[11px] text-muted-foreground">{context}</p>
+          ) : (
+            entity.aliases.length > 0 && (
+              <p className="truncate text-[11px] text-muted-foreground">aka {entity.aliases.join(", ")}</p>
+            )
           )}
         </div>
       </div>
 
-      <Badge variant="outline" className="w-28 justify-center text-[10px]">
-        {humanSourceType(entity.sourceType)}
-        {isPerson && entity.subtype && (
-          <span className="ml-1 text-muted-foreground">({entity.subtype === "internal" ? "int" : "ext"})</span>
+      <div className="flex w-32 items-center justify-center gap-1.5">
+        {source && <ConnectorLogo type={source} size={14} className="shrink-0 text-muted-foreground" />}
+        <Badge variant="outline" className="text-[10px]">
+          {humanSourceType(entity.sourceType)}
+        </Badge>
+        {isAiDiscovered(entity) && (
+          <Badge
+            variant="secondary"
+            className="text-[9px] px-1 py-0 bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300"
+          >
+            AI
+          </Badge>
         )}
-      </Badge>
+      </div>
 
       <span className="w-16 text-center text-xs font-mono text-muted-foreground">
         {entity.mentionCount > 0 ? entity.mentionCount : "-"}
@@ -493,7 +665,7 @@ function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onC
                             <span className="truncate font-medium">{mention.file.fileName}</span>
                           </div>
                           <div className="flex items-center gap-2 shrink-0 ml-2">
-                            <span className="text-muted-foreground">{formatRelativeTime(mention.mentionedAt)}</span>
+                            <span className="text-muted-foreground">{formatRelativeTime(mention.sourceDate)}</span>
                             {mention.file.providerUrl && (
                               <a
                                 href={mention.file.providerUrl}

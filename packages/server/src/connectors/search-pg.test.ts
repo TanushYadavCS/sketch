@@ -34,7 +34,6 @@ async function insertFile(
     source?: string;
     sourcePath?: string;
     summary?: string | null;
-    tags?: string | null;
     content?: string | null;
   },
 ): Promise<void> {
@@ -64,7 +63,6 @@ async function insertFile(
       provider_url: null,
       content: opts.content ?? null,
       summary: opts.summary ?? null,
-      tags: opts.tags ?? null,
       context_note: null,
       access_scope_id: null,
       source_updated_at: new Date().toISOString(),
@@ -105,19 +103,6 @@ describe("searchFiles on Postgres — tsvector/ts_rank", () => {
     const ids = results.map((r) => r.id);
     expect(ids).toContain("f-sum-1");
     expect(ids).not.toContain("f-sum-2");
-  });
-
-  it("returns results matching by tags", async () => {
-    await insertFile(db, "f-tag-1", {
-      fileName: "doc.txt",
-      tags: '["engineering","roadmap"]',
-    });
-    await insertFile(db, "f-tag-2", { fileName: "doc.txt", tags: '["sales","pipeline"]' });
-
-    const results = await searchFiles(db, "roadmap");
-    const ids = results.map((r) => r.id);
-    expect(ids).toContain("f-tag-1");
-    expect(ids).not.toContain("f-tag-2");
   });
 
   it("returns empty array for a query that matches nothing", async () => {

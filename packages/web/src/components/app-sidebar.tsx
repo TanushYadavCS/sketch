@@ -54,7 +54,7 @@ interface NavItem {
   disabled?: boolean;
 }
 
-const experimentalNavLabels = new Set(["Files"]);
+const experimentalNavLabels = new Set(["Files", "Connections"]);
 
 const allPrimaryNav: NavItem[] = [
   { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },

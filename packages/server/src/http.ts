@@ -190,20 +190,20 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/channels/email", emailRoutes(settings));
 
   app.route("/api/usage", usageRoutes(db));
-
+  // Files feature — gated behind EXPERIMENTAL_FLAG
   if (config.EXPERIMENTAL_FLAG) {
     app.route("/api/entities", entityRoutes(db));
-  }
 
-  if (deps?.logger) {
-    app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger));
-  }
+    if (deps?.logger) {
+      app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger));
+    }
 
-  const identities = createProviderIdentityRepository(db);
-  app.route("/api/identities", providerIdentityRoutes(identities, users));
+    const identities = createProviderIdentityRepository(db);
+    app.route("/api/identities", providerIdentityRoutes(identities, users));
 
-  if (deps?.logger) {
-    app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
+    if (deps?.logger) {
+      app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
+    }
   }
 
   if (config.SYSTEM_SECRET) {

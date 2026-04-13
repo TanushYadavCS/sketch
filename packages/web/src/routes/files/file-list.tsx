@@ -287,6 +287,11 @@ function UnifiedFileRow({ file, onView }: { file: UnifiedFile; onView: () => voi
             <SparkleIcon size={10} weight="fill" className="text-primary" />
             Enriched
           </Badge>
+        ) : file.embeddingStatus === "pending" || file.summaryStatus === "pending" ? (
+          <Badge variant="outline" className="gap-0.5 text-[10px] text-amber-500 border-amber-500/30">
+            <SpinnerGapIcon size={10} />
+            Pending
+          </Badge>
         ) : (
           <Badge variant="secondary" className="text-[10px]">
             Raw

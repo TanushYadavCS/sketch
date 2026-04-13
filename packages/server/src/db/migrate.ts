@@ -34,6 +34,11 @@ import * as m027 from "./migrations/027-entities";
 import * as m028 from "./migrations/028-backfill-admin-user";
 import * as m029 from "./migrations/029-settings-model-id";
 import * as m030 from "./migrations/030-extend-scheduled-tasks";
+import * as m031 from "./migrations/031-drop-tags-from-fts";
+import * as m032 from "./migrations/032-smart-enrichment";
+import * as m033 from "./migrations/033-org-context";
+import * as m034 from "./migrations/034-browse-cache";
+import * as m035 from "./migrations/035-sync-interval";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -72,6 +77,11 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "028-backfill-admin-user": m028,
           "029-settings-model-id": m029,
           "030-extend-scheduled-tasks": m030,
+          "031-drop-tags-from-fts": m031,
+          "032-smart-enrichment": m032,
+          "033-org-context": m033,
+          "034-browse-cache": m034,
+          "035-sync-interval": m035,
         };
       },
     },
