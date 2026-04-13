@@ -56,6 +56,38 @@ export interface SketchContextParams {
 }
 
 /**
+ * Platform-specific formatting guidance. Extracted so it can be reused by
+ * anything that produces output destined for a chat channel — main chat agent,
+ * workflow agent steps, outreach responses, etc. Returns the section lines
+ * without joining so callers can control how they merge it with other context.
+ */
+export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): string[] {
+  if (platform === "slack") {
+    return [
+      "## Platform: Slack",
+      "You are responding on Slack. Use Slack mrkdwn formatting:",
+      "- *bold* for emphasis",
+      "- _italic_ for secondary emphasis",
+      "- `code` for inline code, ```code blocks``` for multi-line",
+      "- Use <url|text> for links",
+      "- Do not use markdown tables — use formatted text with bullet lists instead",
+      "- Keep responses concise and scannable",
+    ];
+  }
+  return [
+    "## Platform: WhatsApp",
+    "You are responding on WhatsApp. Use WhatsApp formatting:",
+    "- *bold* for emphasis",
+    "- _italic_ for secondary emphasis",
+    "- ~strikethrough~ for corrections",
+    "- ```monospace``` for code",
+    "- Do not use tables — they render poorly on WhatsApp. Use bullet lists instead",
+    "- Do not use markdown links like [text](url) — write URLs inline",
+    "- Keep responses concise — WhatsApp is a mobile-first platform",
+  ];
+}
+
+/**
  * Build the system context appended to the Claude Code preset.
  * Contains platform formatting rules, user metadata, and optional channel/bot context.
  * No post-processing — the agent produces platform-native formatting.
@@ -80,35 +112,11 @@ export function buildSystemContext(params: {
     groupName: string;
     groupDescription?: string;
   };
+  experimentalFlag?: boolean;
 }): string {
   const sections: string[] = [];
 
-  if (params.platform === "slack") {
-    sections.push(
-      "## Platform: Slack",
-      "You are responding on Slack. Use Slack mrkdwn formatting:",
-      "- *bold* for emphasis",
-      "- _italic_ for secondary emphasis",
-      "- `code` for inline code, ```code blocks``` for multi-line",
-      "- Use <url|text> for links",
-      "- Do not use markdown tables — use formatted text with bullet lists instead",
-      "- Keep responses concise and scannable",
-    );
-  }
-
-  if (params.platform === "whatsapp") {
-    sections.push(
-      "## Platform: WhatsApp",
-      "You are responding on WhatsApp. Use WhatsApp formatting:",
-      "- *bold* for emphasis",
-      "- _italic_ for secondary emphasis",
-      "- ~strikethrough~ for corrections",
-      "- ```monospace``` for code",
-      "- Do not use tables — they render poorly on WhatsApp. Use bullet lists instead",
-      "- Do not use markdown links like [text](url) — write URLs inline",
-      "- Keep responses concise — WhatsApp is a mobile-first platform",
-    );
-  }
+  sections.push(...buildPlatformFormattingLines(params.platform));
 
   if (params.channelContext) {
     sections.push(
@@ -198,13 +206,26 @@ export function buildSystemContext(params: {
     "For multi-step workflows involving integrations (email, CRM, project tools), check the user's connected apps first by calling getProviderConfig and then listing their accounts.",
   );
 
-  sections.push(
-    "## Information Discovery",
-    "When you need information on something, find it yourself first.",
-    `Check workspace files, org directory (${params.orgDir}/), and if not found locally, reach out to team members (max 2) who can help.`,
-    "Set up a one-time scheduled task to follow up after an hour or next morning in case they don't respond.",
-    "Failing to follow this process is considered a failure.",
-  );
+  if (params.experimentalFlag) {
+    sections.push(
+      "## Information Discovery",
+      "When you need information, search for it before asking others.",
+      `1. Check workspace files and org directory (${params.orgDir}/)`,
+      "2. Use Search to find relevant docs, tasks, meetings, and past conversations across all connected sources",
+      "3. Use SearchEntities + GetEntityContext for entity-specific context (who/what is this?)",
+      "4. Only if not found: reach out to team members (max 2) who can help",
+      "Set up a one-time scheduled task to follow up after an hour or next morning in case they don't respond.",
+      "Failing to follow this process is considered a failure.",
+    );
+  } else {
+    sections.push(
+      "## Information Discovery",
+      "When you need information on something, find it yourself first.",
+      `Check workspace files, org directory (${params.orgDir}/), and if not found locally, reach out to team members (max 2) who can help.`,
+      "Set up a one-time scheduled task to follow up after an hour or next morning in case they don't respond.",
+      "Failing to follow this process is considered a failure.",
+    );
+  }
 
   if (!params.channelContext && !params.groupContext) {
     const userLines = ["## User", `Name: ${params.userName}`, `Email: ${params.userEmail || "not configured"}`];

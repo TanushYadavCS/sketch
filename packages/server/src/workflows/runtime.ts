@@ -11,9 +11,10 @@
  */
 import { spawn } from "node:child_process";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
+import { buildPlatformFormattingLines } from "../agent/prompt";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
@@ -130,6 +131,10 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           step,
           input: previousOutput,
           logger,
+          workspaceDir: resolveWorkspaceDir(params.config.DATA_DIR, task),
+          // output_platform lets a workflow deliver to a different channel than
+          // its trigger context; fall back to the task's own platform otherwise.
+          outputPlatform: (task.output_platform ?? task.platform) as "slack" | "whatsapp",
         });
       }
 
@@ -256,13 +261,25 @@ interface ActionStepParams {
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   const { script, step, input, runId, logger, creatorEmail, workspaceDir, findIntegrationProvider } = params;
 
-  // Resolve integration env vars
+  // Resolve integration env vars for the action step child process.
+  //
+  // INTEGRATION_CLI is the generic contract that action-step scripts rely on:
+  // scripts invoke `node $INTEGRATION_CLI <subcommand>` without knowing which
+  // provider is configured. Today only the Canvas provider is wired here; when
+  // a second provider lands, this block should branch to resolve the correct
+  // CLI path per provider type.
+  //
+  // HOME is required so Node can resolve `~` in any paths scripts might use
+  // and so anything that reads user dotfiles behaves sanely.
   const integrationEnv: Record<string, string> = {};
+  const home = homedir();
+  if (home) integrationEnv.HOME = home;
   const provider = await findIntegrationProvider();
   if (provider?.type === "canvas") {
     const creds = JSON.parse(provider.credentials);
     if (creds.apiKey) integrationEnv.CANVAS_API_KEY_MCP = creds.apiKey;
     if (creatorEmail) integrationEnv.CANVAS_USER_EMAIL = creatorEmail;
+    integrationEnv.INTEGRATION_CLI = join(home, ".claude", "skills", "canvas", "canvas-cli.js");
   }
 
   const tempFile = join(tmpdir(), `sketch-auto-${runId}-${step.id}.js`);
@@ -347,10 +364,12 @@ interface AgentStepParams {
   step: WorkflowStep;
   input: unknown;
   logger: Logger;
+  workspaceDir: string;
+  outputPlatform: "slack" | "whatsapp";
 }
 
 async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
-  const { prompt, step, input, logger } = params;
+  const { prompt, step, input, logger, workspaceDir, outputPlatform } = params;
 
   if (step.agentMode === "sketch") {
     logger.warn({ stepId: step.id }, "Automation agent: sketch mode not implemented, falling back to light mode");
@@ -360,41 +379,88 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
 
   const userMessage = `${prompt}\n\nInput:\n${JSON.stringify(input, null, 2)}`;
 
+  // Capture stderr from the spawned Claude Code subprocess so failures produce
+  // an actionable error message instead of an opaque "exited with code 1".
+  const stderrChunks: string[] = [];
+
+  // Model: only override if the step explicitly specifies one. Otherwise let
+  // the CLI fall back to ANTHROPIC_MODEL from the environment, which is set by
+  // applyLlmEnvFromSettings at startup and carries the correct ID for whichever
+  // backend (Anthropic / Bedrock / Vertex) is configured. Hardcoding an
+  // Anthropic-format model ID here breaks every non-Anthropic backend.
+  const modelOverride = step.agentModel;
+
+  // System prompt: generic workflow-step directive + channel-native formatting
+  // rules so the final step of an automation renders correctly wherever the
+  // output is delivered (Slack mrkdwn vs WhatsApp conventions). Uses the same
+  // helper the main chat agent uses via buildSystemContext — any tweaks to
+  // platform formatting rules land in both paths at once.
+  const systemPromptLines = [
+    "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
+    "",
+    "The text you return is delivered directly to the user's chat channel. Format it for that channel:",
+    "",
+    ...buildPlatformFormattingLines(outputPlatform),
+  ];
+
   const run = query({
     prompt: userMessage,
     options: {
       maxTurns: 10,
-      model: step.agentModel ?? "claude-sonnet-4-6",
-      systemPrompt:
-        "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
-      permissionMode: "default" as const,
-      allowDangerouslySkipPermissions: true,
+      ...(modelOverride ? { model: modelOverride } : {}),
+      cwd: workspaceDir,
+      systemPrompt: systemPromptLines.join("\n"),
+      // bypassPermissions + empty settingSources: the agent step runs
+      // non-interactively, with no user settings / skills / MCP servers loaded,
+      // and no permission prompts to block tool calls.
+      permissionMode: "bypassPermissions" as const,
+      settingSources: [],
+      stderr: (chunk: string) => {
+        stderrChunks.push(chunk);
+      },
     },
   });
 
   let lastText = "";
-  for await (const message of run) {
-    if (
-      message &&
-      typeof message === "object" &&
-      "type" in message &&
-      message.type === "assistant" &&
-      "message" in message
-    ) {
-      const msg = message.message as { content?: Array<{ type: string; text?: string }> };
-      if (msg.content) {
-        for (const block of msg.content) {
-          if (block.type === "text" && block.text) {
-            lastText = block.text;
+  try {
+    for await (const message of run) {
+      if (
+        message &&
+        typeof message === "object" &&
+        "type" in message &&
+        message.type === "assistant" &&
+        "message" in message
+      ) {
+        const msg = message.message as { content?: Array<{ type: string; text?: string }> };
+        if (msg.content) {
+          for (const block of msg.content) {
+            if (block.type === "text" && block.text) {
+              lastText = block.text;
+            }
           }
         }
       }
     }
+  } catch (err) {
+    const stderrText = stderrChunks.join("").slice(0, 2000);
+    logger.error(
+      { err, stepId: step.id, stderrText },
+      "Automation agent: step failed (Claude Code subprocess error)",
+    );
+    const baseMsg = err instanceof Error ? err.message : String(err);
+    throw new Error(stderrText ? `${baseMsg}\nstderr: ${stderrText}` : baseMsg);
   }
 
-  logger.info({ stepId: step.id, responseLength: lastText.length }, "Automation agent: step completed");
+  logger.info(
+    { stepId: step.id, responseLength: lastText.length, stderrLen: stderrChunks.join("").length },
+    "Automation agent: step completed",
+  );
 
-  return { response: lastText };
+  // Return the raw assistant text, not a wrapper object. The delivery path
+  // (executeAutomation) sends strings as-is and stringifies objects — so the
+  // raw string both renders cleanly in Slack/WhatsApp and makes the run log
+  // readable (no `{ "response": "..." }` wrapper in stored step_outputs).
+  return lastText;
 }
 
 // --- Context file writer ---
