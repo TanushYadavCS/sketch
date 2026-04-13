@@ -579,7 +579,9 @@ describe("buildSketchContext", () => {
         currentMessage: "hello",
         workspaceDir: "/data/workspaces/u123",
         orgDir: "/data/.claude",
-        inboxMessages: [{ id: "inbox-1", senderName: "Bob", message: "Please send the latest update.", createdAt: tenMinutesAgo }],
+        inboxMessages: [
+          { id: "inbox-1", senderName: "Bob", message: "Please send the latest update.", createdAt: tenMinutesAgo },
+        ],
       });
 
       expect(result).toContain("<inbox>");

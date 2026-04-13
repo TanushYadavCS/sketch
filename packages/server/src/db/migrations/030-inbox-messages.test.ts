@@ -45,7 +45,13 @@ describe("030-inbox-messages migration", () => {
       .execute();
     await up(db);
 
-    await db.insertInto("users").values([{ id: "u1", name: "Alice" }, { id: "u2", name: "Bob" }]).execute();
+    await db
+      .insertInto("users")
+      .values([
+        { id: "u1", name: "Alice" },
+        { id: "u2", name: "Bob" },
+      ])
+      .execute();
 
     await db
       .insertInto("inbox_messages")

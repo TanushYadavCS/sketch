@@ -2,8 +2,8 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { createUserRepository } from "./users";
 import { createInboxMessagesRepository } from "./inbox-messages";
+import { createUserRepository } from "./users";
 
 let db: Kysely<DB>;
 let repo: ReturnType<typeof createInboxMessagesRepository>;
@@ -70,8 +70,16 @@ describe("listPendingForRecipient()", () => {
       platform: "slack",
     });
 
-    await db.updateTable("inbox_messages").set({ created_at: "2026-04-10T08:00:00.000Z" }).where("id", "=", first.id).execute();
-    await db.updateTable("inbox_messages").set({ created_at: "2026-04-10T09:00:00.000Z" }).where("id", "=", second.id).execute();
+    await db
+      .updateTable("inbox_messages")
+      .set({ created_at: "2026-04-10T08:00:00.000Z" })
+      .where("id", "=", first.id)
+      .execute();
+    await db
+      .updateTable("inbox_messages")
+      .set({ created_at: "2026-04-10T09:00:00.000Z" })
+      .where("id", "=", second.id)
+      .execute();
 
     const rows = await repo.listPendingForRecipient(recipientUserId);
 

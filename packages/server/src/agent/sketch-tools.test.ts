@@ -4,7 +4,12 @@ import { join } from "node:path";
 import type { Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsersTable } from "../db/schema";
-import { UploadCollector, createSketchMcpServer, handleGetTeamDirectory, handleSendMessageToUser } from "./sketch-tools";
+import {
+  UploadCollector,
+  createSketchMcpServer,
+  handleGetTeamDirectory,
+  handleSendMessageToUser,
+} from "./sketch-tools";
 
 function makeUser(overrides: Partial<Selectable<UsersTable>> = {}): Selectable<UsersTable> {
   return {
