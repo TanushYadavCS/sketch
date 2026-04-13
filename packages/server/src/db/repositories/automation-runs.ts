@@ -84,5 +84,26 @@ export function createAutomationRunsRepository(db: Kysely<DB>) {
     async deleteByTaskId(taskId: string): Promise<void> {
       await db.deleteFrom("automation_runs").where("task_id", "=", taskId).execute();
     },
+
+    /**
+     * Marks all runs currently in "running" status as failed with a restart
+     * reason. Called at startup to clean up runs that were in-flight when the
+     * previous process exited. Workflows can't be safely resumed mid-run
+     * because steps have side effects (Slack posts, sheet reads, agent calls)
+     * that aren't idempotent — the user can re-trigger or wait for the next
+     * schedule if they want the work to happen again.
+     */
+    async markRunningAsFailed(reason: string): Promise<number> {
+      const result = await db
+        .updateTable("automation_runs")
+        .set({
+          status: "failed",
+          error_message: reason,
+          completed_at: new Date().toISOString(),
+        })
+        .where("status", "=", "running")
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
   };
 }
