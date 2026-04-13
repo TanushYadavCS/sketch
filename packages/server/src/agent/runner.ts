@@ -240,6 +240,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     wrapperResult = await resolveIntegrationWrappers({
       runId: existingSessionId ?? crypto.randomUUID().slice(0, 8),
       userEmail: params.userEmail ?? null,
+      claudeConfigDir: params.claudeConfigDir,
       findIntegrationProvider: params.findIntegrationProvider,
       logger,
     });

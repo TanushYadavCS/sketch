@@ -8,7 +8,6 @@
  * The wrapper is deleted after the agent run completes.
  */
 import { chmodSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
 import type { DB } from "../db/schema";
@@ -32,10 +31,11 @@ export interface WrapperResult {
 export async function resolveIntegrationWrappers(params: {
   runId: string;
   userEmail: string | null;
+  claudeConfigDir: string;
   findIntegrationProvider: () => Promise<SkillModeProvider | null>;
   logger: Logger;
 }): Promise<WrapperResult> {
-  const { runId, userEmail, logger } = params;
+  const { runId, userEmail, logger, claudeConfigDir } = params;
   const envVars: Record<string, string> = {};
   const wrapperPaths: string[] = [];
 
@@ -44,7 +44,7 @@ export async function resolveIntegrationWrappers(params: {
 
   if (provider.type === "canvas") {
     const creds = JSON.parse(provider.credentials) as Record<string, string>;
-    const cliPath = join(homedir(), ".claude", "skills", "canvas", "canvas-cli.js");
+    const cliPath = join(claudeConfigDir, "skills", "canvas", "canvas-cli.js");
 
     const wrapperEnv: Record<string, string> = {};
     if (creds.apiKey) wrapperEnv.CANVAS_API_KEY_MCP = creds.apiKey;

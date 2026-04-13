@@ -11,7 +11,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
 import { buildPlatformFormattingLines } from "../agent/prompt";
@@ -27,7 +27,7 @@ export interface ExecuteAutomationParams {
   triggerData?: unknown;
   db: Kysely<DB>;
   logger: Logger;
-  config: { DATA_DIR: string; BASE_URL?: string; PORT: number };
+  config: { DATA_DIR: string; BASE_URL?: string; PORT: number; CLAUDE_CONFIG_DIR: string };
   runsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
@@ -116,6 +116,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           input: previousOutput,
           runId,
           logger,
+          config: params.config,
           creatorEmail,
           workspaceDir: resolveWorkspaceDir(params.config.DATA_DIR, task),
           findIntegrationProvider: params.findIntegrationProvider,
@@ -253,6 +254,7 @@ interface ActionStepParams {
   input: unknown;
   runId: string;
   logger: Logger;
+  config: ExecuteAutomationParams["config"];
   creatorEmail: string | null;
   workspaceDir: string;
   findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
@@ -268,18 +270,13 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   // provider is configured. Today only the Canvas provider is wired here; when
   // a second provider lands, this block should branch to resolve the correct
   // CLI path per provider type.
-  //
-  // HOME is required so Node can resolve `~` in any paths scripts might use
-  // and so anything that reads user dotfiles behaves sanely.
   const integrationEnv: Record<string, string> = {};
-  const home = homedir();
-  if (home) integrationEnv.HOME = home;
   const provider = await findIntegrationProvider();
   if (provider?.type === "canvas") {
     const creds = JSON.parse(provider.credentials);
     if (creds.apiKey) integrationEnv.CANVAS_API_KEY_MCP = creds.apiKey;
     if (creatorEmail) integrationEnv.CANVAS_USER_EMAIL = creatorEmail;
-    integrationEnv.INTEGRATION_CLI = join(home, ".claude", "skills", "canvas", "canvas-cli.js");
+    integrationEnv.INTEGRATION_CLI = join(params.config.CLAUDE_CONFIG_DIR, "skills", "canvas", "canvas-cli.js");
   }
 
   const tempFile = join(tmpdir(), `sketch-auto-${runId}-${step.id}.js`);
