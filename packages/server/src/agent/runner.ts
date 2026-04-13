@@ -10,7 +10,7 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
-import type { createOutreachRepository } from "../db/repositories/outreach";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
@@ -88,13 +88,6 @@ export interface RunAgentParams {
   threadTs?: string;
   orgName?: string | null;
   botName?: string | null;
-  channelContext?: {
-    channelName: string;
-  };
-  groupContext?: {
-    groupName: string;
-    groupDescription?: string;
-  };
   integrationMcpServers?: Record<string, McpServerConfig>;
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
   /**
@@ -106,18 +99,17 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
-  outreachRepo?: ReturnType<typeof createOutreachRepository>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
     findById: (id: string) => Promise<Selectable<UsersTable> | undefined>;
   };
-  contextType?: "dm" | "channel_mention" | "scheduled_task" | "outreach";
+  contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
-  enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
 }
 
 /**
@@ -215,11 +207,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     findIntegrationProvider: params.findIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
-    outreachRepo: params.outreachRepo,
+    inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
-    enqueueMessage: params.enqueueMessage,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir);

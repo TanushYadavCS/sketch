@@ -657,6 +657,41 @@ describe("executeTask() delivery routing", () => {
   });
 });
 
+describe("executeTask() prompt building", () => {
+  beforeEach(async () => {
+    const workspaceMod = await import("../agent/workspace");
+    vi.spyOn(workspaceMod, "ensureWorkspace").mockResolvedValue("/tmp/ws/user");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("builds scheduled task runs through buildSketchContext with <task>, <time>, and <workspace>", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D_DM_CHANNEL",
+      prompt: "Send the daily summary",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 10));
+
+    const agentCall = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(agentCall.userMessage).toContain("<context>");
+    expect(agentCall.userMessage).toContain("<time>");
+    expect(agentCall.userMessage).toContain("<workspace>");
+    expect(agentCall.userMessage).toContain("<task>Send the daily summary</task>");
+    expect(agentCall.userMessage).not.toContain("[Scheduled Task]");
+    expect(agentCall.userMessage).not.toContain("<inbox>");
+  });
+});
+
 describe("executeTask() queue key derivation", () => {
   beforeEach(async () => {
     const workspaceMod = await import("../agent/workspace");

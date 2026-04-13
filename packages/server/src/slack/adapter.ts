@@ -5,13 +5,13 @@
  */
 import { join } from "node:path";
 import type { Kysely } from "kysely";
-import { buildSketchContext } from "../agent/prompt";
+import { type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { getSessionId } from "../agent/sessions";
 import { ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import type { createChannelRepository } from "../db/repositories/channels";
-import type { createOutreachRepository } from "../db/repositories/outreach";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -29,7 +29,7 @@ import type { UserCache } from "./user-cache";
 type UserRepository = ReturnType<typeof createUserRepository>;
 type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
-type OutreachRepository = ReturnType<typeof createOutreachRepository>;
+type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 
 export interface SlackAdapterDeps {
   db: Kysely<DB>;
@@ -49,7 +49,7 @@ export interface SlackAdapterDeps {
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
   scheduler?: TaskScheduler;
-  outreachRepo?: OutreachRepository;
+  inboxMessagesRepo?: InboxMessagesRepository;
 }
 
 export async function validateSlackTokens(botToken: string, appToken?: string) {
@@ -92,7 +92,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     buildMcpServers,
     findIntegrationProvider,
     scheduler,
-    outreachRepo,
+    inboxMessagesRepo,
   } = deps;
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
@@ -128,86 +128,25 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     return { channelId, messageRef };
   };
 
-  /**
-   * Enqueues a synthetic agent run in the requester's queue, delivering an outreach response
-   * as a pre-formatted <context> message. The requester's agent resumes its session and can
-   * continue the original task with the new information.
-   *
-   * Defined at adapter level (not inside the queue callback) so the requester's agent run
-   * can reference the same function for any further outreach it initiates.
-   */
-  const enqueueMessageViaSlack = async ({ requesterUserId, message }: { requesterUserId: string; message: string }) => {
-    const requester = await repos.users.findById(requesterUserId);
-    if (!requester?.slack_user_id) {
-      logger.warn({ requesterUserId }, "Cannot deliver outreach response: requester has no Slack ID");
-      return;
-    }
+  const loadPendingInboxMessages = async (
+    recipientUserId: string,
+  ): Promise<{ ids: string[]; messages: InboxMessageContext[] }> => {
+    if (!inboxMessagesRepo) return { ids: [], messages: [] };
 
-    const settings = await repos.settings.get();
-    const dmChannelId = await slackBot.openDmChannel(requester.slack_user_id, settings?.slack_bot_token ?? undefined);
-    if (!dmChannelId) {
-      logger.warn({ requesterUserId }, "Cannot deliver outreach response: failed to open DM channel");
-      return;
-    }
+    const rows = await inboxMessagesRepo.listPendingForRecipient(recipientUserId);
+    const messages = await Promise.all(
+      rows.map(async (row) => {
+        const sender = await repos.users.findById(row.sender_user_id);
+        return {
+          id: row.id,
+          senderName: sender?.name ?? "Unknown",
+          message: row.message,
+          createdAt: row.created_at,
+        };
+      }),
+    );
 
-    const requesterQueue = queue.getQueue(requesterUserId);
-    requesterQueue.enqueue(async () => {
-      const workspaceDir = await ensureWorkspace(config, requesterUserId);
-      const currentSettings = await repos.settings.get();
-
-      const onFinalMessage = createSlackMessageHandler(slackBot, dmChannelId);
-      const onToolProgress = createSlackToolProgressHandler(slackBot, dmChannelId);
-
-      const integrationMcpServers = await buildMcpServers(requester.email);
-
-      try {
-        const agentResult = await runAgent({
-          db,
-          workspaceKey: requesterUserId,
-          userMessage: message,
-          workspaceDir,
-          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
-          userName: requester.name,
-          userEmail: requester.email,
-          logger,
-          platform: "slack",
-          onToolProgress,
-          onFinalMessage,
-          orgName: currentSettings?.org_name,
-          botName: currentSettings?.bot_name,
-          integrationMcpServers,
-          findIntegrationProvider,
-          contextType: "outreach",
-          taskContext: {
-            platform: "slack" as const,
-            contextType: "dm" as const,
-            deliveryTarget: dmChannelId,
-            createdBy: requesterUserId,
-          },
-          scheduler,
-          outreachRepo,
-          userRepo: repos.users,
-          currentUserId: requesterUserId,
-          sendDm: sendDmViaSlack,
-          enqueueMessage: enqueueMessageViaSlack,
-        });
-
-        for (const filePath of agentResult.pendingUploads) {
-          try {
-            await slackBot.uploadFile(dmChannelId, filePath);
-          } catch (err) {
-            logger.warn({ err, filePath }, "Failed to upload file");
-          }
-        }
-
-        if (!agentResult.messageSent) {
-          await slackBot.postMessage(dmChannelId, "_No response_");
-        }
-      } catch (err) {
-        logger.error({ err, requesterUserId }, "Outreach response agent run failed");
-        await slackBot.postMessage(dmChannelId, "_Something went wrong_");
-      }
-    });
+    return { ids: rows.map((row) => row.id), messages };
   };
 
   // DM handler
@@ -259,6 +198,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       const onToolProgress = createSlackToolProgressHandler(slackBot, message.channelId);
 
       const integrationMcpServers = await buildMcpServers(user.email);
+      const pendingInbox = await loadPendingInboxMessages(user.id);
 
       const userMessage = buildSketchContext({
         messages: [],
@@ -268,6 +208,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         workspaceDir,
         orgDir: config.CLAUDE_CONFIG_DIR,
         isSharedContext: false,
+        inboxMessages: pendingInbox.messages,
       });
 
       try {
@@ -296,11 +237,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             createdBy: user.id,
           },
           scheduler,
-          outreachRepo,
+          inboxMessagesRepo,
           userRepo: repos.users,
           currentUserId: user.id,
           sendDm: sendDmViaSlack,
-          enqueueMessage: enqueueMessageViaSlack,
         });
 
         for (const filePath of result.pendingUploads) {
@@ -313,6 +253,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
         await slackBot.removeReaction(message.channelId, message.ts, "eyes");
         await slackBot.addReaction(message.channelId, message.ts, "white_check_mark");
+        if (pendingInbox.ids.length > 0 && inboxMessagesRepo) {
+          await inboxMessagesRepo.markConsumed(pendingInbox.ids);
+        }
         if (!result.messageSent) {
           await slackBot.postMessage(message.channelId, "_No response_");
         }
@@ -439,6 +382,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             orgDir: config.CLAUDE_CONFIG_DIR,
             isSharedContext: true,
             threadTag: "thread",
+            channelContext: { channelName: channel.name },
           });
         } else {
           const history = message.threadTs
@@ -457,7 +401,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             const info = await slackDeps.userCache.resolve(msg.userId, (id) => slackBot.getUserInfo(id));
             bootstrapMessages.push({ userName: info.realName, text: msg.text, ts: msg.ts });
           }
-          const threadTag = message.threadTs ? "thread_history" : "channel_history";
+          const threadTag = message.threadTs ? "thread" : "channel_history";
           userMessage = buildSketchContext({
             messages: bootstrapMessages,
             currentUserName: user.name,
@@ -467,6 +411,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             orgDir: config.CLAUDE_CONFIG_DIR,
             isSharedContext: true,
             threadTag,
+            channelContext: { channelName: channel.name },
           });
         }
 
@@ -492,9 +437,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
-          channelContext: {
-            channelName: channel.name,
-          },
           integrationMcpServers,
           findIntegrationProvider,
           contextType: "channel_mention",

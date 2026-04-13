@@ -56,6 +56,7 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
     repos: {
       users: {
         findByWhatsappNumber: vi.fn().mockResolvedValue(makeUser()),
+        findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
       } as unknown as WhatsAppAdapterDeps["repos"]["users"],
       settings: {
         get: vi.fn().mockResolvedValue({
@@ -77,6 +78,11 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
     }),
     buildMcpServers: vi.fn().mockResolvedValue({}),
     findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    inboxMessagesRepo: {
+      listPendingForRecipient: vi.fn().mockResolvedValue([]),
+      markConsumed: vi.fn().mockResolvedValue(undefined),
+      create: vi.fn(),
+    } as unknown as WhatsAppAdapterDeps["inboxMessagesRepo"],
     ...overrides,
   };
 }
@@ -251,6 +257,90 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
 
+    it("injects inbox messages into DM context and marks them consumed after success", async () => {
+      const deps = makeDeps({
+        inboxMessagesRepo: {
+          listPendingForRecipient: vi.fn().mockResolvedValue([
+            {
+              id: "inbox-1",
+              sender_user_id: "sender-1",
+              recipient_user_id: "u1",
+              message: "Please send your latest update.",
+              platform: "whatsapp",
+              channel_id: "1234567890@s.whatsapp.net",
+              message_ref: "",
+              created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+              consumed_at: null,
+            },
+          ]),
+          markConsumed: vi.fn().mockResolvedValue(undefined),
+          create: vi.fn(),
+        } as unknown as WhatsAppAdapterDeps["inboxMessagesRepo"],
+      });
+      vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>
+        id === "sender-1" ? makeUser({ id, name: "Bob" }) : makeUser({ id }),
+      );
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("<inbox>");
+      expect(agentCall.userMessage).toContain("From Bob, 5m ago:");
+      expect(agentCall.userMessage).toContain("Please send your latest update.");
+      expect(deps.inboxMessagesRepo?.markConsumed).toHaveBeenCalledWith(["inbox-1"]);
+    });
+
+    it("does not mark inbox messages consumed when the DM run fails", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("boom")),
+        inboxMessagesRepo: {
+          listPendingForRecipient: vi.fn().mockResolvedValue([
+            {
+              id: "inbox-1",
+              sender_user_id: "sender-1",
+              recipient_user_id: "u1",
+              message: "Please send your latest update.",
+              platform: "whatsapp",
+              channel_id: "1234567890@s.whatsapp.net",
+              message_ref: "",
+              created_at: new Date().toISOString(),
+              consumed_at: null,
+            },
+          ]),
+          markConsumed: vi.fn().mockResolvedValue(undefined),
+          create: vi.fn(),
+        } as unknown as WhatsAppAdapterDeps["inboxMessagesRepo"],
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(deps.inboxMessagesRepo?.markConsumed).not.toHaveBeenCalled();
+    });
+
     it("passes user phone to agent context in DM", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
@@ -356,7 +446,7 @@ describe("whatsapp/adapter", () => {
       );
     });
 
-    it("runs agent on mention with group context", async () => {
+    it("runs agent on mention with group metadata in the user message context", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -377,7 +467,9 @@ describe("whatsapp/adapter", () => {
 
       expect(deps.runAgent).toHaveBeenCalledOnce();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
-      expect(agentCall.groupContext).toEqual({ groupName: "Test Group", groupDescription: "A test group" });
+      expect(agentCall.userMessage).toContain("<group>");
+      expect(agentCall.userMessage).toContain("name: Test Group");
+      expect(agentCall.userMessage).toContain("description: A test group");
     });
 
     it("drains group buffer on mention", async () => {

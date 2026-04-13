@@ -15,6 +15,10 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     whatsapp_number: null,
     created_at: "2025-01-01",
     email_verified_at: null,
+    description: null,
+    type: "human",
+    role: null,
+    reports_to: null,
     ...overrides,
   };
 }
@@ -43,6 +47,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
     repos: {
       users: {
         findBySlackId: vi.fn().mockResolvedValue(makeUser()),
+        findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
         findByEmail: vi.fn().mockResolvedValue(undefined),
         create: vi.fn().mockImplementation(async (data) => makeUser({ id: "new-u", ...data })),
         update: vi.fn().mockImplementation(async (id, data) => makeUser({ id, ...data })),
@@ -81,6 +86,11 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
     }),
     buildMcpServers: vi.fn().mockResolvedValue({}),
     findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    inboxMessagesRepo: {
+      listPendingForRecipient: vi.fn().mockResolvedValue([]),
+      markConsumed: vi.fn().mockResolvedValue(undefined),
+      create: vi.fn(),
+    } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
     ...overrides,
   };
 }
@@ -257,6 +267,72 @@ describe("slack/adapter", () => {
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
+
+    it("injects inbox messages into DM context and marks them consumed after success", async () => {
+      const deps = makeDeps({
+        inboxMessagesRepo: {
+          listPendingForRecipient: vi.fn().mockResolvedValue([
+            {
+              id: "inbox-1",
+              sender_user_id: "sender-1",
+              recipient_user_id: "u1",
+              message: "Please send the latest update.",
+              platform: "slack",
+              channel_id: "D123",
+              message_ref: "1111.0001",
+              created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+              consumed_at: null,
+            },
+          ]),
+          markConsumed: vi.fn().mockResolvedValue(undefined),
+          create: vi.fn(),
+        } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
+      });
+      vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>
+        id === "sender-1" ? makeUser({ id, name: "Bob" }) : makeUser({ id }),
+      );
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("<inbox>");
+      expect(agentCall.userMessage).toContain("From Bob, 5m ago:");
+      expect(agentCall.userMessage).toContain("Please send the latest update.");
+      expect(deps.inboxMessagesRepo?.markConsumed).toHaveBeenCalledWith(["inbox-1"]);
+    });
+
+    it("does not mark inbox messages consumed when the DM run fails", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("boom")),
+        inboxMessagesRepo: {
+          listPendingForRecipient: vi.fn().mockResolvedValue([
+            {
+              id: "inbox-1",
+              sender_user_id: "sender-1",
+              recipient_user_id: "u1",
+              message: "Please send the latest update.",
+              platform: "slack",
+              channel_id: "D123",
+              message_ref: "1111.0001",
+              created_at: new Date().toISOString(),
+              consumed_at: null,
+            },
+          ]),
+          markConsumed: vi.fn().mockResolvedValue(undefined),
+          create: vi.fn(),
+        } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.inboxMessagesRepo?.markConsumed).not.toHaveBeenCalled();
+    });
   });
 
   describe("thread handler", () => {
@@ -287,7 +363,7 @@ describe("slack/adapter", () => {
   });
 
   describe("channel mention handler", () => {
-    it("creates channel if not found, runs agent with channel context", async () => {
+    it("creates channel if not found and injects channel metadata into shared context", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
@@ -298,7 +374,8 @@ describe("slack/adapter", () => {
       expect(deps.repos.channels.create).toHaveBeenCalled();
       expect(deps.runAgent).toHaveBeenCalledOnce();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
-      expect(agentCall.channelContext).toEqual({ channelName: "general" });
+      expect(agentCall.userMessage).toContain("<channel>");
+      expect(agentCall.userMessage).toContain("name: #general");
     });
 
     it("reuses existing channel", async () => {

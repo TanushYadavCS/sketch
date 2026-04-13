@@ -33,6 +33,7 @@ import * as m026 from "./migrations/026-normalize-created-at";
 import * as m027 from "./migrations/027-entities";
 import * as m028 from "./migrations/028-backfill-admin-user";
 import * as m029 from "./migrations/029-settings-model-id";
+import * as m030 from "./migrations/030-inbox-messages";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -70,6 +71,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "027-entities": m027,
           "028-backfill-admin-user": m028,
           "029-settings-model-id": m029,
+          "030-inbox-messages": m030,
         };
       },
     },

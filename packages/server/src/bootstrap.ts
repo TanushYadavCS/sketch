@@ -17,8 +17,8 @@ import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
 import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createChannelRepository } from "./db/repositories/channels";
+import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
-import { createOutreachRepository } from "./db/repositories/outreach";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
@@ -76,7 +76,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await runManagedSeed(config, settingsRepo);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
-  const outreachRepo = createOutreachRepository(db);
+  const inboxMessagesRepo = createInboxMessagesRepository(db);
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
   const tracer = trace.getTracer("sketch");
@@ -173,7 +173,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { type: row.type, credentials: row.credentials };
     },
     scheduler,
-    outreachRepo,
+    inboxMessagesRepo,
   };
 
   const startSlackBotIfConfigured = createSlackStartupManager({
@@ -213,7 +213,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { type: row.type, credentials: row.credentials };
     },
     scheduler,
-    outreachRepo,
+    inboxMessagesRepo,
   });
 
   // 9. HTTP server

@@ -1,8 +1,8 @@
 /**
  * Sketch MCP tools: SendFileToChat (file upload), getProviderConfig (integration credentials),
  * ManageScheduledTasks (create/list/update/pause/resume/remove scheduled agent runs),
- * GetTeamDirectory (discover team members), SendMessageToUser (send tracked DM outreach),
- * and RespondToOutreach (deliver a response back to the requester).
+ * GetTeamDirectory (discover team members), and SendMessageToUser (send a DM and
+ * create a one-way inbox record for the recipient).
  *
  * Uses createSdkMcpServer() for in-memory tool dispatch. UploadCollector is created
  * per agent run. getProviderConfig reads integration provider credentials from the DB
@@ -12,7 +12,7 @@
  * when scheduler or taskContext are not available (e.g. during scheduled task execution itself,
  * to prevent recursive scheduling).
  *
- * Outreach tools require outreachRepo, userRepo, currentUserId, sendDm, and enqueueMessage
+ * Messaging tools require inboxMessagesRepo, userRepo, currentUserId, and sendDm
  * to be present in deps. They return a descriptive error when those deps are absent.
  */
 import { existsSync } from "node:fs";
@@ -21,7 +21,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
 import { createEntityRepository } from "../db/repositories/entities";
-import type { createOutreachRepository } from "../db/repositories/outreach";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
@@ -49,14 +49,13 @@ export interface SketchMcpDeps {
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
-  outreachRepo?: ReturnType<typeof createOutreachRepository>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: { list: () => Promise<SelectableUser[]>; findById: (id: string) => Promise<SelectableUser | undefined> };
   currentUserId?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
-  enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
 }
 
 const manageScheduledTasksSchema = {
@@ -252,14 +251,14 @@ export async function handleGetTeamDirectory(
 }
 
 export async function handleSendMessageToUser(
-  params: { recipientUserId: string; message: string; taskContext?: string },
-  deps: Pick<SketchMcpDeps, "outreachRepo" | "userRepo" | "sendDm" | "currentUserId" | "taskContext">,
+  params: { recipientUserId: string; message: string },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
 ): Promise<ToolResult> {
-  if (!deps.outreachRepo || !deps.userRepo || !deps.sendDm || !deps.currentUserId || !deps.taskContext) {
-    return { content: [{ type: "text" as const, text: "Error: outreach is not available in this context." }] };
+  if (!deps.inboxMessagesRepo || !deps.userRepo || !deps.sendDm || !deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Error: messaging is not available in this context." }] };
   }
   if (params.recipientUserId === deps.currentUserId) {
-    return { content: [{ type: "text" as const, text: "Error: cannot send outreach to yourself." }] };
+    return { content: [{ type: "text" as const, text: "Error: cannot send a message to yourself." }] };
   }
   const recipient = await deps.userRepo.findById(params.recipientUserId);
   if (!recipient) return { content: [{ type: "text" as const, text: "Error: user not found." }] };
@@ -278,109 +277,20 @@ export async function handleSendMessageToUser(
     message: params.message,
   });
 
-  const ctx = deps.taskContext;
-  const outreach = await deps.outreachRepo.create({
-    requesterUserId: deps.currentUserId,
+  const inboxMessage = await deps.inboxMessagesRepo.create({
+    senderUserId: deps.currentUserId,
     recipientUserId: params.recipientUserId,
     message: params.message,
-    taskContext: params.taskContext,
     platform,
     channelId,
     messageRef,
-    requesterPlatform: ctx.platform,
-    requesterChannel: ctx.deliveryTarget,
-    requesterThreadTs: ctx.threadTs,
   });
 
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ outreachId: outreach.id, recipientName: recipient.name, status: "sent" }),
-      },
-    ],
-  };
-}
-
-export async function handleGetOutreachStatus(
-  deps: Pick<SketchMcpDeps, "outreachRepo" | "userRepo" | "currentUserId">,
-): Promise<ToolResult> {
-  if (!deps.outreachRepo || !deps.currentUserId) {
-    return { content: [{ type: "text" as const, text: "Outreach status not available." }] };
-  }
-  const [sent, received] = await Promise.all([
-    deps.outreachRepo.findForRequester(deps.currentUserId),
-    deps.outreachRepo.findPendingForRecipient(deps.currentUserId),
-  ]);
-
-  const userNameCache = new Map<string, string>();
-  const resolveName = async (userId: string): Promise<string> => {
-    const cached = userNameCache.get(userId);
-    if (cached) return cached;
-    const user = deps.userRepo ? await deps.userRepo.findById(userId) : null;
-    const name = user?.name ?? "Unknown";
-    userNameCache.set(userId, name);
-    return name;
-  };
-
-  const sentItems = await Promise.all(
-    sent.map(async (o) => ({
-      id: o.id,
-      recipientName: await resolveName(o.recipient_user_id),
-      message: o.message,
-      status: o.status,
-      createdAt: o.created_at,
-      response: o.response,
-      respondedAt: o.responded_at,
-    })),
-  );
-
-  const receivedItems = await Promise.all(
-    received.map(async (o) => ({
-      id: o.id,
-      requesterName: await resolveName(o.requester_user_id),
-      message: o.message,
-      taskContext: o.task_context,
-      status: o.status,
-      createdAt: o.created_at,
-    })),
-  );
-
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify({ sent: sentItems, received: receivedItems }, null, 2) }],
-  };
-}
-
-export async function handleRespondToOutreach(
-  params: { outreachId: string; response: string },
-  deps: Pick<SketchMcpDeps, "outreachRepo" | "enqueueMessage" | "userRepo">,
-): Promise<ToolResult> {
-  if (!deps.outreachRepo || !deps.enqueueMessage) {
-    return { content: [{ type: "text" as const, text: "Error: outreach is not available in this context." }] };
-  }
-  const outreach = await deps.outreachRepo.findById(params.outreachId);
-  if (!outreach) return { content: [{ type: "text" as const, text: "Error: outreach not found." }] };
-  if (outreach.status !== "pending")
-    return { content: [{ type: "text" as const, text: "Error: this outreach has already been responded to." }] };
-
-  await deps.outreachRepo.markResponded(params.outreachId, params.response);
-
-  const requester = deps.userRepo ? await deps.userRepo.findById(outreach.requester_user_id) : null;
-  const recipientUser = deps.userRepo ? await deps.userRepo.findById(outreach.recipient_user_id) : null;
-
-  const recipientName = recipientUser?.name ?? "Unknown";
-  const syntheticMessage = `${recipientName} responded to your outreach: "${params.response}"`;
-
-  await deps.enqueueMessage({
-    requesterUserId: outreach.requester_user_id,
-    message: syntheticMessage,
-  });
-
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify({ status: "delivered", requesterName: requester?.name ?? "Unknown" }),
+        text: JSON.stringify({ inboxMessageId: inboxMessage.id, recipientName: recipient.name, status: "sent" }),
       },
     ],
   };
@@ -458,6 +368,23 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         }
         return handleManageScheduledTasks(params, { scheduler: deps.scheduler, taskContext: deps.taskContext });
       },
+    ),
+
+    tool(
+      "GetTeamDirectory",
+      "Discover team members and their roles. Returns all team members except yourself.",
+      {},
+      async () => handleGetTeamDirectory(deps),
+    ),
+
+    tool(
+      "SendMessageToUser",
+      "Send a DM to a team member via their connected channel (Slack or WhatsApp). The exact message is also stored as a one-way inbox item so their agent can see it on their next private chat.",
+      {
+        recipientUserId: z.string().describe("The user ID from GetTeamDirectory"),
+        message: z.string().describe("The exact message text to send to the recipient."),
+      },
+      async (params) => handleSendMessageToUser(params, deps),
     ),
 
     tool(

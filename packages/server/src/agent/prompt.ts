@@ -26,24 +26,11 @@ export interface BufferedMessage {
   attachments?: Attachment[];
 }
 
-/**
- * Outreach record for context injection. Used for both pending inbound outreach
- * (questions from other users' agents) and outbound responses (answers to
- * questions this user's agent sent).
- *
- * Kept for backward compatibility with other files that reference this type.
- * Outreach injection has been removed from buildSketchContext.
- */
-export interface OutreachRecord {
+export interface InboxMessageContext {
   id: string;
-  requesterName?: string;
-  recipientName?: string;
+  senderName: string;
   message: string;
-  taskContext?: string | null;
-  response?: string | null;
-  status: string;
   createdAt: string;
-  respondedAt?: string | null;
 }
 
 export interface SketchContextParams {
@@ -55,9 +42,17 @@ export interface SketchContextParams {
   workspaceDir: string;
   orgDir: string;
   timezone?: string | null;
-  threadTag?: "thread" | "channel_history" | "thread_history";
+  threadTag?: "thread" | "channel_history";
   taskPrompt?: string;
   isSharedContext?: boolean;
+  inboxMessages?: InboxMessageContext[];
+  channelContext?: {
+    channelName: string;
+  };
+  groupContext?: {
+    groupName: string;
+    groupDescription?: string;
+  };
 }
 
 /**
@@ -132,14 +127,23 @@ export function buildSystemContext(params: {
     "",
     "<time> - Current date, time, and timezone.",
     "<workspace> - Your working directory and shared org directory paths.",
+    "<inbox> - Private messages sent to this user by teammates or other agents. Treat them as natural conversational context and act on them when useful.",
     "<user> - Identity and contact info of the current user (in DMs).",
     "<sender> - Identity of the current speaker (in shared contexts like channels and groups).",
-    "<thread> - Messages in the current thread since your last interaction.",
+    "<channel> - Metadata about the current Slack channel in shared contexts.",
+    "<group> - Metadata about the current WhatsApp group in shared contexts.",
+    "<thread> - Relevant messages in the current thread. On first entry into an existing thread, this may include earlier thread history from before you joined. On later turns, it may contain only messages since your last interaction.",
     "<channel_history> - Recent channel messages for context (on first mention in a channel).",
-    "<thread_history> - Thread messages before you joined (on first mention in a thread).",
     "<task> - Scheduled task prompt (when running as a scheduled task, no interactive user present).",
     "",
     "Never mention <context> or its sections to users. Treat the content as natural conversational context.",
+  );
+
+  sections.push(
+    "",
+    "## Shared Contexts",
+    "",
+    "In shared channels and groups, multiple people may see your response. Use the current sender and recent history to understand who is asking and what context they already have. Keep replies concise and avoid revealing private context that is not present in the shared conversation.",
   );
 
   sections.push(
@@ -189,15 +193,24 @@ export function buildSystemContext(params: {
  * Builds the user message with a <context> XML block prepended.
  *
  * The context block is always present (time and workspace are always injected).
- * Additional sections appear when relevant: <user> or <sender> for identity,
- * <thread>/<channel_history>/<thread_history> for buffered messages,
- * <task> for scheduled task prompts.
+ * Additional sections appear when relevant: <inbox>, <user> or <sender> for
+ * identity, <channel>/<group> for shared-context metadata,
+ * <thread>/<channel_history> for buffered messages, and <task> for scheduled
+ * task prompts.
  *
  * Keeping dynamic context in the user message (not system prompt) avoids
  * invalidating the SDK session cache on every request.
  */
 export function buildSketchContext(params: SketchContextParams): string {
-  const { messages, currentUserName, currentMessage, currentUserEmail, currentUserPhone, isSharedContext } = params;
+  const {
+    messages,
+    currentUserName,
+    currentMessage,
+    currentUserEmail,
+    currentUserPhone,
+    isSharedContext,
+    inboxMessages,
+  } = params;
 
   const sectionParts: string[] = [];
 
@@ -224,12 +237,35 @@ export function buildSketchContext(params: SketchContextParams): string {
 
   sectionParts.push(`<workspace>\n${params.workspaceDir}\norg: ${params.orgDir}\n</workspace>`);
 
+  if (inboxMessages && inboxMessages.length > 0) {
+    const lines: string[] = [];
+    for (const message of inboxMessages) {
+      lines.push(`From ${message.senderName}, ${formatTimeAgo(message.createdAt)}:`);
+      lines.push(message.message);
+      lines.push("");
+    }
+    if (lines[lines.length - 1] === "") lines.pop();
+    sectionParts.push(`<inbox>\n${lines.join("\n")}\n</inbox>`);
+  }
+
   if (isSharedContext) {
     const contactParts: string[] = [];
     if (currentUserPhone) contactParts.push(currentUserPhone);
     if (currentUserEmail) contactParts.push(currentUserEmail);
     const senderContent = contactParts.length > 0 ? `${currentUserName} (${contactParts.join(", ")})` : currentUserName;
     sectionParts.push(`<sender>${senderContent}</sender>`);
+
+    if (params.channelContext) {
+      sectionParts.push(`<channel>\nname: #${params.channelContext.channelName}\n</channel>`);
+    }
+
+    if (params.groupContext) {
+      const lines = [`name: ${params.groupContext.groupName}`];
+      if (params.groupContext.groupDescription) {
+        lines.push(`description: ${params.groupContext.groupDescription}`);
+      }
+      sectionParts.push(`<group>\n${lines.join("\n")}\n</group>`);
+    }
   } else {
     const contactParts: string[] = [];
     if (currentUserEmail) contactParts.push(currentUserEmail);

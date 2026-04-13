@@ -136,11 +136,13 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("<time>");
       expect(result).toContain("<workspace>");
+      expect(result).toContain("<inbox>");
       expect(result).toContain("<user>");
       expect(result).toContain("<sender>");
+      expect(result).toContain("<channel>");
+      expect(result).toContain("<group>");
       expect(result).toContain("<thread>");
       expect(result).toContain("<channel_history>");
-      expect(result).toContain("<thread_history>");
       expect(result).toContain("<task>");
     });
 
@@ -251,7 +253,7 @@ describe("buildSystemContext", () => {
     it("does not contain old channel context guidance", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).not.toContain("Slack Channel #");
-      expect(result).not.toContain("Multiple users share this workspace");
+      expect(result).toContain("In shared channels and groups");
     });
 
     it("does not contain outreach tag in context protocol", () => {
@@ -326,7 +328,7 @@ describe("buildSketchContext", () => {
       });
       expect(result).toContain("<time>");
       expect(result).toContain("</time>");
-      expect(result).toContain("IST");
+      expect(result).toContain("GMT+5:30");
       expect(result).toContain("Asia/Kolkata");
     });
 
@@ -503,7 +505,6 @@ describe("buildSketchContext", () => {
       });
       expect(result).toContain("<thread>");
       expect(result).not.toContain("<channel_history>");
-      expect(result).not.toContain("<thread_history>");
     });
 
     it("wraps messages in <channel_history> when threadTag is 'channel_history'", () => {
@@ -523,7 +524,7 @@ describe("buildSketchContext", () => {
       expect(result).not.toContain("<thread>");
     });
 
-    it("wraps messages in <thread_history> when threadTag is 'thread_history'", () => {
+    it("uses <thread> for bootstrap thread history", () => {
       const messages = [{ userName: "Bob", text: "a message", ts: "1111.0001" }];
       const result = buildSketchContext({
         messages,
@@ -532,12 +533,11 @@ describe("buildSketchContext", () => {
         workspaceDir: "/data/workspaces/channel-C001",
         orgDir: "/data/.claude",
         isSharedContext: true,
-        threadTag: "thread_history",
+        threadTag: "thread",
       });
-      expect(result).toContain("<thread_history>");
+      expect(result).toContain("<thread>");
       expect(result).toContain("Bob: a message");
-      expect(result).toContain("</thread_history>");
-      expect(result).not.toContain("<thread>");
+      expect(result).toContain("</thread>");
     });
 
     it("does not include header text inside thread tags", () => {
@@ -548,10 +548,10 @@ describe("buildSketchContext", () => {
         currentMessage: "hello",
         workspaceDir: "/data/workspaces/u123",
         orgDir: "/data/.claude",
-        threadTag: "thread_history",
+        threadTag: "thread",
       });
-      const threadStart = result.indexOf("<thread_history>");
-      const threadEnd = result.indexOf("</thread_history>");
+      const threadStart = result.indexOf("<thread>");
+      const threadEnd = result.indexOf("</thread>");
       const innerContent = result.slice(threadStart, threadEnd);
       expect(innerContent).not.toContain("[Thread context before you joined]");
       expect(innerContent).not.toContain("Thread context");
@@ -567,7 +567,74 @@ describe("buildSketchContext", () => {
       });
       expect(result).not.toContain("<thread>");
       expect(result).not.toContain("<channel_history>");
-      expect(result).not.toContain("<thread_history>");
+    });
+  });
+
+  describe("<inbox> tag", () => {
+    it("renders inbox items with sender name, relative time, and original message", () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        inboxMessages: [{ id: "inbox-1", senderName: "Bob", message: "Please send the latest update.", createdAt: tenMinutesAgo }],
+      });
+
+      expect(result).toContain("<inbox>");
+      expect(result).toContain("From Bob, 10m ago:");
+      expect(result).toContain("Please send the latest update.");
+      expect(result).toContain("</inbox>");
+    });
+
+    it("omits inbox tag when there are no inbox messages", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+
+      expect(result).not.toContain("<inbox>");
+    });
+  });
+
+  describe("<channel> and <group> tags", () => {
+    it("renders channel metadata in shared Slack contexts", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        channelContext: { channelName: "general" },
+      });
+
+      expect(result).toContain("<channel>");
+      expect(result).toContain("name: #general");
+      expect(result).toContain("</channel>");
+    });
+
+    it("renders group metadata in shared WhatsApp contexts", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserPhone: "+1234567890",
+        workspaceDir: "/data/workspaces/wa-group-g1",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        groupContext: { groupName: "Leadership", groupDescription: "Weekly updates" },
+      });
+
+      expect(result).toContain("<group>");
+      expect(result).toContain("name: Leadership");
+      expect(result).toContain("description: Weekly updates");
+      expect(result).toContain("</group>");
     });
   });
 
@@ -659,7 +726,7 @@ describe("buildSketchContext", () => {
       expect(threadIdx).toBeLessThan(taskIdx);
     });
 
-    it("context sections appear in order for shared context: time, workspace, sender, thread", () => {
+    it("context sections appear in order for shared context: time, workspace, sender, channel, channel_history", () => {
       const messages = [{ userName: "Dave", text: "hi", ts: "1111.0001" }];
       const result = buildSketchContext({
         messages,
@@ -670,14 +737,17 @@ describe("buildSketchContext", () => {
         orgDir: "/data/.claude",
         isSharedContext: true,
         threadTag: "channel_history",
+        channelContext: { channelName: "general" },
       });
       const timeIdx = result.indexOf("<time>");
       const workspaceIdx = result.indexOf("<workspace>");
       const senderIdx = result.indexOf("<sender>");
+      const channelIdx = result.indexOf("<channel>");
       const channelHistoryIdx = result.indexOf("<channel_history>");
       expect(timeIdx).toBeLessThan(workspaceIdx);
       expect(workspaceIdx).toBeLessThan(senderIdx);
-      expect(senderIdx).toBeLessThan(channelHistoryIdx);
+      expect(senderIdx).toBeLessThan(channelIdx);
+      expect(channelIdx).toBeLessThan(channelHistoryIdx);
     });
 
     it("preserves chronological message order", () => {

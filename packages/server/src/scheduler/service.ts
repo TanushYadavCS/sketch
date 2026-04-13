@@ -18,6 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
+import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, runAgent } from "../agent/runner";
 import { ensureChannelWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
@@ -214,11 +215,20 @@ export class TaskScheduler {
       try {
         const settingsRow = await settingsRepo.get();
         const integrationMcpServers = await buildMcpServers(null);
+        const userMessage = buildSketchContext({
+          messages: [],
+          currentUserName: "System",
+          currentMessage: "",
+          workspaceDir,
+          orgDir: this.deps.config.CLAUDE_CONFIG_DIR,
+          taskPrompt: task.prompt,
+          isSharedContext: false,
+        });
 
         await this.deps.runAgent({
           db: this.deps.db,
           workspaceKey,
-          userMessage: `[Scheduled Task] ${task.prompt}`,
+          userMessage,
           workspaceDir,
           claudeConfigDir: this.deps.config.CLAUDE_CONFIG_DIR,
           userName: "System",

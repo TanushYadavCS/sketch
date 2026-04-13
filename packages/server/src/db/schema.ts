@@ -248,6 +248,18 @@ export interface OutreachMessagesTable {
   responded_at: string | null;
 }
 
+export interface InboxMessagesTable {
+  id: string;
+  sender_user_id: string;
+  recipient_user_id: string;
+  message: string;
+  platform: string;
+  channel_id: string | null;
+  message_ref: string | null;
+  created_at: Generated<string>;
+  consumed_at: string | null;
+}
+
 export interface EntitiesTable {
   id: string;
   name: string;
@@ -335,6 +347,7 @@ export interface DB {
   chat_sessions: ChatSessionsTable;
   scheduled_tasks: ScheduledTasksTable;
   outreach_messages: OutreachMessagesTable;
+  inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_mentions: EntityMentionsTable;
