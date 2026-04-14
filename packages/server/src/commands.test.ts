@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getNewSessionConfirmation, NEW_SESSION_CONFIRMATIONS, parseSketchCommand } from "./commands";
+import { NEW_SESSION_CONFIRMATIONS, getNewSessionConfirmation, parseSketchCommand } from "./commands";
 
 describe("parseSketchCommand", () => {
   it("detects /new exactly", () => {

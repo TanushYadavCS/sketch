@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
-import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import type { SlackAdapterDeps } from "./adapter";
 import { createConfiguredSlackBot, validateSlackTokens } from "./adapter";
 
