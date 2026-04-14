@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
 import type { WhatsAppAdapterDeps } from "./adapter";
@@ -282,7 +283,10 @@ describe("whatsapp/adapter", () => {
 
       expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Started a new session.");
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "1234567890@s.whatsapp.net",
+        expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
+      );
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -720,7 +724,11 @@ describe("whatsapp/adapter", () => {
       expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "wa-group-group@g.us");
       expect(deps.groupBuffer.clear).toHaveBeenCalledWith("group@g.us");
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "Started a new session.", { quoted: rawMessage });
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "group@g.us",
+        expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
+        { quoted: rawMessage },
+      );
     });
 
     it("group handler uses senderPhone for user lookup instead of senderJid", async () => {
@@ -779,3 +787,7 @@ describe("whatsapp/adapter", () => {
     });
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

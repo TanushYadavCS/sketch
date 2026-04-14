@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSketchCommand } from "./commands";
+import { getNewSessionConfirmation, NEW_SESSION_CONFIRMATIONS, parseSketchCommand } from "./commands";
 
 describe("parseSketchCommand", () => {
   it("detects /new exactly", () => {
@@ -28,5 +28,19 @@ describe("parseSketchCommand", () => {
     expect(parseSketchCommand("   ")).toBeNull();
     expect(parseSketchCommand(null)).toBeNull();
     expect(parseSketchCommand(undefined)).toBeNull();
+  });
+});
+
+describe("getNewSessionConfirmation", () => {
+  it("returns the first message for 0", () => {
+    expect(getNewSessionConfirmation(0)).toBe(NEW_SESSION_CONFIRMATIONS[0]);
+  });
+
+  it("returns the last message for values near 1", () => {
+    expect(getNewSessionConfirmation(0.999999)).toBe(NEW_SESSION_CONFIRMATIONS[NEW_SESSION_CONFIRMATIONS.length - 1]);
+  });
+
+  it("always returns one of the configured messages", () => {
+    expect(NEW_SESSION_CONFIRMATIONS).toContain(getNewSessionConfirmation(0.4));
   });
 });

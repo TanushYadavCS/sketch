@@ -10,7 +10,7 @@ import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
-import { NEW_SESSION_CONFIRMATION, parseSketchCommand } from "../commands";
+import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
 import type { Config } from "../config";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
@@ -118,7 +118,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         const command = parseSketchCommand(message.text);
         if (command === "new_session") {
           await deleteSessionId(db, user.id);
-          await whatsapp.sendText(replyJid, NEW_SESSION_CONFIRMATION);
+          await whatsapp.sendText(replyJid, getNewSessionConfirmation());
           return;
         }
 
@@ -249,7 +249,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         await deleteSessionId(db, `wa-group-${groupJid}`);
         groupBuffer.clear(groupJid);
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
-        await onFinalMessage(NEW_SESSION_CONFIRMATION);
+        await onFinalMessage(getNewSessionConfirmation());
         return;
       }
 

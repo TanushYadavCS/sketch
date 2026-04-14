@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
+import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import type { SlackAdapterDeps } from "./adapter";
 import { createConfiguredSlackBot, validateSlackTokens } from "./adapter";
 
@@ -281,7 +282,10 @@ describe("slack/adapter", () => {
 
       expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "Started a new session.");
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
+        "D1",
+        expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
+      );
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -452,7 +456,11 @@ describe("slack/adapter", () => {
       expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "channel-C1", "0.9");
       expect(deps.slack.threadBuffer.reset).toHaveBeenCalledWith("C1", "0.9");
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "0.9", "Started a new session.");
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
+        "C1",
+        "0.9",
+        expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
+      );
     });
 
     it("skips bootstrap history after a thread has been reset", async () => {
@@ -503,3 +511,7 @@ describe("slack/adapter", () => {
     });
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
