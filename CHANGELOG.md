@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.18.0] -- 2026-04-14
+
+- Replace the old outbound/outreach flow with an inbox-based agent messaging model for cross-user delivery and response handling
+- Refresh agent execution flow with dedicated tool-progress and final-message callbacks, emoji-based progress feedback, and success reactions in Slack
+- Replace the Claude Code preset with a rewritten custom system prompt for better cache efficiency and clearer platform behavior
+- Add a lightweight command system with `/new` session reset support across Slack and WhatsApp, including fresh-session confirmations
+- Add ephemeral integration credential wrappers and harden skill-sync behavior to preserve local edits and safely scope wrapper environment variables
+- Fix WhatsApp startup by disabling Baileys `fireInitQueries` to avoid bad-request failures on boot
+- Replace Chart.js with Recharts for usage charts in the web app
+
 ## [0.17.4] -- 2026-04-08
 
 - Fix WhatsApp DM replies for LID-based inbound messages by normalizing outbound delivery to the user's phone-number JID
