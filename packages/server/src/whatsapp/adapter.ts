@@ -24,7 +24,7 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { WhatsAppBot } from "./bot";
 import type { GroupBuffer } from "./group-buffer";
-import { createWhatsAppMessageHandler } from "./message-handler";
+import { createWhatsAppMessageHandler, createWhatsAppToolProgressHandler } from "./message-handler";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
@@ -69,6 +69,19 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
   const toPhoneJid = (phoneNumber: string) => `${phoneNumber.replace("+", "")}@s.whatsapp.net`;
+  const updateReaction = async (jid: string, rawMessage: WAMessage, emoji: string | null) => {
+    if (!whatsapp.isConnected || !rawMessage.key) return;
+
+    try {
+      if (emoji === null) {
+        await whatsapp.removeReaction(jid, rawMessage.key);
+      } else {
+        await whatsapp.addReaction(jid, rawMessage.key, emoji);
+      }
+    } catch (err) {
+      logger.debug({ err, jid, emoji }, "Failed to update WhatsApp reaction");
+    }
+  };
 
   /**
    * Sends a DM to a user via their WhatsApp number. Used both in normal DM handling and in
@@ -132,8 +145,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         const workspaceDir = await ensureWorkspace(config, user.id);
         const settingsRow = await repos.settings.get();
         const deliveryJid = toPhoneJid(user.whatsapp_number ?? message.phoneNumber);
+        const reactionJid = (message.rawMessage as WAMessage).key?.remoteJid ?? message.jid;
 
         whatsapp.startComposing(deliveryJid);
+        await updateReaction(reactionJid, message.rawMessage as WAMessage, "👀");
 
         try {
           const attachments: Attachment[] = [];
@@ -154,7 +169,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           }
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
-          const onToolProgress = async () => {};
+          const onToolProgress = createWhatsAppToolProgressHandler(whatsapp, deliveryJid);
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
           const pendingInbox = await loadPendingInboxMessages(user.id);
@@ -224,8 +239,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           if (pendingInbox.ids.length > 0 && inboxMessagesRepo) {
             await inboxMessagesRepo.markConsumed(pendingInbox.ids);
           }
+          await updateReaction(reactionJid, message.rawMessage as WAMessage, null);
+          await updateReaction(reactionJid, message.rawMessage as WAMessage, "✅");
         } catch (err) {
           logger.error({ err, userId: user.id }, "Agent run failed (WhatsApp)");
+          await updateReaction(reactionJid, message.rawMessage as WAMessage, null);
           if (whatsapp.isConnected) {
             await whatsapp.sendText(deliveryJid, "Something went wrong, try again.");
           }
@@ -271,6 +289,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       const groupDescription = groupMeta?.desc ?? undefined;
 
       whatsapp.startComposing(groupJid);
+      await updateReaction(groupJid, message.rawMessage as WAMessage, "👀");
 
       try {
         const buffered = groupBuffer.drain(groupJid);
@@ -311,7 +330,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
-        const onToolProgress = async () => {};
+        const onToolProgress = createWhatsAppToolProgressHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
@@ -359,8 +378,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             logger.warn({ err, filePath }, "Failed to send file via WhatsApp");
           }
         }
+        await updateReaction(groupJid, message.rawMessage as WAMessage, null);
+        await updateReaction(groupJid, message.rawMessage as WAMessage, "✅");
       } catch (err) {
         logger.error({ err, groupJid }, "Agent run failed (WhatsApp group)");
+        await updateReaction(groupJid, message.rawMessage as WAMessage, null);
         if (whatsapp.isConnected) {
           await whatsapp.sendText(groupJid, "Something went wrong, try again.");
         }

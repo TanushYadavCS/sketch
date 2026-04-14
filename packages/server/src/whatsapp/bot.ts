@@ -14,6 +14,7 @@ import {
   DisconnectReason,
   type GroupMetadata,
   type MiscMessageGenerationOptions,
+  type WAMessage,
   type WASocket,
   type WAVersion,
   areJidsSameUser,
@@ -293,14 +294,38 @@ export class WhatsAppBot {
 
   // --- Sending ---
 
-  async sendText(jid: string, text: string, options?: MiscMessageGenerationOptions): Promise<void> {
-    if (!this.sock) return;
+  async sendText(jid: string, text: string, options?: MiscMessageGenerationOptions): Promise<WAMessage | null> {
+    if (!this.sock) return null;
     const chunks = chunkText(text, WHATSAPP_TEXT_LIMIT);
+    let firstSent: WAMessage | null = null;
     for (let i = 0; i < chunks.length; i++) {
       // Only apply options (e.g. quoted reply) to the first chunk
       const sent = await this.sock.sendMessage(jid, { text: chunks[i] }, i === 0 ? options : undefined);
-      if (sent?.key?.id) this.trackSentMessage(sent.key.id);
+      if (i === 0) firstSent = sent ?? null;
+      this.trackSentMessageId(sent?.key?.id);
     }
+    return firstSent;
+  }
+
+  async editText(jid: string, targetKey: proto.IMessageKey, text: string): Promise<WAMessage | null> {
+    if (!this.sock) return null;
+    const sent = await this.sock.sendMessage(jid, { text, edit: targetKey });
+    this.trackSentMessageId(sent?.key?.id);
+    return sent ?? null;
+  }
+
+  async addReaction(jid: string, targetKey: proto.IMessageKey, emoji: string): Promise<WAMessage | null> {
+    if (!this.sock) return null;
+    const sent = await this.sock.sendMessage(jid, { react: { text: emoji, key: targetKey } });
+    this.trackSentMessageId(sent?.key?.id);
+    return sent ?? null;
+  }
+
+  async removeReaction(jid: string, targetKey: proto.IMessageKey): Promise<WAMessage | null> {
+    if (!this.sock) return null;
+    const sent = await this.sock.sendMessage(jid, { react: { text: "", key: targetKey } });
+    this.trackSentMessageId(sent?.key?.id);
+    return sent ?? null;
   }
 
   async sendFile(jid: string, filePath: string, mimeType: string, fileName: string): Promise<void> {
@@ -312,14 +337,14 @@ export class WhatsAppBot {
         image: { url: filePath },
         caption: fileName,
       });
-      if (sent?.key?.id) this.trackSentMessage(sent.key.id);
+      this.trackSentMessageId(sent?.key?.id);
     } else {
       const sent = await this.sock.sendMessage(jid, {
         document: { url: filePath },
         mimetype: mimeType,
         fileName,
       });
-      if (sent?.key?.id) this.trackSentMessage(sent.key.id);
+      this.trackSentMessageId(sent?.key?.id);
     }
   }
 
@@ -658,6 +683,11 @@ export class WhatsAppBot {
   private trackSentMessage(messageId: string): void {
     this.recentlySent.add(messageId);
     setTimeout(() => this.recentlySent.delete(messageId), ECHO_TTL_MS);
+  }
+
+  private trackSentMessageId(messageId: string | null | undefined): void {
+    if (!messageId) return;
+    this.trackSentMessage(messageId);
   }
 
   private startWatchdog(): void {

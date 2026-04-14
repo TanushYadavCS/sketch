@@ -33,8 +33,11 @@ function createMockWhatsApp(connected = true) {
       onMessage: vi.fn().mockImplementation((fn) => {
         handler.fn = fn;
       }),
-      sendText: vi.fn().mockResolvedValue(undefined),
+      sendText: vi.fn().mockResolvedValue({ key: { remoteJid: "jid", id: "sent-1", fromMe: true } }),
+      editText: vi.fn().mockResolvedValue({ key: { remoteJid: "jid", id: "edit-1", fromMe: true } }),
       sendFile: vi.fn().mockResolvedValue(undefined),
+      addReaction: vi.fn().mockResolvedValue(undefined),
+      removeReaction: vi.fn().mockResolvedValue(undefined),
       startComposing: vi.fn(),
       stopComposing: vi.fn(),
       getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Test Group", desc: "A test group" }),
@@ -185,6 +188,29 @@ describe("whatsapp/adapter", () => {
       expect(mock.stopComposing).toHaveBeenCalledWith("1234567890@s.whatsapp.net");
     });
 
+    it("adds 👀 at start and swaps to ✅ on success", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "1234@s.whatsapp.net", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.addReaction).toHaveBeenNthCalledWith(1, "1234@s.whatsapp.net", rawMessage.key, "👀");
+      expect(mock.removeReaction).toHaveBeenCalledWith("1234@s.whatsapp.net", rawMessage.key);
+      expect(mock.addReaction).toHaveBeenNthCalledWith(2, "1234@s.whatsapp.net", rawMessage.key, "✅");
+    });
+
     it("sends error message on agent failure", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockRejectedValue(new Error("boom")),
@@ -205,6 +231,31 @@ describe("whatsapp/adapter", () => {
       await flush();
 
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
+    });
+
+    it("removes 👀 and does not add ✅ when the DM run fails", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("boom")),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "1234@s.whatsapp.net", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.addReaction).toHaveBeenCalledWith("1234@s.whatsapp.net", rawMessage.key, "👀");
+      expect(mock.removeReaction).toHaveBeenCalledWith("1234@s.whatsapp.net", rawMessage.key);
+      expect(mock.addReaction).not.toHaveBeenCalledWith("1234@s.whatsapp.net", rawMessage.key, "✅");
     });
 
     it("uploads pending files after agent run", async () => {
@@ -424,6 +475,38 @@ describe("whatsapp/adapter", () => {
       expect(mock.startComposing).toHaveBeenCalledWith("1234567890@s.whatsapp.net");
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
       expect(mock.stopComposing).toHaveBeenCalledWith("1234567890@s.whatsapp.net");
+    });
+
+    it("wires DM tool progress as a separate unquoted message", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async ({ onToolProgress, onFinalMessage }) => {
+          await onToolProgress(['📖 Read: "src/index.ts"']);
+          await onFinalMessage("hello back");
+          return {
+            messageSent: true,
+            sessionId: "s1",
+            costUsd: 0,
+            pendingUploads: [],
+          };
+        }),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: { key: { remoteJid: "1234@s.whatsapp.net", id: "m1", fromMe: false } },
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", '📖 Read: "src/index.ts"', undefined);
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
     });
   });
 
@@ -700,6 +783,58 @@ describe("whatsapp/adapter", () => {
       expect(mock.stopComposing).toHaveBeenCalledWith("group@g.us");
     });
 
+    it("adds 👀 at start and swaps to ✅ on group success", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "group@g.us", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.addReaction).toHaveBeenNthCalledWith(1, "group@g.us", rawMessage.key, "👀");
+      expect(mock.removeReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key);
+      expect(mock.addReaction).toHaveBeenNthCalledWith(2, "group@g.us", rawMessage.key, "✅");
+    });
+
+    it("removes 👀 and does not add ✅ when the group run fails", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("boom")),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "group@g.us", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.addReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key, "👀");
+      expect(mock.removeReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key);
+      expect(mock.addReaction).not.toHaveBeenCalledWith("group@g.us", rawMessage.key, "✅");
+    });
+
     it("resets the current group session on /new", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
@@ -729,6 +864,41 @@ describe("whatsapp/adapter", () => {
         expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
         { quoted: rawMessage },
       );
+    });
+
+    it("wires group tool progress and final reply as separate quoted messages", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async ({ onToolProgress, onFinalMessage }) => {
+          await onToolProgress(['📖 Read: "src/index.ts"']);
+          await onFinalMessage("hello back");
+          return {
+            messageSent: true,
+            sessionId: "s1",
+            costUsd: 0,
+            pendingUploads: [],
+          };
+        }),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "group@g.us", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", '📖 Read: "src/index.ts"', { quoted: rawMessage });
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "hello back", { quoted: rawMessage });
     });
 
     it("group handler uses senderPhone for user lookup instead of senderJid", async () => {

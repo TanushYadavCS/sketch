@@ -404,6 +404,77 @@ describe("WhatsAppBot.composing", () => {
   });
 });
 
+describe("WhatsAppBot sending helpers", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  function createBotWithSendMessage() {
+    const bot = new WhatsAppBot({ db, logger: createTestLogger() });
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ key: { remoteJid: "123@s.whatsapp.net", id: "MSG1", fromMe: true } });
+    (bot as unknown as { sock: { sendMessage: typeof sendMessage } }).sock = { sendMessage };
+    return { bot, sendMessage };
+  }
+
+  it("sendText returns the first sent message reference", async () => {
+    const { bot, sendMessage } = createBotWithSendMessage();
+
+    const sent = await bot.sendText("123@s.whatsapp.net", "hello");
+
+    expect(sendMessage).toHaveBeenCalledWith("123@s.whatsapp.net", { text: "hello" }, undefined);
+    expect(sent?.key?.id).toBe("MSG1");
+  });
+
+  it("editText sends a WhatsApp edit payload", async () => {
+    const { bot, sendMessage } = createBotWithSendMessage();
+
+    await bot.editText(
+      "123@s.whatsapp.net",
+      { remoteJid: "123@s.whatsapp.net", id: "TARGET", fromMe: true },
+      "updated",
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith("123@s.whatsapp.net", {
+      text: "updated",
+      edit: { remoteJid: "123@s.whatsapp.net", id: "TARGET", fromMe: true },
+    });
+  });
+
+  it("addReaction sends a WhatsApp reaction payload", async () => {
+    const { bot, sendMessage } = createBotWithSendMessage();
+
+    await bot.addReaction("123@s.whatsapp.net", { remoteJid: "123@s.whatsapp.net", id: "TARGET", fromMe: false }, "👀");
+
+    expect(sendMessage).toHaveBeenCalledWith("123@s.whatsapp.net", {
+      react: {
+        text: "👀",
+        key: { remoteJid: "123@s.whatsapp.net", id: "TARGET", fromMe: false },
+      },
+    });
+  });
+
+  it("removeReaction sends an empty-text reaction payload", async () => {
+    const { bot, sendMessage } = createBotWithSendMessage();
+
+    await bot.removeReaction("123@s.whatsapp.net", { remoteJid: "123@s.whatsapp.net", id: "TARGET", fromMe: false });
+
+    expect(sendMessage).toHaveBeenCalledWith("123@s.whatsapp.net", {
+      react: {
+        text: "",
+        key: { remoteJid: "123@s.whatsapp.net", id: "TARGET", fromMe: false },
+      },
+    });
+  });
+});
+
 describe("WhatsAppBot group metadata persistence", () => {
   let db: Kysely<DB>;
 

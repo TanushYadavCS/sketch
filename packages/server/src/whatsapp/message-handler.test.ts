@@ -1,11 +1,12 @@
 import type { WAMessage } from "@whiskeysockets/baileys";
-import { describe, expect, it, vi } from "vitest";
-import { createWhatsAppMessageHandler } from "./message-handler";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createWhatsAppMessageHandler, createWhatsAppToolProgressHandler } from "./message-handler";
 
 function createMockWhatsApp(connected = true) {
   return {
     isConnected: connected,
-    sendText: vi.fn().mockResolvedValue(undefined),
+    sendText: vi.fn().mockResolvedValue(connected ? { key: { remoteJid: "jid", id: "sent-1", fromMe: true } } : null),
+    editText: vi.fn().mockResolvedValue(connected ? { key: { remoteJid: "jid", id: "edit-1", fromMe: true } } : null),
   };
 }
 
@@ -82,5 +83,86 @@ describe("createWhatsAppMessageHandler", () => {
 
       expect(bot.sendText).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("createWhatsAppToolProgressHandler", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sends the first progress update as a new message", async () => {
+    const bot = createMockWhatsApp();
+    const onProgress = createWhatsAppToolProgressHandler(bot as never, "jid");
+
+    await onProgress(['📖 Read: "src/index.ts"']);
+
+    expect(bot.sendText).toHaveBeenCalledWith("jid", '📖 Read: "src/index.ts"', undefined);
+    expect(bot.editText).not.toHaveBeenCalled();
+  });
+
+  it("edits the same progress message on subsequent updates", async () => {
+    const bot = createMockWhatsApp();
+    const onProgress = createWhatsAppToolProgressHandler(bot as never, "jid");
+
+    await onProgress(['📖 Read: "src/index.ts"']);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await onProgress(['📖 Read: "src/index.ts"', '💻 Bash: "pnpm test"']);
+
+    expect(bot.sendText).toHaveBeenCalledTimes(1);
+    expect(bot.editText).toHaveBeenCalledWith(
+      "jid",
+      { remoteJid: "jid", id: "sent-1", fromMe: true },
+      '📖 Read: "src/index.ts"\n💻 Bash: "pnpm test"',
+    );
+  });
+
+  it("quotes the first progress message in groups", async () => {
+    const bot = createMockWhatsApp();
+    const quotedMsg = {
+      key: { remoteJid: "group@g.us", id: "QUOTED123", fromMe: false },
+      message: { conversation: "original message" },
+    } as WAMessage;
+    const onProgress = createWhatsAppToolProgressHandler(bot as never, "group@g.us", quotedMsg);
+
+    await onProgress(['📖 Read: "src/index.ts"']);
+
+    expect(bot.sendText).toHaveBeenCalledWith("group@g.us", '📖 Read: "src/index.ts"', { quoted: quotedMsg });
+  });
+
+  it("throttles rapid progress updates and applies only the latest edit", async () => {
+    const bot = createMockWhatsApp();
+    const onProgress = createWhatsAppToolProgressHandler(bot as never, "jid");
+
+    await onProgress(['📖 Read: "src/index.ts"']);
+    await onProgress(['📖 Read: "src/index.ts"', '💻 Bash: "pnpm test"']);
+    await onProgress(['📖 Read: "src/index.ts"', '💻 Bash: "pnpm test"', '🔧 Edit: "src/app.ts"']);
+
+    expect(bot.sendText).toHaveBeenCalledTimes(1);
+    expect(bot.editText).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(bot.editText).toHaveBeenCalledTimes(1);
+    expect(bot.editText).toHaveBeenCalledWith(
+      "jid",
+      { remoteJid: "jid", id: "sent-1", fromMe: true },
+      '📖 Read: "src/index.ts"\n💻 Bash: "pnpm test"\n🔧 Edit: "src/app.ts"',
+    );
+  });
+
+  it("skips progress updates when disconnected", async () => {
+    const bot = createMockWhatsApp(false);
+    const onProgress = createWhatsAppToolProgressHandler(bot as never, "jid");
+
+    await onProgress(['📖 Read: "src/index.ts"']);
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(bot.sendText).toHaveBeenCalledWith("jid", '📖 Read: "src/index.ts"', undefined);
+    expect(bot.editText).not.toHaveBeenCalled();
   });
 });
