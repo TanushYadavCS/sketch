@@ -10,7 +10,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestPgDb } from "../test-utils";
-import { getSessionId, saveSessionId } from "./sessions";
+import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 
 describe("session persistence on Postgres", () => {
   let db!: Kysely<DB>;
@@ -51,6 +51,13 @@ describe("session persistence on Postgres", () => {
       const rows = await db.selectFrom("chat_sessions").selectAll().where("workspace_key", "=", "user-U1").execute();
 
       expect(rows).toHaveLength(1);
+    });
+
+    it("deleteSessionId removes a workspace session", async () => {
+      await saveSessionId(db, "user-U1", "sess_abc123");
+      await deleteSessionId(db, "user-U1");
+      const result = await getSessionId(db, "user-U1");
+      expect(result).toBeUndefined();
     });
   });
 
@@ -96,6 +103,15 @@ describe("session persistence on Postgres", () => {
         .execute();
 
       expect(rows).toHaveLength(1);
+    });
+
+    it("deleteSessionId removes only the targeted thread session", async () => {
+      await saveSessionId(db, "channel-C1", "sess_a", "1111.0000");
+      await saveSessionId(db, "channel-C1", "sess_b", "2222.0000");
+      await deleteSessionId(db, "channel-C1", "1111.0000");
+
+      expect(await getSessionId(db, "channel-C1", "1111.0000")).toBeUndefined();
+      expect(await getSessionId(db, "channel-C1", "2222.0000")).toBe("sess_b");
     });
   });
 

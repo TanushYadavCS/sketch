@@ -7,7 +7,7 @@ import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
-import { getSessionId, saveSessionId } from "./sessions";
+import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 
 async function createTestDb(): Promise<Kysely<DB>> {
   const db = new Kysely<DB>({
@@ -56,6 +56,13 @@ describe("session persistence", () => {
       const result = await getSessionId(db, "user-U1");
       expect(result).toBe("id2");
     });
+
+    it("deleteSessionId removes a workspace session", async () => {
+      await saveSessionId(db, "user-U1", "sess_abc123");
+      await deleteSessionId(db, "user-U1");
+      const result = await getSessionId(db, "user-U1");
+      expect(result).toBeUndefined();
+    });
   });
 
   describe("per-thread sessions (channels)", () => {
@@ -91,6 +98,15 @@ describe("session persistence", () => {
       await saveSessionId(db, "channel-C1", "new", "1111.0000");
 
       expect(await getSessionId(db, "channel-C1", "1111.0000")).toBe("new");
+    });
+
+    it("deleteSessionId removes only the targeted thread session", async () => {
+      await saveSessionId(db, "channel-C1", "sess_a", "1111.0000");
+      await saveSessionId(db, "channel-C1", "sess_b", "2222.0000");
+      await deleteSessionId(db, "channel-C1", "1111.0000");
+
+      expect(await getSessionId(db, "channel-C1", "1111.0000")).toBeUndefined();
+      expect(await getSessionId(db, "channel-C1", "2222.0000")).toBe("sess_b");
     });
   });
 });

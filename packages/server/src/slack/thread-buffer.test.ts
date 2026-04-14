@@ -64,6 +64,26 @@ describe("ThreadBuffer", () => {
     });
   });
 
+  describe("reset", () => {
+    it("registers a thread and clears existing buffered messages", () => {
+      const buf = new ThreadBuffer();
+      buf.register("C001", "1111.0000");
+      buf.append("C001", "1111.0000", { userName: "Alice", text: "hello", ts: "1111.0001" });
+
+      buf.reset("C001", "1111.0000");
+
+      expect(buf.hasThread("C001", "1111.0000")).toBe(true);
+      expect(buf.drain("C001", "1111.0000")).toEqual([]);
+    });
+
+    it("creates an empty registered thread when missing", () => {
+      const buf = new ThreadBuffer();
+      buf.reset("C001", "1111.0000");
+      expect(buf.hasThread("C001", "1111.0000")).toBe(true);
+      expect(buf.drain("C001", "1111.0000")).toEqual([]);
+    });
+  });
+
   describe("drain", () => {
     it("returns empty array for unregistered thread", () => {
       const buf = new ThreadBuffer();

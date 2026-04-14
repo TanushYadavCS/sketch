@@ -7,8 +7,9 @@ import { join } from "node:path";
 import type { Kysely } from "kysely";
 import { type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
-import { getSessionId } from "../agent/sessions";
+import { deleteSessionId, getSessionId } from "../agent/sessions";
 import { ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
+import { NEW_SESSION_CONFIRMATION, parseSketchCommand } from "../commands";
 import type { Config } from "../config";
 import type { createChannelRepository } from "../db/repositories/channels";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -156,6 +157,13 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
     userQueue.enqueue(async () => {
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing message");
+
+      const command = parseSketchCommand(message.text);
+      if (command === "new_session") {
+        await deleteSessionId(db, user.id);
+        await slackBot.postMessage(message.channelId, NEW_SESSION_CONFIRMATION);
+        return;
+      }
 
       const workspaceDir = await ensureWorkspace(config, user.id);
       const settingsRow = await repos.settings.get();
@@ -327,8 +335,17 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           logger.info({ channelId: channel.id, name: channel.name }, "New channel created");
         }
 
+        const command = parseSketchCommand(message.text);
+        if (command === "new_session") {
+          await deleteSessionId(db, `channel-${message.channelId}`, threadTs);
+          slackDeps.threadBuffer.reset(message.channelId, threadTs);
+          await slackBot.postThreadReply(message.channelId, threadTs, NEW_SESSION_CONFIRMATION);
+          return;
+        }
+
         const workspaceDir = await ensureChannelWorkspace(config, message.channelId);
         const settingsRow = await repos.settings.get();
+        const hadRegisteredThread = slackDeps.threadBuffer.hasThread(message.channelId, threadTs);
 
         slackDeps.threadBuffer.register(message.channelId, threadTs);
 
@@ -370,7 +387,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const rawText = message.text || "See attached files.";
         let userMessage: string;
 
-        if (existingSession) {
+        if (existingSession || hadRegisteredThread) {
           const buffered = slackDeps.threadBuffer.drain(message.channelId, threadTs);
           logger.debug({ threadTs, bufferedCount: buffered.length }, "Draining thread buffer for subsequent mention");
           userMessage = buildSketchContext({

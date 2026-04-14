@@ -69,6 +69,7 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
     groupBuffer: {
       append: vi.fn(),
       drain: vi.fn().mockReturnValue([]),
+      clear: vi.fn(),
     } as unknown as WhatsAppAdapterDeps["groupBuffer"],
     runAgent: vi.fn().mockResolvedValue({
       messageSent: true,
@@ -107,6 +108,10 @@ vi.mock("../files", async (importOriginal) => {
     }),
   };
 });
+
+vi.mock("../agent/sessions", () => ({
+  deleteSessionId: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe("whatsapp/adapter", () => {
   describe("DM handler", () => {
@@ -255,6 +260,29 @@ describe("whatsapp/adapter", () => {
 
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
+    });
+
+    it("resets the current DM session on /new", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const sessions = await import("../agent/sessions");
+
+      await handler({
+        type: "dm",
+        text: "/new",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Started a new session.");
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -666,6 +694,33 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.startComposing).toHaveBeenCalledWith("group@g.us");
       expect(mock.stopComposing).toHaveBeenCalledWith("group@g.us");
+    });
+
+    it("resets the current group session on /new", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const sessions = await import("../agent/sessions");
+      const rawMessage = { key: { id: "m1" } };
+
+      await handler({
+        type: "group",
+        text: "/new",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "wa-group-group@g.us");
+      expect(deps.groupBuffer.clear).toHaveBeenCalledWith("group@g.us");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "Started a new session.", { quoted: rawMessage });
     });
 
     it("group handler uses senderPhone for user lookup instead of senderJid", async () => {
