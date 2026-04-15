@@ -16,6 +16,8 @@ import { startSyncScheduler } from "./connectors/sync";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
 import { createAgentRunsRepo } from "./db/repositories/agent-runs";
+import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
+import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
@@ -76,6 +78,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await runManagedSeed(config, settingsRepo);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
+  const automationRunsRepo = createAutomationRunsRepository(db);
+  const stepContentRepo = createAutomationStepContentRepository(db);
+  const staleCount = await automationRunsRepo.markRunningAsFailed("Interrupted by server restart");
+  if (staleCount > 0) {
+    logger.warn({ staleCount }, "Cleaned up automation runs interrupted by previous shutdown");
+  }
   const inboxMessagesRepo = createInboxMessagesRepository(db);
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
@@ -150,6 +158,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
       if (!row || row.type == null) return null;
       return { type: row.type, credentials: row.credentials };
     },
+    automationRunsRepo,
+    stepContentRepo,
+    userRepo: users,
   });
   await scheduler.start();
 
@@ -173,6 +184,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { type: row.type, credentials: row.credentials };
     },
     scheduler,
+    stepContentRepo,
+    automationRunsRepo,
     inboxMessagesRepo,
   };
 
@@ -213,6 +226,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { type: row.type, credentials: row.credentials };
     },
     scheduler,
+    stepContentRepo,
+    automationRunsRepo,
     inboxMessagesRepo,
   });
 

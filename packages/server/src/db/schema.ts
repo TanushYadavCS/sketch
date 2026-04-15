@@ -228,6 +228,32 @@ export interface ScheduledTasksTable {
   status: Generated<string>;
   created_by: string | null;
   created_at: Generated<string>;
+  title: string | null;
+  description: string | null;
+  steps: string | null;
+  edges: string | null;
+  output_target: string | null;
+  output_platform: string | null;
+}
+
+export interface AutomationRunsTable {
+  id: string;
+  task_id: string;
+  trigger_data: string | null;
+  status: string;
+  step_outputs: string | null;
+  error_message: string | null;
+  started_at: Generated<string>;
+  completed_at: string | null;
+}
+
+export interface AutomationStepContentTable {
+  task_id: string;
+  step_id: string;
+  content_type: string;
+  content: string;
+  apps: string | null;
+  updated_at: Generated<string>;
 }
 
 export interface OutreachMessagesTable {
@@ -346,6 +372,8 @@ export interface DB {
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   scheduled_tasks: ScheduledTasksTable;
+  automation_runs: AutomationRunsTable;
+  automation_step_content: AutomationStepContentTable;
   outreach_messages: OutreachMessagesTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;

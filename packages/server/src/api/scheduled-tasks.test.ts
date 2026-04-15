@@ -111,6 +111,7 @@ describe("Scheduled Tasks API", () => {
       pauseTask: vi.fn(),
       resumeTask: vi.fn(),
       removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
     const cookie = await loginAdmin(app);
@@ -176,6 +177,7 @@ describe("Scheduled Tasks API", () => {
         pauseTask: vi.fn(),
         resumeTask: vi.fn(),
         removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
       },
     });
     const cookie = await getMemberCookie(db, alice.id);
@@ -216,6 +218,7 @@ describe("Scheduled Tasks API", () => {
         pauseTask: vi.fn(),
         resumeTask: vi.fn(),
         removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
       },
     });
     const cookie = await loginAdmin(app);
@@ -257,6 +260,7 @@ describe("Scheduled Tasks API", () => {
         await tasks.updateStatus(id, "active");
       }),
       removeTask: vi.fn(async () => true),
+      executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
     const cookie = await loginAdmin(app);
@@ -302,6 +306,7 @@ describe("Scheduled Tasks API", () => {
       pauseTask: vi.fn(),
       resumeTask: vi.fn(),
       removeTask: vi.fn(async (id: string) => tasks.remove(id)),
+      executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
     const cookie = await loginAdmin(app);

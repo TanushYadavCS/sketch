@@ -49,6 +49,34 @@ export interface ScheduledTaskListItem {
   canPause: boolean;
   canResume: boolean;
   canDelete: boolean;
+  title: string | null;
+  description: string | null;
+  steps: string | null;
+  stepCount: number;
+  outputTarget: string | null;
+  outputPlatform: string | null;
+  lastRunStatus: string | null;
+  runCount: number;
+}
+
+export interface AutomationRunItem {
+  id: string;
+  task_id: string;
+  trigger_data: string | null;
+  status: "running" | "completed" | "failed";
+  step_outputs: string | null;
+  error_message: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface AutomationStepContentItem {
+  task_id: string;
+  step_id: string;
+  content_type: "prompt" | "script";
+  content: string;
+  apps: string | null;
+  updated_at: string;
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -548,6 +576,25 @@ export const api = {
     remove(id: string) {
       return request<{ success: true }>(`/api/scheduled-tasks/${id}`, {
         method: "DELETE",
+      });
+    },
+    async listRuns(taskId: string) {
+      const res = await request<{ runs: AutomationRunItem[] }>(`/api/scheduled-tasks/${taskId}/runs`);
+      return res.runs;
+    },
+    async getRun(taskId: string, runId: string) {
+      const res = await request<{ run: AutomationRunItem }>(`/api/scheduled-tasks/${taskId}/runs/${runId}`);
+      return res.run;
+    },
+    async getStepContent(taskId: string) {
+      const res = await request<{ stepContent: AutomationStepContentItem[] }>(
+        `/api/scheduled-tasks/${taskId}/step-content`,
+      );
+      return res.stepContent;
+    },
+    trigger(taskId: string) {
+      return request<{ status: string }>(`/api/scheduled-tasks/${taskId}/run`, {
+        method: "POST",
       });
     },
   },

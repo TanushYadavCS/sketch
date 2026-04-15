@@ -55,6 +55,33 @@ export interface SketchContextParams {
   };
 }
 
+export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): string[] {
+  if (platform === "slack") {
+    return [
+      "You are responding on Slack. Use Slack mrkdwn formatting:",
+      "",
+      "- *bold* for emphasis",
+      "- _italic_ for secondary emphasis",
+      "- `code` for inline code, ```code blocks``` for multi-line",
+      "- Use <url|text> for links",
+      "- Do not use markdown tables -- use formatted text with bullet lists instead",
+      "- Keep responses concise and scannable",
+    ];
+  }
+
+  return [
+    "You are responding on WhatsApp. Use WhatsApp formatting:",
+    "",
+    "- *bold* for emphasis",
+    "- _italic_ for secondary emphasis",
+    "- ~strikethrough~ for corrections",
+    "- ```monospace``` for code",
+    "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
+    "- Do not use markdown links like [text](url) -- write URLs inline",
+    "- Keep responses concise -- WhatsApp is a mobile-first platform",
+  ];
+}
+
 /**
  * Builds a stable system prompt for the given platform and org configuration.
  * Contains no per-user content so it can be shared across all users in the
@@ -154,36 +181,11 @@ export function buildSystemContext(params: {
   );
 
   if (params.platform === "slack") {
-    sections.push(
-      "",
-      "## Platform",
-      "",
-      "You are responding on Slack. Use Slack mrkdwn formatting:",
-      "",
-      "- *bold* for emphasis",
-      "- _italic_ for secondary emphasis",
-      "- `code` for inline code, ```code blocks``` for multi-line",
-      "- Use <url|text> for links",
-      "- Do not use markdown tables -- use formatted text with bullet lists instead",
-      "- Keep responses concise and scannable",
-    );
+    sections.push("", "## Platform", "", ...buildPlatformFormattingLines("slack"));
   }
 
   if (params.platform === "whatsapp") {
-    sections.push(
-      "",
-      "## Platform",
-      "",
-      "You are responding on WhatsApp. Use WhatsApp formatting:",
-      "",
-      "- *bold* for emphasis",
-      "- _italic_ for secondary emphasis",
-      "- ~strikethrough~ for corrections",
-      "- ```monospace``` for code",
-      "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
-      "- Do not use markdown links like [text](url) -- write URLs inline",
-      "- Keep responses concise -- WhatsApp is a mobile-first platform",
-    );
+    sections.push("", "## Platform", "", ...buildPlatformFormattingLines("whatsapp"));
   }
 
   return sections.join("\n");

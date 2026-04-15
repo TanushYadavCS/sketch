@@ -18,18 +18,21 @@
 import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
-import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, runAgent } from "../agent/runner";
 import { ensureChannelWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
+import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { executeAutomation } from "../workflows/runtime";
 import type { ScheduledTask } from "./types";
 
 export interface TaskSchedulerDeps {
@@ -43,6 +46,9 @@ export interface TaskSchedulerDeps {
   runAgent: typeof runAgent;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  automationRunsRepo: ReturnType<typeof createAutomationRunsRepository>;
+  stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
+  userRepo: ReturnType<typeof createUserRepository>;
 }
 
 export class TaskScheduler {
@@ -59,7 +65,15 @@ export class TaskScheduler {
     const activeTasks = await this.repo.listActive();
     this.deps.logger.info({ count: activeTasks.length }, "TaskScheduler: loading active tasks");
     for (const task of activeTasks) {
-      await this.scheduleTask(task);
+      try {
+        await this.scheduleTask(task);
+      } catch (err) {
+        this.deps.logger.error(
+          { err, taskId: task.id, scheduleType: task.schedule_type, scheduleValue: task.schedule_value },
+          "TaskScheduler: failed to schedule task, pausing it",
+        );
+        await this.repo.updateStatus(task.id, "paused").catch(() => {});
+      }
     }
   }
 
@@ -129,21 +143,10 @@ export class TaskScheduler {
   }
 
   async executeTask(task: ScheduledTaskRow): Promise<void> {
-    const { config, logger, queueManager, getSlack, whatsapp, settingsRepo, buildMcpServers, findIntegrationProvider } =
-      this.deps;
+    const { config, logger, queueManager, getSlack, whatsapp, findIntegrationProvider } = this.deps;
 
-    let workspaceDir: string;
-    if (task.context_type === "channel") {
-      workspaceDir = await ensureChannelWorkspace(config, task.delivery_target);
-    } else if (task.context_type === "group") {
-      workspaceDir = await ensureGroupWorkspace(config, task.delivery_target);
-    } else {
-      const userId = task.created_by ?? task.delivery_target;
-      workspaceDir = await ensureWorkspace(config, userId);
-    }
-
-    let onFinalMessage: (text: string) => Promise<void>;
-    const onToolProgress = async () => {};
+    // Build onMessage callback for delivery
+    let onMessage: (text: string) => Promise<void>;
 
     if (task.platform === "slack") {
       const slack = getSlack();
@@ -152,14 +155,17 @@ export class TaskScheduler {
         return;
       }
 
+      // Determine output target: use output_target if set (for workflows), else delivery_target
+      const outputTarget = task.output_target ?? task.delivery_target;
+
       if (task.context_type === "channel" && task.session_mode !== "fresh" && task.thread_ts) {
         const threadTs = task.thread_ts;
-        onFinalMessage = async (text) => {
-          await slack.postThreadReply(task.delivery_target, threadTs, text);
+        onMessage = async (text) => {
+          await slack.postThreadReply(outputTarget, threadTs, text);
         };
       } else {
-        onFinalMessage = async (text) => {
-          await slack.postMessage(task.delivery_target, text);
+        onMessage = async (text) => {
+          await slack.postMessage(outputTarget, text);
         };
       }
     } else {
@@ -167,86 +173,45 @@ export class TaskScheduler {
         logger.warn({ taskId: task.id }, "TaskScheduler: WhatsApp not connected, skipping task");
         return;
       }
-      onFinalMessage = async (text) => {
-        await whatsapp.sendText(task.delivery_target, text);
+      onMessage = async (text) => {
+        await whatsapp.sendText(task.output_target ?? task.delivery_target, text);
       };
     }
 
-    const userId = task.created_by ?? task.delivery_target;
-
-    let workspaceKey: string;
-    if (task.context_type === "dm") {
-      workspaceKey = userId;
-    } else if (task.platform === "slack" && task.context_type === "channel") {
-      workspaceKey = `channel-${task.delivery_target}`;
-    } else {
-      const groupId = task.delivery_target.replace("@g.us", "");
-      workspaceKey = `wa-group-${groupId}`;
-    }
-
+    // Queue key: chat-mode keeps original key (sequential with conversation), everything else is isolated
     let queueKey: string;
-    if (task.context_type === "dm") {
-      queueKey = userId;
-    } else if (task.platform === "slack" && task.context_type === "channel") {
-      if (task.session_mode !== "fresh" && task.thread_ts) {
-        queueKey = `${task.delivery_target}:${task.thread_ts}`;
+    if (task.session_mode === "chat") {
+      // Chat mode: original queue key logic
+      const userId = task.created_by ?? task.delivery_target;
+      if (task.context_type === "dm") {
+        queueKey = userId;
+      } else if (task.platform === "slack" && task.context_type === "channel") {
+        queueKey = task.thread_ts ? `${task.delivery_target}:${task.thread_ts}` : task.delivery_target;
       } else {
-        queueKey = task.delivery_target;
+        const groupId = task.delivery_target.replace("@g.us", "");
+        queueKey = `wa-group-${groupId}`;
       }
     } else {
-      const groupId = task.delivery_target.replace("@g.us", "");
-      queueKey = `wa-group-${groupId}`;
-    }
-
-    let threadKey: string | undefined;
-    if (task.session_mode === "persistent") {
-      threadKey = `task-${task.id}`;
-    } else if (task.session_mode === "chat") {
-      if (task.context_type === "channel" && task.thread_ts) {
-        threadKey = task.thread_ts;
-      } else {
-        threadKey = undefined;
-      }
-    } else {
-      threadKey = undefined;
+      // Fresh/persistent: isolated queue key
+      queueKey = `task-${task.id}`;
     }
 
     queueManager.getQueue(queueKey).enqueue(async () => {
       try {
-        const settingsRow = await settingsRepo.get();
-        const integrationMcpServers = await buildMcpServers(null);
-        const userMessage = buildSketchContext({
-          messages: [],
-          currentUserName: "System",
-          currentMessage: "",
-          workspaceDir,
-          orgDir: this.deps.config.CLAUDE_CONFIG_DIR,
-          taskPrompt: task.prompt,
-          isSharedContext: false,
-        });
-
-        await this.deps.runAgent({
+        await executeAutomation({
+          task,
+          triggerData: { scheduledAt: new Date().toISOString(), taskId: task.id },
           db: this.deps.db,
-          workspaceKey,
-          userMessage,
-          workspaceDir,
-          claudeConfigDir: this.deps.config.CLAUDE_CONFIG_DIR,
-          userName: "System",
           logger,
-          platform: task.platform as "slack" | "whatsapp",
-          onToolProgress,
-          onFinalMessage,
-          threadTs: threadKey,
-          orgName: settingsRow?.org_name,
-          botName: settingsRow?.bot_name,
-          integrationMcpServers,
+          config,
+          runsRepo: this.deps.automationRunsRepo,
+          stepContentRepo: this.deps.stepContentRepo,
           findIntegrationProvider,
-          sessionMode: task.session_mode as "fresh" | "persistent" | "chat",
-          contextType: "scheduled_task",
-          currentUserId: task.created_by ?? null,
+          userRepo: this.deps.userRepo,
+          sendMessage: onMessage,
         });
       } catch (err) {
-        logger.error({ err, taskId: task.id }, "Scheduled task execution failed");
+        logger.error({ err, taskId: task.id }, "Automation execution failed");
       }
     });
 
@@ -274,6 +239,12 @@ export class TaskScheduler {
     timezone?: string;
     sessionMode?: "fresh" | "persistent" | "chat";
     createdBy?: string | null;
+    title?: string | null;
+    description?: string | null;
+    steps?: string | null;
+    edges?: string | null;
+    outputTarget?: string | null;
+    outputPlatform?: string | null;
   }): Promise<ScheduledTask> {
     const row = await this.repo.add({
       id: randomUUID(),
@@ -289,30 +260,47 @@ export class TaskScheduler {
       created_by: params.createdBy ?? null,
       status: "active",
       next_run_at: null,
+      title: params.title ?? null,
+      description: params.description ?? null,
+      steps: params.steps ?? null,
+      edges: params.edges ?? null,
+      output_target: params.outputTarget ?? null,
+      output_platform: params.outputPlatform ?? null,
     });
 
-    await this.scheduleTask(row);
+    try {
+      await this.scheduleTask(row);
+    } catch (err) {
+      this.deps.logger.error({ err, taskId: row.id }, "TaskScheduler: failed to schedule new task, pausing it");
+      await this.repo.updateStatus(row.id, "paused");
+      const paused = await this.repo.getById(row.id);
+      return this.toScheduledTask(paused ?? row);
+    }
 
     const updated = await this.repo.getById(row.id);
     return this.toScheduledTask(updated ?? row);
   }
 
-  async updateTask(
-    id: string,
-    params: {
-      prompt?: string;
-      scheduleType?: "cron" | "interval" | "once";
-      scheduleValue?: string;
-      timezone?: string;
-      sessionMode?: "fresh" | "persistent" | "chat";
-    },
-  ): Promise<ScheduledTask | null> {
+  async executeTaskById(id: string): Promise<void> {
+    const row = await this.repo.getById(id);
+    if (!row) throw new Error(`Task ${id} not found`);
+    if (row.status !== "active") throw new Error(`Task ${id} is not active`);
+    await this.executeTask(row);
+  }
+
+  async updateTask(id: string, params: Record<string, string | null | undefined>): Promise<ScheduledTask | null> {
     const fields: Record<string, string | null | undefined> = {};
     if (params.prompt !== undefined) fields.prompt = params.prompt;
     if (params.scheduleType !== undefined) fields.schedule_type = params.scheduleType;
     if (params.scheduleValue !== undefined) fields.schedule_value = params.scheduleValue;
     if (params.timezone !== undefined) fields.timezone = params.timezone;
     if (params.sessionMode !== undefined) fields.session_mode = params.sessionMode;
+    if (params.title !== undefined) fields.title = params.title;
+    if (params.description !== undefined) fields.description = params.description;
+    if (params.steps !== undefined) fields.steps = params.steps;
+    if (params.edges !== undefined) fields.edges = params.edges;
+    if (params.outputTarget !== undefined) fields.output_target = params.outputTarget;
+    if (params.outputPlatform !== undefined) fields.output_platform = params.outputPlatform;
 
     const row = await this.repo.update(id, fields);
     if (!row) return null;
@@ -320,7 +308,12 @@ export class TaskScheduler {
     const scheduleChanged =
       params.scheduleType !== undefined || params.scheduleValue !== undefined || params.timezone !== undefined;
     if (scheduleChanged && row.status === "active") {
-      await this.scheduleTask(row);
+      try {
+        await this.scheduleTask(row);
+      } catch (err) {
+        this.deps.logger.error({ err, taskId: id }, "TaskScheduler: failed to reschedule updated task, pausing it");
+        await this.repo.updateStatus(id, "paused");
+      }
     }
 
     const refreshed = await this.repo.getById(id);
@@ -374,6 +367,12 @@ export class TaskScheduler {
       status: row.status as "active" | "paused" | "completed",
       createdBy: row.created_by,
       createdAt: row.created_at,
+      title: row.title,
+      description: row.description,
+      steps: row.steps,
+      edges: row.edges,
+      outputTarget: row.output_target,
+      outputPlatform: row.output_platform,
     };
   }
 }

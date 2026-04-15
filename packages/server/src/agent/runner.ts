@@ -10,6 +10,8 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
+import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
@@ -99,6 +101,10 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
+  stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
+  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  toolConfig?: { BASE_URL?: string; PORT: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
@@ -207,6 +213,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     findIntegrationProvider: params.findIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
+    stepContentRepo: params.stepContentRepo,
+    automationRunsRepo: params.automationRunsRepo,
+    queueManager: params.queueManager,
+    toolConfig: params.toolConfig,
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
@@ -230,6 +240,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     wrapperResult = await resolveIntegrationWrappers({
       runId: existingSessionId ?? crypto.randomUUID().slice(0, 8),
       userEmail: params.userEmail ?? null,
+      claudeConfigDir: params.claudeConfigDir,
       findIntegrationProvider: params.findIntegrationProvider,
       logger,
     });

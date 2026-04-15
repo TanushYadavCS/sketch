@@ -26,6 +26,15 @@ interface MockCronInstance {
 }
 
 const mockCronInstances: MockCronInstance[] = [];
+let lastExecuteAutomationParams: { sendMessage?: (text: string) => Promise<void> } | null = null;
+
+vi.mock("../workflows/runtime", () => ({
+  executeAutomation: vi.fn().mockImplementation(async (params: { sendMessage?: (text: string) => Promise<void> }) => {
+    lastExecuteAutomationParams = params;
+    return { runId: "mock-run-1", status: "completed" };
+  }),
+}));
+
 let cronCallCount = 0;
 
 vi.mock("croner", () => {
@@ -100,6 +109,30 @@ function buildDeps(
     runAgent: mockRunAgent,
     buildMcpServers: vi.fn().mockResolvedValue({}),
     findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    automationRunsRepo: {
+      create: vi.fn().mockResolvedValue("run-1"),
+      update: vi.fn().mockResolvedValue(undefined),
+      getById: vi.fn().mockResolvedValue(undefined),
+      getLatest: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+      deleteByTaskId: vi.fn().mockResolvedValue(undefined),
+    },
+    stepContentRepo: {
+      upsert: vi.fn().mockResolvedValue(undefined),
+      getByTask: vi.fn().mockResolvedValue([]),
+      getByStep: vi.fn().mockResolvedValue(undefined),
+      deleteByTaskId: vi.fn().mockResolvedValue(undefined),
+      deleteOrphanedSteps: vi.fn().mockResolvedValue(undefined),
+    },
+    userRepo: {
+      list: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockResolvedValue({ email: "test@example.com" }),
+      findBySlackId: vi.fn().mockResolvedValue(undefined),
+      findByWhatsApp: vi.fn().mockResolvedValue(undefined),
+      findByEmail: vi.fn().mockResolvedValue(undefined),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
     _mockRunAgent: mockRunAgent,
     _slack: slack,
     _whatsapp: whatsapp,
@@ -373,23 +406,27 @@ describe("listTasks()", () => {
   });
 });
 
-describe("executeTask() workspace resolution", () => {
-  it("uses ensureWorkspace for Slack DM", async () => {
+describe("executeTask() invokes automation runtime", () => {
+  afterEach(() => {
+    lastExecuteAutomationParams = null;
+  });
+
+  it("calls executeAutomation for DM task", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
     const row = await repo.add({ ...baseTaskFields, platform: "slack", context_type: "dm", created_by: "U_DM_USER" });
-
-    const workspaceMod = await import("../agent/workspace");
-    const ensureSpy = vi.spyOn(workspaceMod, "ensureWorkspace").mockResolvedValue("/tmp/ws/U_DM_USER");
-
     await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    expect(ensureSpy).toHaveBeenCalledWith(deps.config, "U_DM_USER");
-    ensureSpy.mockRestore();
+    expect(executeAutomation).toHaveBeenCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
+    );
   });
 
-  it("uses ensureChannelWorkspace for Slack channel", async () => {
+  it("calls executeAutomation for Slack channel task", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -399,17 +436,16 @@ describe("executeTask() workspace resolution", () => {
       context_type: "channel",
       delivery_target: "C_CHANNEL1",
     });
-
-    const workspaceMod = await import("../agent/workspace");
-    const ensureSpy = vi.spyOn(workspaceMod, "ensureChannelWorkspace").mockResolvedValue("/tmp/ws/channel-C_CHANNEL1");
-
     await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    expect(ensureSpy).toHaveBeenCalledWith(deps.config, "C_CHANNEL1");
-    ensureSpy.mockRestore();
+    expect(executeAutomation).toHaveBeenCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
+    );
   });
 
-  it("uses ensureGroupWorkspace for WhatsApp group", async () => {
+  it("calls executeAutomation for WhatsApp group task", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -419,14 +455,12 @@ describe("executeTask() workspace resolution", () => {
       context_type: "group",
       delivery_target: "1234567890@g.us",
     });
-
-    const workspaceMod = await import("../agent/workspace");
-    const ensureSpy = vi.spyOn(workspaceMod, "ensureGroupWorkspace").mockResolvedValue("/tmp/ws/wa-group-1234567890");
-
     await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    expect(ensureSpy).toHaveBeenCalledWith(deps.config, "1234567890@g.us");
-    ensureSpy.mockRestore();
+    expect(executeAutomation).toHaveBeenCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
+    );
   });
 });
 
@@ -469,97 +503,15 @@ describe("executeTask() bot availability checks", () => {
   });
 });
 
-describe("executeTask() session modes", () => {
-  beforeEach(async () => {
-    const workspaceMod = await import("../agent/workspace");
-    vi.spyOn(workspaceMod, "ensureWorkspace").mockResolvedValue("/tmp/ws/user");
-    vi.spyOn(workspaceMod, "ensureChannelWorkspace").mockResolvedValue("/tmp/ws/channel");
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("passes sessionMode=fresh and no threadTs for fresh mode", async () => {
-    const deps = buildDeps(db);
-    const scheduler = new TaskScheduler(deps as never);
-
-    const row = await repo.add({ ...baseTaskFields, session_mode: "fresh", context_type: "dm" });
-
-    await scheduler.executeTask(row as ScheduledTaskRow);
-
-    await new Promise<void>((r) => setTimeout(r, 10));
-
-    expect(deps._mockRunAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionMode: "fresh", threadTs: undefined }),
-    );
-  });
-
-  it("passes sessionMode=persistent and threadTs=task-{id} for persistent mode", async () => {
-    const deps = buildDeps(db);
-    const scheduler = new TaskScheduler(deps as never);
-
-    const row = await repo.add({ ...baseTaskFields, session_mode: "persistent", context_type: "dm" });
-
-    await scheduler.executeTask(row as ScheduledTaskRow);
-
-    await new Promise<void>((r) => setTimeout(r, 10));
-
-    expect(deps._mockRunAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionMode: "persistent", threadTs: `task-${row.id}` }),
-    );
-  });
-
-  it("passes sessionMode=chat and original threadTs for chat mode in Slack channel", async () => {
-    const deps = buildDeps(db);
-    const scheduler = new TaskScheduler(deps as never);
-
-    const row = await repo.add({
-      ...baseTaskFields,
-      session_mode: "chat",
-      context_type: "channel",
-      delivery_target: "C_CHAN1",
-      thread_ts: "1234567890.000100",
-    });
-
-    await scheduler.executeTask(row as ScheduledTaskRow);
-
-    await new Promise<void>((r) => setTimeout(r, 10));
-
-    expect(deps._mockRunAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionMode: "chat", threadTs: "1234567890.000100" }),
-    );
-  });
-
-  it("passes sessionMode=chat and undefined threadTs for chat mode in DM", async () => {
-    const deps = buildDeps(db);
-    const scheduler = new TaskScheduler(deps as never);
-
-    const row = await repo.add({ ...baseTaskFields, session_mode: "chat", context_type: "dm" });
-
-    await scheduler.executeTask(row as ScheduledTaskRow);
-
-    await new Promise<void>((r) => setTimeout(r, 10));
-
-    expect(deps._mockRunAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionMode: "chat", threadTs: undefined }),
-    );
-  });
-});
+// Session mode routing is verified through "invokes automation runtime" + "queue key derivation" tests.
+// The runtime handles session/workspace logic internally.
 
 describe("executeTask() delivery routing", () => {
-  beforeEach(async () => {
-    const workspaceMod = await import("../agent/workspace");
-    vi.spyOn(workspaceMod, "ensureWorkspace").mockResolvedValue("/tmp/ws/user");
-    vi.spyOn(workspaceMod, "ensureChannelWorkspace").mockResolvedValue("/tmp/ws/channel");
-    vi.spyOn(workspaceMod, "ensureGroupWorkspace").mockResolvedValue("/tmp/ws/group");
-  });
-
   afterEach(() => {
-    vi.restoreAllMocks();
+    lastExecuteAutomationParams = null;
   });
 
-  it("Slack DM: calls postMessage on the DM channel", async () => {
+  it("Slack DM: sendMessage calls postMessage on the DM channel", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -571,10 +523,10 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 10));
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
-    await onFinalMessage("Hello from task");
+    expect(lastExecuteAutomationParams?.sendMessage).toBeDefined();
+    await lastExecuteAutomationParams?.sendMessage?.("Hello from task");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
       "D_DM_CHANNEL",
@@ -582,7 +534,7 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
-  it("Slack channel + fresh: calls postMessage (not thread reply)", async () => {
+  it("Slack channel + fresh: sendMessage calls postMessage", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -595,10 +547,9 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 10));
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
-    await onFinalMessage("Channel update");
+    await lastExecuteAutomationParams?.sendMessage?.("Channel update");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
       "C_CHANNEL1",
@@ -607,7 +558,7 @@ describe("executeTask() delivery routing", () => {
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
   });
 
-  it("Slack channel + chat + threadTs: calls postThreadReply", async () => {
+  it("Slack channel + chat + threadTs: sendMessage calls postThreadReply", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -621,10 +572,9 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 10));
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
-    await onFinalMessage("Thread reply");
+    await lastExecuteAutomationParams?.sendMessage?.("Thread reply");
 
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).toHaveBeenCalledWith(
       "C_CHANNEL1",
@@ -633,7 +583,7 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
-  it("WhatsApp: calls sendText", async () => {
+  it("WhatsApp: sendMessage calls sendText", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -645,50 +595,14 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 10));
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    const onFinalMessage = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0].onFinalMessage;
-    await onFinalMessage("WhatsApp message");
+    await lastExecuteAutomationParams?.sendMessage?.("WhatsApp message");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
       "5511999999999@s.whatsapp.net",
       "WhatsApp message",
     );
-  });
-});
-
-describe("executeTask() prompt building", () => {
-  beforeEach(async () => {
-    const workspaceMod = await import("../agent/workspace");
-    vi.spyOn(workspaceMod, "ensureWorkspace").mockResolvedValue("/tmp/ws/user");
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("builds scheduled task runs through buildSketchContext with <task>, <time>, and <workspace>", async () => {
-    const deps = buildDeps(db);
-    const scheduler = new TaskScheduler(deps as never);
-
-    const row = await repo.add({
-      ...baseTaskFields,
-      platform: "slack",
-      context_type: "dm",
-      delivery_target: "D_DM_CHANNEL",
-      prompt: "Send the daily summary",
-    });
-
-    await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 10));
-
-    const agentCall = (deps._mockRunAgent as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(agentCall.userMessage).toContain("<context>");
-    expect(agentCall.userMessage).toContain("<time>");
-    expect(agentCall.userMessage).toContain("<workspace>");
-    expect(agentCall.userMessage).toContain("<task>Send the daily summary</task>");
-    expect(agentCall.userMessage).not.toContain("[Scheduled Task]");
-    expect(agentCall.userMessage).not.toContain("<inbox>");
   });
 });
 
@@ -704,7 +618,7 @@ describe("executeTask() queue key derivation", () => {
     vi.restoreAllMocks();
   });
 
-  it("uses created_by as queue key for DM", async () => {
+  it("uses task-{id} as queue key for fresh DM (isolated from conversation)", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -713,10 +627,10 @@ describe("executeTask() queue key derivation", () => {
     const row = await repo.add({ ...baseTaskFields, platform: "slack", context_type: "dm", created_by: "U_CREATOR" });
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    expect(getQueueSpy).toHaveBeenCalledWith("U_CREATOR");
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
-  it("uses delivery_target as queue key for Slack channel + fresh", async () => {
+  it("uses task-{id} as queue key for Slack channel + fresh (isolated)", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -731,10 +645,10 @@ describe("executeTask() queue key derivation", () => {
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    expect(getQueueSpy).toHaveBeenCalledWith("C_CHAN");
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
-  it("uses delivery_target:thread_ts as queue key for Slack channel + persistent with threadTs", async () => {
+  it("uses task-{id} as queue key for persistent mode (isolated)", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -750,10 +664,28 @@ describe("executeTask() queue key derivation", () => {
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    expect(getQueueSpy).toHaveBeenCalledWith("C_CHAN:111.222");
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
-  it("uses wa-group-{jid} as queue key for WhatsApp group", async () => {
+  it("uses conversation queue key for chat mode (sequential with user)", async () => {
+    const queueManager = new QueueManager();
+    const getQueueSpy = vi.spyOn(queueManager, "getQueue");
+    const deps = buildDeps(db, { queueManager });
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "dm",
+      created_by: "U_CREATOR",
+      session_mode: "chat",
+    });
+    await scheduler.executeTask(row as ScheduledTaskRow);
+
+    expect(getQueueSpy).toHaveBeenCalledWith("U_CREATOR");
+  });
+
+  it("uses task-{id} as queue key for WhatsApp group + fresh (isolated)", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -767,7 +699,7 @@ describe("executeTask() queue key derivation", () => {
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    expect(getQueueSpy).toHaveBeenCalledWith("wa-group-987654321");
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 });
 
