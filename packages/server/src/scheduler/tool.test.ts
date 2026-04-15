@@ -41,11 +41,15 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
 function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskScheduler {
   return {
     listTasks: vi.fn().mockResolvedValue([]),
+    // Default ownership check returns a task owned by the standard test creator "U123".
+    // Tests that exercise the not-yours branch override this with their own mock.
+    getTaskById: vi.fn().mockResolvedValue(makeTask()),
     addTask: vi.fn().mockResolvedValue(makeTask()),
     updateTask: vi.fn().mockResolvedValue(makeTask()),
     removeTask: vi.fn().mockResolvedValue(true),
     pauseTask: vi.fn().mockResolvedValue(undefined),
     resumeTask: vi.fn().mockResolvedValue(undefined),
+    executeTaskById: vi.fn().mockResolvedValue(undefined),
     start: vi.fn(),
     stop: vi.fn(),
     scheduleTask: vi.fn(),
@@ -491,5 +495,69 @@ describe("handleManageScheduledTasks — add with once schedule type", () => {
     expect(result.content[0].text).toContain("Error:");
     expect(result.content[0].text).toContain("ISO 8601");
     expect(scheduler.addTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleManageScheduledTasks — ownership", () => {
+  const GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"] as const;
+
+  function buildParams(action: (typeof GUARDED_ACTIONS)[number]): Parameters<typeof handleManageScheduledTasks>[0] {
+    if (action === "updateStepContent") {
+      return { action, task_id: "task-1", step_id: "step1", step_content: "new prompt" };
+    }
+    return { action, task_id: "task-1" };
+  }
+
+  for (const action of GUARDED_ACTIONS) {
+    it(`rejects '${action}' when the task was created by a different user`, async () => {
+      const otherUsersTask = makeTask({ createdBy: "U_OTHER" });
+      const scheduler = makeMockScheduler({
+        getTaskById: vi.fn().mockResolvedValue(otherUsersTask),
+      });
+
+      const result = await handleManageScheduledTasks(buildParams(action), {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext, // createdBy: "U123"
+      });
+
+      expect(result.content[0].text).toBe("Error: task not found.");
+      // No mutating / side-effecting operation should have fired.
+      expect(scheduler.updateTask).not.toHaveBeenCalled();
+      expect(scheduler.removeTask).not.toHaveBeenCalled();
+      expect(scheduler.pauseTask).not.toHaveBeenCalled();
+      expect(scheduler.resumeTask).not.toHaveBeenCalled();
+      expect(scheduler.executeTaskById).not.toHaveBeenCalled();
+    });
+
+    it(`rejects '${action}' with same phrasing when the task is missing`, async () => {
+      const scheduler = makeMockScheduler({
+        getTaskById: vi.fn().mockResolvedValue(null),
+      });
+
+      const result = await handleManageScheduledTasks(buildParams(action), {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+      });
+
+      // Same phrasing as the "not yours" branch — avoids existence leak.
+      expect(result.content[0].text).toBe("Error: task not found.");
+    });
+  }
+
+  it("allows a guarded action when the caller owns the task", async () => {
+    const ownTask = makeTask({ createdBy: "U123" });
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(ownTask),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "pause", task_id: "task-1" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(result.content[0].text).not.toContain("Error:");
+    expect(scheduler.pauseTask).toHaveBeenCalledWith("task-1");
   });
 });

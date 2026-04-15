@@ -693,7 +693,7 @@ describe("Auth endpoints", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.authenticated).toBe(true);
-      expect(body.role).toBe("member");
+      expect(body.role).toBe("admin");
       expect(body.userId).toBe(adminUser.id);
       expect(body.name).toBe("admin");
       expect(body.email).toBe("admin@test.com");
@@ -851,7 +851,7 @@ describe("Auth endpoints", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.authenticated).toBe(true);
-      expect(body.role).toBe("member");
+      expect(body.role).toBe("admin");
       expect(body.userId).toBe(adminUser.id);
       expect(body.email).toBe("admin@test.com");
     });
