@@ -35,6 +35,10 @@ export class ThreadBuffer {
     buf.push(message);
   }
 
+  reset(channelId: string, threadTs: string): void {
+    this.buffers.set(this.key(channelId, threadTs), []);
+  }
+
   drain(channelId: string, threadTs: string): BufferedMessage[] {
     const k = this.key(channelId, threadTs);
     const buf = this.buffers.get(k);

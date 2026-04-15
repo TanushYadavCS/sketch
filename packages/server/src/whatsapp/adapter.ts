@@ -8,7 +8,9 @@ import type { Kysely } from "kysely";
 import type { BufferedMessage, InboxMessageContext } from "../agent/prompt";
 import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
+import { deleteSessionId } from "../agent/sessions";
 import { ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
+import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -120,6 +122,13 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       const userQueue = queue.getQueue(user.id);
 
       userQueue.enqueue(async () => {
+        const command = parseSketchCommand(message.text);
+        if (command === "new_session") {
+          await deleteSessionId(db, user.id);
+          await whatsapp.sendText(replyJid, getNewSessionConfirmation());
+          return;
+        }
+
         const workspaceDir = await ensureWorkspace(config, user.id);
         const settingsRow = await repos.settings.get();
         const deliveryJid = toPhoneJid(user.whatsapp_number ?? message.phoneNumber);
@@ -246,6 +255,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     const groupQueue = queue.getQueue(`wa-group-${groupJid}`);
 
     groupQueue.enqueue(async () => {
+      const command = parseSketchCommand(message.text);
+      if (command === "new_session") {
+        await deleteSessionId(db, `wa-group-${groupJid}`);
+        groupBuffer.clear(groupJid);
+        const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        await onFinalMessage(getNewSessionConfirmation());
+        return;
+      }
+
       const workspaceDir = await ensureGroupWorkspace(config, groupJid);
       const settingsRow = await repos.settings.get();
       const groupMeta = await whatsapp.getGroupMetadata(groupJid);

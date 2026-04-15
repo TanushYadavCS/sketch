@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
 import type { SlackAdapterDeps } from "./adapter";
@@ -73,6 +74,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
         hasThread: vi.fn().mockReturnValue(false),
         append: vi.fn(),
         drain: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
       } as unknown as SlackAdapterDeps["slack"]["threadBuffer"],
       userCache: {
         resolve: vi.fn().mockImplementation(async (_id, fetcher) => fetcher(_id)),
@@ -156,6 +158,7 @@ vi.mock("../agent/workspace", () => ({
 vi.mock("../agent/sessions", () => ({
   getSessionId: vi.fn().mockResolvedValue(undefined),
   saveSessionId: vi.fn().mockResolvedValue(undefined),
+  deleteSessionId: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Stub slack API for validateSlackTokens
@@ -266,6 +269,23 @@ describe("slack/adapter", () => {
 
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
+    });
+
+    it("treats leading-space /new as a reset command in Slack DMs", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+      const sessions = await import("../agent/sessions");
+
+      await dm({ text: " /new", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
+        "D1",
+        expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
+      );
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -417,6 +437,46 @@ describe("slack/adapter", () => {
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
 
+    it("resets the current thread when a channel mention sends /new", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+      const sessions = await import("../agent/sessions");
+
+      await mention({
+        text: "/new",
+        userId: "S1",
+        channelId: "C1",
+        ts: "1",
+        threadTs: "0.9",
+        type: "channel_mention",
+      });
+      await flush();
+
+      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "channel-C1", "0.9");
+      expect(deps.slack.threadBuffer.reset).toHaveBeenCalledWith("C1", "0.9");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
+        "C1",
+        "0.9",
+        expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
+      );
+    });
+
+    it("skips bootstrap history after a thread has been reset", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.slack.threadBuffer.hasThread).mockReturnValue(true);
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(deps.slack.threadBuffer.drain).toHaveBeenCalledWith("C1", "1");
+      expect(mockBotInstance.getChannelHistory).not.toHaveBeenCalled();
+      expect(mockBotInstance.getThreadReplies).not.toHaveBeenCalled();
+    });
+
     it("includes user email in channel mention message", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -451,3 +511,7 @@ describe("slack/adapter", () => {
     });
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
