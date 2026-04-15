@@ -216,7 +216,7 @@ export function buildSketchContext(params: SketchContextParams): string {
 
   const tz = params.timezone || "UTC";
   const now = new Date();
-  const dateFormatter = new Intl.DateTimeFormat(undefined, {
+  const dateFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     weekday: "long",
     year: "numeric",
@@ -226,7 +226,7 @@ export function buildSketchContext(params: SketchContextParams): string {
     minute: "2-digit",
     hour12: true,
   });
-  const tzFormatter = new Intl.DateTimeFormat(undefined, {
+  const tzFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     timeZoneName: "short",
   });
