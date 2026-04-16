@@ -540,6 +540,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           automationRunsRepo,
           queueManager: queue,
           toolConfig,
+          inboxMessagesRepo,
+          userRepo: repos.users,
+          sendDm: sendDmViaWhatsApp,
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });

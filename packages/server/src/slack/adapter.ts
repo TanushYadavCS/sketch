@@ -627,6 +627,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           automationRunsRepo,
           queueManager: queue,
           toolConfig,
+          inboxMessagesRepo,
+          userRepo: repos.users,
+          sendDm: sendDmViaSlack,
         });
 
         await flushSlackProgressTransport(progressTransport, logger, {
