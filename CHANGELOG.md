@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.19.1] -- 2026-04-16
+
+- Fix: wire teammate tools (`GetTeamDirectory`, `SendMessageToUser`) in shared chats. Slack channel mentions and WhatsApp group runs now receive `inboxMessagesRepo`, `userRepo`, and the platform `sendDm` callback, so the agent can discover and DM teammates from shared contexts (previously only wired for DMs).
+
 ## [0.19.0] -- 2026-04-16
 
 - Workflows phase 1: unified automation model where every scheduled task is a workflow (single-step tasks are sugar-expanded; multi-step workflows have trigger + action/agent steps with step content stored separately)
