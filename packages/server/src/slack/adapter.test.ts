@@ -266,6 +266,30 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_Something went wrong, try again_");
     });
 
+    it("flushes buffered progress before posting the DM error reply", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Edit", input: { file_path: "a.ts" } });
+          throw new Error("boom");
+        }),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "crash", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(mockBotInstance.updateMessage).toHaveBeenCalled();
+      const errorCallIndex = mockBotInstance.postMessage.mock.calls.findIndex(
+        ([channelId, text]) => channelId === "D1" && text === "_Something went wrong, try again_",
+      );
+      expect(errorCallIndex).toBeGreaterThanOrEqual(0);
+      const errorOrder = mockBotInstance.postMessage.mock.invocationCallOrder[errorCallIndex];
+      const flushOrder = mockBotInstance.updateMessage.mock.invocationCallOrder.at(-1);
+      expect(flushOrder).toBeLessThan(errorOrder);
+    });
+
     it("shows _No response_ when agent sends nothing", async () => {
       const deps = makeDeps({
         runAgent: vi

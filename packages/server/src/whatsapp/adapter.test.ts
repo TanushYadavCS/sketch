@@ -269,6 +269,39 @@ describe("whatsapp/adapter", () => {
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
     });
 
+    it("flushes buffered progress before sending the DM error reply", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Edit", input: { file_path: "a.ts" } });
+          throw new Error("boom");
+        }),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "crash",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.editText).toHaveBeenCalled();
+      const errorCallIndex = mock.sendText.mock.calls.findIndex(
+        ([jid, text]) => jid === "1234567890@s.whatsapp.net" && text === "Something went wrong, try again.",
+      );
+      expect(errorCallIndex).toBeGreaterThanOrEqual(0);
+      const errorOrder = mock.sendText.mock.invocationCallOrder[errorCallIndex];
+      const flushOrder = mock.editText.mock.invocationCallOrder.at(-1);
+      expect(flushOrder).toBeLessThan(errorOrder);
+    });
+
     it("still sends the final reply when progress flush fails", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockImplementation(async (params) => {

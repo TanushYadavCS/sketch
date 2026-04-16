@@ -103,6 +103,20 @@ async function downloadSlackFiles(
   return attachments;
 }
 
+async function flushSlackProgressTransport(
+  progressTransport: { flush(): Promise<void> } | null,
+  logger: Logger,
+  context: { userId?: string; channelId?: string; threadTs?: string },
+) {
+  if (!progressTransport) return;
+
+  try {
+    await progressTransport.flush();
+  } catch (err) {
+    logger.warn({ err, ...context }, "Failed to flush Slack progress updates");
+  }
+}
+
 export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: string }, deps: SlackAdapterDeps) {
   const {
     db,
@@ -338,11 +352,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           sendDm: sendDmViaSlack,
         });
 
-        try {
-          await progressTransport?.flush();
-        } catch (err) {
-          logger.error({ err, userId: user.id }, "Failed to flush Slack progress updates");
-        }
+        await flushSlackProgressTransport(progressTransport, logger, { userId: user.id, channelId: message.channelId });
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }
@@ -365,6 +375,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
       } catch (err) {
         logger.error({ err, userId: user.id }, "Agent run failed");
+        await flushSlackProgressTransport(progressTransport, logger, { userId: user.id, channelId: message.channelId });
         await slackBot.removeReaction(message.channelId, message.ts, "eyes");
         await slackBot.postMessage(message.channelId, "_Something went wrong, try again_");
       }
@@ -415,7 +426,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     mentionQueue.enqueue(async () => {
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
 
-      let user: Awaited<ReturnType<typeof resolveUser>>;
+      let user: Awaited<ReturnType<typeof resolveUser>> | undefined;
+      let progressTransport: ReturnType<typeof createSlackProgressTransport> | null = null;
 
       try {
         user = await resolveUser(message.userId);
@@ -573,7 +585,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const progressSettings = resolveProgressDisplaySettings(channel);
         const progressRenderer = createProgressRenderer(progressSettings);
         const progressStrategy = getProgressTransportStrategy(progressSettings);
-        const progressTransport =
+        progressTransport =
           progressStrategy === "none"
             ? null
             : createSlackProgressTransport(slackBot, message.channelId, progressStrategy, threadTs);
@@ -617,11 +629,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           toolConfig,
         });
 
-        try {
-          await progressTransport?.flush();
-        } catch (err) {
-          logger.error({ err, channelId: message.channelId }, "Failed to flush Slack progress updates");
-        }
+        await flushSlackProgressTransport(progressTransport, logger, {
+          userId: user.id,
+          channelId: message.channelId,
+          threadTs,
+        });
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }
@@ -641,6 +653,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
       } catch (err) {
         logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
+        await flushSlackProgressTransport(progressTransport, logger, {
+          userId: user?.id,
+          channelId: message.channelId,
+          threadTs,
+        });
         await slackBot.removeReaction(message.channelId, message.ts, "eyes");
         await slackBot.postThreadReply(message.channelId, threadTs, "_Something went wrong, try again_");
       }

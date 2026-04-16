@@ -70,6 +70,20 @@ export interface WhatsAppAdapterDeps {
   inboxMessagesRepo?: InboxMessagesRepository;
 }
 
+async function flushWhatsAppProgressTransport(
+  progressTransport: { flush(): Promise<void> } | null,
+  logger: Logger,
+  context: { userId?: string; jid?: string; groupJid?: string },
+) {
+  if (!progressTransport) return;
+
+  try {
+    await progressTransport.flush();
+  } catch (err) {
+    logger.warn({ err, ...context }, "Failed to flush WhatsApp progress updates");
+  }
+}
+
 export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapterDeps): void {
   const {
     db,
@@ -217,6 +231,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
         whatsapp.startComposing(deliveryJid);
         await updateReaction(reactionJid, message.rawMessage as WAMessage, "👀");
+        let progressTransport: ReturnType<typeof createWhatsAppProgressTransport> | null = null;
 
         try {
           const attachments: Attachment[] = [];
@@ -240,7 +255,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           const progressSettings = resolveProgressDisplaySettings(user);
           const progressRenderer = createProgressRenderer(progressSettings);
           const progressStrategy = getProgressTransportStrategy(progressSettings);
-          const progressTransport =
+          progressTransport =
             progressStrategy === "none"
               ? null
               : createWhatsAppProgressTransport(whatsapp, deliveryJid, progressStrategy);
@@ -301,11 +316,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             sendDm: sendDmViaWhatsApp,
           });
 
-          try {
-            await progressTransport?.flush();
-          } catch (err) {
-            logger.error({ err, userId: user.id }, "Failed to flush WhatsApp progress updates");
-          }
+          await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
           if (result.trace.finalText) {
             await onFinalMessage(result.trace.finalText);
           }
@@ -329,6 +340,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           await updateReaction(reactionJid, message.rawMessage as WAMessage, "✅");
         } catch (err) {
           logger.error({ err, userId: user.id }, "Agent run failed (WhatsApp)");
+          await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
           await updateReaction(reactionJid, message.rawMessage as WAMessage, null);
           if (whatsapp.isConnected) {
             await whatsapp.sendText(deliveryJid, "Something went wrong, try again.");
@@ -443,6 +455,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
       whatsapp.startComposing(groupJid);
       await updateReaction(groupJid, message.rawMessage as WAMessage, "👀");
+      let progressTransport: ReturnType<typeof createWhatsAppProgressTransport> | null = null;
 
       try {
         const buffered = groupBuffer.drain(groupJid);
@@ -486,7 +499,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         const progressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
         const progressRenderer = createProgressRenderer(progressSettings);
         const progressStrategy = getProgressTransportStrategy(progressSettings);
-        const progressTransport =
+        progressTransport =
           progressStrategy === "none"
             ? null
             : createWhatsAppProgressTransport(whatsapp, groupJid, progressStrategy, message.rawMessage as WAMessage);
@@ -529,11 +542,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           toolConfig,
         });
 
-        try {
-          await progressTransport?.flush();
-        } catch (err) {
-          logger.error({ err, groupJid }, "Failed to flush WhatsApp progress updates");
-        }
+        await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }
@@ -553,6 +562,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         await updateReaction(groupJid, message.rawMessage as WAMessage, "✅");
       } catch (err) {
         logger.error({ err, groupJid }, "Agent run failed (WhatsApp group)");
+        await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
         await updateReaction(groupJid, message.rawMessage as WAMessage, null);
         if (whatsapp.isConnected) {
           await whatsapp.sendText(groupJid, "Something went wrong, try again.");
