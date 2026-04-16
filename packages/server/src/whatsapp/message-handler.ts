@@ -1,6 +1,6 @@
 /**
- * Factory for the onMessage callback passed to runAgent().
- * Sends each text chunk via WhatsApp, skipping if disconnected.
+ * Final message delivery helper for WhatsApp.
+ *
  * In groups, the first message quotes the original mention message.
  */
 import type { WAMessage } from "@whiskeysockets/baileys";

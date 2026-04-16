@@ -9,26 +9,46 @@ import type { BufferedMessage, InboxMessageContext } from "../agent/prompt";
 import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
+import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
-import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
+import {
+  type ReasoningTextCommand,
+  type ToolProgressCommand,
+  getNewSessionConfirmation,
+  getReasoningTextConfirmation,
+  getReasoningTextCurrent,
+  getToolProgressConfirmation,
+  getToolProgressCurrent,
+  parseSketchCommand,
+} from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
+import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
 import type { Logger } from "../logger";
+import {
+  getUnknownReasoningTextMessage,
+  getUnknownToolProgressMessage,
+  isReasoningTextCommand,
+  isToolProgressCommand,
+  resolveProgressDisplaySettings,
+} from "../progress-settings";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { WhatsAppBot } from "./bot";
 import type { GroupBuffer } from "./group-buffer";
 import { createWhatsAppMessageHandler } from "./message-handler";
+import { createWhatsAppProgressTransport } from "./progress-transport";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
+type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 
 export interface WhatsAppAdapterDeps {
   db: Kysely<DB>;
@@ -37,6 +57,7 @@ export interface WhatsAppAdapterDeps {
   repos: {
     users: UserRepository;
     settings: SettingsRepository;
+    whatsappGroups: WhatsAppGroupsRepository;
   };
   queue: QueueManager;
   groupBuffer: GroupBuffer;
@@ -47,6 +68,20 @@ export interface WhatsAppAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+}
+
+async function flushWhatsAppProgressTransport(
+  progressTransport: { flush(): Promise<void> } | null,
+  logger: Logger,
+  context: { userId?: string; jid?: string; groupJid?: string },
+) {
+  if (!progressTransport) return;
+
+  try {
+    await progressTransport.flush();
+  } catch (err) {
+    logger.warn({ err, ...context }, "Failed to flush WhatsApp progress updates");
+  }
 }
 
 export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapterDeps): void {
@@ -69,6 +104,27 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
   const toPhoneJid = (phoneNumber: string) => `${phoneNumber.replace("+", "")}@s.whatsapp.net`;
+  const resolveCommandToolProgress = (command: ReturnType<typeof parseSketchCommand>): ToolProgressCommand | null => {
+    if (!command?.startsWith("tool_progress_") || command === "tool_progress_query") return null;
+    return command.slice("tool_progress_".length) as ToolProgressCommand;
+  };
+  const resolveCommandReasoningText = (command: ReturnType<typeof parseSketchCommand>): ReasoningTextCommand | null => {
+    if (!command?.startsWith("reasoning_text_") || command === "reasoning_text_query") return null;
+    return command.slice("reasoning_text_".length) as ReasoningTextCommand;
+  };
+  const updateReaction = async (jid: string, rawMessage: WAMessage, emoji: string | null) => {
+    if (!whatsapp.isConnected || !rawMessage.key) return;
+
+    try {
+      if (emoji === null) {
+        await whatsapp.removeReaction(jid, rawMessage.key);
+      } else {
+        await whatsapp.addReaction(jid, rawMessage.key, emoji);
+      }
+    } catch (err) {
+      logger.debug({ err, jid, emoji }, "Failed to update WhatsApp reaction");
+    }
+  };
 
   /**
    * Sends a DM to a user via their WhatsApp number. Used both in normal DM handling and in
@@ -129,11 +185,53 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           return;
         }
 
+        if (!command && isToolProgressCommand(message.text)) {
+          await whatsapp.sendText(replyJid, getUnknownToolProgressMessage(message.text));
+          return;
+        }
+
+        if (!command && isReasoningTextCommand(message.text)) {
+          await whatsapp.sendText(replyJid, getUnknownReasoningTextMessage(message.text));
+          return;
+        }
+
+        const currentProgressSettings = resolveProgressDisplaySettings(user);
+        if (command === "tool_progress_query") {
+          await whatsapp.sendText(replyJid, getToolProgressCurrent(currentProgressSettings));
+          return;
+        }
+
+        if (command === "reasoning_text_query") {
+          await whatsapp.sendText(replyJid, getReasoningTextCurrent(currentProgressSettings));
+          return;
+        }
+
+        const requestedToolProgress = resolveCommandToolProgress(command);
+        if (requestedToolProgress) {
+          await repos.users.update(user.id, { toolProgress: requestedToolProgress });
+          await whatsapp.sendText(
+            replyJid,
+            getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText),
+          );
+          return;
+        }
+
+        const requestedReasoningText = resolveCommandReasoningText(command);
+        if (requestedReasoningText) {
+          const enabled = requestedReasoningText === "on";
+          await repos.users.update(user.id, { reasoningText: enabled });
+          await whatsapp.sendText(replyJid, getReasoningTextConfirmation(enabled));
+          return;
+        }
+
         const workspaceDir = await ensureWorkspace(config, user.id);
         const settingsRow = await repos.settings.get();
         const deliveryJid = toPhoneJid(user.whatsapp_number ?? message.phoneNumber);
+        const reactionJid = (message.rawMessage as WAMessage).key?.remoteJid ?? message.jid;
 
         whatsapp.startComposing(deliveryJid);
+        await updateReaction(reactionJid, message.rawMessage as WAMessage, "👀");
+        let progressTransport: ReturnType<typeof createWhatsAppProgressTransport> | null = null;
 
         try {
           const attachments: Attachment[] = [];
@@ -154,7 +252,17 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           }
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
-          const onToolProgress = async () => {};
+          const progressSettings = resolveProgressDisplaySettings(user);
+          const progressRenderer = createProgressRenderer(progressSettings);
+          const progressStrategy = getProgressTransportStrategy(progressSettings);
+          progressTransport =
+            progressStrategy === "none"
+              ? null
+              : createWhatsAppProgressTransport(whatsapp, deliveryJid, progressStrategy);
+          const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
+            if (!progressTransport) return;
+            await progressTransport.pushLines(progressRenderer.renderEvent(event));
+          };
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
           const pendingInbox = await loadPendingInboxMessages(user.id);
@@ -189,8 +297,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             userPhone: user.whatsapp_number ?? message.phoneNumber,
             logger,
             platform: "whatsapp",
-            onToolProgress,
-            onFinalMessage,
+            onProgressEvent,
             orgName: settingsRow?.org_name,
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
@@ -209,6 +316,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             sendDm: sendDmViaWhatsApp,
           });
 
+          await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
+          if (result.trace.finalText) {
+            await onFinalMessage(result.trace.finalText);
+          }
+
           for (const filePath of result.pendingUploads) {
             try {
               if (whatsapp.isConnected) {
@@ -224,8 +336,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           if (pendingInbox.ids.length > 0 && inboxMessagesRepo) {
             await inboxMessagesRepo.markConsumed(pendingInbox.ids);
           }
+          await updateReaction(reactionJid, message.rawMessage as WAMessage, null);
+          await updateReaction(reactionJid, message.rawMessage as WAMessage, "✅");
         } catch (err) {
           logger.error({ err, userId: user.id }, "Agent run failed (WhatsApp)");
+          await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
+          await updateReaction(reactionJid, message.rawMessage as WAMessage, null);
           if (whatsapp.isConnected) {
             await whatsapp.sendText(deliveryJid, "Something went wrong, try again.");
           }
@@ -269,8 +385,77 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       const groupMeta = await whatsapp.getGroupMetadata(groupJid);
       const groupName = groupMeta?.subject ?? "Unknown Group";
       const groupDescription = groupMeta?.desc ?? undefined;
+      const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
+
+      if (!command && isToolProgressCommand(message.text)) {
+        await whatsapp.sendText(groupJid, getUnknownToolProgressMessage(message.text), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
+
+      if (!command && isReasoningTextCommand(message.text)) {
+        await whatsapp.sendText(groupJid, getUnknownReasoningTextMessage(message.text), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
+
+      const currentProgressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
+      if (command === "tool_progress_query") {
+        await whatsapp.sendText(groupJid, getToolProgressCurrent(currentProgressSettings), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
+
+      if (command === "reasoning_text_query") {
+        await whatsapp.sendText(groupJid, getReasoningTextCurrent(currentProgressSettings), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
+
+      const requestedToolProgress = resolveCommandToolProgress(command);
+      if (requestedToolProgress) {
+        await repos.whatsappGroups.upsert({
+          jid: groupJid,
+          name: groupName,
+          description: groupDescription ?? null,
+          tool_progress: requestedToolProgress,
+          reasoning_text: currentProgressSettings.reasoningText ? 1 : 0,
+          updated_at: new Date().toISOString(),
+        });
+        await whatsapp.sendText(
+          groupJid,
+          getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText),
+          {
+            quoted: message.rawMessage as WAMessage,
+          },
+        );
+        return;
+      }
+
+      const requestedReasoningText = resolveCommandReasoningText(command);
+      if (requestedReasoningText) {
+        const enabled = requestedReasoningText === "on";
+        await repos.whatsappGroups.upsert({
+          jid: groupJid,
+          name: groupName,
+          description: groupDescription ?? null,
+          tool_progress: currentProgressSettings.toolProgress,
+          reasoning_text: enabled ? 1 : 0,
+          updated_at: new Date().toISOString(),
+        });
+        await whatsapp.sendText(groupJid, getReasoningTextConfirmation(enabled), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
 
       whatsapp.startComposing(groupJid);
+      await updateReaction(groupJid, message.rawMessage as WAMessage, "👀");
+      let progressTransport: ReturnType<typeof createWhatsAppProgressTransport> | null = null;
 
       try {
         const buffered = groupBuffer.drain(groupJid);
@@ -311,7 +496,17 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
-        const onToolProgress = async () => {};
+        const progressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
+        const progressRenderer = createProgressRenderer(progressSettings);
+        const progressStrategy = getProgressTransportStrategy(progressSettings);
+        progressTransport =
+          progressStrategy === "none"
+            ? null
+            : createWhatsAppProgressTransport(whatsapp, groupJid, progressStrategy, message.rawMessage as WAMessage);
+        const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
+          if (!progressTransport) return;
+          await progressTransport.pushLines(progressRenderer.renderEvent(event));
+        };
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
@@ -326,8 +521,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
-          onToolProgress,
-          onFinalMessage,
+          onProgressEvent,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
@@ -348,6 +542,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           toolConfig,
         });
 
+        await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
+        if (result.trace.finalText) {
+          await onFinalMessage(result.trace.finalText);
+        }
+
         for (const filePath of result.pendingUploads) {
           try {
             if (whatsapp.isConnected) {
@@ -359,8 +558,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             logger.warn({ err, filePath }, "Failed to send file via WhatsApp");
           }
         }
+        await updateReaction(groupJid, message.rawMessage as WAMessage, null);
+        await updateReaction(groupJid, message.rawMessage as WAMessage, "✅");
       } catch (err) {
         logger.error({ err, groupJid }, "Agent run failed (WhatsApp group)");
+        await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
+        await updateReaction(groupJid, message.rawMessage as WAMessage, null);
         if (whatsapp.isConnected) {
           await whatsapp.sendText(groupJid, "Something went wrong, try again.");
         }

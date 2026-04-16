@@ -215,7 +215,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     config,
     logger,
-    repos: { users, settings: settingsRepo },
+    repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo },
     queue: queueManager,
     groupBuffer,
     runAgent: trackedRunAgent,

@@ -17,6 +17,8 @@ type UserRow = {
   whatsapp_number: string | null;
   created_at: string;
   email_verified_at: string | null;
+  tool_progress: string | null;
+  reasoning_text: number | null;
 };
 
 export interface ResolveSlackUserDeps {

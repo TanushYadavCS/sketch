@@ -23,6 +23,8 @@ function makeUser(overrides: Partial<Selectable<UsersTable>> = {}): Selectable<U
     type: "human",
     role: null,
     reports_to: null,
+    tool_progress: null,
+    reasoning_text: null,
     created_at: "2024-01-01T00:00:00.000Z",
     ...overrides,
   };

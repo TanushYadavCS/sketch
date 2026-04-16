@@ -14,6 +14,8 @@ const makeUser = (
   whatsapp_number: null as string | null,
   created_at: "2026-01-01T00:00:00Z",
   email_verified_at: null as string | null,
+  tool_progress: null as string | null,
+  reasoning_text: null as number | null,
   ...overrides,
 });
 

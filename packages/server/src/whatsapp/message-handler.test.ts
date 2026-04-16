@@ -5,7 +5,8 @@ import { createWhatsAppMessageHandler } from "./message-handler";
 function createMockWhatsApp(connected = true) {
   return {
     isConnected: connected,
-    sendText: vi.fn().mockResolvedValue(undefined),
+    sendText: vi.fn().mockResolvedValue(connected ? { key: { remoteJid: "jid", id: "sent-1", fromMe: true } } : null),
+    editText: vi.fn().mockResolvedValue(connected ? { key: { remoteJid: "jid", id: "edit-1", fromMe: true } } : null),
   };
 }
 
