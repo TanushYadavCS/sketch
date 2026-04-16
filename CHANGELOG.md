@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [0.19.0] -- 2026-04-16
+
+- Workflows phase 1: unified automation model where every scheduled task is a workflow (single-step tasks are sugar-expanded; multi-step workflows have trigger + action/agent steps with step content stored separately)
+- New `automation_runs` and `automation_step_content` tables (migration 031), with per-run tracking, step outputs, and cascade delete on task removal
+- New runtime at `packages/server/src/workflows/` executes all automations through a single code path; agent steps receive integration env, platform formatting, and stderr capture
+- API: `/api/scheduled-tasks/:id/step-content`, runs and run-detail endpoints, enriched list response, "Run now" trigger
+- Frontend: step summary, run history, run detail, and Run-now action on the automations page
+- Resilience: mark interrupted runs as `failed` on startup, auto-pause tasks with invalid cron/step structure
+- Member access: members now see and mutate only automations they created; admins retain tenant-wide access across list, pause/resume/delete/run, runs, and the `ManageScheduledTasks` agent tool; N+1 list query replaced with a single grouped run-summary query
+- Output style modes: `/outputstyle friendly|concise|technical|verbose` (shorthand `f`/`c`/`t`/`v`), stored per-user in DMs and per-channel in channels/WhatsApp groups, defaulting to friendly
+- Runner emits semantic progress events live during a run and delays the final answer until the run ends; new `tool-progress` renderer and Slack/WhatsApp `progress-transport` own accumulate-vs-replace strategy and invisible rollover
+- Integration CLIs now run through ephemeral, brokered wrappers with scoped environment and credentials, keyed off `CLAUDE_CONFIG_DIR`
+- Fix: flush progress updates on agent errors so users see partial output on failures
+- Fix: harden progress message length handling to respect platform caps
+- Fix(agent): pin prompt time formatter to `en-US` so the `<time>` tag is stable across host locales
+- Fix(web): Vite dev proxy follows the server `PORT` instead of hard-coding `localhost:3000`
+- Fix(whatsapp): disable Baileys `fireInitQueries` to avoid bad-request errors on boot and reconnect
+
 ## [0.18.0] -- 2026-04-14
 
 - Replace the old outbound/outreach flow with an inbox-based agent messaging model for cross-user delivery and response handling
