@@ -20,7 +20,8 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     type: "human",
     role: null,
     reports_to: null,
-    output_style: null,
+    tool_progress: null,
+    reasoning_text: null,
     ...overrides,
   };
 }
@@ -104,7 +105,7 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
       whatsappGroups: {
         getByJid: vi.fn().mockResolvedValue(undefined),
         upsert: vi.fn().mockResolvedValue(undefined),
-        updateOutputStyle: vi.fn().mockResolvedValue(undefined),
+        updateProgressSettings: vi.fn().mockResolvedValue(undefined),
       } as unknown as WhatsAppAdapterDeps["repos"]["whatsappGroups"],
     },
     queue: new QueueManager(),
@@ -398,7 +399,7 @@ describe("whatsapp/adapter", () => {
       );
     });
 
-    it("updates the DM user's output style on /outputstyle", async () => {
+    it("updates the DM user's tool progress on /toolprogress", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -406,7 +407,7 @@ describe("whatsapp/adapter", () => {
 
       await handler({
         type: "dm",
-        text: "/outputstyle verbose",
+        text: "/toolprogress verbose",
         jid: "1234@s.whatsapp.net",
         messageId: "m1",
         pushName: "Alice",
@@ -415,9 +416,9 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { outputStyle: "verbose" });
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "verbose" });
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Output style set to verbose.");
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "🔍 Tool progress set to verbose.");
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -938,7 +939,7 @@ describe("whatsapp/adapter", () => {
       );
     });
 
-    it("upserts the group output style on /outputstyle", async () => {
+    it("upserts the group tool progress on /toolprogress", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -947,7 +948,7 @@ describe("whatsapp/adapter", () => {
 
       await handler({
         type: "group",
-        text: "/outputstyle friendly",
+        text: "/toolprogress friendly",
         jid: "group@g.us",
         messageId: "m1",
         pushName: "Alice",
@@ -963,11 +964,14 @@ describe("whatsapp/adapter", () => {
           jid: "group@g.us",
           name: "Test Group",
           description: "A test group",
-          output_style: "friendly",
+          tool_progress: "friendly",
+          reasoning_text: 0,
         }),
       );
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "Output style set to friendly.", { quoted: rawMessage });
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "🪄 Tool progress set to friendly.", {
+        quoted: rawMessage,
+      });
     });
 
     it("wires group tool progress and final reply as separate quoted messages", async () => {

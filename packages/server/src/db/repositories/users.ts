@@ -66,7 +66,8 @@ export function createUserRepository(db: Kysely<DB>) {
         description?: string | null;
         role?: string | null;
         reportsTo?: string | null;
-        outputStyle?: string | null;
+        toolProgress?: string | null;
+        reasoningText?: boolean | null;
       },
     ) {
       const values: Record<string, unknown> = {};
@@ -90,7 +91,9 @@ export function createUserRepository(db: Kysely<DB>) {
       if (data.description !== undefined) values.description = data.description;
       if (data.role !== undefined) values.role = data.role;
       if (data.reportsTo !== undefined) values.reports_to = data.reportsTo;
-      if (data.outputStyle !== undefined) values.output_style = data.outputStyle;
+      if (data.toolProgress !== undefined) values.tool_progress = data.toolProgress;
+      if (data.reasoningText !== undefined)
+        values.reasoning_text = data.reasoningText == null ? null : data.reasoningText ? 1 : 0;
 
       if (Object.keys(values).length > 0) {
         await db.updateTable("users").set(values).where("id", "=", id).execute();

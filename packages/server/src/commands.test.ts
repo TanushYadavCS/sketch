@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   NEW_SESSION_CONFIRMATIONS,
   getNewSessionConfirmation,
-  getOutputStyleConfirmation,
-  getOutputStyleCurrent,
-  getOutputStyleSuggestion,
+  getReasoningTextConfirmation,
+  getReasoningTextCurrent,
+  getToolProgressConfirmation,
+  getToolProgressCurrent,
+  getToolProgressSuggestion,
   parseSketchCommand,
 } from "./commands";
 
@@ -37,28 +39,39 @@ describe("parseSketchCommand", () => {
     expect(parseSketchCommand(undefined)).toBeNull();
   });
 
-  it("detects /outputstyle with long forms", () => {
-    expect(parseSketchCommand("/outputstyle friendly")).toBe("output_style_friendly");
-    expect(parseSketchCommand("/outputstyle concise")).toBe("output_style_concise");
-    expect(parseSketchCommand("/outputstyle technical")).toBe("output_style_technical");
-    expect(parseSketchCommand("/outputstyle verbose")).toBe("output_style_verbose");
+  it("detects /toolprogress with all supported values", () => {
+    expect(parseSketchCommand("/toolprogress off")).toBe("tool_progress_off");
+    expect(parseSketchCommand("/toolprogress friendly")).toBe("tool_progress_friendly");
+    expect(parseSketchCommand("/toolprogress concise")).toBe("tool_progress_concise");
+    expect(parseSketchCommand("/toolprogress technical")).toBe("tool_progress_technical");
+    expect(parseSketchCommand("/toolprogress verbose")).toBe("tool_progress_verbose");
   });
 
-  it("detects /outputstyle with short forms", () => {
-    expect(parseSketchCommand("/outputstyle f")).toBe("output_style_friendly");
-    expect(parseSketchCommand("/outputstyle c")).toBe("output_style_concise");
-    expect(parseSketchCommand("/outputstyle t")).toBe("output_style_technical");
-    expect(parseSketchCommand("/outputstyle v")).toBe("output_style_verbose");
+  it("treats /toolprogress without args as query", () => {
+    expect(parseSketchCommand("/toolprogress")).toBe("tool_progress_query");
+    expect(parseSketchCommand(" /toolprogress  ")).toBe("tool_progress_query");
   });
 
-  it("treats /outputstyle without args as query", () => {
-    expect(parseSketchCommand("/outputstyle")).toBe("output_style_query");
-    expect(parseSketchCommand(" /outputstyle  ")).toBe("output_style_query");
+  it("returns null for unknown /toolprogress values", () => {
+    expect(parseSketchCommand("/toolprogress friendy")).toBeNull();
+    expect(parseSketchCommand("/toolprogress xyz")).toBeNull();
   });
 
-  it("returns null for unknown /outputstyle values", () => {
-    expect(parseSketchCommand("/outputstyle friendy")).toBeNull();
-    expect(parseSketchCommand("/outputstyle xyz")).toBeNull();
+  it("detects /reasoningtext values and synonyms", () => {
+    expect(parseSketchCommand("/reasoningtext on")).toBe("reasoning_text_on");
+    expect(parseSketchCommand("/reasoningtext off")).toBe("reasoning_text_off");
+    expect(parseSketchCommand("/reasoningtext true")).toBe("reasoning_text_on");
+    expect(parseSketchCommand("/reasoningtext false")).toBe("reasoning_text_off");
+    expect(parseSketchCommand("/reasoningtext yes")).toBe("reasoning_text_on");
+    expect(parseSketchCommand("/reasoningtext no")).toBe("reasoning_text_off");
+  });
+
+  it("treats /reasoningtext without args as query", () => {
+    expect(parseSketchCommand("/reasoningtext")).toBe("reasoning_text_query");
+  });
+
+  it("returns null for unknown /reasoningtext values", () => {
+    expect(parseSketchCommand("/reasoningtext maybe")).toBeNull();
   });
 });
 
@@ -76,23 +89,38 @@ describe("getNewSessionConfirmation", () => {
   });
 });
 
-describe("output style helpers", () => {
+describe("tool progress helpers", () => {
   it("formats the set confirmation", () => {
-    expect(getOutputStyleConfirmation("verbose")).toBe("Output style set to verbose.");
+    expect(getToolProgressConfirmation("verbose", false)).toBe("🔍 Tool progress set to verbose.");
   });
 
-  it("formats the current style message", () => {
-    expect(getOutputStyleCurrent("friendly")).toBe(
-      "Current output style: friendly. Available: friendly, concise, technical, verbose.",
+  it("mentions live reasoning when turning tool progress off", () => {
+    expect(getToolProgressConfirmation("off", true)).toBe(
+      "🛑 Tool progress turned off. 🧠 Reasoning text is still on, so you may still see live updates.",
     );
   });
 
-  it("suggests the closest output style for typos", () => {
-    expect(getOutputStyleSuggestion("friendy")).toBe("friendly");
-    expect(getOutputStyleSuggestion("concis")).toBe("concise");
+  it("formats the current settings message", () => {
+    expect(getToolProgressCurrent({ toolProgress: "friendly", reasoningText: false })).toBe(
+      "🛠️ Tool progress: friendly. 🧠 Reasoning text: off.\nUse /toolprogress off|friendly|concise|technical|verbose",
+    );
   });
 
-  it("returns null when no reasonable suggestion exists", () => {
-    expect(getOutputStyleSuggestion("xyz")).toBeNull();
+  it("suggests the closest tool progress mode for typos", () => {
+    expect(getToolProgressSuggestion("friendy")).toBe("friendly");
+    expect(getToolProgressSuggestion("tecnical")).toBe("technical");
+  });
+});
+
+describe("reasoning text helpers", () => {
+  it("formats the set confirmation", () => {
+    expect(getReasoningTextConfirmation(true)).toBe("🧠 Reasoning text turned on.");
+    expect(getReasoningTextConfirmation(false)).toBe("🔕 Reasoning text turned off.");
+  });
+
+  it("formats the current settings message", () => {
+    expect(getReasoningTextCurrent({ toolProgress: "concise", reasoningText: true })).toBe(
+      "🧠 Reasoning text: on. 🛠️ Tool progress: concise.\nUse /reasoningtext on|off",
+    );
   });
 });

@@ -11,7 +11,8 @@ export interface UsersTable {
   type: Generated<string>;
   role: string | null;
   reports_to: string | null;
-  output_style: string | null;
+  tool_progress: string | null;
+  reasoning_text: Generated<number | null>;
   created_at: Generated<string>;
 }
 
@@ -20,7 +21,8 @@ export interface ChannelsTable {
   slack_channel_id: string;
   name: string;
   type: string;
-  output_style: string | null;
+  tool_progress: string | null;
+  reasoning_text: Generated<number | null>;
   created_at: Generated<string>;
 }
 
@@ -40,7 +42,8 @@ export interface WhatsAppGroupsTable {
   jid: string;
   name: string;
   description: string | null;
-  output_style: string | null;
+  tool_progress: string | null;
+  reasoning_text: Generated<number | null>;
   updated_at: Generated<string>;
 }
 

@@ -1,7 +1,5 @@
-import type { OutputStyleCommand as OutputStyle } from "../commands";
+import type { ProgressDisplaySettings } from "../progress-settings";
 import type { ProgressEvent } from "./runner";
-
-export type { OutputStyle };
 
 export interface ProgressRenderer {
   renderEvent(event: ProgressEvent): string[];
@@ -132,11 +130,16 @@ function pickFriendlyLine(toolName: string, random: () => number): string {
   return pool[index] ?? pool[0] ?? `${FALLBACK_EMOJI} Working on it`;
 }
 
-export function getProgressTransportStrategy(style: OutputStyle): "accumulate" | "replace" {
-  return style === "concise" ? "replace" : "accumulate";
+export function getProgressTransportStrategy(settings: ProgressDisplaySettings): "accumulate" | "replace" | "none" {
+  if (settings.toolProgress === "concise") return "replace";
+  if (settings.toolProgress === "off" && !settings.reasoningText) return "none";
+  return "accumulate";
 }
 
-export function createProgressRenderer(style: OutputStyle, random: () => number = Math.random): ProgressRenderer {
+export function createProgressRenderer(
+  settings: ProgressDisplaySettings,
+  random: () => number = Math.random,
+): ProgressRenderer {
   const lines: string[] = [];
   let lastFriendlyToolName: string | null = null;
   let lastFriendlyLine: string | null = null;
@@ -159,25 +162,32 @@ export function createProgressRenderer(style: OutputStyle, random: () => number 
     return [line];
   };
 
+  const replaceLine = (line: string) => {
+    lines.splice(0, lines.length, line);
+    return [line];
+  };
+
   return {
     renderEvent(event) {
       if (event.kind === "intermediate_text") {
-        if (style !== "verbose") return [];
-        return appendAccumulateLine(`💬 ${event.text}`);
+        if (!settings.reasoningText) return [];
+        const line = `💬 ${event.text}`;
+        return settings.toolProgress === "concise" ? replaceLine(line) : appendAccumulateLine(line);
       }
 
-      if (style === "technical") {
+      if (settings.toolProgress === "off") return [];
+
+      if (settings.toolProgress === "technical") {
         return appendAccumulateLine(buildTechnicalLine(event.toolName, event.input));
       }
 
-      if (style === "verbose") {
+      if (settings.toolProgress === "verbose") {
         return appendAccumulateLine(buildVerboseLine(event.toolName, event.input));
       }
 
       const friendlyLine = getFriendlyLine(event.toolName);
-      if (style === "concise") {
-        lines.splice(0, lines.length, friendlyLine);
-        return [friendlyLine];
+      if (settings.toolProgress === "concise") {
+        return replaceLine(friendlyLine);
       }
 
       return appendAccumulateLine(friendlyLine);

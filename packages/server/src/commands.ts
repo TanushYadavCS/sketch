@@ -1,12 +1,17 @@
-export type OutputStyleCommand = "friendly" | "concise" | "technical" | "verbose";
+export type ToolProgressCommand = "off" | "friendly" | "concise" | "technical" | "verbose";
+export type ReasoningTextCommand = "on" | "off";
 
 export type SketchCommand =
   | "new_session"
-  | "output_style_friendly"
-  | "output_style_concise"
-  | "output_style_technical"
-  | "output_style_verbose"
-  | "output_style_query";
+  | "tool_progress_off"
+  | "tool_progress_friendly"
+  | "tool_progress_concise"
+  | "tool_progress_technical"
+  | "tool_progress_verbose"
+  | "tool_progress_query"
+  | "reasoning_text_on"
+  | "reasoning_text_off"
+  | "reasoning_text_query";
 
 export const NEW_SESSION_CONFIRMATIONS = [
   "Started a new session. ✨",
@@ -16,31 +21,38 @@ export const NEW_SESSION_CONFIRMATIONS = [
   "New conversation started. 💬",
 ] as const;
 
-export const OUTPUT_STYLE_OPTIONS = ["friendly", "concise", "technical", "verbose"] as const;
+export const TOOL_PROGRESS_OPTIONS = ["off", "friendly", "concise", "technical", "verbose"] as const;
+export const REASONING_TEXT_OPTIONS = ["on", "off"] as const;
 
-const OUTPUT_STYLE_ALIASES: Record<string, OutputStyleCommand> = {
-  friendly: "friendly",
-  f: "friendly",
-  concise: "concise",
-  c: "concise",
-  technical: "technical",
-  t: "technical",
-  verbose: "verbose",
-  v: "verbose",
-};
+export interface ProgressSettingsSummary {
+  toolProgress: ToolProgressCommand;
+  reasoningText: boolean;
+}
 
 export function parseSketchCommand(text: string | null | undefined): SketchCommand | null {
   const normalized = text?.trim();
   if (!normalized) return null;
   if (/^\/new(?:\s|$)/.test(normalized)) return "new_session";
-  const outputStyleMatch = normalized.match(/^\/outputstyle(?:\s+(.+))?$/);
-  if (outputStyleMatch) {
-    const rawArg = outputStyleMatch[1]?.trim().toLowerCase();
-    if (!rawArg) return "output_style_query";
-    const resolved = OUTPUT_STYLE_ALIASES[rawArg];
-    if (!resolved) return null;
-    return `output_style_${resolved}` as SketchCommand;
+
+  const toolProgressMatch = normalized.match(/^\/toolprogress(?:\s+(.+))?$/);
+  if (toolProgressMatch) {
+    const rawArg = toolProgressMatch[1]?.trim().toLowerCase();
+    if (!rawArg) return "tool_progress_query";
+    if (TOOL_PROGRESS_OPTIONS.includes(rawArg as ToolProgressCommand)) {
+      return `tool_progress_${rawArg}` as SketchCommand;
+    }
+    return null;
   }
+
+  const reasoningTextMatch = normalized.match(/^\/reasoningtext(?:\s+(.+))?$/);
+  if (reasoningTextMatch) {
+    const rawArg = reasoningTextMatch[1]?.trim().toLowerCase();
+    if (!rawArg) return "reasoning_text_query";
+    if (rawArg === "on" || rawArg === "true" || rawArg === "yes") return "reasoning_text_on";
+    if (rawArg === "off" || rawArg === "false" || rawArg === "no") return "reasoning_text_off";
+    return null;
+  }
+
   return null;
 }
 
@@ -49,12 +61,39 @@ export function getNewSessionConfirmation(randomValue = Math.random()): string {
   return NEW_SESSION_CONFIRMATIONS[index] ?? NEW_SESSION_CONFIRMATIONS[0];
 }
 
-export function getOutputStyleConfirmation(style: OutputStyleCommand): string {
-  return `Output style set to ${style}.`;
+export function getToolProgressConfirmation(style: ToolProgressCommand, reasoningText: boolean): string {
+  switch (style) {
+    case "off":
+      return reasoningText
+        ? "🛑 Tool progress turned off. 🧠 Reasoning text is still on, so you may still see live updates."
+        : "🛑 Tool progress turned off.";
+    case "friendly":
+      return "🪄 Tool progress set to friendly.";
+    case "concise":
+      return "🎯 Tool progress set to concise.";
+    case "technical":
+      return "🛠️ Tool progress set to technical.";
+    case "verbose":
+      return "🔍 Tool progress set to verbose.";
+  }
 }
 
-export function getOutputStyleCurrent(style: OutputStyleCommand): string {
-  return `Current output style: ${style}. Available: ${OUTPUT_STYLE_OPTIONS.join(", ")}.`;
+export function getReasoningTextConfirmation(enabled: boolean): string {
+  return enabled ? "🧠 Reasoning text turned on." : "🔕 Reasoning text turned off.";
+}
+
+export function getToolProgressCurrent(settings: ProgressSettingsSummary): string {
+  return [
+    `🛠️ Tool progress: ${settings.toolProgress}. 🧠 Reasoning text: ${settings.reasoningText ? "on" : "off"}.`,
+    `Use /toolprogress ${TOOL_PROGRESS_OPTIONS.join("|")}`,
+  ].join("\n");
+}
+
+export function getReasoningTextCurrent(settings: ProgressSettingsSummary): string {
+  return [
+    `🧠 Reasoning text: ${settings.reasoningText ? "on" : "off"}. 🛠️ Tool progress: ${settings.toolProgress}.`,
+    "Use /reasoningtext on|off",
+  ].join("\n");
 }
 
 function levenshtein(a: string, b: string): number {
@@ -70,12 +109,12 @@ function levenshtein(a: string, b: string): number {
   return dp[a.length][b.length] ?? Number.POSITIVE_INFINITY;
 }
 
-export function getOutputStyleSuggestion(input: string): string | null {
+export function getToolProgressSuggestion(input: string): ToolProgressCommand | null {
   const normalized = input.trim().toLowerCase();
   if (!normalized) return null;
-  let best: OutputStyleCommand | null = null;
+  let best: ToolProgressCommand | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (const option of OUTPUT_STYLE_OPTIONS) {
+  for (const option of TOOL_PROGRESS_OPTIONS) {
     const distance = levenshtein(normalized, option);
     if (distance < bestDistance) {
       bestDistance = distance;

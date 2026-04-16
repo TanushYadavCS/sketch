@@ -20,7 +20,8 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     type: "human",
     role: null,
     reports_to: null,
-    output_style: null,
+    tool_progress: null,
+    reasoning_text: null,
     ...overrides,
   };
 }
@@ -31,7 +32,8 @@ function makeChannel(overrides: Record<string, unknown> = {}) {
     name: "general",
     slack_channel_id: "C1",
     type: "channel",
-    output_style: null,
+    tool_progress: null,
+    reasoning_text: null,
     created_at: "2025-01-01",
     ...overrides,
   };
@@ -330,17 +332,17 @@ describe("slack/adapter", () => {
       );
     });
 
-    it("updates the DM user's output style on /outputstyle", async () => {
+    it("updates the DM user's tool progress on /toolprogress", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { dm } = getHandlers();
 
-      await dm({ text: "/outputstyle concise", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await dm({ text: "/toolprogress concise", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { outputStyle: "concise" });
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "concise" });
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "Output style set to concise.");
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "🎯 Tool progress set to concise.");
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -411,12 +413,12 @@ describe("slack/adapter", () => {
   });
 
   describe("channel mention handler", () => {
-    it("returns the current channel output style on /outputstyle with no args", async () => {
+    it("returns the current channel tool progress on /toolprogress with no args", async () => {
       const deps = makeDeps({
         repos: {
           ...makeDeps().repos,
           channels: {
-            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ output_style: "technical" })),
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ tool_progress: "technical" })),
             findById: vi.fn().mockResolvedValue(undefined),
             create: vi.fn().mockImplementation(async (data) => makeChannel({ ...data })),
             update: vi.fn().mockImplementation(async (id, data) => makeChannel({ id, ...data })),
@@ -426,14 +428,14 @@ describe("slack/adapter", () => {
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
 
-      await mention({ text: "/outputstyle", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await mention({ text: "/toolprogress", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
       await flush();
 
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
         "C1",
         "1",
-        "Current output style: technical. Available: friendly, concise, technical, verbose.",
+        "🛠️ Tool progress: technical. 🧠 Reasoning text: off.\nUse /toolprogress off|friendly|concise|technical|verbose",
       );
     });
   });

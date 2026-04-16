@@ -5,9 +5,22 @@ import { down, up } from "./032-output-style";
 
 function createBlankDb() {
   return new Kysely<{
-    users: { id: string; name: string; output_style?: string | null };
-    channels: { id: string; slack_channel_id: string; name: string; type: string; output_style?: string | null };
-    whatsapp_groups: { jid: string; name: string; description: string | null; output_style?: string | null };
+    users: { id: string; name: string; tool_progress?: string | null; reasoning_text?: number | null };
+    channels: {
+      id: string;
+      slack_channel_id: string;
+      name: string;
+      type: string;
+      tool_progress?: string | null;
+      reasoning_text?: number | null;
+    };
+    whatsapp_groups: {
+      jid: string;
+      name: string;
+      description: string | null;
+      tool_progress?: string | null;
+      reasoning_text?: number | null;
+    };
   }>({
     dialect: new SqliteDialect({ database: new SQLite(":memory:") }),
   });
@@ -42,37 +55,54 @@ describe("032-output-style migration", () => {
     await db.destroy();
   });
 
-  it("adds output_style to users, channels, and whatsapp_groups", async () => {
+  it("adds tool_progress and reasoning_text to users, channels, and whatsapp_groups", async () => {
     await up(db as unknown as Kysely<unknown>);
 
-    await db.insertInto("users").values({ id: "u1", name: "Alice", output_style: "friendly" }).execute();
+    await db
+      .insertInto("users")
+      .values({ id: "u1", name: "Alice", tool_progress: "friendly", reasoning_text: 1 })
+      .execute();
     await db
       .insertInto("channels")
-      .values({ id: "c1", slack_channel_id: "C1", name: "general", type: "public_channel", output_style: "verbose" })
+      .values({
+        id: "c1",
+        slack_channel_id: "C1",
+        name: "general",
+        type: "public_channel",
+        tool_progress: "verbose",
+        reasoning_text: 0,
+      })
       .execute();
     await db
       .insertInto("whatsapp_groups")
-      .values({ jid: "g1@g.us", name: "Group", description: null, output_style: "technical" })
+      .values({ jid: "g1@g.us", name: "Group", description: null, tool_progress: "technical", reasoning_text: 1 })
       .execute();
 
-    const user = await db.selectFrom("users").select("output_style").where("id", "=", "u1").executeTakeFirstOrThrow();
+    const user = await db
+      .selectFrom("users")
+      .select(["tool_progress", "reasoning_text"])
+      .where("id", "=", "u1")
+      .executeTakeFirstOrThrow();
     const channel = await db
       .selectFrom("channels")
-      .select("output_style")
+      .select(["tool_progress", "reasoning_text"])
       .where("id", "=", "c1")
       .executeTakeFirstOrThrow();
     const group = await db
       .selectFrom("whatsapp_groups")
-      .select("output_style")
+      .select(["tool_progress", "reasoning_text"])
       .where("jid", "=", "g1@g.us")
       .executeTakeFirstOrThrow();
 
-    expect(user.output_style).toBe("friendly");
-    expect(channel.output_style).toBe("verbose");
-    expect(group.output_style).toBe("technical");
+    expect(user.tool_progress).toBe("friendly");
+    expect(user.reasoning_text).toBe(1);
+    expect(channel.tool_progress).toBe("verbose");
+    expect(channel.reasoning_text).toBe(0);
+    expect(group.tool_progress).toBe("technical");
+    expect(group.reasoning_text).toBe(1);
   });
 
-  it("drops output_style in down migration", async () => {
+  it("drops tool_progress and reasoning_text in down migration", async () => {
     await up(db as unknown as Kysely<unknown>);
     await down(db as unknown as Kysely<unknown>);
 
@@ -82,7 +112,7 @@ describe("032-output-style migration", () => {
       JOIN pragma_table_info(m.name) p
       WHERE m.type = 'table'
         AND m.name IN ('users', 'channels', 'whatsapp_groups')
-        AND p.name = 'output_style'
+        AND p.name IN ('tool_progress', 'reasoning_text')
     `.execute(db);
 
     expect(result.rows).toHaveLength(0);

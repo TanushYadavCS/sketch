@@ -77,10 +77,11 @@ describe("findById()", () => {
 });
 
 describe("update()", () => {
-  it("updates output_style", async () => {
+  it("updates tool_progress and reasoning_text", async () => {
     const created = await channels.create({ slackChannelId: "C007", name: "ops", type: "public_channel" });
-    const updated = await channels.update(created.id, { outputStyle: "verbose" });
-    expect(updated.output_style).toBe("verbose");
+    const updated = await channels.update(created.id, { toolProgress: "verbose", reasoningText: true });
+    expect(updated.tool_progress).toBe("verbose");
+    expect(updated.reasoning_text).toBe(1);
     expect(updated.name).toBe("ops");
   });
 
@@ -88,6 +89,7 @@ describe("update()", () => {
     const created = await channels.create({ slackChannelId: "C008", name: "sales", type: "group" });
     const updated = await channels.update(created.id, {});
     expect(updated.id).toBe(created.id);
-    expect(updated.output_style).toBeNull();
+    expect(updated.tool_progress).toBeNull();
+    expect(updated.reasoning_text).toBeNull();
   });
 });
