@@ -2,7 +2,7 @@ import type { ProgressDisplaySettings } from "../progress-settings";
 import type { ProgressEvent } from "./runner";
 
 export interface ProgressRenderer {
-  renderEvent(event: ProgressEvent): string[];
+  renderEvent(event: ProgressEvent): void;
   getLines(): string[];
 }
 
@@ -159,38 +159,44 @@ export function createProgressRenderer(
     lines.push(line);
     const deduped = dedup(lines);
     lines.splice(0, lines.length, ...deduped);
-    return [line];
   };
 
   const replaceLine = (line: string) => {
     lines.splice(0, lines.length, line);
-    return [line];
   };
 
   return {
     renderEvent(event) {
       if (event.kind === "intermediate_text") {
-        if (!settings.reasoningText) return [];
+        if (!settings.reasoningText) return;
         const line = `💬 ${event.text}`;
-        return settings.toolProgress === "concise" ? replaceLine(line) : appendAccumulateLine(line);
+        if (settings.toolProgress === "concise") {
+          replaceLine(line);
+          return;
+        }
+        appendAccumulateLine(line);
+        return;
       }
 
-      if (settings.toolProgress === "off") return [];
+      if (settings.toolProgress === "off") return;
 
       if (settings.toolProgress === "technical") {
-        return appendAccumulateLine(buildTechnicalLine(event.toolName, event.input));
+        appendAccumulateLine(buildTechnicalLine(event.toolName, event.input));
+        return;
       }
 
       if (settings.toolProgress === "verbose") {
-        return appendAccumulateLine(buildVerboseLine(event.toolName, event.input));
+        appendAccumulateLine(buildVerboseLine(event.toolName, event.input));
+        return;
       }
 
       const friendlyLine = getFriendlyLine(event.toolName);
       if (settings.toolProgress === "concise") {
-        return replaceLine(friendlyLine);
+        replaceLine(friendlyLine);
+        return;
       }
 
-      return appendAccumulateLine(friendlyLine);
+      appendAccumulateLine(friendlyLine);
     },
 
     getLines() {

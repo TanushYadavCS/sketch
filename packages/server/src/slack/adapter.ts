@@ -300,7 +300,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           : createSlackProgressTransport(slackBot, message.channelId, progressStrategy);
       const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
         if (!progressTransport) return;
-        await progressTransport.pushLines(progressRenderer.renderEvent(event));
+        progressRenderer.renderEvent(event);
+        await progressTransport.syncLines(progressRenderer.getLines());
       };
 
       const integrationMcpServers = await buildMcpServers(user.email);
@@ -591,7 +592,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             : createSlackProgressTransport(slackBot, message.channelId, progressStrategy, threadTs);
         const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
           if (!progressTransport) return;
-          await progressTransport.pushLines(progressRenderer.renderEvent(event));
+          progressRenderer.renderEvent(event);
+          await progressTransport.syncLines(progressRenderer.getLines());
         };
 
         const integrationMcpServers = await buildMcpServers(user.email);

@@ -5,8 +5,10 @@ import { createProgressRenderer, getProgressTransportStrategy } from "./tool-pro
 
 function renderEvents(settings: ProgressDisplaySettings, events: ProgressEvent[], random = () => 0) {
   const renderer = createProgressRenderer(settings, random);
-  const incremental = events.flatMap((event) => renderer.renderEvent(event));
-  return { incremental, lines: renderer.getLines() };
+  for (const event of events) {
+    renderer.renderEvent(event);
+  }
+  return { lines: renderer.getLines() };
 }
 
 describe("createProgressRenderer", () => {
@@ -36,7 +38,7 @@ describe("createProgressRenderer", () => {
   });
 
   it("reuses the same friendly line for consecutive identical tool calls and dedups the history", () => {
-    const { incremental, lines } = renderEvents(
+    const { lines } = renderEvents(
       { toolProgress: "friendly", reasoningText: false },
       [
         { kind: "tool_use", toolName: "Edit", input: {} },
@@ -46,19 +48,16 @@ describe("createProgressRenderer", () => {
       () => 0,
     );
 
-    expect(incremental).toEqual(["🔧 Tweaking things", "🔧 Tweaking things", "🔧 Tweaking things"]);
     expect(lines).toEqual(["🔧 Tweaking things (x3)"]);
   });
 
   it("concise mode keeps only the latest tool line", () => {
     const renderer = createProgressRenderer({ toolProgress: "concise", reasoningText: false }, () => 0);
 
-    expect(renderer.renderEvent({ kind: "tool_use", toolName: "Read", input: {} })).toEqual([
-      "📖 Flipping through some pages",
-    ]);
+    renderer.renderEvent({ kind: "tool_use", toolName: "Read", input: {} });
     expect(renderer.getLines()).toEqual(["📖 Flipping through some pages"]);
 
-    expect(renderer.renderEvent({ kind: "tool_use", toolName: "Bash", input: {} })).toEqual(["🚀 Running commands"]);
+    renderer.renderEvent({ kind: "tool_use", toolName: "Bash", input: {} });
     expect(renderer.getLines()).toEqual(["🚀 Running commands"]);
   });
 
@@ -66,9 +65,7 @@ describe("createProgressRenderer", () => {
     const renderer = createProgressRenderer({ toolProgress: "concise", reasoningText: true }, () => 0);
 
     renderer.renderEvent({ kind: "tool_use", toolName: "Read", input: {} });
-    expect(renderer.renderEvent({ kind: "intermediate_text", text: "Checking config" })).toEqual([
-      "💬 Checking config",
-    ]);
+    renderer.renderEvent({ kind: "intermediate_text", text: "Checking config" });
     expect(renderer.getLines()).toEqual(["💬 Checking config"]);
   });
 

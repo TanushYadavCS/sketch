@@ -22,8 +22,8 @@ describe("createSlackProgressTransport", () => {
     const bot = createMockSlackBot();
     const transport = createSlackProgressTransport(bot as never, "C123", "accumulate");
 
-    await transport.pushLines(["📖 Read"]);
-    await transport.pushLines(["🔧 Edit"]);
+    await transport.syncLines(["📖 Read"]);
+    await transport.syncLines(["📖 Read", "🔧 Edit"]);
     await vi.advanceTimersByTimeAsync(1_500);
     await transport.flush();
 
@@ -35,8 +35,8 @@ describe("createSlackProgressTransport", () => {
     const bot = createMockSlackBot();
     const transport = createSlackProgressTransport(bot as never, "C123", "accumulate");
 
-    await transport.pushLines(["a".repeat(3_995)]);
-    await transport.pushLines(["second line"]);
+    await transport.syncLines(["a".repeat(3_995)]);
+    await transport.syncLines(["a".repeat(3_995), "second line"]);
     await transport.flush();
 
     expect(bot.postMessage).toHaveBeenNthCalledWith(1, "C123", "a".repeat(3_995));
@@ -49,7 +49,7 @@ describe("createSlackProgressTransport", () => {
     const transport = createSlackProgressTransport(bot as never, "C123", "accumulate");
     const hugeLine = `Write: ${"x".repeat(50_000)}`;
 
-    await transport.pushLines([hugeLine]);
+    await transport.syncLines([hugeLine]);
     await transport.flush();
 
     expect(bot.postMessage.mock.calls.length).toBeGreaterThan(1);
@@ -78,7 +78,7 @@ describe("createSlackProgressTransport", () => {
     };
     const transport = createSlackProgressTransport(bot as never, "C123", "accumulate");
 
-    await transport.pushLines([`Write: ${"x".repeat(1_000)}`]);
+    await transport.syncLines([`Write: ${"x".repeat(1_000)}`]);
     await transport.flush();
 
     expect(deliveredTexts.length).toBeGreaterThan(1);
@@ -91,12 +91,26 @@ describe("createSlackProgressTransport", () => {
     const bot = createMockSlackBot();
     const transport = createSlackProgressTransport(bot as never, "C123", "replace");
 
-    await transport.pushLines(["📖 Checking"]);
-    await transport.pushLines(["🔧 Updating"]);
+    await transport.syncLines(["📖 Checking"]);
+    await transport.syncLines(["🔧 Updating"]);
     await vi.advanceTimersByTimeAsync(1_500);
     await transport.flush();
 
     expect(bot.postMessage).toHaveBeenCalledTimes(1);
     expect(bot.updateMessage).toHaveBeenCalledWith("C123", "ts-1", "🔧 Updating");
+  });
+
+  it("edits the current progress message when dedup rewrites the rendered state", async () => {
+    const bot = createMockSlackBot();
+    const transport = createSlackProgressTransport(bot as never, "C123", "accumulate");
+
+    await transport.syncLines(["🔧 Tweaking things"]);
+    await transport.syncLines(["🔧 Tweaking things (x2)"]);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await transport.flush();
+
+    expect(bot.postMessage).toHaveBeenCalledTimes(1);
+    expect(bot.postMessage).toHaveBeenCalledWith("C123", "🔧 Tweaking things");
+    expect(bot.updateMessage).toHaveBeenCalledWith("C123", "ts-1", "🔧 Tweaking things (x2)");
   });
 });
