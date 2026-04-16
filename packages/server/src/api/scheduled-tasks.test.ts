@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import * as automationRunsModule from "../db/repositories/automation-runs";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -133,7 +134,7 @@ describe("Scheduled Tasks API", () => {
     expect(whatsappTask.canResume).toBe(true);
   });
 
-  it("returns all tasks regardless of who created them", async () => {
+  it("members see only their own tasks; admins see all", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const tasks = createScheduledTaskRepository(db);
@@ -180,15 +181,17 @@ describe("Scheduled Tasks API", () => {
         executeTaskById: vi.fn(),
       },
     });
-    const cookie = await getMemberCookie(db, alice.id);
 
-    const res = await app.request("/api/scheduled-tasks", { headers: { Cookie: cookie } });
-    expect(res.status).toBe(200);
+    const aliceCookie = await getMemberCookie(db, alice.id);
+    const aliceRes = await app.request("/api/scheduled-tasks", { headers: { Cookie: aliceCookie } });
+    expect(aliceRes.status).toBe(200);
+    const aliceBody = await aliceRes.json();
+    expect(aliceBody.tasks.map((t: { id: string }) => t.id)).toEqual(["task-alice"]);
 
-    const body = await res.json();
-    expect(body.tasks).toHaveLength(2);
-    const ids = body.tasks.map((t: { id: string }) => t.id).sort();
-    expect(ids).toEqual(["task-alice", "task-bob"]);
+    const adminCookie = await loginAdmin(app);
+    const adminRes = await app.request("/api/scheduled-tasks", { headers: { Cookie: adminCookie } });
+    const adminBody = await adminRes.json();
+    expect(adminBody.tasks.map((t: { id: string }) => t.id).sort()).toEqual(["task-alice", "task-bob"]);
   });
 
   it("falls back to raw delivery targets when metadata is missing", async () => {
@@ -278,6 +281,248 @@ describe("Scheduled Tasks API", () => {
     });
     expect(resumeRes.status).toBe(200);
     expect((await resumeRes.json()).task.status).toBe("active");
+  });
+
+  it("members cannot access other users' tasks via any route", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+    const bob = await users.create({ name: "Bob", email: "bob@test.com" });
+
+    await tasks.add({
+      id: "task-bob",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "bob@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Bob's task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "chat",
+      created_by: bob.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await getMemberCookie(db, alice.id);
+
+    const routes = [
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/pause" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/resume" },
+      { method: "DELETE", path: "/api/scheduled-tasks/task-bob" },
+      { method: "POST", path: "/api/scheduled-tasks/task-bob/run" },
+      { method: "GET", path: "/api/scheduled-tasks/task-bob/runs" },
+      { method: "GET", path: "/api/scheduled-tasks/task-bob/runs/some-run-id" },
+      { method: "GET", path: "/api/scheduled-tasks/task-bob/step-content" },
+    ];
+    for (const { method, path } of routes) {
+      const res = await app.request(path, { method, headers: { Cookie: cookie } });
+      expect(res.status, `${method} ${path}`).toBe(404);
+    }
+
+    // None of the scheduler mutation deps should have been invoked.
+    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+    expect(scheduler.resumeTask).not.toHaveBeenCalled();
+    expect(scheduler.removeTask).not.toHaveBeenCalled();
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
+  });
+
+  it("admins can access any task via any route", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const bob = await users.create({ name: "Bob", email: "bob@test.com" });
+
+    await tasks.add({
+      id: "task-bob",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "bob@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Bob's task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "chat",
+      created_by: bob.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(async (id: string) => {
+        await tasks.updateStatus(id, "paused");
+      }),
+      resumeTask: vi.fn(async (id: string) => {
+        await tasks.updateStatus(id, "active");
+      }),
+      removeTask: vi.fn(async () => true),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await loginAdmin(app);
+
+    const runsRes = await app.request("/api/scheduled-tasks/task-bob/runs", { headers: { Cookie: cookie } });
+    expect(runsRes.status).toBe(200);
+
+    const stepRes = await app.request("/api/scheduled-tasks/task-bob/step-content", { headers: { Cookie: cookie } });
+    expect(stepRes.status).toBe(200);
+
+    const pauseRes = await app.request("/api/scheduled-tasks/task-bob/pause", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(pauseRes.status).toBe(200);
+  });
+
+  it("resolves sub via email for local JWT issued with email subject", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+
+    await tasks.add({
+      id: "task-alice",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "alice@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Alice task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "chat",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    // Email-as-sub (legacy local JWT path)
+    const cookie = await getMemberCookie(db, "alice@test.com");
+
+    const res = await app.request("/api/scheduled-tasks", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.tasks.map((t: { id: string }) => t.id)).toEqual(["task-alice"]);
+  });
+
+  it("members get 404 when sub does not resolve to any user row", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+
+    await tasks.add({
+      id: "task-alice",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "alice@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Alice task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "chat",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+
+    // UUID-shaped sub, but no such user row (simulates a deleted user holding an old JWT)
+    const ghostCookie = await getMemberCookie(db, "00000000-0000-0000-0000-000000000000");
+    const ghostList = await app.request("/api/scheduled-tasks", { headers: { Cookie: ghostCookie } });
+    expect(ghostList.status).toBe(200);
+    expect((await ghostList.json()).tasks).toEqual([]);
+
+    const ghostDetail = await app.request("/api/scheduled-tasks/task-alice/runs", { headers: { Cookie: ghostCookie } });
+    expect(ghostDetail.status).toBe(404);
+
+    // Email-shaped sub but no row
+    const ghostEmailCookie = await getMemberCookie(db, "nobody@test.com");
+    const ghostEmailDetail = await app.request("/api/scheduled-tasks/task-alice/runs", {
+      headers: { Cookie: ghostEmailCookie },
+    });
+    expect(ghostEmailDetail.status).toBe(404);
+  });
+
+  it("list endpoint calls getRunSummaries exactly once regardless of row count", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+
+    for (let i = 0; i < 5; i++) {
+      await tasks.add({
+        id: `task-${i}`,
+        platform: "whatsapp",
+        context_type: "dm",
+        delivery_target: "alice@s.whatsapp.net",
+        thread_ts: null,
+        prompt: `Task ${i}`,
+        schedule_type: "interval",
+        schedule_value: "3600",
+        timezone: "UTC",
+        session_mode: "chat",
+        created_by: alice.id,
+        status: "active",
+        next_run_at: null,
+      });
+    }
+
+    const originalFactory = automationRunsModule.createAutomationRunsRepository;
+    const summariesSpy = vi.fn(originalFactory(db).getRunSummaries);
+    const factorySpy = vi
+      .spyOn(automationRunsModule, "createAutomationRunsRepository")
+      .mockImplementation((arg: Kysely<DB>) => {
+        const repo = originalFactory(arg);
+        return { ...repo, getRunSummaries: summariesSpy };
+      });
+
+    try {
+      const app = createApp(db, config, {
+        scheduler: {
+          pauseTask: vi.fn(),
+          resumeTask: vi.fn(),
+          removeTask: vi.fn(),
+          executeTaskById: vi.fn(),
+        },
+      });
+      const cookie = await loginAdmin(app);
+
+      const res = await app.request("/api/scheduled-tasks", { headers: { Cookie: cookie } });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.tasks).toHaveLength(5);
+      expect(summariesSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      factorySpy.mockRestore();
+    }
   });
 
   it("deletes tasks successfully", async () => {

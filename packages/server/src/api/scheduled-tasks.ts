@@ -1,5 +1,6 @@
 import { type Context, Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
+import type { Logger } from "pino";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
@@ -154,15 +155,8 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
   const channelNames = new Map(channelEntries);
   const groupNames = new Map(groupEntries);
 
-  // Fetch latest run and run count for each task
-  const runDataEntries = await Promise.all(
-    rows.map(async (row) => {
-      const latest = await runsRepo.getLatest(row.id);
-      const runs = await runsRepo.list(row.id, 1000);
-      return [row.id, { lastRunStatus: latest?.status ?? null, runCount: runs.length }] as const;
-    }),
-  );
-  const runData = new Map(runDataEntries);
+  // Single grouped query — avoids N+1 per task.
+  const runData = await runsRepo.getRunSummaries(rows.map((r) => r.id));
 
   return rows.map((row) => {
     const creatorName = row.created_by ? (creatorNames.get(row.created_by) ?? null) : null;
@@ -222,9 +216,30 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
   });
 }
 
-export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMutationDeps) {
+export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMutationDeps, logger?: Logger) {
   const routes = new Hono();
   const repo = createScheduledTaskRepository(db);
+  const users = createUserRepository(db);
+
+  // sub can be a user UUID (managed SSO, local JWT) or an email (legacy local JWT).
+  // Follows the precedent in api/users.ts:223-233.
+  async function resolveUserId(sub: string | undefined): Promise<string | null> {
+    if (!sub) return null;
+    if (sub.includes("@")) {
+      const user = await users.findByEmail(sub);
+      return user?.id ?? null;
+    }
+    const user = await users.findById(sub);
+    return user?.id ?? null;
+  }
+
+  function canAccess(row: ScheduledTaskRow, userId: string | null, role: string | undefined): boolean {
+    // Admin trusted even when sub doesn't resolve (stale JWT, deleted user row).
+    // Admins are internal; acceptable in Phase 1.
+    if (role === "admin") return true;
+    if (!userId) return false;
+    return row.created_by === userId;
+  }
 
   async function loadAccessibleTask(c: Context, id: string) {
     const row = await repo.getById(id);
@@ -233,11 +248,31 @@ export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMuta
         response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
       };
     }
+    const userId = await resolveUserId(c.get("sub"));
+    if (!canAccess(row, userId, c.get("role"))) {
+      logger?.warn(
+        { userId, taskId: id, ownerUserId: row.created_by },
+        "scheduled-tasks: member denied access to task",
+      );
+      return {
+        response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
+      };
+    }
     return { row };
   }
 
   routes.get("/", async (c) => {
-    const rows = await repo.listAll();
+    const role = c.get("role");
+    const userId = await resolveUserId(c.get("sub"));
+
+    let rows: ScheduledTaskRow[];
+    if (role === "admin") {
+      rows = await repo.listAll();
+    } else if (userId) {
+      rows = await repo.listByCreatedBy(userId);
+    } else {
+      rows = [];
+    }
 
     rows.sort(compareNewestFirst);
 
