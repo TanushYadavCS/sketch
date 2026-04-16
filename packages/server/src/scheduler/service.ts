@@ -288,6 +288,11 @@ export class TaskScheduler {
     await this.executeTask(row);
   }
 
+  async getTaskById(id: string): Promise<ScheduledTask | null> {
+    const row = await this.repo.getById(id);
+    return row ? this.toScheduledTask(row) : null;
+  }
+
   async updateTask(id: string, params: Record<string, string | null | undefined>): Promise<ScheduledTask | null> {
     const fields: Record<string, string | null | undefined> = {};
     if (params.prompt !== undefined) fields.prompt = params.prompt;

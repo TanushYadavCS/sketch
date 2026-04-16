@@ -81,6 +81,41 @@ export function createAutomationRunsRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async getRunSummaries(taskIds: string[]): Promise<Map<string, { runCount: number; lastRunStatus: string | null }>> {
+      const result = new Map<string, { runCount: number; lastRunStatus: string | null }>();
+      if (taskIds.length === 0) return result;
+
+      const counts = await db
+        .selectFrom("automation_runs")
+        .select(({ fn }) => ["task_id", fn.count("id").as("run_count")])
+        .where("task_id", "in", taskIds)
+        .groupBy("task_id")
+        .execute();
+
+      for (const row of counts) {
+        result.set(row.task_id, { runCount: Number(row.run_count), lastRunStatus: null });
+      }
+
+      const latest = await db
+        .selectFrom("automation_runs as r1")
+        .select(["r1.task_id", "r1.status"])
+        .where("r1.task_id", "in", taskIds)
+        .where("r1.started_at", "=", (eb) =>
+          eb
+            .selectFrom("automation_runs as r2")
+            .select((ebi) => ebi.fn.max("r2.started_at").as("max_started"))
+            .whereRef("r2.task_id", "=", "r1.task_id"),
+        )
+        .execute();
+
+      for (const row of latest) {
+        const entry = result.get(row.task_id);
+        if (entry) entry.lastRunStatus = row.status;
+      }
+
+      return result;
+    },
+
     async deleteByTaskId(taskId: string): Promise<void> {
       await db.deleteFrom("automation_runs").where("task_id", "=", taskId).execute();
     },

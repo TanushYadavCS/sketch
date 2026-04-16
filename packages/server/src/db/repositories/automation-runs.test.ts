@@ -84,3 +84,69 @@ describe("markRunningAsFailed", () => {
     expect(count).toBe(0);
   });
 });
+
+describe("getRunSummaries", () => {
+  async function seedRun(
+    taskId: string,
+    startedAt: string,
+    status: "running" | "completed" | "failed",
+  ): Promise<string> {
+    const id = await runs.create({ taskId });
+    await db.updateTable("automation_runs").set({ started_at: startedAt, status }).where("id", "=", id).execute();
+    return id;
+  }
+
+  beforeEach(async () => {
+    await tasks.add({
+      id: "task-2",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "U456",
+      thread_ts: null,
+      prompt: "do another thing",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: "U456",
+      status: "active",
+      next_run_at: null,
+    });
+  });
+
+  it("returns an empty map for an empty taskIds list (does not execute SQL)", async () => {
+    const result = await runs.getRunSummaries([]);
+    expect(result.size).toBe(0);
+  });
+
+  it("returns correct counts and last run status per task", async () => {
+    await seedRun("task-1", "2026-04-10T10:00:00.000Z", "completed");
+    await seedRun("task-1", "2026-04-10T11:00:00.000Z", "failed");
+    await seedRun("task-1", "2026-04-10T12:00:00.000Z", "completed");
+    await seedRun("task-2", "2026-04-10T10:30:00.000Z", "running");
+
+    const result = await runs.getRunSummaries(["task-1", "task-2"]);
+
+    expect(result.get("task-1")).toEqual({ runCount: 3, lastRunStatus: "completed" });
+    expect(result.get("task-2")).toEqual({ runCount: 1, lastRunStatus: "running" });
+  });
+
+  it("omits tasks with no runs from the returned map", async () => {
+    await seedRun("task-1", "2026-04-10T10:00:00.000Z", "completed");
+
+    const result = await runs.getRunSummaries(["task-1", "task-2"]);
+
+    expect(result.get("task-1")?.runCount).toBe(1);
+    expect(result.has("task-2")).toBe(false);
+  });
+
+  it("picks the most recent run by started_at, regardless of insert order", async () => {
+    await seedRun("task-1", "2026-04-10T12:00:00.000Z", "failed");
+    await seedRun("task-1", "2026-04-10T10:00:00.000Z", "completed");
+    await seedRun("task-1", "2026-04-10T11:00:00.000Z", "running");
+
+    const result = await runs.getRunSummaries(["task-1"]);
+
+    expect(result.get("task-1")).toEqual({ runCount: 3, lastRunStatus: "failed" });
+  });
+});

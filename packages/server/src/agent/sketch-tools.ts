@@ -198,6 +198,18 @@ export async function handleManageScheduledTasks(
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
+  // Ownership guard: creator-only for actions that mutate or inspect a specific task.
+  // Unified 404 phrasing ("task not found") for both missing and not-yours — avoids
+  // existence leaks. Admin bypass is deliberately not offered here; admins use the
+  // web UI for tenant-wide ops. Matches the HTTP layer's same-behavior guarantee.
+  const OWNERSHIP_GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"];
+  if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
+    const task = await deps.scheduler.getTaskById(task_id);
+    if (!task || task.createdBy !== ctx.createdBy) {
+      return text("Error: task not found.");
+    }
+  }
+
   switch (action) {
     case "list": {
       const tasks =

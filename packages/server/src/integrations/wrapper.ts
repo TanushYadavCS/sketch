@@ -261,103 +261,81 @@ async function startCanvasBroker(params: {
           ...process.env,
           ...credentialEnv,
         },
+        stdio: ["pipe", "pipe", "pipe"],
       });
       children.add(child);
+      const currentChild = child;
 
-      child.stdout.on("data", (chunk: Buffer) => {
-        send({ type: "stdout", data: chunk.toString("base64") });
-      });
-      child.stderr.on("data", (chunk: Buffer) => {
-        send({ type: "stderr", data: chunk.toString("base64") });
-      });
-      child.on("error", (err) => {
+      currentChild.stdout.on("data", (chunk: Buffer) => send({ type: "stdout", data: chunk.toString("base64") }));
+      currentChild.stderr.on("data", (chunk: Buffer) => send({ type: "stderr", data: chunk.toString("base64") }));
+      currentChild.on("error", (err: Error) => {
+        logger.warn({ err }, "Integration broker child failed");
         send({ type: "error", message: err.message });
         socket.end();
       });
-      child.on("exit", (code) => {
+      currentChild.on("close", (code: number | null) => {
+        children.delete(currentChild);
         send({ type: "exit", code });
         socket.end();
       });
     };
 
-    const handleLine = (line: string) => {
-      if (!line) return;
-      let message: BrokerMessage;
-      try {
-        message = JSON.parse(line) as BrokerMessage;
-      } catch {
-        send({ type: "error", message: "Integration broker received malformed JSON" });
-        socket.end();
-        return;
-      }
-
-      switch (message.type) {
-        case "start":
-          startChild(message);
-          break;
-        case "stdin":
-          if (!child || !message.data) return;
-          child.stdin.write(Buffer.from(message.data, "base64"));
-          break;
-        case "stdin_end":
-          if (child) child.stdin.end();
-          break;
-        default:
-          send({ type: "error", message: `Integration broker received unsupported message type: ${message.type}` });
-          socket.end();
-      }
-    };
-
-    socket.on("data", (chunk: Buffer) => {
+    socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
       while (true) {
-        const newlineIdx = buffer.indexOf("\n");
-        if (newlineIdx === -1) break;
-        const line = buffer.slice(0, newlineIdx);
-        buffer = buffer.slice(newlineIdx + 1);
-        handleLine(line);
-      }
-    });
+        const idx = buffer.indexOf("\n");
+        if (idx === -1) break;
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        if (!line.trim()) continue;
 
-    socket.on("error", (err) => {
-      logger.debug({ err }, "Integration broker socket error");
-      killChild();
+        let message: BrokerMessage;
+        try {
+          message = JSON.parse(line) as BrokerMessage;
+        } catch {
+          send({ type: "error", message: "Integration broker received invalid JSON" });
+          socket.end();
+          return;
+        }
+
+        if (message.type === "start") {
+          startChild(message);
+          continue;
+        }
+        if (message.type === "stdin" && child?.stdin.writable && message.data) {
+          child.stdin.write(Buffer.from(message.data, "base64"));
+          continue;
+        }
+        if (message.type === "stdin_end" && child?.stdin.writable) {
+          child.stdin.end();
+        }
+      }
     });
 
     socket.on("close", () => {
       sockets.delete(socket);
       killChild();
     });
-  });
-
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    server.once("error", rejectPromise);
-    server.listen(socketPath, () => {
-      server.off("error", rejectPromise);
-      resolvePromise();
+    socket.on("error", () => {
+      sockets.delete(socket);
+      killChild();
     });
   });
-  await chmod(socketPath, 0o600);
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
 
   return async () => {
-    for (const socket of sockets) {
-      try {
-        socket.destroy();
-      } catch {}
-    }
+    for (const socket of sockets) socket.destroy();
     for (const child of children) {
-      if (child.exitCode === null && !child.killed) {
-        child.kill("SIGTERM");
-        await new Promise((resolvePromise) => {
-          const forceKillTimer = setTimeout(() => {
-            if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
-          }, 1000);
-          forceKillTimer.unref();
-          child.once("exit", () => resolvePromise(undefined));
-        }).catch(() => undefined);
-      }
+      if (child.exitCode === null && !child.killed) child.kill("SIGTERM");
     }
-    await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     try {
       await unlink(socketPath);
     } catch {}
