@@ -546,6 +546,21 @@ describe("slack/adapter", () => {
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
 
+    it("passes teammate messaging deps to agent for channel mentions", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userRepo).toBe(deps.repos.users);
+      expect(agentCall.inboxMessagesRepo).toBe(deps.inboxMessagesRepo);
+      expect(agentCall.currentUserId).toBe("u1");
+      expect(agentCall.sendDm).toBeTypeOf("function");
+    });
+
     it("resets the current thread when a channel mention sends /new", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
