@@ -35,6 +35,7 @@ import * as m028 from "./migrations/028-backfill-admin-user";
 import * as m029 from "./migrations/029-settings-model-id";
 import * as m030 from "./migrations/030-inbox-messages";
 import * as m031 from "./migrations/031-extend-scheduled-tasks";
+import * as m032 from "./migrations/032-output-style";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -74,6 +75,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "029-settings-model-id": m029,
           "030-inbox-messages": m030,
           "031-extend-scheduled-tasks": m031,
+          "032-output-style": m032,
         };
       },
     },

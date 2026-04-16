@@ -26,5 +26,18 @@ export function createChannelRepository(db: Kysely<DB>) {
 
       return db.selectFrom("channels").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
     },
+
+    async update(id: string, data: { name?: string; type?: string; outputStyle?: string | null }) {
+      const values: Record<string, unknown> = {};
+      if (data.name !== undefined) values.name = data.name;
+      if (data.type !== undefined) values.type = data.type;
+      if (data.outputStyle !== undefined) values.output_style = data.outputStyle;
+
+      if (Object.keys(values).length > 0) {
+        await db.updateTable("channels").set(values).where("id", "=", id).execute();
+      }
+
+      return db.selectFrom("channels").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    },
   };
 }

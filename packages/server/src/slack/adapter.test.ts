@@ -20,6 +20,7 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     type: "human",
     role: null,
     reports_to: null,
+    output_style: null,
     ...overrides,
   };
 }
@@ -30,7 +31,39 @@ function makeChannel(overrides: Record<string, unknown> = {}) {
     name: "general",
     slack_channel_id: "C1",
     type: "channel",
+    output_style: null,
     created_at: "2025-01-01",
+    ...overrides,
+  };
+}
+
+function makeAgentResult(overrides: Record<string, unknown> = {}) {
+  return {
+    messageSent: true,
+    sessionId: "sess-1",
+    costUsd: 0.01,
+    pendingUploads: [],
+    durationMs: 0,
+    durationApiMs: 0,
+    numTurns: 0,
+    stopReason: null,
+    errorSubtype: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    webSearchRequests: 0,
+    webFetchRequests: 0,
+    model: null,
+    isResumedSession: false,
+    totalAttachments: 0,
+    imageCount: 0,
+    nonImageCount: 0,
+    mimeTypes: [],
+    fileSizes: [],
+    promptMode: "text",
+    toolCalls: [],
+    trace: { progressEvents: [], finalText: "hello back" },
     ...overrides,
   };
 }
@@ -57,6 +90,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
         findBySlackChannelId: vi.fn().mockResolvedValue(undefined),
         findById: vi.fn().mockResolvedValue(undefined),
         create: vi.fn().mockImplementation(async (data) => makeChannel({ ...data })),
+        update: vi.fn().mockImplementation(async (id, data) => makeChannel({ id, ...data })),
       } as unknown as SlackAdapterDeps["repos"]["channels"],
       settings: {
         get: vi.fn().mockResolvedValue({
@@ -81,10 +115,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
       } as unknown as SlackAdapterDeps["slack"]["userCache"],
     },
     runAgent: vi.fn().mockResolvedValue({
-      messageSent: true,
-      sessionId: "sess-1",
-      costUsd: 0.01,
-      pendingUploads: [],
+      ...makeAgentResult(),
     }),
     buildMcpServers: vi.fn().mockResolvedValue({}),
     findIntegrationProvider: vi.fn().mockResolvedValue(null),
@@ -208,12 +239,7 @@ describe("slack/adapter", () => {
 
     it("uploads pending files after agent run", async () => {
       const deps = makeDeps({
-        runAgent: vi.fn().mockResolvedValue({
-          messageSent: true,
-          sessionId: "s1",
-          costUsd: 0,
-          pendingUploads: ["/tmp/out.pdf"],
-        }),
+        runAgent: vi.fn().mockResolvedValue(makeAgentResult({ pendingUploads: ["/tmp/out.pdf"] })),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { dm } = getHandlers();
@@ -240,12 +266,9 @@ describe("slack/adapter", () => {
 
     it("shows _No response_ when agent sends nothing", async () => {
       const deps = makeDeps({
-        runAgent: vi.fn().mockResolvedValue({
-          messageSent: false,
-          sessionId: "s1",
-          costUsd: 0,
-          pendingUploads: [],
-        }),
+        runAgent: vi
+          .fn()
+          .mockResolvedValue(makeAgentResult({ messageSent: false, trace: { progressEvents: [], finalText: null } })),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { dm } = getHandlers();
@@ -286,6 +309,19 @@ describe("slack/adapter", () => {
         "D1",
         expect.stringMatching(new RegExp(`^(${NEW_SESSION_CONFIRMATIONS.map((m) => escapeRegExp(m)).join("|")})$`)),
       );
+    });
+
+    it("updates the DM user's output style on /outputstyle", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "/outputstyle concise", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { outputStyle: "concise" });
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "Output style set to concise.");
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -352,6 +388,34 @@ describe("slack/adapter", () => {
       await flush();
 
       expect(deps.inboxMessagesRepo?.markConsumed).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("channel mention handler", () => {
+    it("returns the current channel output style on /outputstyle with no args", async () => {
+      const deps = makeDeps({
+        repos: {
+          ...makeDeps().repos,
+          channels: {
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ output_style: "technical" })),
+            findById: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn().mockImplementation(async (data) => makeChannel({ ...data })),
+            update: vi.fn().mockImplementation(async (id, data) => makeChannel({ id, ...data })),
+          } as unknown as SlackAdapterDeps["repos"]["channels"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "/outputstyle", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
+        "C1",
+        "1",
+        "Current output style: technical. Available: friendly, concise, technical, verbose.",
+      );
     });
   });
 

@@ -1,137 +1,75 @@
 import { describe, expect, it } from "vitest";
-import { buildToolProgressLine, dedup } from "./tool-progress";
+import type { ProgressEvent } from "./runner";
+import { createProgressRenderer, getProgressTransportStrategy } from "./tool-progress";
 
-describe("buildToolProgressLine", () => {
-  describe("emoji and primary arg per tool", () => {
-    it("Read shows 📖 emoji and file_path value", () => {
-      expect(buildToolProgressLine("Read", { file_path: "src/agent/runner.ts" })).toBe(
-        '📖 Read: "src/agent/runner.ts"',
-      );
-    });
+function renderEvents(style: Parameters<typeof createProgressRenderer>[0], events: ProgressEvent[], random = () => 0) {
+  const renderer = createProgressRenderer(style, random);
+  const incremental = events.flatMap((event) => renderer.renderEvent(event));
+  return { incremental, lines: renderer.getLines() };
+}
 
-    it("Write shows ✍️ emoji and file_path value", () => {
-      expect(buildToolProgressLine("Write", { file_path: "src/output.ts" })).toBe('✍️ Write: "src/output.ts"');
-    });
+describe("createProgressRenderer", () => {
+  it("renders technical mode with clipped primary args", () => {
+    const longPath = `src/${"very-long-folder-name/".repeat(3)}index.ts`;
+    const { lines } = renderEvents("technical", [
+      { kind: "tool_use", toolName: "Read", input: { file_path: longPath } },
+    ]);
 
-    it("Edit shows 🔧 emoji and file_path value", () => {
-      expect(buildToolProgressLine("Edit", { file_path: "src/config.ts" })).toBe('🔧 Edit: "src/config.ts"');
-    });
-
-    it("Bash shows 💻 emoji and command value", () => {
-      expect(buildToolProgressLine("Bash", { command: "pnpm test" })).toBe('💻 Bash: "pnpm test"');
-    });
-
-    it("Glob shows 📂 emoji and pattern value", () => {
-      expect(buildToolProgressLine("Glob", { pattern: "**/*.ts" })).toBe('📂 Glob: "**/*.ts"');
-    });
-
-    it("Grep shows 🔎 emoji and pattern value", () => {
-      expect(buildToolProgressLine("Grep", { pattern: "runAgent" })).toBe('🔎 Grep: "runAgent"');
-    });
-
-    it("Skill shows 📚 emoji and skill value", () => {
-      expect(buildToolProgressLine("Skill", { skill: "commit" })).toBe('📚 Skill: "commit"');
-    });
-
-    it("SendFileToChat shows 📎 emoji and file_path value", () => {
-      expect(buildToolProgressLine("SendFileToChat", { file_path: "report.pdf" })).toBe(
-        '📎 SendFileToChat: "report.pdf"',
-      );
-    });
-
-    it("ManageScheduledTasks shows ⏰ emoji and action value", () => {
-      expect(buildToolProgressLine("ManageScheduledTasks", { action: "list" })).toBe('⏰ ManageScheduledTasks: "list"');
-    });
-
-    it("SearchEntities shows 🔍 emoji and queries value", () => {
-      expect(buildToolProgressLine("SearchEntities", { queries: ["foo", "bar"] })).toBe(
-        '🔍 SearchEntities: "["foo","bar"]"',
-      );
-    });
-
-    it("GetEntityContext shows 📊 emoji with ellipsis (no primary arg in map)", () => {
-      expect(buildToolProgressLine("GetEntityContext", { entity_id: "123" })).toBe("📊 GetEntityContext...");
-    });
-
-    it("unknown MCP tool shows ⚙️ fallback emoji with ellipsis", () => {
-      expect(buildToolProgressLine("SomeMcpTool", { anything: "value" })).toBe("⚙️ SomeMcpTool...");
-    });
+    expect(lines).toEqual([`📖 Read: "${longPath.slice(0, 40)}..."`]);
   });
 
-  describe("arg truncation", () => {
-    it("primary arg truncated to 40 chars with '...' suffix when longer than 40 chars", () => {
-      const longPath = "a".repeat(41);
-      const result = buildToolProgressLine("Read", { file_path: longPath });
-      expect(result).toBe(`📖 Read: "${"a".repeat(40)}..."`);
-    });
+  it("renders verbose mode with intermediate text and full args", () => {
+    const { lines } = renderEvents("verbose", [
+      { kind: "intermediate_text", text: "Let me check the config" },
+      { kind: "tool_use", toolName: "Read", input: { file_path: "config.json", recursive: true } },
+    ]);
 
-    it("primary arg exactly 40 chars is NOT truncated", () => {
-      const exactPath = "a".repeat(40);
-      const result = buildToolProgressLine("Read", { file_path: exactPath });
-      expect(result).toBe(`📖 Read: "${"a".repeat(40)}"`);
-    });
-
-    it("primary arg of 41 chars IS truncated", () => {
-      const path41 = "b".repeat(41);
-      const result = buildToolProgressLine("Bash", { command: path41 });
-      expect(result).toBe(`💻 Bash: "${"b".repeat(40)}..."`);
-    });
+    expect(lines).toEqual(["💬 Let me check the config", '📖 Read: {"file_path":"config.json","recursive":true}']);
   });
 
-  describe("missing or empty primary arg", () => {
-    it("primary arg key present but value is undefined shows tool name with ellipsis", () => {
-      expect(buildToolProgressLine("Read", { file_path: undefined })).toBe("📖 Read...");
-    });
+  it("suppresses intermediate text outside verbose mode", () => {
+    const { lines } = renderEvents("friendly", [{ kind: "intermediate_text", text: "Thinking..." }]);
+    expect(lines).toEqual([]);
+  });
 
-    it("primary arg key present but value is null shows tool name with ellipsis", () => {
-      expect(buildToolProgressLine("Read", { file_path: null })).toBe("📖 Read...");
-    });
+  it("reuses the same friendly line for consecutive identical tool calls and dedups the history", () => {
+    const { incremental, lines } = renderEvents(
+      "friendly",
+      [
+        { kind: "tool_use", toolName: "Edit", input: {} },
+        { kind: "tool_use", toolName: "Edit", input: {} },
+        { kind: "tool_use", toolName: "Edit", input: {} },
+      ],
+      () => 0,
+    );
 
-    it("empty input object shows tool name with ellipsis", () => {
-      expect(buildToolProgressLine("Glob", {})).toBe("📂 Glob...");
-    });
+    expect(incremental).toEqual(["🔧 Tweaking things", "🔧 Tweaking things", "🔧 Tweaking things"]);
+    expect(lines).toEqual(["🔧 Tweaking things (x3)"]);
+  });
+
+  it("concise mode keeps only the latest tool line", () => {
+    const renderer = createProgressRenderer("concise", () => 0);
+
+    expect(renderer.renderEvent({ kind: "tool_use", toolName: "Read", input: {} })).toEqual([
+      "📖 Flipping through some pages",
+    ]);
+    expect(renderer.getLines()).toEqual(["📖 Flipping through some pages"]);
+
+    expect(renderer.renderEvent({ kind: "tool_use", toolName: "Bash", input: {} })).toEqual(["🚀 Running commands"]);
+    expect(renderer.getLines()).toEqual(["🚀 Running commands"]);
+  });
+
+  it("uses the fallback friendly pool for unknown tools", () => {
+    const { lines } = renderEvents("friendly", [{ kind: "tool_use", toolName: "SomeMcpTool", input: {} }], () => 0);
+    expect(lines).toEqual(["⚙️ Working on it"]);
   });
 });
 
-describe("dedup", () => {
-  it("identical consecutive lines get counter: last entry updated to include (x2)", () => {
-    const lines = ['📖 Read: "config.ts"', '📖 Read: "config.ts"'];
-    const result = dedup(lines);
-    expect(result).toEqual(['📖 Read: "config.ts" (x2)']);
-  });
-
-  it("three identical consecutive lines: counter shows (x3)", () => {
-    const lines = ['📖 Read: "config.ts"', '📖 Read: "config.ts"', '📖 Read: "config.ts"'];
-    const result = dedup(lines);
-    expect(result).toEqual(['📖 Read: "config.ts" (x3)']);
-  });
-
-  it("different consecutive lines are not collapsed", () => {
-    const lines = ['📖 Read: "a.ts"', '🔧 Edit: "b.ts"'];
-    const result = dedup(lines);
-    expect(result).toEqual(['📖 Read: "a.ts"', '🔧 Edit: "b.ts"']);
-  });
-
-  it("single line array returns unchanged", () => {
-    const lines = ['📖 Read: "config.ts"'];
-    const result = dedup(lines);
-    expect(result).toEqual(['📖 Read: "config.ts"']);
-  });
-
-  it("empty array returns unchanged", () => {
-    const result = dedup([]);
-    expect(result).toEqual([]);
-  });
-
-  it("only the LAST entry is checked for dedup (earlier duplicates don't matter)", () => {
-    const lines = ['📖 Read: "a.ts"', '🔧 Edit: "b.ts"', '📖 Read: "a.ts"', '📖 Read: "a.ts"'];
-    const result = dedup(lines);
-    expect(result).toEqual(['📖 Read: "a.ts"', '🔧 Edit: "b.ts"', '📖 Read: "a.ts" (x2)']);
-  });
-
-  it("line that already has a counter gets incremented: (x2) becomes (x3)", () => {
-    const lines = ['📖 Read: "config.ts" (x2)', '📖 Read: "config.ts"'];
-    const result = dedup(lines);
-    expect(result).toEqual(['📖 Read: "config.ts" (x3)']);
+describe("getProgressTransportStrategy", () => {
+  it("uses replace mode only for concise", () => {
+    expect(getProgressTransportStrategy("concise")).toBe("replace");
+    expect(getProgressTransportStrategy("friendly")).toBe("accumulate");
+    expect(getProgressTransportStrategy("technical")).toBe("accumulate");
+    expect(getProgressTransportStrategy("verbose")).toBe("accumulate");
   });
 });

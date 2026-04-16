@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { NEW_SESSION_CONFIRMATIONS, getNewSessionConfirmation, parseSketchCommand } from "./commands";
+import {
+  NEW_SESSION_CONFIRMATIONS,
+  getNewSessionConfirmation,
+  getOutputStyleConfirmation,
+  getOutputStyleCurrent,
+  getOutputStyleSuggestion,
+  parseSketchCommand,
+} from "./commands";
 
 describe("parseSketchCommand", () => {
   it("detects /new exactly", () => {
@@ -29,6 +36,30 @@ describe("parseSketchCommand", () => {
     expect(parseSketchCommand(null)).toBeNull();
     expect(parseSketchCommand(undefined)).toBeNull();
   });
+
+  it("detects /outputstyle with long forms", () => {
+    expect(parseSketchCommand("/outputstyle friendly")).toBe("output_style_friendly");
+    expect(parseSketchCommand("/outputstyle concise")).toBe("output_style_concise");
+    expect(parseSketchCommand("/outputstyle technical")).toBe("output_style_technical");
+    expect(parseSketchCommand("/outputstyle verbose")).toBe("output_style_verbose");
+  });
+
+  it("detects /outputstyle with short forms", () => {
+    expect(parseSketchCommand("/outputstyle f")).toBe("output_style_friendly");
+    expect(parseSketchCommand("/outputstyle c")).toBe("output_style_concise");
+    expect(parseSketchCommand("/outputstyle t")).toBe("output_style_technical");
+    expect(parseSketchCommand("/outputstyle v")).toBe("output_style_verbose");
+  });
+
+  it("treats /outputstyle without args as query", () => {
+    expect(parseSketchCommand("/outputstyle")).toBe("output_style_query");
+    expect(parseSketchCommand(" /outputstyle  ")).toBe("output_style_query");
+  });
+
+  it("returns null for unknown /outputstyle values", () => {
+    expect(parseSketchCommand("/outputstyle friendy")).toBeNull();
+    expect(parseSketchCommand("/outputstyle xyz")).toBeNull();
+  });
 });
 
 describe("getNewSessionConfirmation", () => {
@@ -42,5 +73,26 @@ describe("getNewSessionConfirmation", () => {
 
   it("always returns one of the configured messages", () => {
     expect(NEW_SESSION_CONFIRMATIONS).toContain(getNewSessionConfirmation(0.4));
+  });
+});
+
+describe("output style helpers", () => {
+  it("formats the set confirmation", () => {
+    expect(getOutputStyleConfirmation("verbose")).toBe("Output style set to verbose.");
+  });
+
+  it("formats the current style message", () => {
+    expect(getOutputStyleCurrent("friendly")).toBe(
+      "Current output style: friendly. Available: friendly, concise, technical, verbose.",
+    );
+  });
+
+  it("suggests the closest output style for typos", () => {
+    expect(getOutputStyleSuggestion("friendy")).toBe("friendly");
+    expect(getOutputStyleSuggestion("concis")).toBe("concise");
+  });
+
+  it("returns null when no reasonable suggestion exists", () => {
+    expect(getOutputStyleSuggestion("xyz")).toBeNull();
   });
 });

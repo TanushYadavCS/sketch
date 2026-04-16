@@ -17,6 +17,7 @@ type UserRow = {
   whatsapp_number: string | null;
   created_at: string;
   email_verified_at: string | null;
+  output_style: string | null;
 };
 
 export interface ResolveSlackUserDeps {

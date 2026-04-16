@@ -26,6 +26,7 @@ describe("createWhatsAppGroupRepository", () => {
       jid: "123@g.us",
       name: "Founders",
       description: "Core team",
+      output_style: null,
       updated_at: "2026-03-13T10:00:00.000Z",
     });
 
@@ -40,6 +41,7 @@ describe("createWhatsAppGroupRepository", () => {
       jid: "123@g.us",
       name: "Founders",
       description: "Core team",
+      output_style: null,
       updated_at: "2026-03-13T10:00:00.000Z",
     });
 
@@ -47,11 +49,28 @@ describe("createWhatsAppGroupRepository", () => {
       jid: "123@g.us",
       name: "Founders Plus",
       description: null,
+      output_style: "friendly",
       updated_at: "2026-03-14T10:00:00.000Z",
     });
 
     expect(updated.name).toBe("Founders Plus");
     expect(updated.description).toBeNull();
+    expect(updated.output_style).toBe("friendly");
     expect(updated.updated_at).toBe("2026-03-14T10:00:00.000Z");
+  });
+
+  it("updates only output_style for an existing group", async () => {
+    await repo.upsert({
+      jid: "123@g.us",
+      name: "Founders",
+      description: "Core team",
+      output_style: null,
+      updated_at: "2026-03-13T10:00:00.000Z",
+    });
+
+    const updated = await repo.updateOutputStyle("123@g.us", "concise");
+
+    expect(updated?.output_style).toBe("concise");
+    expect(updated?.name).toBe("Founders");
   });
 });

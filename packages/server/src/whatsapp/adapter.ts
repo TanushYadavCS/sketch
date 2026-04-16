@@ -9,26 +9,37 @@ import type { BufferedMessage, InboxMessageContext } from "../agent/prompt";
 import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
+import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
-import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
+import {
+  type OutputStyleCommand,
+  getNewSessionConfirmation,
+  getOutputStyleConfirmation,
+  getOutputStyleCurrent,
+  parseSketchCommand,
+} from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
+import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
 import type { Logger } from "../logger";
+import { getUnknownOutputStyleMessage, isOutputStyleCommand, resolveOutputStyle } from "../output-style";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { WhatsAppBot } from "./bot";
 import type { GroupBuffer } from "./group-buffer";
-import { createWhatsAppMessageHandler, createWhatsAppToolProgressHandler } from "./message-handler";
+import { createWhatsAppMessageHandler } from "./message-handler";
+import { createWhatsAppProgressTransport } from "./progress-transport";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
+type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 
 export interface WhatsAppAdapterDeps {
   db: Kysely<DB>;
@@ -37,6 +48,7 @@ export interface WhatsAppAdapterDeps {
   repos: {
     users: UserRepository;
     settings: SettingsRepository;
+    whatsappGroups: WhatsAppGroupsRepository;
   };
   queue: QueueManager;
   groupBuffer: GroupBuffer;
@@ -69,6 +81,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
 
   const toPhoneJid = (phoneNumber: string) => `${phoneNumber.replace("+", "")}@s.whatsapp.net`;
+  const resolveCommandOutputStyle = (command: ReturnType<typeof parseSketchCommand>): OutputStyleCommand | null => {
+    if (!command?.startsWith("output_style_") || command === "output_style_query") return null;
+    return command.slice("output_style_".length) as OutputStyleCommand;
+  };
   const updateReaction = async (jid: string, rawMessage: WAMessage, emoji: string | null) => {
     if (!whatsapp.isConnected || !rawMessage.key) return;
 
@@ -142,6 +158,24 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           return;
         }
 
+        if (!command && isOutputStyleCommand(message.text)) {
+          await whatsapp.sendText(replyJid, getUnknownOutputStyleMessage(message.text));
+          return;
+        }
+
+        const currentOutputStyle = resolveOutputStyle(user.output_style);
+        if (command === "output_style_query") {
+          await whatsapp.sendText(replyJid, getOutputStyleCurrent(currentOutputStyle));
+          return;
+        }
+
+        const requestedOutputStyle = resolveCommandOutputStyle(command);
+        if (requestedOutputStyle) {
+          await repos.users.update(user.id, { outputStyle: requestedOutputStyle });
+          await whatsapp.sendText(replyJid, getOutputStyleConfirmation(requestedOutputStyle));
+          return;
+        }
+
         const workspaceDir = await ensureWorkspace(config, user.id);
         const settingsRow = await repos.settings.get();
         const deliveryJid = toPhoneJid(user.whatsapp_number ?? message.phoneNumber);
@@ -169,7 +203,16 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           }
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
-          const onToolProgress = createWhatsAppToolProgressHandler(whatsapp, deliveryJid);
+          const outputStyle = resolveOutputStyle(user.output_style);
+          const progressRenderer = createProgressRenderer(outputStyle);
+          const progressTransport = createWhatsAppProgressTransport(
+            whatsapp,
+            deliveryJid,
+            getProgressTransportStrategy(outputStyle),
+          );
+          const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
+            await progressTransport.pushLines(progressRenderer.renderEvent(event));
+          };
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
           const pendingInbox = await loadPendingInboxMessages(user.id);
@@ -204,8 +247,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             userPhone: user.whatsapp_number ?? message.phoneNumber,
             logger,
             platform: "whatsapp",
-            onToolProgress,
-            onFinalMessage,
+            onProgressEvent,
             orgName: settingsRow?.org_name,
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
@@ -223,6 +265,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             currentUserId: user.id,
             sendDm: sendDmViaWhatsApp,
           });
+
+          await progressTransport.flush();
+          if (result.trace.finalText) {
+            await onFinalMessage(result.trace.finalText);
+          }
 
           for (const filePath of result.pendingUploads) {
             try {
@@ -287,6 +334,37 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       const groupMeta = await whatsapp.getGroupMetadata(groupJid);
       const groupName = groupMeta?.subject ?? "Unknown Group";
       const groupDescription = groupMeta?.desc ?? undefined;
+      const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
+
+      if (!command && isOutputStyleCommand(message.text)) {
+        await whatsapp.sendText(groupJid, getUnknownOutputStyleMessage(message.text), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
+
+      const currentOutputStyle = resolveOutputStyle(existingGroup?.output_style);
+      if (command === "output_style_query") {
+        await whatsapp.sendText(groupJid, getOutputStyleCurrent(currentOutputStyle), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
+
+      const requestedOutputStyle = resolveCommandOutputStyle(command);
+      if (requestedOutputStyle) {
+        await repos.whatsappGroups.upsert({
+          jid: groupJid,
+          name: groupName,
+          description: groupDescription ?? null,
+          output_style: requestedOutputStyle,
+          updated_at: new Date().toISOString(),
+        });
+        await whatsapp.sendText(groupJid, getOutputStyleConfirmation(requestedOutputStyle), {
+          quoted: message.rawMessage as WAMessage,
+        });
+        return;
+      }
 
       whatsapp.startComposing(groupJid);
       await updateReaction(groupJid, message.rawMessage as WAMessage, "👀");
@@ -330,7 +408,17 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
-        const onToolProgress = createWhatsAppToolProgressHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        const outputStyle = resolveOutputStyle(existingGroup?.output_style);
+        const progressRenderer = createProgressRenderer(outputStyle);
+        const progressTransport = createWhatsAppProgressTransport(
+          whatsapp,
+          groupJid,
+          getProgressTransportStrategy(outputStyle),
+          message.rawMessage as WAMessage,
+        );
+        const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
+          await progressTransport.pushLines(progressRenderer.renderEvent(event));
+        };
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
@@ -345,8 +433,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
-          onToolProgress,
-          onFinalMessage,
+          onProgressEvent,
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
@@ -366,6 +453,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           queueManager: queue,
           toolConfig,
         });
+
+        await progressTransport.flush();
+        if (result.trace.finalText) {
+          await onFinalMessage(result.trace.finalText);
+        }
 
         for (const filePath of result.pendingUploads) {
           try {

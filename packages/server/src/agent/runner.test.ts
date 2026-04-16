@@ -135,8 +135,7 @@ function makeBaseParams(overrides?: Partial<Parameters<typeof runAgent>[0]>): Pa
     userName: "TestUser",
     logger: makeMockLogger(),
     platform: "slack",
-    onToolProgress: vi.fn().mockResolvedValue(undefined),
-    onFinalMessage: vi.fn().mockResolvedValue(undefined),
+    onProgressEvent: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -281,6 +280,12 @@ describe("runAgent", () => {
     const result = await runAgent(makeBaseParams());
 
     expect(result.toolCalls).toHaveLength(3);
+    expect(result.trace.progressEvents).toEqual([
+      { kind: "intermediate_text", text: "Let me check." },
+      { kind: "tool_use", toolName: "Bash", input: { command: "ls" } },
+      { kind: "tool_use", toolName: "Skill", input: { skill: "canvas" } },
+      { kind: "tool_use", toolName: "mcp__plugin_pipedream__action", input: { app: "slack" } },
+    ]);
     expect(result.toolCalls[0]).toEqual(expect.objectContaining({ toolName: "Bash", skillName: null }));
     expect(result.toolCalls[1]).toEqual(expect.objectContaining({ toolName: "Skill", skillName: "canvas" }));
     expect(result.toolCalls[2]).toEqual(
@@ -368,5 +373,43 @@ describe("runAgent", () => {
     expect(result.webSearchRequests).toBe(0);
     expect(result.webFetchRequests).toBe(0);
     expect(result.model).toBeNull();
+  });
+
+  it("keeps the trailing text-only suffix as finalText", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-final" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: "config.json" } }],
+          },
+        };
+        yield {
+          type: "assistant",
+          message: {
+            content: [{ type: "text", text: "I found the issue." }],
+          },
+        };
+        yield {
+          type: "assistant",
+          message: {
+            content: [{ type: "text", text: "I updated the config and parser." }],
+          },
+        };
+        yield makeRichResultMessage({ session_id: "sess-final" });
+      })();
+    }) as unknown as typeof query);
+
+    const onProgressEvent = vi.fn().mockResolvedValue(undefined);
+    const result = await runAgent(makeBaseParams({ onProgressEvent }));
+
+    expect(onProgressEvent).toHaveBeenCalledTimes(1);
+    expect(result.trace.progressEvents).toEqual([
+      { kind: "tool_use", toolName: "Read", input: { file_path: "config.json" } },
+    ]);
+    expect(result.trace.finalText).toBe("I found the issue.\n\nI updated the config and parser.");
+    expect(result.messageSent).toBe(true);
   });
 });

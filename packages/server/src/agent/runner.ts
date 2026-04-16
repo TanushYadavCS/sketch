@@ -24,7 +24,6 @@ import { createCanUseTool } from "./permissions";
 import { buildSystemContext } from "./prompt";
 import { getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
-import { buildToolProgressLine, dedup } from "./tool-progress";
 
 export interface ToolCallRecord {
   toolName: string;
@@ -38,6 +37,24 @@ export interface ToolCallRecord {
 interface CanUseToolTiming {
   toolName: string;
   calledAt: number;
+}
+
+export interface ToolUseProgressEvent {
+  kind: "tool_use";
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+export interface IntermediateTextProgressEvent {
+  kind: "intermediate_text";
+  text: string;
+}
+
+export type ProgressEvent = ToolUseProgressEvent | IntermediateTextProgressEvent;
+
+export interface RunTrace {
+  progressEvents: ProgressEvent[];
+  finalText: string | null;
 }
 
 export interface AgentResult {
@@ -65,6 +82,7 @@ export interface AgentResult {
   fileSizes: number[];
   promptMode: "text" | "multimodal";
   toolCalls: ToolCallRecord[];
+  trace: RunTrace;
 }
 
 export interface McpServerConfig {
@@ -84,8 +102,7 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
-  onToolProgress: (lines: string[]) => Promise<void>;
-  onFinalMessage: (text: string) => Promise<void>;
+  onProgressEvent: (event: ProgressEvent) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
   orgName?: string | null;
@@ -156,7 +173,6 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   });
 
   let sessionId = "";
-  let messageSent = false;
   let costUsd = 0;
   let durationMs = 0;
   let durationApiMs = 0;
@@ -171,6 +187,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   let webFetchRequests = 0;
   let model: string | null = null;
   const toolCalls: ToolCallRecord[] = [];
+  const progressEvents: ProgressEvent[] = [];
+  const currentTextSuffix: string[] = [];
 
   const attachments = params.attachments ?? [];
   const hasImages = attachments.some((a) => isImageAttachment(a));
@@ -278,7 +296,19 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   });
 
   let pendingToolCalls: ToolCallRecord[] = [];
-  let progressLines: string[] = [];
+
+  const flushIntermediateText = async () => {
+    if (currentTextSuffix.length === 0) return;
+    const text = currentTextSuffix.join("\n\n");
+    currentTextSuffix.length = 0;
+    const event: IntermediateTextProgressEvent = { kind: "intermediate_text", text };
+    progressEvents.push(event);
+    try {
+      await params.onProgressEvent(event);
+    } catch (err) {
+      logger.warn({ err }, "Failed to deliver intermediate progress text");
+    }
+  };
 
   for await (const message of run) {
     const now = Date.now();
@@ -300,6 +330,17 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
         );
 
         if (hasToolUse) {
+          await flushIntermediateText();
+          const inlineText = extractAssistantText(message);
+          if (inlineText) {
+            const textEvent: IntermediateTextProgressEvent = { kind: "intermediate_text", text: inlineText };
+            progressEvents.push(textEvent);
+            try {
+              await params.onProgressEvent(textEvent);
+            } catch (err) {
+              logger.warn({ err }, "Failed to deliver inline intermediate progress text");
+            }
+          }
           for (const block of content) {
             if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
               const name = (block as { name: string }).name;
@@ -312,24 +353,19 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
               };
               toolCalls.push(tc);
               pendingToolCalls.push(tc);
-              progressLines.push(buildToolProgressLine(name, input));
+              const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
+              progressEvents.push(event);
+              try {
+                await params.onProgressEvent(event);
+              } catch (err) {
+                logger.warn({ err }, "Failed to deliver tool progress");
+              }
             }
-          }
-          progressLines = dedup(progressLines);
-          try {
-            await params.onToolProgress(progressLines);
-          } catch (err) {
-            logger.warn({ err }, "Failed to deliver tool progress");
           }
         } else {
           const text = extractAssistantText(message);
           if (text) {
-            try {
-              await params.onFinalMessage(text);
-              messageSent = true;
-            } catch (err) {
-              logger.warn({ err }, "Failed to deliver assistant message");
-            }
+            currentTextSuffix.push(text);
           }
         }
       }
@@ -384,9 +420,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const pendingUploads = uploadCollector.drain();
   logger.info({ userId: userName, sessionId, costUsd, pendingUploads: pendingUploads.length }, "Agent run completed");
+  const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
-    messageSent,
+    messageSent: finalText !== null,
     sessionId,
     costUsd,
     pendingUploads,
@@ -410,5 +447,9 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     fileSizes: attachments.map((a) => a.sizeBytes),
     promptMode: hasImages ? "multimodal" : "text",
     toolCalls,
+    trace: {
+      progressEvents,
+      finalText,
+    },
   };
 }

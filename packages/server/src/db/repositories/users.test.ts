@@ -229,6 +229,12 @@ describe("update()", () => {
     expect(updated.name).toBe("Ivy");
     expect(updated.slack_user_id).toBe("U012");
   });
+
+  it("updates output_style", async () => {
+    const created = await users.create({ name: "Jules", slackUserId: "U017" });
+    const updated = await users.update(created.id, { outputStyle: "concise" });
+    expect(updated.output_style).toBe("concise");
+  });
 });
 
 describe("remove()", () => {

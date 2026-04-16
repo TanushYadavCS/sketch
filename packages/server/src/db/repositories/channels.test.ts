@@ -75,3 +75,19 @@ describe("findById()", () => {
     expect(found).toBeUndefined();
   });
 });
+
+describe("update()", () => {
+  it("updates output_style", async () => {
+    const created = await channels.create({ slackChannelId: "C007", name: "ops", type: "public_channel" });
+    const updated = await channels.update(created.id, { outputStyle: "verbose" });
+    expect(updated.output_style).toBe("verbose");
+    expect(updated.name).toBe("ops");
+  });
+
+  it("returns unchanged channel when no fields provided", async () => {
+    const created = await channels.create({ slackChannelId: "C008", name: "sales", type: "group" });
+    const updated = await channels.update(created.id, {});
+    expect(updated.id).toBe(created.id);
+    expect(updated.output_style).toBeNull();
+  });
+});
