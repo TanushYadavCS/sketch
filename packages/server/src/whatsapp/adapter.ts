@@ -266,7 +266,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             sendDm: sendDmViaWhatsApp,
           });
 
-          await progressTransport.flush();
+          try {
+            await progressTransport.flush();
+          } catch (err) {
+            logger.error({ err, userId: user.id }, "Failed to flush WhatsApp progress updates");
+          }
           if (result.trace.finalText) {
             await onFinalMessage(result.trace.finalText);
           }
@@ -454,7 +458,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           toolConfig,
         });
 
-        await progressTransport.flush();
+        try {
+          await progressTransport.flush();
+        } catch (err) {
+          logger.error({ err, groupJid }, "Failed to flush WhatsApp progress updates");
+        }
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }

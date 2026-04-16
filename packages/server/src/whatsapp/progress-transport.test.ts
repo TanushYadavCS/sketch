@@ -56,6 +56,49 @@ describe("createWhatsAppProgressTransport", () => {
     expect(bot.editText).not.toHaveBeenCalled();
   });
 
+  it("splits a single oversized progress line into multiple WhatsApp messages", async () => {
+    const bot = createMockWhatsApp();
+    const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
+    const hugeLine = `Write: ${"x".repeat(6_000)}`;
+
+    await transport.pushLines([hugeLine]);
+    await transport.flush();
+
+    expect(bot.sendText.mock.calls.length).toBeGreaterThan(1);
+    for (const call of bot.sendText.mock.calls) {
+      expect(String(call[1]).length).toBeLessThanOrEqual(4_000);
+    }
+    expect(bot.editText).not.toHaveBeenCalled();
+  });
+
+  it("retries with smaller progress segments when WhatsApp rejects a send as too long", async () => {
+    let sentCount = 0;
+    const deliveredTexts: string[] = [];
+    const bot = {
+      isConnected: true,
+      sendText: vi.fn(async (_jid: string, text: string) => {
+        if (text.length > 200) {
+          const err = new Error("msg_too_long");
+          Object.assign(err, { data: { error: "msg_too_long" } });
+          throw err;
+        }
+        deliveredTexts.push(text);
+        sentCount += 1;
+        return { key: { remoteJid: "jid", id: `sent-${sentCount}`, fromMe: true } };
+      }),
+      editText: vi.fn().mockResolvedValue(undefined),
+    };
+    const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
+
+    await transport.pushLines([`Write: ${"x".repeat(1_000)}`]);
+    await transport.flush();
+
+    expect(deliveredTexts.length).toBeGreaterThan(1);
+    for (const text of deliveredTexts) {
+      expect(text.length).toBeLessThanOrEqual(200);
+    }
+  });
+
   it("replaces the latest concise status in place", async () => {
     const bot = createMockWhatsApp();
     const transport = createWhatsAppProgressTransport(bot, "jid", "replace");

@@ -5,7 +5,9 @@ import {
 } from "../agent/progress-transport";
 import type { SlackBot } from "./bot";
 
-const SLACK_PROGRESS_LIMIT = 39_000;
+// Slack progress messages are edited in place via chat.update, which rejects
+// text payloads above 4,000 characters with `msg_too_long`.
+const SLACK_PROGRESS_LIMIT = 4_000;
 const PROGRESS_THROTTLE_MS = 1_500;
 
 export function createSlackProgressTransport(

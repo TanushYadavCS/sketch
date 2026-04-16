@@ -302,7 +302,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           sendDm: sendDmViaSlack,
         });
 
-        await progressTransport.flush();
+        try {
+          await progressTransport.flush();
+        } catch (err) {
+          logger.error({ err, userId: user.id }, "Failed to flush Slack progress updates");
+        }
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }
@@ -555,7 +559,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           toolConfig,
         });
 
-        await progressTransport.flush();
+        try {
+          await progressTransport.flush();
+        } catch (err) {
+          logger.error({ err, channelId: message.channelId }, "Failed to flush Slack progress updates");
+        }
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }

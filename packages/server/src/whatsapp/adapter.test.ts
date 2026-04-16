@@ -268,6 +268,34 @@ describe("whatsapp/adapter", () => {
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
     });
 
+    it("still sends the final reply when progress flush fails", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Edit", input: { file_path: "a.ts" } });
+          return makeAgentResult({ trace: { progressEvents: [], finalText: "final reply" } });
+        }),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      mock.editText.mockRejectedValue(new Error("progress boom"));
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "final reply");
+      expect(mock.sendText).not.toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
+    });
+
     it("removes 👀 and does not add ✅ when the DM run fails", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockRejectedValue(new Error("boom")),

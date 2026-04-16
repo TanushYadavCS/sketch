@@ -279,6 +279,25 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_No response_");
     });
 
+    it("still posts the final reply when progress flush fails", async () => {
+      mockBotInstance.updateMessage.mockRejectedValue(new Error("progress boom"));
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
+          await params.onProgressEvent({ kind: "tool_use", toolName: "Edit", input: { file_path: "a.ts" } });
+          return makeAgentResult({ trace: { progressEvents: [], finalText: "final reply" } });
+        }),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "final reply");
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalledWith("D1", "_Something went wrong, try again_");
+    });
+
     it("passes MCP servers to agent for DMs", async () => {
       const mcpServers = { canvas: { type: "http" as const, url: "https://mcp.test" } };
       const deps = makeDeps({

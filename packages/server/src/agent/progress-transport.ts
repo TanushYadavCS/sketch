@@ -1,3 +1,5 @@
+import { chunkText } from "../formatting/chunking";
+
 export type ProgressTransportStrategy = "accumulate" | "replace";
 
 export interface ProgressTransport {
@@ -19,16 +21,26 @@ interface CreateProgressTransportParams<TRef> {
   editText: (ref: TRef, text: string) => Promise<void>;
 }
 
-const ELLIPSIS = "...";
-
 function renderLines(lines: string[]): string {
   return lines.join("\n");
 }
 
-function clipOversizedLine(line: string, charLimit: number): string {
-  if (line.length <= charLimit) return line;
-  if (charLimit <= ELLIPSIS.length) return ELLIPSIS.slice(0, charLimit);
-  return `${line.slice(0, charLimit - ELLIPSIS.length)}${ELLIPSIS}`;
+function splitOversizedText(text: string, charLimit: number): string[] {
+  return chunkText(text, charLimit).filter((chunk) => chunk.length > 0);
+}
+
+function isMessageTooLongError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+
+  const candidate = err as {
+    message?: unknown;
+    data?: { error?: unknown };
+  };
+
+  return (
+    candidate.data?.error === "msg_too_long" ||
+    (typeof candidate.message === "string" && candidate.message.includes("msg_too_long"))
+  );
 }
 
 export function createProgressTransport<TRef>(params: CreateProgressTransportParams<TRef>): ProgressTransport {
@@ -45,6 +57,28 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
 
   const activeSegment = () => segments[segments.length - 1] ?? segments[0];
 
+  const splitSegmentForRetry = (index: number, text: string): boolean => {
+    if (text.length <= 1) return false;
+
+    const retryLimit = Math.max(1, Math.min(params.charLimit, Math.floor(text.length / 2)));
+    const chunks = splitOversizedText(text, retryLimit);
+    if (chunks.length < 2) return false;
+
+    const current = segments[index];
+    if (!current) return false;
+
+    segments.splice(
+      index,
+      1,
+      ...chunks.map((chunk, chunkIndex) => ({
+        lines: [chunk],
+        ref: chunkIndex === 0 ? current.ref : null,
+        syncedText: chunkIndex === 0 ? current.syncedText : null,
+      })),
+    );
+    return true;
+  };
+
   const syncNow = async () => {
     clearPendingTimer();
     if (syncPromise) {
@@ -53,19 +87,47 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
     }
 
     syncPromise = (async () => {
-      for (const segment of segments) {
+      for (let index = 0; index < segments.length; ) {
+        const segment = segments[index];
+        if (!segment) {
+          index++;
+          continue;
+        }
         const text = renderLines(segment.lines);
-        if (!text) continue;
-
-        if (!segment.ref) {
-          segment.ref = await params.postText(text);
-          segment.syncedText = segment.ref ? text : null;
+        if (!text) {
+          index++;
           continue;
         }
 
-        if (segment.syncedText === text) continue;
-        await params.editText(segment.ref, text);
-        segment.syncedText = text;
+        if (!segment.ref) {
+          try {
+            segment.ref = await params.postText(text);
+            segment.syncedText = segment.ref ? text : null;
+            index++;
+            continue;
+          } catch (err) {
+            if (isMessageTooLongError(err) && splitSegmentForRetry(index, text)) {
+              continue;
+            }
+            throw err;
+          }
+        }
+
+        if (segment.syncedText === text) {
+          index++;
+          continue;
+        }
+
+        try {
+          await params.editText(segment.ref, text);
+          segment.syncedText = text;
+          index++;
+        } catch (err) {
+          if (isMessageTooLongError(err) && splitSegmentForRetry(index, text)) {
+            continue;
+          }
+          throw err;
+        }
       }
       lastSyncAt = Date.now();
     })();
@@ -91,8 +153,8 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
   };
 
   const appendAccumulateLines = async (incomingLines: string[]) => {
-    for (const rawLine of incomingLines) {
-      const line = clipOversizedLine(rawLine, params.charLimit);
+    for (const rawLine of incomingLines.flatMap((line) => splitOversizedText(line, params.charLimit))) {
+      const line = rawLine;
       const current = activeSegment();
       const nextLines = current.lines.length > 0 ? [...current.lines, line] : [line];
       if (renderLines(nextLines).length <= params.charLimit) {
@@ -110,11 +172,20 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
 
   const replaceLines = (incomingLines: string[]) => {
     if (incomingLines.length === 0) return;
-    const current = activeSegment();
-    current.lines = incomingLines.map((line) => clipOversizedLine(line, params.charLimit));
-    if (renderLines(current.lines).length > params.charLimit) {
-      current.lines = [clipOversizedLine(renderLines(current.lines), params.charLimit)];
-    }
+    const current = activeSegment() ?? { lines: [], ref: null, syncedText: null };
+    const nextText = renderLines(incomingLines);
+    const chunks = splitOversizedText(nextText, params.charLimit);
+    segments.splice(
+      0,
+      segments.length,
+      ...(chunks.length > 0
+        ? chunks.map((chunk, index) => ({
+            lines: [chunk],
+            ref: index === 0 ? current.ref : null,
+            syncedText: index === 0 ? current.syncedText : null,
+          }))
+        : [{ lines: [], ref: current.ref, syncedText: current.syncedText }]),
+    );
   };
 
   return {
