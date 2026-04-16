@@ -16,7 +16,11 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
-import { type WrapperResult, cleanupWrappers, resolveIntegrationWrappers } from "../integrations/wrapper";
+import {
+  type IntegrationAccessResult,
+  cleanupIntegrationAccess,
+  startIntegrationAccess,
+} from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
@@ -248,52 +252,31 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return baseCanUseTool(toolName, input);
   };
 
-  // Generate ephemeral credential wrappers for skill-mode integrations.
-  // The wrapper env vars (just paths, no credentials) are passed to the agent
-  // subprocess via the SDK's per-call `options.env` — never mutated onto
-  // process.env — so concurrent runAgent calls in the same Node process cannot
-  // interleave and leak one user's wrapper path to another user's subprocess.
-  let wrapperResult: WrapperResult = { envVars: {}, wrapperPaths: [] };
+  // Start per-run brokered access for skill-mode integrations.
+  // The agent sees only harmless launcher paths and broker metadata; the
+  // credential env vars stay inside the trusted broker and are injected only
+  // into the real CLI child process.
+  let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
   if (params.findIntegrationProvider) {
-    wrapperResult = await resolveIntegrationWrappers({
-      runId: existingSessionId ?? crypto.randomUUID().slice(0, 8),
+    integrationAccess = await startIntegrationAccess({
       userEmail: params.userEmail ?? null,
       claudeConfigDir: params.claudeConfigDir,
+      workspaceDir,
       findIntegrationProvider: params.findIntegrationProvider,
       logger,
     });
     logger.info(
       {
-        wrapperEnvKeys: Object.keys(wrapperResult.envVars),
-        wrapperPaths: wrapperResult.wrapperPaths,
-        hasCanvasCli: !!wrapperResult.envVars.CANVAS_CLI,
-        hasCanvasApiKey: !!wrapperResult.envVars.CANVAS_API_KEY_MCP,
-        hasCanvasUserEmail: !!wrapperResult.envVars.CANVAS_USER_EMAIL,
+        integrationEnvKeys: Object.keys(integrationAccess.envVars),
+        runtimePaths: integrationAccess.runtimePaths,
+        hasCanvasCli: !!integrationAccess.envVars.CANVAS_CLI,
+        hasCanvasApiKey: !!integrationAccess.envVars.CANVAS_API_KEY_MCP,
+        hasCanvasUserEmail: !!integrationAccess.envVars.CANVAS_USER_EMAIL,
       },
-      "Integration wrappers resolved",
+      "Integration access resolved",
     );
-    logger.debug({ userEmail: params.userEmail }, "Integration wrappers resolved (user context)");
+    logger.debug({ userEmail: params.userEmail }, "Integration access resolved (user context)");
   }
-
-  const run = query({
-    prompt,
-    options: {
-      maxTurns: 100,
-      cwd: workspaceDir,
-      resume: existingSessionId,
-      env: { ...process.env, ...wrapperResult.envVars },
-      systemPrompt: systemAppend,
-      tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
-      permissionMode: "default" as const,
-      allowDangerouslySkipPermissions: false,
-      settingSources: ["project", "user"],
-      mcpServers: { sketch: sketchServer, ...params.integrationMcpServers },
-      stderr: (data) => {
-        logger.debug({ stderr: data.trim() }, "Agent subprocess");
-      },
-      canUseTool: timedCanUseTool,
-    },
-  });
 
   let pendingToolCalls: ToolCallRecord[] = [];
 
@@ -310,93 +293,119 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     }
   };
 
-  for await (const message of run) {
-    const now = Date.now();
-    for (const tc of pendingToolCalls) {
-      tc.endedAt = now;
-    }
-    pendingToolCalls = [];
+  try {
+    const run = query({
+      prompt,
+      options: {
+        maxTurns: 100,
+        cwd: workspaceDir,
+        resume: existingSessionId,
+        env: { ...process.env, ...integrationAccess.envVars },
+        systemPrompt: systemAppend,
+        tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
+        permissionMode: "default" as const,
+        allowDangerouslySkipPermissions: false,
+        settingSources: ["project", "user"],
+        mcpServers: { sketch: sketchServer, ...params.integrationMcpServers },
+        stderr: (data) => {
+          logger.debug({ stderr: data.trim() }, "Agent subprocess");
+        },
+        canUseTool: timedCanUseTool,
+      },
+    });
 
-    if (message.type === "system" && message.subtype === "init") {
-      sessionId = message.session_id;
-    }
+    for await (const message of run) {
+      const now = Date.now();
+      for (const tc of pendingToolCalls) {
+        tc.endedAt = now;
+      }
+      pendingToolCalls = [];
 
-    if (message.type === "assistant") {
-      const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
-      const content = inner?.content;
-      if (Array.isArray(content)) {
-        const hasToolUse = content.some(
-          (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
-        );
+      if (message.type === "system" && message.subtype === "init") {
+        sessionId = message.session_id;
+      }
 
-        if (hasToolUse) {
-          await flushIntermediateText();
-          const inlineText = extractAssistantText(message);
-          if (inlineText) {
-            const textEvent: IntermediateTextProgressEvent = { kind: "intermediate_text", text: inlineText };
-            progressEvents.push(textEvent);
-            try {
-              await params.onProgressEvent(textEvent);
-            } catch (err) {
-              logger.warn({ err }, "Failed to deliver inline intermediate progress text");
-            }
-          }
-          for (const block of content) {
-            if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-              const name = (block as { name: string }).name;
-              const input = (block as { input?: Record<string, unknown> }).input ?? {};
-              const tc: ToolCallRecord = {
-                toolName: name,
-                skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
-                startedAt: now,
-                endedAt: 0,
-              };
-              toolCalls.push(tc);
-              pendingToolCalls.push(tc);
-              const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
-              progressEvents.push(event);
+      if (message.type === "assistant") {
+        const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
+        const content = inner?.content;
+        if (Array.isArray(content)) {
+          const hasToolUse = content.some(
+            (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
+          );
+
+          if (hasToolUse) {
+            await flushIntermediateText();
+            const inlineText = extractAssistantText(message);
+            if (inlineText) {
+              const textEvent: IntermediateTextProgressEvent = { kind: "intermediate_text", text: inlineText };
+              progressEvents.push(textEvent);
               try {
-                await params.onProgressEvent(event);
+                await params.onProgressEvent(textEvent);
               } catch (err) {
-                logger.warn({ err }, "Failed to deliver tool progress");
+                logger.warn({ err }, "Failed to deliver inline intermediate progress text");
               }
             }
-          }
-        } else {
-          const text = extractAssistantText(message);
-          if (text) {
-            currentTextSuffix.push(text);
+            for (const block of content) {
+              if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
+                const name = (block as { name: string }).name;
+                const input = (block as { input?: Record<string, unknown> }).input ?? {};
+                const tc: ToolCallRecord = {
+                  toolName: name,
+                  skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
+                  startedAt: now,
+                  endedAt: 0,
+                };
+                toolCalls.push(tc);
+                pendingToolCalls.push(tc);
+                const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
+                progressEvents.push(event);
+                try {
+                  await params.onProgressEvent(event);
+                } catch (err) {
+                  logger.warn({ err }, "Failed to deliver tool progress");
+                }
+              }
+            }
+          } else {
+            const text = extractAssistantText(message);
+            if (text) {
+              currentTextSuffix.push(text);
+            }
           }
         }
       }
+
+      if (message.type === "result") {
+        sessionId = message.session_id;
+        costUsd = message.total_cost_usd;
+        const resultMsg = message as Record<string, unknown>;
+        durationMs = (resultMsg.duration_ms as number) ?? 0;
+        durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
+        numTurns = (resultMsg.num_turns as number) ?? 0;
+        stopReason = (resultMsg.stop_reason as string) ?? null;
+        errorSubtype = message.subtype !== "success" ? message.subtype : null;
+        const usage = message.usage as Record<string, unknown> | undefined;
+        inputTokens = (usage?.input_tokens as number) ?? 0;
+        outputTokens = (usage?.output_tokens as number) ?? 0;
+        cacheReadTokens = (usage?.cache_read_input_tokens as number) ?? 0;
+        cacheCreationTokens = (usage?.cache_creation_input_tokens as number) ?? 0;
+        const serverToolUse = usage?.server_tool_use as Record<string, number> | undefined;
+        webSearchRequests = serverToolUse?.web_search_requests ?? 0;
+        webFetchRequests = serverToolUse?.web_fetch_requests ?? 0;
+        const modelKeys = Object.keys((message as Record<string, unknown>).modelUsage ?? {});
+        model = modelKeys.length > 0 ? modelKeys[0] : null;
+      }
     }
 
-    if (message.type === "result") {
-      sessionId = message.session_id;
-      costUsd = message.total_cost_usd;
-      const resultMsg = message as Record<string, unknown>;
-      durationMs = (resultMsg.duration_ms as number) ?? 0;
-      durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
-      numTurns = (resultMsg.num_turns as number) ?? 0;
-      stopReason = (resultMsg.stop_reason as string) ?? null;
-      errorSubtype = message.subtype !== "success" ? message.subtype : null;
-      const usage = message.usage as Record<string, unknown> | undefined;
-      inputTokens = (usage?.input_tokens as number) ?? 0;
-      outputTokens = (usage?.output_tokens as number) ?? 0;
-      cacheReadTokens = (usage?.cache_read_input_tokens as number) ?? 0;
-      cacheCreationTokens = (usage?.cache_creation_input_tokens as number) ?? 0;
-      const serverToolUse = usage?.server_tool_use as Record<string, number> | undefined;
-      webSearchRequests = serverToolUse?.web_search_requests ?? 0;
-      webFetchRequests = serverToolUse?.web_fetch_requests ?? 0;
-      const modelKeys = Object.keys((message as Record<string, unknown>).modelUsage ?? {});
-      model = modelKeys.length > 0 ? modelKeys[0] : null;
+    if (sessionId && !isFresh) {
+      await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
     }
-  }
-
-  // Close out any tool calls still pending when the stream ends
-  const endNow = Date.now();
-  for (const tc of pendingToolCalls) {
-    tc.endedAt = endNow;
+  } finally {
+    const endNow = Date.now();
+    for (const tc of pendingToolCalls) {
+      tc.endedAt = endNow;
+    }
+    await cleanupIntegrationAccess(integrationAccess);
   }
 
   // Merge canUseTool timing: override only startedAt with canUseTool's calledAt
@@ -410,13 +419,6 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       timingIdx++;
     }
   }
-
-  if (sessionId && !isFresh) {
-    await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
-  }
-
-  // Clean up ephemeral credential wrappers
-  cleanupWrappers(wrapperResult);
 
   const pendingUploads = uploadCollector.drain();
   logger.info({ userId: userName, sessionId, costUsd, pendingUploads: pendingUploads.length }, "Agent run completed");
