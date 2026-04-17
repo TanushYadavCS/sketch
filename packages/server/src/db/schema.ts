@@ -11,6 +11,8 @@ export interface UsersTable {
   type: Generated<string>;
   role: string | null;
   reports_to: string | null;
+  tool_progress: string | null;
+  reasoning_text: Generated<number | null>;
   created_at: Generated<string>;
 }
 
@@ -19,6 +21,8 @@ export interface ChannelsTable {
   slack_channel_id: string;
   name: string;
   type: string;
+  tool_progress: string | null;
+  reasoning_text: Generated<number | null>;
   created_at: Generated<string>;
 }
 
@@ -38,6 +42,8 @@ export interface WhatsAppGroupsTable {
   jid: string;
   name: string;
   description: string | null;
+  tool_progress: string | null;
+  reasoning_text: Generated<number | null>;
   updated_at: Generated<string>;
 }
 
@@ -277,6 +283,18 @@ export interface OutreachMessagesTable {
   responded_at: string | null;
 }
 
+export interface InboxMessagesTable {
+  id: string;
+  sender_user_id: string;
+  recipient_user_id: string;
+  message: string;
+  platform: string;
+  channel_id: string | null;
+  message_ref: string | null;
+  created_at: Generated<string>;
+  consumed_at: string | null;
+}
+
 export interface EntitiesTable {
   id: string;
   name: string;
@@ -379,6 +397,7 @@ export interface DB {
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
   outreach_messages: OutreachMessagesTable;
+  inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_mentions: EntityMentionsTable;

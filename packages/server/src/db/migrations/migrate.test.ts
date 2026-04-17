@@ -1,10 +1,10 @@
 /**
  * Integration tests for the full migration sequence.
  *
- * Uses a fresh in-memory SQLite database and runs all 035 migrations through the
+ * Uses a fresh in-memory SQLite database and runs all 037 migrations through the
  * actual runMigrations() function. Tests verify that all migrations are recorded in
  * the kysely_migration table, that key tables exist after migration, and that a DB
- * with migrations 001-018 already applied can be upgraded with only 019-035.
+ * with migrations 001-018 already applied can be upgraded with only 019-037.
  */
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
@@ -33,14 +33,14 @@ describe("runMigrations — full sequence", () => {
     await expect(runMigrations(db)).resolves.not.toThrow();
   });
 
-  it("records all 35 migration entries in the kysely_migration table", async () => {
+  it("records all 37 migration entries in the kysely_migration table", async () => {
     await runMigrations(db);
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(35);
+    expect(rows.rows).toHaveLength(37);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -66,12 +66,14 @@ describe("runMigrations — full sequence", () => {
     expect(names[26]).toBe("027-entities");
     expect(names[27]).toBe("028-backfill-admin-user");
     expect(names[28]).toBe("029-settings-model-id");
-    expect(names[29]).toBe("030-extend-scheduled-tasks");
-    expect(names[30]).toBe("031-drop-tags-from-fts");
-    expect(names[31]).toBe("032-smart-enrichment");
-    expect(names[32]).toBe("033-org-context");
-    expect(names[33]).toBe("034-browse-cache");
-    expect(names[34]).toBe("035-sync-interval");
+    expect(names[29]).toBe("030-inbox-messages");
+    expect(names[30]).toBe("031-extend-scheduled-tasks");
+    expect(names[31]).toBe("032-output-style");
+    expect(names[32]).toBe("033-drop-tags-from-fts");
+    expect(names[33]).toBe("034-smart-enrichment");
+    expect(names[34]).toBe("035-org-context");
+    expect(names[35]).toBe("036-browse-cache");
+    expect(names[36]).toBe("037-sync-interval");
   });
 
   it("creates the users table", async () => {
@@ -177,8 +179,8 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    // Still exactly 35, not 70
-    expect(rows.rows).toHaveLength(35);
+    // Still exactly 37, not 74
+    expect(rows.rows).toHaveLength(37);
   });
 });
 
@@ -193,14 +195,14 @@ describe("runMigrations — incremental upgrade", () => {
     await db.destroy();
   });
 
-  it("applies only 019-035 when 001-018 are already present", async () => {
+  it("applies only 019-037 when 001-018 are already present", async () => {
     // Simulate a DB that already has 001-018 applied by running the full migration
     // sequence once, then seeding a user row to represent existing data.
     await runMigrations(db);
 
     await db.insertInto("users").values({ id: "existing-user", name: "Alice" }).execute();
 
-    // Running again should be a no-op (all 35 already applied)
+    // Running again should be a no-op (all 37 already applied)
     await runMigrations(db);
 
     const users = await db.selectFrom("users").selectAll().execute();
@@ -210,6 +212,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(35);
+    expect(rows.rows).toHaveLength(37);
   });
 });

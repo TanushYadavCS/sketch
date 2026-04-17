@@ -12,11 +12,15 @@ import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
-import type { createOutreachRepository } from "../db/repositories/outreach";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
-import { type WrapperResult, cleanupWrappers, resolveIntegrationWrappers } from "../integrations/wrapper";
+import {
+  type IntegrationAccessResult,
+  cleanupIntegrationAccess,
+  startIntegrationAccess,
+} from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
@@ -37,6 +41,24 @@ export interface ToolCallRecord {
 interface CanUseToolTiming {
   toolName: string;
   calledAt: number;
+}
+
+export interface ToolUseProgressEvent {
+  kind: "tool_use";
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+export interface IntermediateTextProgressEvent {
+  kind: "intermediate_text";
+  text: string;
+}
+
+export type ProgressEvent = ToolUseProgressEvent | IntermediateTextProgressEvent;
+
+export interface RunTrace {
+  progressEvents: ProgressEvent[];
+  finalText: string | null;
 }
 
 export interface AgentResult {
@@ -64,6 +86,7 @@ export interface AgentResult {
   fileSizes: number[];
   promptMode: "text" | "multimodal";
   toolCalls: ToolCallRecord[];
+  trace: RunTrace;
 }
 
 export interface McpServerConfig {
@@ -83,18 +106,11 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
-  onMessage: (text: string) => Promise<void>;
+  onProgressEvent: (event: ProgressEvent) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
   orgName?: string | null;
   botName?: string | null;
-  channelContext?: {
-    channelName: string;
-  };
-  groupContext?: {
-    groupName: string;
-    groupDescription?: string;
-  };
   integrationMcpServers?: Record<string, McpServerConfig>;
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
   /**
@@ -106,28 +122,28 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
-  /**
-   * Repositories and helpers needed by the ManageScheduledTasks tool to persist
-   * multi-step workflow content, inspect run history, and manually trigger runs.
-   * Must flow through from bootstrap via the adapter deps — without them, the
-   * tool silently drops step content at creation time, see sketch-tools.ts.
-   */
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
-  /** Narrow config slice used by ManageScheduledTasks to build webhook URLs for webhook-trigger workflows. */
   toolConfig?: { BASE_URL?: string; PORT: number };
-  outreachRepo?: ReturnType<typeof createOutreachRepository>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
     findById: (id: string) => Promise<Selectable<UsersTable> | undefined>;
   };
-  contextType?: "dm" | "channel_mention" | "scheduled_task" | "outreach";
+  contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
+  channelContext?: {
+    channelName: string;
+  };
+  groupContext?: {
+    groupName: string;
+    groupDescription?: string;
+  };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   experimentalFlag?: boolean;
 }
@@ -165,20 +181,11 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const systemAppend = buildSystemContext({
     platform: params.platform,
-    userName,
-    userEmail: params.userEmail,
-    userPhone: params.userPhone,
-    workspaceDir: absWorkspace,
-    orgDir: params.claudeConfigDir,
     orgName: params.orgName,
     botName: params.botName,
-    channelContext: params.channelContext,
-    groupContext: params.groupContext,
-    experimentalFlag: params.experimentalFlag,
   });
 
   let sessionId = "";
-  let messageSent = false;
   let costUsd = 0;
   let durationMs = 0;
   let durationApiMs = 0;
@@ -193,6 +200,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   let webFetchRequests = 0;
   let model: string | null = null;
   const toolCalls: ToolCallRecord[] = [];
+  const progressEvents: ProgressEvent[] = [];
+  const currentTextSuffix: string[] = [];
 
   const attachments = params.attachments ?? [];
   const hasImages = attachments.some((a) => isImageAttachment(a));
@@ -239,7 +248,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,
     toolConfig: params.toolConfig,
-    outreachRepo: params.outreachRepo,
+    inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
@@ -254,127 +263,160 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return baseCanUseTool(toolName, input);
   };
 
-  // Generate ephemeral credential wrappers for skill-mode integrations.
-  // The wrapper env vars (just paths, no credentials) are passed to the agent
-  // subprocess via the SDK's per-call `options.env` — never mutated onto
-  // process.env — so concurrent runAgent calls in the same Node process cannot
-  // interleave and leak one user's wrapper path to another user's subprocess.
-  let wrapperResult: WrapperResult = { envVars: {}, wrapperPaths: [] };
+  // Start per-run brokered access for skill-mode integrations.
+  // The agent sees only harmless launcher paths and broker metadata; the
+  // credential env vars stay inside the trusted broker and are injected only
+  // into the real CLI child process.
+  let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
   if (params.findIntegrationProvider) {
-    wrapperResult = await resolveIntegrationWrappers({
-      runId: existingSessionId ?? crypto.randomUUID().slice(0, 8),
+    integrationAccess = await startIntegrationAccess({
       userEmail: params.userEmail ?? null,
+      claudeConfigDir: params.claudeConfigDir,
+      workspaceDir,
       findIntegrationProvider: params.findIntegrationProvider,
       logger,
     });
     logger.info(
       {
-        wrapperEnvKeys: Object.keys(wrapperResult.envVars),
-        wrapperPaths: wrapperResult.wrapperPaths,
-        hasCanvasCli: !!wrapperResult.envVars.CANVAS_CLI,
-        hasCanvasApiKey: !!wrapperResult.envVars.CANVAS_API_KEY_MCP,
-        hasCanvasUserEmail: !!wrapperResult.envVars.CANVAS_USER_EMAIL,
+        integrationEnvKeys: Object.keys(integrationAccess.envVars),
+        runtimePaths: integrationAccess.runtimePaths,
+        hasCanvasCli: !!integrationAccess.envVars.CANVAS_CLI,
+        hasCanvasApiKey: !!integrationAccess.envVars.CANVAS_API_KEY_MCP,
+        hasCanvasUserEmail: !!integrationAccess.envVars.CANVAS_USER_EMAIL,
       },
-      "Integration wrappers resolved",
+      "Integration access resolved",
     );
-    logger.debug({ userEmail: params.userEmail }, "Integration wrappers resolved (user context)");
+    logger.debug({ userEmail: params.userEmail }, "Integration access resolved (user context)");
   }
-
-  const run = query({
-    prompt,
-    options: {
-      maxTurns: 100,
-      cwd: workspaceDir,
-      resume: existingSessionId,
-      env: { ...process.env, ...wrapperResult.envVars },
-      systemPrompt: {
-        type: "preset" as const,
-        preset: "claude_code" as const,
-        append: systemAppend,
-      },
-      permissionMode: "default" as const,
-      allowDangerouslySkipPermissions: false,
-      settingSources: ["project", "user"],
-      mcpServers: { sketch: sketchServer, ...params.integrationMcpServers },
-      stderr: (data) => {
-        logger.debug({ stderr: data.trim() }, "Agent subprocess");
-      },
-      canUseTool: timedCanUseTool,
-    },
-  });
 
   let pendingToolCalls: ToolCallRecord[] = [];
 
-  for await (const message of run) {
-    // When a new message arrives, any pending tool calls from the previous
-    // iteration have finished executing (the SDK blocks until tool completion).
-    const now = Date.now();
-    for (const tc of pendingToolCalls) {
-      tc.endedAt = now;
+  const flushIntermediateText = async () => {
+    if (currentTextSuffix.length === 0) return;
+    const text = currentTextSuffix.join("\n\n");
+    currentTextSuffix.length = 0;
+    const event: IntermediateTextProgressEvent = { kind: "intermediate_text", text };
+    progressEvents.push(event);
+    try {
+      await params.onProgressEvent(event);
+    } catch (err) {
+      logger.warn({ err }, "Failed to deliver intermediate progress text");
     }
-    pendingToolCalls = [];
+  };
 
-    if (message.type === "system" && message.subtype === "init") {
-      sessionId = message.session_id;
-    }
+  try {
+    const run = query({
+      prompt,
+      options: {
+        maxTurns: 100,
+        cwd: workspaceDir,
+        resume: existingSessionId,
+        env: { ...process.env, ...integrationAccess.envVars },
+        systemPrompt: systemAppend,
+        tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
+        permissionMode: "default" as const,
+        allowDangerouslySkipPermissions: false,
+        settingSources: ["project", "user"],
+        mcpServers: { sketch: sketchServer, ...params.integrationMcpServers },
+        stderr: (data) => {
+          logger.debug({ stderr: data.trim() }, "Agent subprocess");
+        },
+        canUseTool: timedCanUseTool,
+      },
+    });
 
-    const text = extractAssistantText(message);
-    if (text) {
-      try {
-        await params.onMessage(text);
-        messageSent = true;
-      } catch (err) {
-        logger.warn({ err }, "Failed to deliver assistant message");
+    for await (const message of run) {
+      const now = Date.now();
+      for (const tc of pendingToolCalls) {
+        tc.endedAt = now;
       }
-    }
+      pendingToolCalls = [];
 
-    if (message.type === "assistant") {
-      const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
-      const content = inner?.content;
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-            const name = (block as { name: string }).name;
-            const input = (block as { input?: Record<string, unknown> }).input;
-            const tc: ToolCallRecord = {
-              toolName: name,
-              skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
-              startedAt: now,
-              endedAt: 0,
-            };
-            toolCalls.push(tc);
-            pendingToolCalls.push(tc);
+      if (message.type === "system" && message.subtype === "init") {
+        sessionId = message.session_id;
+      }
+
+      if (message.type === "assistant") {
+        const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
+        const content = inner?.content;
+        if (Array.isArray(content)) {
+          const hasToolUse = content.some(
+            (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
+          );
+
+          if (hasToolUse) {
+            await flushIntermediateText();
+            const inlineText = extractAssistantText(message);
+            if (inlineText) {
+              const textEvent: IntermediateTextProgressEvent = { kind: "intermediate_text", text: inlineText };
+              progressEvents.push(textEvent);
+              try {
+                await params.onProgressEvent(textEvent);
+              } catch (err) {
+                logger.warn({ err }, "Failed to deliver inline intermediate progress text");
+              }
+            }
+            for (const block of content) {
+              if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
+                const name = (block as { name: string }).name;
+                const input = (block as { input?: Record<string, unknown> }).input ?? {};
+                const tc: ToolCallRecord = {
+                  toolName: name,
+                  skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
+                  startedAt: now,
+                  endedAt: 0,
+                };
+                toolCalls.push(tc);
+                pendingToolCalls.push(tc);
+                const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
+                progressEvents.push(event);
+                try {
+                  await params.onProgressEvent(event);
+                } catch (err) {
+                  logger.warn({ err }, "Failed to deliver tool progress");
+                }
+              }
+            }
+          } else {
+            const text = extractAssistantText(message);
+            if (text) {
+              currentTextSuffix.push(text);
+            }
           }
         }
       }
+
+      if (message.type === "result") {
+        sessionId = message.session_id;
+        costUsd = message.total_cost_usd;
+        const resultMsg = message as Record<string, unknown>;
+        durationMs = (resultMsg.duration_ms as number) ?? 0;
+        durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
+        numTurns = (resultMsg.num_turns as number) ?? 0;
+        stopReason = (resultMsg.stop_reason as string) ?? null;
+        errorSubtype = message.subtype !== "success" ? message.subtype : null;
+        const usage = message.usage as Record<string, unknown> | undefined;
+        inputTokens = (usage?.input_tokens as number) ?? 0;
+        outputTokens = (usage?.output_tokens as number) ?? 0;
+        cacheReadTokens = (usage?.cache_read_input_tokens as number) ?? 0;
+        cacheCreationTokens = (usage?.cache_creation_input_tokens as number) ?? 0;
+        const serverToolUse = usage?.server_tool_use as Record<string, number> | undefined;
+        webSearchRequests = serverToolUse?.web_search_requests ?? 0;
+        webFetchRequests = serverToolUse?.web_fetch_requests ?? 0;
+        const modelKeys = Object.keys((message as Record<string, unknown>).modelUsage ?? {});
+        model = modelKeys.length > 0 ? modelKeys[0] : null;
+      }
     }
 
-    if (message.type === "result") {
-      sessionId = message.session_id;
-      costUsd = message.total_cost_usd;
-      const resultMsg = message as Record<string, unknown>;
-      durationMs = (resultMsg.duration_ms as number) ?? 0;
-      durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
-      numTurns = (resultMsg.num_turns as number) ?? 0;
-      stopReason = (resultMsg.stop_reason as string) ?? null;
-      errorSubtype = message.subtype !== "success" ? message.subtype : null;
-      const usage = message.usage as Record<string, unknown> | undefined;
-      inputTokens = (usage?.input_tokens as number) ?? 0;
-      outputTokens = (usage?.output_tokens as number) ?? 0;
-      cacheReadTokens = (usage?.cache_read_input_tokens as number) ?? 0;
-      cacheCreationTokens = (usage?.cache_creation_input_tokens as number) ?? 0;
-      const serverToolUse = usage?.server_tool_use as Record<string, number> | undefined;
-      webSearchRequests = serverToolUse?.web_search_requests ?? 0;
-      webFetchRequests = serverToolUse?.web_fetch_requests ?? 0;
-      const modelKeys = Object.keys((message as Record<string, unknown>).modelUsage ?? {});
-      model = modelKeys.length > 0 ? modelKeys[0] : null;
+    if (sessionId && !isFresh) {
+      await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
     }
-  }
-
-  // Close out any tool calls still pending when the stream ends
-  const endNow = Date.now();
-  for (const tc of pendingToolCalls) {
-    tc.endedAt = endNow;
+  } finally {
+    const endNow = Date.now();
+    for (const tc of pendingToolCalls) {
+      tc.endedAt = endNow;
+    }
+    await cleanupIntegrationAccess(integrationAccess);
   }
 
   // Merge canUseTool timing: override only startedAt with canUseTool's calledAt
@@ -389,18 +431,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     }
   }
 
-  if (sessionId && !isFresh) {
-    await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
-  }
-
-  // Clean up ephemeral credential wrappers
-  cleanupWrappers(wrapperResult);
-
   const pendingUploads = uploadCollector.drain();
   logger.info({ userId: userName, sessionId, costUsd, pendingUploads: pendingUploads.length }, "Agent run completed");
+  const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
-    messageSent,
+    messageSent: finalText !== null,
     sessionId,
     costUsd,
     pendingUploads,
@@ -424,5 +460,9 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     fileSizes: attachments.map((a) => a.sizeBytes),
     promptMode: hasImages ? "multimodal" : "text",
     toolCalls,
+    trace: {
+      progressEvents,
+      finalText,
+    },
   };
 }

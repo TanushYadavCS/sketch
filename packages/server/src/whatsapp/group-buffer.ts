@@ -40,4 +40,8 @@ export class GroupBuffer {
     buf.length = 0;
     return messages;
   }
+
+  clear(groupJid: string): void {
+    this.buffers.set(groupJid, []);
+  }
 }

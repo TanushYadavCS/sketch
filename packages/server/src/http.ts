@@ -170,7 +170,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
-    app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler));
+    app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));
   }
   app.route(
     "/api/channels",

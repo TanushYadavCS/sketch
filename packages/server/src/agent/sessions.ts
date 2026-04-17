@@ -43,3 +43,11 @@ export async function saveSessionId(
     )
     .execute();
 }
+
+export async function deleteSessionId(db: Kysely<DB>, workspaceKey: string, threadKey?: string): Promise<void> {
+  await db
+    .deleteFrom("chat_sessions")
+    .where("workspace_key", "=", workspaceKey)
+    .where("thread_key", "=", threadKey ?? "")
+    .execute();
+}

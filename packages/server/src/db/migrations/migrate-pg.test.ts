@@ -28,7 +28,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   }, 30000);
 
-  it("runs all 035 migrations on a fresh Postgres database without error", async () => {
+  it("runs all 037 migrations on a fresh Postgres database without error", async () => {
     // createTestPgDb() already ran migrations — just verify no error was thrown.
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
@@ -36,11 +36,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(rows.rows.length).toBeGreaterThan(0);
   }, 30000);
 
-  it("records all 35 migration entries in kysely_migration", async () => {
+  it("records all 37 migration entries in kysely_migration", async () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(35);
+    expect(rows.rows).toHaveLength(37);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -63,12 +63,14 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[26]).toBe("027-entities");
     expect(names[27]).toBe("028-backfill-admin-user");
     expect(names[28]).toBe("029-settings-model-id");
-    expect(names[29]).toBe("030-extend-scheduled-tasks");
-    expect(names[30]).toBe("031-drop-tags-from-fts");
-    expect(names[31]).toBe("032-smart-enrichment");
-    expect(names[32]).toBe("033-org-context");
-    expect(names[33]).toBe("034-browse-cache");
-    expect(names[34]).toBe("035-sync-interval");
+    expect(names[29]).toBe("030-inbox-messages");
+    expect(names[30]).toBe("031-extend-scheduled-tasks");
+    expect(names[31]).toBe("032-output-style");
+    expect(names[32]).toBe("033-drop-tags-from-fts");
+    expect(names[33]).toBe("034-smart-enrichment");
+    expect(names[34]).toBe("035-org-context");
+    expect(names[35]).toBe("036-browse-cache");
+    expect(names[36]).toBe("037-sync-interval");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -77,7 +79,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(35);
+    expect(rows.rows).toHaveLength(37);
   });
 
   it("creates the users table", async () => {
@@ -134,8 +136,8 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
-  it("creates mcp_servers, chat_sessions, scheduled_tasks, outreach_messages tables", async () => {
-    for (const table of ["mcp_servers", "chat_sessions", "scheduled_tasks", "outreach_messages"]) {
+  it("creates mcp_servers, chat_sessions, scheduled_tasks, outreach_messages, and inbox_messages tables", async () => {
+    for (const table of ["mcp_servers", "chat_sessions", "scheduled_tasks", "outreach_messages", "inbox_messages"]) {
       const result = await sql<{ table_name: string }>`
         SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}

@@ -2,17 +2,172 @@ import { describe, expect, it } from "vitest";
 import { buildSketchContext, buildSystemContext, formatTimeAgo } from "./prompt";
 
 describe("buildSystemContext", () => {
-  describe("slack platform (DM)", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-      orgName: "Acme Corp",
-      botName: "Sketch",
+  describe("identity variants", () => {
+    it("uses botName + orgName identity line when both provided", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: "CanvasX AI",
+      });
+      expect(result).toContain(
+        "You are Atlas, working for CanvasX AI. An intelligent agent powered by Sketch, created by Canvas AI.",
+      );
     });
 
+    it("uses botName-only identity line when orgName is absent", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+      });
+      expect(result).toContain("You are Atlas, an intelligent agent powered by Sketch, created by Canvas AI.");
+      expect(result).not.toContain("working for");
+    });
+
+    it("uses botName-only identity line when orgName is null", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: null,
+      });
+      expect(result).toContain("You are Atlas, an intelligent agent powered by Sketch, created by Canvas AI.");
+    });
+
+    it("falls back to Sketch identity when neither botName nor orgName provided", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("You are Sketch, an intelligent agent created by Canvas AI.");
+    });
+
+    it("falls back to Sketch identity when both are null", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        botName: null,
+        orgName: null,
+      });
+      expect(result).toContain("You are Sketch, an intelligent agent created by Canvas AI.");
+    });
+
+    it("always includes teammate framing", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("member of the team");
+    });
+
+    it("always includes capability description", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("knowledgeable, direct, and action-oriented");
+    });
+  });
+
+  describe("memory section", () => {
+    it("includes memory section with persistent memory guidance", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("## Memory");
+      expect(result).toContain("persistent memory across conversations");
+    });
+
+    it("mentions reducing future steering", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("reduces future steering");
+    });
+
+    it("instructs not to save task progress", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("Do NOT save task progress");
+    });
+
+    it("mentions org-level memory in shared org directory", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("shared org directory");
+    });
+  });
+
+  describe("skills section", () => {
+    it("includes skills section", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("## Skills");
+    });
+
+    it("mentions complex task threshold", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("complex task (5+ tool calls)");
+    });
+
+    it("instructs to patch outdated skills immediately", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("patch it immediately");
+    });
+  });
+
+  describe("scheduled tasks section", () => {
+    it("includes scheduled tasks section", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("## Scheduled Tasks");
+    });
+
+    it("mentions ManageScheduledTasks tool", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("ManageScheduledTasks tool");
+    });
+  });
+
+  describe("file attachments section", () => {
+    it("includes file attachments section", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("## File Attachments");
+    });
+
+    it("mentions attachments/ directory", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("attachments/");
+    });
+
+    it("mentions SendFileToChat tool", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("SendFileToChat");
+    });
+  });
+
+  describe("context protocol section", () => {
+    it("includes context protocol section", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("## Context Protocol");
+    });
+
+    it("mentions all new context tags", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("<time>");
+      expect(result).toContain("<workspace>");
+      expect(result).toContain("<inbox>");
+      expect(result).toContain("<user>");
+      expect(result).toContain("<sender>");
+      expect(result).toContain("<channel>");
+      expect(result).toContain("<group>");
+      expect(result).toContain("<thread>");
+      expect(result).toContain("<channel_history>");
+      expect(result).toContain("<task>");
+    });
+
+    it("instructs agent never to mention context to users", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("Never mention <context>");
+    });
+  });
+
+  describe("workspace rules", () => {
+    it("includes generic workspace security rule", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("NEVER access files outside");
+    });
+
+    it("does not include specific workspace paths", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("/data/workspaces/");
+      expect(result).not.toContain("/data/.claude");
+    });
+  });
+
+  describe("Slack platform formatting", () => {
     it("includes mrkdwn formatting rules", () => {
+      const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("mrkdwn");
       expect(result).toContain("*bold*");
       expect(result).toContain("_italic_");
@@ -20,625 +175,633 @@ describe("buildSystemContext", () => {
       expect(result).toContain("<url|text>");
     });
 
-    it("includes no-tables instruction", () => {
+    it("instructs not to use markdown tables", () => {
+      const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("Do not use markdown tables");
     });
 
-    it("includes workspace isolation section with the workspace path", () => {
-      expect(result).toContain("Workspace Isolation");
-      expect(result).toContain("/data/workspaces/u123");
-    });
-
-    it("includes file restriction rule", () => {
-      expect(result).toContain("NEVER access files outside these two directories");
-    });
-
-    it("includes user name under User heading", () => {
-      expect(result).toContain("## User");
-      expect(result).toContain("Alice");
-    });
-
-    it("includes bot identity section when org/bot provided", () => {
-      expect(result).toContain("## Bot Identity");
-      expect(result).toContain("You are Sketch from Acme Corp.");
-    });
-
-    it("does not include channel context sections", () => {
-      expect(result).not.toContain("Slack Channel #");
-      expect(result).not.toContain("Sent by");
-      expect(result).not.toContain("Recent Channel Messages");
+    it("does not include WhatsApp-specific formatting", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("~strikethrough~");
+      expect(result).not.toContain("mobile-first platform");
     });
   });
 
-  describe("whatsapp platform", () => {
-    const result = buildSystemContext({
-      platform: "whatsapp",
-      userName: "Bob",
-      workspaceDir: "/data/workspaces/u456",
-      orgDir: "/data/.claude",
-    });
-
+  describe("WhatsApp platform formatting", () => {
     it("includes WhatsApp formatting rules", () => {
-      expect(result).toContain("## Platform: WhatsApp");
+      const result = buildSystemContext({ platform: "whatsapp" });
+      expect(result).toContain("You are responding on WhatsApp");
       expect(result).toContain("*bold*");
       expect(result).toContain("_italic_");
       expect(result).toContain("~strikethrough~");
       expect(result).toContain("```monospace```");
     });
 
-    it("does not include Slack-specific rules", () => {
-      expect(result).not.toContain("mrkdwn");
-      expect(result).not.toContain("<url|text>");
-    });
-
-    it("includes no-tables instruction", () => {
+    it("instructs not to use tables", () => {
+      const result = buildSystemContext({ platform: "whatsapp" });
       expect(result).toContain("Do not use tables");
     });
 
-    it("includes no-markdown-links instruction", () => {
+    it("instructs not to use markdown links", () => {
+      const result = buildSystemContext({ platform: "whatsapp" });
       expect(result).toContain("Do not use markdown links");
       expect(result).toContain("write URLs inline");
     });
 
-    it("includes workspace isolation section with the workspace path", () => {
-      expect(result).toContain("Workspace Isolation");
-      expect(result).toContain("/data/workspaces/u456");
-    });
-
-    it("includes file restriction rule", () => {
-      expect(result).toContain("NEVER access files outside these two directories");
-    });
-
-    it("includes file attachments section", () => {
-      expect(result).toContain("## File Attachments");
-      expect(result).toContain("SendFileToChat");
-    });
-
-    it("includes user name under User heading", () => {
-      expect(result).toContain("## User");
-      expect(result).toContain("Bob");
+    it("does not include Slack-specific formatting", () => {
+      const result = buildSystemContext({ platform: "whatsapp" });
+      expect(result).not.toContain("mrkdwn");
+      expect(result).not.toContain("<url|text>");
     });
   });
 
-  describe("channel context", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Carol",
-      workspaceDir: "/data/workspaces/channel-C001",
-      orgDir: "/data/.claude",
-      channelContext: {
-        channelName: "general",
-      },
+  describe("no per-user content", () => {
+    it("does not contain user names or emails", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: "Acme",
+      });
+      expect(result).not.toContain("alice@example.com");
+      expect(result).not.toContain("Name: ");
+      expect(result).not.toContain("Email: ");
+      expect(result).not.toContain("Phone: ");
     });
 
-    it("includes channel name", () => {
-      expect(result).toContain("Slack Channel #general");
-    });
-
-    it("includes shared workspace note", () => {
-      expect(result).toContain("Multiple users share this workspace");
-    });
-
-    it("does not include sender name in system prompt", () => {
-      expect(result).not.toContain("## Sent by");
-      expect(result).not.toContain("## User");
-    });
-
-    it("includes address-by-name instruction", () => {
-      expect(result).toContain("Address the user who mentioned you by name");
-    });
-
-    it("still includes Slack formatting rules", () => {
-      expect(result).toContain("mrkdwn");
-    });
-
-    it("still includes workspace isolation", () => {
-      expect(result).toContain("Workspace Isolation");
-      expect(result).toContain("/data/workspaces/channel-C001");
+    it("does not contain workspace paths", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("/data/workspaces/u123");
     });
   });
 
-  describe("file attachments", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Eve",
-      workspaceDir: "/data/workspaces/u789",
-      orgDir: "/data/.claude",
+  describe("removed sections", () => {
+    it("does not contain About Sketch section", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("## About Sketch");
     });
 
-    it("includes file attachments section", () => {
-      expect(result).toContain("## File Attachments");
+    it("does not contain Information Discovery section", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("## Information Discovery");
     });
 
-    it("mentions the attachments directory", () => {
-      expect(result).toContain("attachments/");
+    it("does not contain Bot Identity section header", () => {
+      const result = buildSystemContext({ platform: "slack", botName: "Atlas", orgName: "Acme" });
+      expect(result).not.toContain("## Bot Identity");
     });
 
-    it("mentions images shown directly", () => {
-      expect(result).toContain("Images are shown directly");
+    it("does not contain old channel context guidance", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("Slack Channel #");
+      expect(result).toContain("In shared channels and groups");
     });
 
-    it("mentions Read tool for non-image files", () => {
-      expect(result).toContain("Read tool");
-    });
-
-    it("mentions SendFileToChat tool for sending files back", () => {
-      expect(result).toContain("SendFileToChat");
-    });
-  });
-
-  describe("memory", () => {
-    it("includes memory section in DM context", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("## Memory");
-      expect(result).toContain("Personal memory");
-      expect(result).toContain("Org memory");
-      expect(result).toContain("/data/.claude/CLAUDE.md");
-    });
-
-    it("includes concise writing instruction", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("single concise line");
-      expect(result).toContain("topic headings");
-    });
-
-    it("does not include shared memory note in DM context", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).not.toContain("shared by all users");
-    });
-
-    it("includes shared memory note in channel context", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/channel-C001",
-        orgDir: "/data/.claude",
-        channelContext: {
-          channelName: "general",
-        },
-      });
-      expect(result).toContain("shared by all users");
+    it("does not contain outreach tag in context protocol", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("<outreach>");
     });
   });
 
-  describe("group context", () => {
-    const result = buildSystemContext({
-      platform: "whatsapp",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/wa-group-123",
-      orgDir: "/data/.claude",
-      groupContext: {
-        groupName: "Engineering Team",
-        groupDescription: "Daily standups and discussions",
-      },
+  describe("section order", () => {
+    it("identity appears before memory", () => {
+      const result = buildSystemContext({ platform: "slack", botName: "Atlas" });
+      const identityIdx = result.indexOf("You are Atlas");
+      const memoryIdx = result.indexOf("## Memory");
+      expect(identityIdx).toBeGreaterThanOrEqual(0);
+      expect(identityIdx).toBeLessThan(memoryIdx);
     });
 
-    it("includes group name", () => {
-      expect(result).toContain('WhatsApp Group "Engineering Team"');
+    it("memory appears before skills", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      const memoryIdx = result.indexOf("## Memory");
+      const skillsIdx = result.indexOf("## Skills");
+      expect(memoryIdx).toBeLessThan(skillsIdx);
     });
 
-    it("includes group description", () => {
-      expect(result).toContain("Group description: Daily standups and discussions");
+    it("skills appears before scheduled tasks", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      const skillsIdx = result.indexOf("## Skills");
+      const scheduledTasksIdx = result.indexOf("## Scheduled Tasks");
+      expect(skillsIdx).toBeLessThan(scheduledTasksIdx);
     });
 
-    it("includes shared workspace note", () => {
-      expect(result).toContain("Multiple users share this workspace");
+    it("scheduled tasks appears before file attachments", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      const scheduledTasksIdx = result.indexOf("## Scheduled Tasks");
+      const fileAttachmentsIdx = result.indexOf("## File Attachments");
+      expect(scheduledTasksIdx).toBeLessThan(fileAttachmentsIdx);
     });
 
-    it("does not include sender name in system prompt", () => {
-      expect(result).not.toContain("## Sent by");
-      expect(result).not.toContain("## User");
+    it("file attachments appears before context protocol", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      const fileAttachmentsIdx = result.indexOf("## File Attachments");
+      const contextProtocolIdx = result.indexOf("## Context Protocol");
+      expect(fileAttachmentsIdx).toBeLessThan(contextProtocolIdx);
     });
 
-    it("includes address-by-name instruction", () => {
-      expect(result).toContain("Address the user who mentioned you by name");
+    it("context protocol appears before workspace rules", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      const contextProtocolIdx = result.indexOf("## Context Protocol");
+      const workspaceIdx = result.indexOf("NEVER access files outside");
+      expect(contextProtocolIdx).toBeLessThan(workspaceIdx);
     });
 
-    it("includes shared memory note", () => {
-      expect(result).toContain("shared by all users");
-    });
-
-    it("includes WhatsApp formatting rules", () => {
-      expect(result).toContain("## Platform: WhatsApp");
-    });
-  });
-
-  describe("about sketch section", () => {
-    it("is always present", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("## About Sketch");
-      expect(result).toContain("managed by the admin");
-    });
-  });
-
-  describe("context protocol section", () => {
-    it("is always present", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("## Context Protocol");
-    });
-
-    it("mentions all context sub-tags", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("<context>");
-      expect(result).toContain("<outreach>");
-      expect(result).toContain("<thread>");
-      expect(result).toContain("<sender>");
-    });
-
-    it("instructs agent never to mention context to users", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("Never mention <context>");
-    });
-  });
-
-  describe("user email", () => {
-    it("includes email when provided", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        userEmail: "alice@example.com",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("Email: alice@example.com");
-    });
-
-    it("shows 'not configured' when email is null", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        userEmail: null,
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("Email: not configured");
-    });
-
-    it("shows 'not configured' when email is omitted", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("Email: not configured");
-    });
-
-    it("does not include email in channel context", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        userEmail: "alice@example.com",
-        workspaceDir: "/data/workspaces/channel-C001",
-        orgDir: "/data/.claude",
-        channelContext: { channelName: "general" },
-      });
-      expect(result).not.toContain("Email:");
-    });
-  });
-
-  describe("user phone", () => {
-    it("includes phone when provided in DM context", () => {
-      const result = buildSystemContext({
-        platform: "whatsapp",
-        userName: "Alice",
-        userPhone: "+1234567890",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("Phone: +1234567890");
-    });
-
-    it("omits phone line when null (no noise for platforms without phone)", () => {
-      const result = buildSystemContext({
-        platform: "whatsapp",
-        userName: "Alice",
-        userPhone: null,
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).not.toContain("Phone:");
-    });
-
-    it("does not include phone in channel context", () => {
-      const result = buildSystemContext({
-        platform: "slack",
-        userName: "Alice",
-        userPhone: "+1234567890",
-        workspaceDir: "/data/workspaces/channel-C001",
-        orgDir: "/data/.claude",
-        channelContext: { channelName: "general" },
-      });
-      expect(result).not.toContain("Phone:");
-    });
-
-    it("does not include phone in group context", () => {
-      const result = buildSystemContext({
-        platform: "whatsapp",
-        userName: "Alice",
-        userPhone: "+1234567890",
-        workspaceDir: "/data/workspaces/wa-group-123",
-        orgDir: "/data/.claude",
-        groupContext: { groupName: "Engineering Team" },
-      });
-      expect(result).not.toContain("Phone:");
-    });
-
-    it("phone and email coexist in DM context", () => {
-      const result = buildSystemContext({
-        platform: "whatsapp",
-        userName: "Alice",
-        userEmail: "alice@example.com",
-        userPhone: "+1234567890",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).toContain("Email: alice@example.com");
-      expect(result).toContain("Phone: +1234567890");
-    });
-  });
-
-  describe("group context without description", () => {
-    const result = buildSystemContext({
-      platform: "whatsapp",
-      userName: "Bob",
-      workspaceDir: "/data/workspaces/wa-group-456",
-      orgDir: "/data/.claude",
-      groupContext: {
-        groupName: "Casual Chat",
-      },
-    });
-
-    it("includes group name", () => {
-      expect(result).toContain('WhatsApp Group "Casual Chat"');
-    });
-
-    it("does not include group description line", () => {
-      expect(result).not.toContain("Group description:");
+    it("workspace rules appear before platform formatting", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      const workspaceIdx = result.indexOf("NEVER access files outside");
+      const platformIdx = result.indexOf("You are responding on Slack");
+      expect(workspaceIdx).toBeLessThan(platformIdx);
     });
   });
 });
 
 describe("buildSketchContext", () => {
-  it("returns plain message when no messages, no outreach, and DM context (isSharedContext=false)", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "what do you think?",
+  describe("<time> tag", () => {
+    it("always includes time tag with formatted datetime and timezone", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        timezone: "Asia/Kolkata",
+      });
+      expect(result).toContain("<time>");
+      expect(result).toContain("</time>");
+      expect(result).toContain("GMT+5:30");
+      expect(result).toContain("Asia/Kolkata");
     });
-    expect(result).toBe("what do you think?");
+
+    it("includes UTC when timezone is null", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        timezone: null,
+      });
+      expect(result).toContain("<time>");
+      expect(result).toContain("UTC");
+    });
+
+    it("includes UTC when timezone is omitted", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).toContain("<time>");
+      expect(result).toContain("UTC");
+    });
+
+    it("includes day of week, date, and year in time tag", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        timezone: "UTC",
+      });
+      expect(result).toMatch(/<time>[\s\S]*\d{4}[\s\S]*<\/time>/);
+    });
   });
 
-  it("returns plain message when empty messages and isSharedContext not set", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      currentUserEmail: "alice@example.com",
+  describe("<workspace> tag", () => {
+    it("always includes workspace tag with workspace and org paths", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).toContain("<workspace>");
+      expect(result).toContain("/data/workspaces/u123");
+      expect(result).toContain("/data/.claude");
+      expect(result).toContain("</workspace>");
     });
-    expect(result).toBe("hello");
   });
 
-  it("wraps with context block when isSharedContext=true even with no thread messages", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "What do you think?",
-      currentUserEmail: "alice@example.com",
-      isSharedContext: true,
+  describe("<user> tag for DMs", () => {
+    it("produces user tag for DM context (isSharedContext false)", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        isSharedContext: false,
+      });
+      expect(result).toContain("<user>");
+      expect(result).toContain("Alice");
+      expect(result).toContain("alice@example.com");
+      expect(result).toContain("</user>");
     });
-    expect(result).toBe("<context>\n<sender>Alice (alice@example.com)</sender>\n</context>\n\nWhat do you think?");
+
+    it("produces user tag when isSharedContext is omitted", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).toContain("<user>");
+      expect(result).not.toContain("<sender>");
+    });
+
+    it("includes name, email, and phone in user tag when all provided", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        currentUserPhone: "+1234567890",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        isSharedContext: false,
+      });
+      expect(result).toContain("<user>");
+      expect(result).toContain("Alice");
+      expect(result).toContain("alice@example.com");
+      expect(result).toContain("+1234567890");
+    });
   });
 
-  it("includes sender name only when email is absent", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "message",
-      isSharedContext: true,
+  describe("<sender> tag for shared contexts", () => {
+    it("produces sender tag when isSharedContext is true", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+      });
+      expect(result).toContain("<sender>");
+      expect(result).toContain("Alice");
+      expect(result).toContain("alice@example.com");
+      expect(result).toContain("</sender>");
+      expect(result).not.toContain("<user>");
     });
-    expect(result).toBe("<context>\n<sender>Alice</sender>\n</context>\n\nmessage");
+
+    it("sender tag contains name only when no email", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+      });
+      expect(result).toContain("<sender>Alice</sender>");
+    });
+
+    it("sender tag includes phone when provided", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserPhone: "+1234567890",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+      });
+      expect(result).toContain("+1234567890");
+    });
   });
 
-  it("includes sender name only when email is null", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "message",
-      currentUserEmail: null,
-      isSharedContext: true,
+  describe("<thread> tag variants", () => {
+    it("wraps messages in <thread> by default when no threadTag specified", () => {
+      const messages = [{ userName: "Bob", text: "hello there", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "hey",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).toContain("<thread>");
+      expect(result).toContain("Bob: hello there");
+      expect(result).toContain("</thread>");
     });
-    expect(result).toBe("<context>\n<sender>Alice</sender>\n</context>\n\nmessage");
+
+    it("wraps messages in <thread> when threadTag is 'thread'", () => {
+      const messages = [{ userName: "Bob", text: "hello there", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "hey",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        threadTag: "thread",
+      });
+      expect(result).toContain("<thread>");
+      expect(result).not.toContain("<channel_history>");
+    });
+
+    it("wraps messages in <channel_history> when threadTag is 'channel_history'", () => {
+      const messages = [{ userName: "Bob", text: "a message", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "hey",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        threadTag: "channel_history",
+      });
+      expect(result).toContain("<channel_history>");
+      expect(result).toContain("Bob: a message");
+      expect(result).toContain("</channel_history>");
+      expect(result).not.toContain("<thread>");
+    });
+
+    it("uses <thread> for bootstrap thread history", () => {
+      const messages = [{ userName: "Bob", text: "a message", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "hey",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        threadTag: "thread",
+      });
+      expect(result).toContain("<thread>");
+      expect(result).toContain("Bob: a message");
+      expect(result).toContain("</thread>");
+    });
+
+    it("does not include header text inside thread tags", () => {
+      const messages = [{ userName: "Bob", text: "hey", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        threadTag: "thread",
+      });
+      const threadStart = result.indexOf("<thread>");
+      const threadEnd = result.indexOf("</thread>");
+      const innerContent = result.slice(threadStart, threadEnd);
+      expect(innerContent).not.toContain("[Thread context before you joined]");
+      expect(innerContent).not.toContain("Thread context");
+    });
+
+    it("omits thread tag entirely when no messages", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).not.toContain("<thread>");
+      expect(result).not.toContain("<channel_history>");
+    });
   });
 
-  it("renders thread section when messages are provided", () => {
-    const messages = [
-      { userName: "Bob", text: "I like option A", ts: "1111.0001" },
-      { userName: "Carol", text: "Me too", ts: "1111.0002" },
-    ];
-    const result = buildSketchContext({
-      messages,
-      currentUserName: "Alice",
-      currentMessage: "what do you think?",
-    });
-    expect(result).toContain("<thread>");
-    expect(result).toContain("Bob: I like option A");
-    expect(result).toContain("Carol: Me too");
-    expect(result).toContain("</thread>");
-    expect(result).toContain("what do you think?");
-  });
-
-  it("prepends header inside thread section when provided", () => {
-    const messages = [{ userName: "Bob", text: "hey there", ts: "1111.0001" }];
-    const result = buildSketchContext({
-      messages,
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      header: "[Thread context before you joined]",
-    });
-    expect(result).toContain("[Thread context before you joined]");
-    const threadStart = result.indexOf("<thread>");
-    const headerIdx = result.indexOf("[Thread context before you joined]");
-    const msgIdx = result.indexOf("Bob: hey there");
-    expect(headerIdx).toBeGreaterThan(threadStart);
-    expect(headerIdx).toBeLessThan(msgIdx);
-  });
-
-  it("renders thread and sender in correct order when both are present", () => {
-    const messages = [{ userName: "Bob", text: "hi", ts: "1111.0001" }];
-    const result = buildSketchContext({
-      messages,
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      currentUserEmail: "alice@example.com",
-      isSharedContext: true,
-    });
-    const threadIdx = result.indexOf("<thread>");
-    const senderIdx = result.indexOf("<sender>");
-    expect(threadIdx).toBeLessThan(senderIdx);
-    expect(result).toContain("<sender>Alice (alice@example.com)</sender>");
-  });
-
-  it("includes phone and email in sender tag when both provided", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      currentUserEmail: "alice@example.com",
-      currentUserPhone: "+1234567890",
-      isSharedContext: true,
-    });
-    expect(result).toContain("<sender>Alice (+1234567890, alice@example.com)</sender>");
-  });
-
-  it("includes only phone in sender tag when email absent", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      currentUserPhone: "+1234567890",
-      isSharedContext: true,
-    });
-    expect(result).toContain("<sender>Alice (+1234567890)</sender>");
-  });
-
-  it("includes only email in sender tag when phone absent", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      currentUserEmail: "alice@example.com",
-      isSharedContext: true,
-    });
-    expect(result).toContain("<sender>Alice (alice@example.com)</sender>");
-  });
-
-  it("includes only name in sender tag when both phone and email absent", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      isSharedContext: true,
-    });
-    expect(result).toContain("<sender>Alice</sender>");
-  });
-
-  it("includes attachment formatting inside thread section", () => {
-    const messages = [
-      {
-        userName: "Bob",
-        text: "here's the report",
-        ts: "1111.0001",
-        attachments: [
-          {
-            originalName: "report.pdf",
-            mimeType: "application/pdf",
-            localPath: "/ws/attachments/report.pdf",
-            sizeBytes: 2048,
-          },
+  describe("<inbox> tag", () => {
+    it("renders inbox items with sender name, relative time, and original message", () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        inboxMessages: [
+          { id: "inbox-1", senderName: "Bob", message: "Please send the latest update.", createdAt: tenMinutesAgo },
         ],
-      },
-    ];
-    const result = buildSketchContext({
-      messages,
-      currentUserName: "Alice",
-      currentMessage: "looks good?",
+      });
+
+      expect(result).toContain("<inbox>");
+      expect(result).toContain("From Bob, 10m ago:");
+      expect(result).toContain("Please send the latest update.");
+      expect(result).toContain("</inbox>");
     });
-    expect(result).toContain("Bob: here's the report");
-    expect(result).toContain("<attachments>");
-    expect(result).toContain('name="report.pdf"');
-    expect(result).toContain('path="/ws/attachments/report.pdf"');
-    const attachIdx = result.indexOf("<attachments>");
-    const msgIdx = result.indexOf("looks good?");
-    expect(attachIdx).toBeLessThan(msgIdx);
+
+    it("omits inbox tag when there are no inbox messages", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+
+      expect(result).not.toContain("<inbox>");
+    });
   });
 
-  it("preserves chronological message order", () => {
-    const messages = [
-      { userName: "Alice", text: "first", ts: "1111.0001" },
-      { userName: "Bob", text: "second", ts: "1111.0002" },
-      { userName: "Carol", text: "third", ts: "1111.0003" },
-    ];
-    const result = buildSketchContext({
-      messages,
-      currentUserName: "Dave",
-      currentMessage: "fourth",
+  describe("<channel> and <group> tags", () => {
+    it("renders channel metadata in shared Slack contexts", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        channelContext: { channelName: "general" },
+      });
+
+      expect(result).toContain("<channel>");
+      expect(result).toContain("name: #general");
+      expect(result).toContain("</channel>");
     });
-    const firstIdx = result.indexOf("Alice: first");
-    const secondIdx = result.indexOf("Bob: second");
-    const thirdIdx = result.indexOf("Carol: third");
-    const fourthIdx = result.indexOf("fourth");
-    expect(firstIdx).toBeLessThan(secondIdx);
-    expect(secondIdx).toBeLessThan(thirdIdx);
-    expect(thirdIdx).toBeLessThan(fourthIdx);
+
+    it("renders group metadata in shared WhatsApp contexts", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserPhone: "+1234567890",
+        workspaceDir: "/data/workspaces/wa-group-g1",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        groupContext: { groupName: "Leadership", groupDescription: "Weekly updates" },
+      });
+
+      expect(result).toContain("<group>");
+      expect(result).toContain("name: Leadership");
+      expect(result).toContain("description: Weekly updates");
+      expect(result).toContain("</group>");
+    });
   });
 
-  it("current message appears after the closing context tag", () => {
-    const messages = [{ userName: "Bob", text: "hey", ts: "1111.0001" }];
-    const result = buildSketchContext({
-      messages,
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      isSharedContext: true,
+  describe("<task> tag", () => {
+    it("produces task tag when taskPrompt is provided", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "Send daily summary",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        taskPrompt: "Send daily summary",
+      });
+      expect(result).toContain("<task>");
+      expect(result).toContain("Send daily summary");
+      expect(result).toContain("</task>");
     });
-    const contextCloseIdx = result.indexOf("</context>");
-    const messageIdx = result.lastIndexOf("hello");
-    expect(contextCloseIdx).toBeLessThan(messageIdx);
+
+    it("does not produce task tag when taskPrompt is absent", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).not.toContain("<task>");
+    });
+  });
+
+  describe("no outreach section", () => {
+    it("does not produce outreach section", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).not.toContain("<outreach>");
+    });
+  });
+
+  describe("context block structure", () => {
+    it("always produces context block (time and workspace are always present)", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).toContain("<context>");
+      expect(result).toContain("</context>");
+    });
+
+    it("current message appears after closing context tag", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello world",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      const contextCloseIdx = result.indexOf("</context>");
+      const messageIdx = result.lastIndexOf("hello world");
+      expect(contextCloseIdx).toBeLessThan(messageIdx);
+    });
+
+    it("context sections appear in order: time, workspace, user, thread, task", () => {
+      const messages = [{ userName: "Bob", text: "hi", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "what's up?",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        taskPrompt: "Do the thing",
+      });
+      const timeIdx = result.indexOf("<time>");
+      const workspaceIdx = result.indexOf("<workspace>");
+      const userIdx = result.indexOf("<user>");
+      const threadIdx = result.indexOf("<thread>");
+      const taskIdx = result.indexOf("<task>");
+      expect(timeIdx).toBeLessThan(workspaceIdx);
+      expect(workspaceIdx).toBeLessThan(userIdx);
+      expect(userIdx).toBeLessThan(threadIdx);
+      expect(threadIdx).toBeLessThan(taskIdx);
+    });
+
+    it("context sections appear in order for shared context: time, workspace, sender, channel, channel_history", () => {
+      const messages = [{ userName: "Dave", text: "hi", ts: "1111.0001" }];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        currentUserEmail: "alice@example.com",
+        workspaceDir: "/data/workspaces/channel-C001",
+        orgDir: "/data/.claude",
+        isSharedContext: true,
+        threadTag: "channel_history",
+        channelContext: { channelName: "general" },
+      });
+      const timeIdx = result.indexOf("<time>");
+      const workspaceIdx = result.indexOf("<workspace>");
+      const senderIdx = result.indexOf("<sender>");
+      const channelIdx = result.indexOf("<channel>");
+      const channelHistoryIdx = result.indexOf("<channel_history>");
+      expect(timeIdx).toBeLessThan(workspaceIdx);
+      expect(workspaceIdx).toBeLessThan(senderIdx);
+      expect(senderIdx).toBeLessThan(channelIdx);
+      expect(channelIdx).toBeLessThan(channelHistoryIdx);
+    });
+
+    it("preserves chronological message order", () => {
+      const messages = [
+        { userName: "Alice", text: "first", ts: "1111.0001" },
+        { userName: "Bob", text: "second", ts: "1111.0002" },
+        { userName: "Carol", text: "third", ts: "1111.0003" },
+      ];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Dave",
+        currentMessage: "fourth",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      const firstIdx = result.indexOf("Alice: first");
+      const secondIdx = result.indexOf("Bob: second");
+      const thirdIdx = result.indexOf("Carol: third");
+      const fourthIdx = result.indexOf("fourth");
+      expect(firstIdx).toBeLessThan(secondIdx);
+      expect(secondIdx).toBeLessThan(thirdIdx);
+      expect(thirdIdx).toBeLessThan(fourthIdx);
+    });
+
+    it("includes attachment formatting inside thread section", () => {
+      const messages = [
+        {
+          userName: "Bob",
+          text: "here's the report",
+          ts: "1111.0001",
+          attachments: [
+            {
+              originalName: "report.pdf",
+              mimeType: "application/pdf",
+              localPath: "/ws/attachments/report.pdf",
+              sizeBytes: 2048,
+            },
+          ],
+        },
+      ];
+      const result = buildSketchContext({
+        messages,
+        currentUserName: "Alice",
+        currentMessage: "looks good?",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+      });
+      expect(result).toContain("Bob: here's the report");
+      expect(result).toContain("<attachments>");
+      expect(result).toContain('name="report.pdf"');
+      expect(result).toContain('path="/ws/attachments/report.pdf"');
+    });
   });
 });
 
@@ -666,211 +829,5 @@ describe("formatTimeAgo", () => {
   it("returns '1m ago' for exactly 60 seconds ago", () => {
     const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
     expect(formatTimeAgo(oneMinAgo)).toBe("1m ago");
-  });
-});
-
-describe("buildSketchContext with outreach", () => {
-  const createdAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-
-  it("renders <outreach> section with pendingOutreach", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Bob",
-      currentMessage: "hello",
-      isSharedContext: false,
-      pendingOutreach: [
-        {
-          id: "o1",
-          message: "What's the status?",
-          taskContext: null,
-          status: "pending",
-          createdAt,
-          requesterName: "Alice",
-        },
-      ],
-    });
-    expect(result).toContain("<outreach>");
-    expect(result).toContain("[o1] from Alice");
-    expect(result).toContain('"What\'s the status?"');
-    expect(result).toContain("</outreach>");
-  });
-
-  it("includes taskContext as 'Context:' line when present", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Bob",
-      currentMessage: "hello",
-      isSharedContext: false,
-      pendingOutreach: [
-        {
-          id: "o1",
-          message: "Any updates?",
-          taskContext: "Working on Q4 strategy",
-          status: "pending",
-          createdAt,
-          requesterName: "Alice",
-        },
-      ],
-    });
-    expect(result).toContain("Context: Working on Q4 strategy");
-  });
-
-  it("renders responded outreach in outreachResponses", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "ok",
-      isSharedContext: false,
-      outreachResponses: [
-        {
-          id: "o1",
-          message: "What's the budget?",
-          taskContext: null,
-          status: "responded",
-          response: "Budget is $50k",
-          createdAt,
-          recipientName: "Bob",
-        },
-      ],
-    });
-    expect(result).toContain("Bob responded to your outreach:");
-    expect(result).toContain('"Budget is $50k"');
-  });
-
-  it("renders pending (no response) outreach in outreachResponses", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "waiting",
-      isSharedContext: false,
-      outreachResponses: [
-        {
-          id: "o1",
-          message: "Can you help?",
-          taskContext: null,
-          status: "pending",
-          createdAt,
-          recipientName: "Carol",
-        },
-      ],
-    });
-    expect(result).toContain("Carol has not responded");
-    expect(result).toContain("sent");
-  });
-
-  it("renders outreach before thread and sender in correct order", () => {
-    const result = buildSketchContext({
-      messages: [{ userName: "Dave", text: "hi", ts: "1111.0001" }],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      currentUserEmail: "alice@example.com",
-      isSharedContext: true,
-      pendingOutreach: [
-        {
-          id: "o1",
-          message: "Question",
-          taskContext: null,
-          status: "pending",
-          createdAt,
-          requesterName: "Bob",
-        },
-      ],
-    });
-    const outreachIdx = result.indexOf("<outreach>");
-    const threadIdx = result.indexOf("<thread>");
-    const senderIdx = result.indexOf("<sender>");
-    expect(outreachIdx).toBeGreaterThanOrEqual(0);
-    expect(outreachIdx).toBeLessThan(threadIdx);
-    expect(threadIdx).toBeLessThan(senderIdx);
-  });
-
-  it("returns plain message when both pendingOutreach and outreachResponses are empty", () => {
-    const result = buildSketchContext({
-      messages: [],
-      currentUserName: "Alice",
-      currentMessage: "hello",
-      isSharedContext: false,
-      pendingOutreach: [],
-      outreachResponses: [],
-    });
-    expect(result).toBe("hello");
-  });
-});
-
-describe("buildSystemContext Information Discovery section", () => {
-  it("includes ## Information Discovery section", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("## Information Discovery");
-  });
-
-  it("instructs to check workspace and org directory first, then reach out", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("find it yourself first");
-    expect(result).toContain("workspace files");
-    expect(result).toContain("org directory (/data/.claude/)");
-    expect(result).toContain("reach out to team members");
-  });
-
-  it("includes max 2 people limit", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("max 2");
-  });
-
-  it("mentions follow-up scheduled task", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("scheduled task to follow up");
-  });
-
-  it("marks failure to follow process as a failure", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("considered a failure");
-  });
-});
-
-describe("buildSystemContext workspace and org directory", () => {
-  it("mentions ~/.claude/ as shared org directory in workspace isolation", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("/data/.claude/ (the shared org directory)");
-  });
-
-  it("includes org directory line in memory section", () => {
-    const result = buildSystemContext({
-      platform: "slack",
-      userName: "Alice",
-      workspaceDir: "/data/workspaces/u123",
-      orgDir: "/data/.claude",
-    });
-    expect(result).toContain("Org directory");
-    expect(result).toContain("/data/.claude/ is the shared org workspace");
   });
 });

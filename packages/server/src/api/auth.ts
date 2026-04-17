@@ -98,7 +98,9 @@ export function authRoutes(
 
     const adminUser = await deps.userRepo.findByEmail(row.admin_email.toLowerCase());
     const sub = adminUser?.id ?? row.admin_email;
-    await createSession(c, sub, "member", jwtSecret);
+    // Admin login path — issue an admin JWT so downstream role checks work.
+    // Member sessions from the magic-link path below still get "member".
+    await createSession(c, sub, "admin", jwtSecret);
     return c.json({ authenticated: true, email: row.admin_email });
   });
 
@@ -127,10 +129,13 @@ export function authRoutes(
           }
 
           if (user) {
-            await createSession(c, user.id, "member", row.jwt_secret);
+            // Preserve the role from the existing JWT on refresh (was hardcoded
+            // to "member" before admin role became load-bearing).
+            const role = payload.role === "admin" ? "admin" : "member";
+            await createSession(c, user.id, role, row.jwt_secret);
             return c.json({
               authenticated: true,
-              role: "member" as const,
+              role,
               userId: user.id,
               name: user.name,
               email: user.email,

@@ -65,6 +65,28 @@ describe("GroupBuffer", () => {
     });
   });
 
+  describe("clear", () => {
+    it("clears buffered messages for the target group", () => {
+      const buf = new GroupBuffer();
+      buf.append("group1@g.us", { senderName: "Alice", text: "hello", timestamp: 1 });
+
+      buf.clear("group1@g.us");
+
+      expect(buf.drain("group1@g.us")).toEqual([]);
+    });
+
+    it("does not affect other groups", () => {
+      const buf = new GroupBuffer();
+      buf.append("group1@g.us", { senderName: "Alice", text: "hello", timestamp: 1 });
+      buf.append("group2@g.us", { senderName: "Bob", text: "hi", timestamp: 2 });
+
+      buf.clear("group1@g.us");
+
+      expect(buf.drain("group1@g.us")).toEqual([]);
+      expect(buf.drain("group2@g.us")).toEqual([{ senderName: "Bob", text: "hi", timestamp: 2 }]);
+    });
+  });
+
   describe("eviction", () => {
     it("evicts oldest messages when exceeding max capacity", () => {
       const buf = new GroupBuffer(3);
