@@ -36,11 +36,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(rows.rows.length).toBeGreaterThan(0);
   }, 30000);
 
-  it("records all 32 migration entries in kysely_migration", async () => {
+  it("records all 33 migration entries in kysely_migration", async () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(32);
+    expect(rows.rows).toHaveLength(33);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -66,6 +66,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[29]).toBe("030-inbox-messages");
     expect(names[30]).toBe("031-extend-scheduled-tasks");
     expect(names[31]).toBe("032-output-style");
+    expect(names[32]).toBe("033-drop-outreach-messages");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -74,7 +75,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(32);
+    expect(rows.rows).toHaveLength(33);
   });
 
   it("creates the users table", async () => {
@@ -131,14 +132,22 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
-  it("creates mcp_servers, chat_sessions, scheduled_tasks, outreach_messages, and inbox_messages tables", async () => {
-    for (const table of ["mcp_servers", "chat_sessions", "scheduled_tasks", "outreach_messages", "inbox_messages"]) {
+  it("creates mcp_servers, chat_sessions, scheduled_tasks, and inbox_messages tables", async () => {
+    for (const table of ["mcp_servers", "chat_sessions", "scheduled_tasks", "inbox_messages"]) {
       const result = await sql<{ table_name: string }>`
         SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
+  });
+
+  it("does not leave the legacy outreach_messages table behind after migration 033", async () => {
+    const result = await sql<{ table_name: string }>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'outreach_messages'
+    `.execute(db);
+    expect(result.rows).toHaveLength(0);
   });
 });
 

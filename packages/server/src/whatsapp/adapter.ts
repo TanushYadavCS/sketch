@@ -127,8 +127,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
   };
 
   /**
-   * Sends a DM to a user via their WhatsApp number. Used both in normal DM handling and in
-   * outreach response runs so the same function is available at adapter level.
+   * Sends a DM to a user via their WhatsApp number. Used by the SendMessageToUser MCP tool
+   * to deliver inbox messages.
    */
   const sendDmViaWhatsApp = async ({
     userId,

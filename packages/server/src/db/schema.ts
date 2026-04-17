@@ -262,24 +262,6 @@ export interface AutomationStepContentTable {
   updated_at: Generated<string>;
 }
 
-export interface OutreachMessagesTable {
-  id: string;
-  requester_user_id: string;
-  recipient_user_id: string;
-  message: string;
-  task_context: string | null;
-  response: string | null;
-  status: Generated<string>;
-  platform: string;
-  channel_id: string | null;
-  message_ref: string | null;
-  requester_platform: string;
-  requester_channel: string;
-  requester_thread_ts: string | null;
-  created_at: Generated<string>;
-  responded_at: string | null;
-}
-
 export interface InboxMessagesTable {
   id: string;
   sender_user_id: string;
@@ -380,7 +362,6 @@ export interface DB {
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
-  outreach_messages: OutreachMessagesTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
   entity_source_refs: EntitySourceRefsTable;

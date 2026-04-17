@@ -255,11 +255,6 @@ describe("buildSystemContext", () => {
       expect(result).not.toContain("Slack Channel #");
       expect(result).toContain("In shared channels and groups");
     });
-
-    it("does not contain outreach tag in context protocol", () => {
-      const result = buildSystemContext({ platform: "slack" });
-      expect(result).not.toContain("<outreach>");
-    });
   });
 
   describe("section order", () => {
@@ -664,19 +659,6 @@ describe("buildSketchContext", () => {
         orgDir: "/data/.claude",
       });
       expect(result).not.toContain("<task>");
-    });
-  });
-
-  describe("no outreach section", () => {
-    it("does not produce outreach section", () => {
-      const result = buildSketchContext({
-        messages: [],
-        currentUserName: "Alice",
-        currentMessage: "hello",
-        workspaceDir: "/data/workspaces/u123",
-        orgDir: "/data/.claude",
-      });
-      expect(result).not.toContain("<outreach>");
     });
   });
 

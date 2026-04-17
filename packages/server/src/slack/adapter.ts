@@ -163,7 +163,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   /**
    * Sends a DM to a user via their Slack channel. Fetches fresh settings on each call so the
-   * token is always current. Used both in normal DM handling and in outreach response runs.
+   * token is always current. Used by the SendMessageToUser MCP tool to deliver inbox messages.
    */
   const sendDmViaSlack = async ({
     userId,

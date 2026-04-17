@@ -33,14 +33,14 @@ describe("runMigrations — full sequence", () => {
     await expect(runMigrations(db)).resolves.not.toThrow();
   });
 
-  it("records all 32 migration entries in the kysely_migration table", async () => {
+  it("records all 33 migration entries in the kysely_migration table", async () => {
     await runMigrations(db);
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(32);
+    expect(rows.rows).toHaveLength(33);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -69,6 +69,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[29]).toBe("030-inbox-messages");
     expect(names[30]).toBe("031-extend-scheduled-tasks");
     expect(names[31]).toBe("032-output-style");
+    expect(names[32]).toBe("033-drop-outreach-messages");
   });
 
   it("creates the users table", async () => {
@@ -174,8 +175,8 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    // Still exactly 32, not 64
-    expect(rows.rows).toHaveLength(32);
+    // Still exactly 33, not 66
+    expect(rows.rows).toHaveLength(33);
   });
 });
 
@@ -190,14 +191,14 @@ describe("runMigrations — incremental upgrade", () => {
     await db.destroy();
   });
 
-  it("applies only 019-032 when 001-018 are already present", async () => {
+  it("applies only 019-033 when 001-018 are already present", async () => {
     // Simulate a DB that already has 001-018 applied by running the full migration
     // sequence once, then seeding a user row to represent existing data.
     await runMigrations(db);
 
     await db.insertInto("users").values({ id: "existing-user", name: "Alice" }).execute();
 
-    // Running again should be a no-op (all 32 already applied)
+    // Running again should be a no-op (all 33 already applied)
     await runMigrations(db);
 
     const users = await db.selectFrom("users").selectAll().execute();
@@ -207,6 +208,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(32);
+    expect(rows.rows).toHaveLength(33);
   });
 });
