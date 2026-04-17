@@ -746,6 +746,32 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
 
+    it("passes teammate messaging deps to agent for group mentions", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userRepo).toBe(deps.repos.users);
+      expect(agentCall.inboxMessagesRepo).toBe(deps.inboxMessagesRepo);
+      expect(agentCall.currentUserId).toBe("u1");
+      expect(agentCall.sendDm).toBeTypeOf("function");
+    });
+
     it("passes user email to agent for group mentions", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();

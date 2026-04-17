@@ -3,7 +3,7 @@ import { chunkText } from "../formatting/chunking";
 export type ProgressTransportStrategy = "accumulate" | "replace";
 
 export interface ProgressTransport {
-  pushLines(lines: string[]): Promise<void>;
+  syncLines(lines: string[]): Promise<void>;
   flush(): Promise<void>;
 }
 
@@ -29,6 +29,8 @@ function splitOversizedText(text: string, charLimit: number): string[] {
   return chunkText(text, charLimit).filter((chunk) => chunk.length > 0);
 }
 
+const CLEARED_SEGMENT_TEXT = "\u200b";
+
 function isMessageTooLongError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
 
@@ -45,6 +47,7 @@ function isMessageTooLongError(err: unknown): boolean {
 
 export function createProgressTransport<TRef>(params: CreateProgressTransportParams<TRef>): ProgressTransport {
   const segments: Segment<TRef>[] = [{ lines: [], ref: null, syncedText: null }];
+  let desiredLines: string[] = [];
   let lastSyncAt = 0;
   let syncPromise: Promise<void> | null = null;
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -56,6 +59,31 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
   };
 
   const activeSegment = () => segments[segments.length - 1] ?? segments[0];
+
+  const buildDesiredSegments = (lines: string[]): string[][] => {
+    if (lines.length === 0) return [];
+
+    if (params.strategy === "replace") {
+      return splitOversizedText(renderLines(lines), params.charLimit).map((chunk) => [chunk]);
+    }
+
+    const nextSegments: string[][] = [];
+    for (const rawLine of lines.flatMap((line) => splitOversizedText(line, params.charLimit))) {
+      const current = nextSegments[nextSegments.length - 1];
+      if (!current) {
+        nextSegments.push([rawLine]);
+        continue;
+      }
+
+      const maybeExtended = [...current, rawLine];
+      if (renderLines(maybeExtended).length <= params.charLimit) {
+        current.push(rawLine);
+      } else {
+        nextSegments.push([rawLine]);
+      }
+    }
+    return nextSegments;
+  };
 
   const splitSegmentForRetry = (index: number, text: string): boolean => {
     if (text.length <= 1) return false;
@@ -87,13 +115,34 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
     }
 
     syncPromise = (async () => {
+      const desiredSegments = buildDesiredSegments(desiredLines);
+      const existingCount = segments.length;
+      const targetCount = Math.max(existingCount, desiredSegments.length, 1);
+
+      for (let index = 0; index < targetCount; index++) {
+        if (!segments[index]) {
+          segments[index] = { lines: [], ref: null, syncedText: null };
+        }
+
+        const desiredSegmentLines = desiredSegments[index];
+        const segment = segments[index];
+        if (!segment) continue;
+
+        if (desiredSegmentLines) {
+          segment.lines = desiredSegmentLines;
+        } else {
+          segment.lines = [];
+        }
+      }
+
       for (let index = 0; index < segments.length; ) {
         const segment = segments[index];
         if (!segment) {
           index++;
           continue;
         }
-        const text = renderLines(segment.lines);
+
+        const text = segment.lines.length > 0 ? renderLines(segment.lines) : segment.ref ? CLEARED_SEGMENT_TEXT : "";
         if (!text) {
           index++;
           continue;
@@ -129,6 +178,13 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
           throw err;
         }
       }
+
+      while (segments.length > 1) {
+        const last = segments[segments.length - 1];
+        if (!last || last.ref || last.lines.length > 0) break;
+        segments.pop();
+      }
+
       lastSyncAt = Date.now();
     })();
 
@@ -152,50 +208,9 @@ export function createProgressTransport<TRef>(params: CreateProgressTransportPar
     }, params.throttleMs - elapsed);
   };
 
-  const appendAccumulateLines = async (incomingLines: string[]) => {
-    for (const rawLine of incomingLines.flatMap((line) => splitOversizedText(line, params.charLimit))) {
-      const line = rawLine;
-      const current = activeSegment();
-      const nextLines = current.lines.length > 0 ? [...current.lines, line] : [line];
-      if (renderLines(nextLines).length <= params.charLimit) {
-        current.lines = nextLines;
-        continue;
-      }
-
-      if (current.lines.length > 0) {
-        await syncNow();
-      }
-
-      segments.push({ lines: [line], ref: null, syncedText: null });
-    }
-  };
-
-  const replaceLines = (incomingLines: string[]) => {
-    if (incomingLines.length === 0) return;
-    const current = activeSegment() ?? { lines: [], ref: null, syncedText: null };
-    const nextText = renderLines(incomingLines);
-    const chunks = splitOversizedText(nextText, params.charLimit);
-    segments.splice(
-      0,
-      segments.length,
-      ...(chunks.length > 0
-        ? chunks.map((chunk, index) => ({
-            lines: [chunk],
-            ref: index === 0 ? current.ref : null,
-            syncedText: index === 0 ? current.syncedText : null,
-          }))
-        : [{ lines: [], ref: current.ref, syncedText: current.syncedText }]),
-    );
-  };
-
   return {
-    async pushLines(lines: string[]) {
-      if (lines.length === 0) return;
-      if (params.strategy === "replace") {
-        replaceLines(lines);
-      } else {
-        await appendAccumulateLines(lines);
-      }
+    async syncLines(lines: string[]) {
+      desiredLines = [...lines];
       await scheduleSync();
     },
 

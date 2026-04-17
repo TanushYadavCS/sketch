@@ -30,8 +30,8 @@ describe("createWhatsAppProgressTransport", () => {
     } as WAMessage;
     const transport = createWhatsAppProgressTransport(bot, "group@g.us", "accumulate", quotedMessage);
 
-    await transport.pushLines(["📖 Read"]);
-    await transport.pushLines(["🔧 Edit"]);
+    await transport.syncLines(["📖 Read"]);
+    await transport.syncLines(["📖 Read", "🔧 Edit"]);
     await vi.advanceTimersByTimeAsync(1_500);
     await transport.flush();
 
@@ -47,8 +47,8 @@ describe("createWhatsAppProgressTransport", () => {
     const bot = createMockWhatsApp();
     const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
 
-    await transport.pushLines(["a".repeat(3_995)]);
-    await transport.pushLines(["second line"]);
+    await transport.syncLines(["a".repeat(3_995)]);
+    await transport.syncLines(["a".repeat(3_995), "second line"]);
     await transport.flush();
 
     expect(bot.sendText).toHaveBeenNthCalledWith(1, "jid", "a".repeat(3_995), undefined);
@@ -61,7 +61,7 @@ describe("createWhatsAppProgressTransport", () => {
     const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
     const hugeLine = `Write: ${"x".repeat(6_000)}`;
 
-    await transport.pushLines([hugeLine]);
+    await transport.syncLines([hugeLine]);
     await transport.flush();
 
     expect(bot.sendText.mock.calls.length).toBeGreaterThan(1);
@@ -90,7 +90,7 @@ describe("createWhatsAppProgressTransport", () => {
     };
     const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
 
-    await transport.pushLines([`Write: ${"x".repeat(1_000)}`]);
+    await transport.syncLines([`Write: ${"x".repeat(1_000)}`]);
     await transport.flush();
 
     expect(deliveredTexts.length).toBeGreaterThan(1);
@@ -103,12 +103,30 @@ describe("createWhatsAppProgressTransport", () => {
     const bot = createMockWhatsApp();
     const transport = createWhatsAppProgressTransport(bot, "jid", "replace");
 
-    await transport.pushLines(["📖 Checking"]);
-    await transport.pushLines(["🔧 Updating"]);
+    await transport.syncLines(["📖 Checking"]);
+    await transport.syncLines(["🔧 Updating"]);
     await vi.advanceTimersByTimeAsync(1_500);
     await transport.flush();
 
     expect(bot.sendText).toHaveBeenCalledTimes(1);
     expect(bot.editText).toHaveBeenCalledWith("jid", { remoteJid: "jid", id: "sent-1", fromMe: true }, "🔧 Updating");
+  });
+
+  it("edits the current progress message when dedup rewrites the rendered state", async () => {
+    const bot = createMockWhatsApp();
+    const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
+
+    await transport.syncLines(["🔧 Tweaking things"]);
+    await transport.syncLines(["🔧 Tweaking things (x2)"]);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await transport.flush();
+
+    expect(bot.sendText).toHaveBeenCalledTimes(1);
+    expect(bot.sendText).toHaveBeenCalledWith("jid", "🔧 Tweaking things", undefined);
+    expect(bot.editText).toHaveBeenCalledWith(
+      "jid",
+      { remoteJid: "jid", id: "sent-1", fromMe: true },
+      "🔧 Tweaking things (x2)",
+    );
   });
 });

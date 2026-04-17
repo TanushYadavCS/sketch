@@ -261,7 +261,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
               : createWhatsAppProgressTransport(whatsapp, deliveryJid, progressStrategy);
           const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
             if (!progressTransport) return;
-            await progressTransport.pushLines(progressRenderer.renderEvent(event));
+            progressRenderer.renderEvent(event);
+            await progressTransport.syncLines(progressRenderer.getLines());
           };
 
           const waIntegrationMcpServers = await buildMcpServers(user.email);
@@ -505,7 +506,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             : createWhatsAppProgressTransport(whatsapp, groupJid, progressStrategy, message.rawMessage as WAMessage);
         const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
           if (!progressTransport) return;
-          await progressTransport.pushLines(progressRenderer.renderEvent(event));
+          progressRenderer.renderEvent(event);
+          await progressTransport.syncLines(progressRenderer.getLines());
         };
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
@@ -540,6 +542,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           automationRunsRepo,
           queueManager: queue,
           toolConfig,
+          inboxMessagesRepo,
+          userRepo: repos.users,
+          sendDm: sendDmViaWhatsApp,
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
