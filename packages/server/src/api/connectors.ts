@@ -25,9 +25,11 @@ import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import type { ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
+import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
+type UserRepo = ReturnType<typeof createUserRepository>;
 
 /** Run sync in background. Enrichment runs separately on the scheduled sync cycle. */
 function syncInBackground(db: Kysely<DB>, connectorId: string, logger: Logger) {
@@ -81,8 +83,15 @@ const updateScopeSchema = z.object({
   scopeConfig: z.record(z.string(), z.unknown()),
 });
 
-export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, logger: Logger) {
+export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, logger: Logger, userRepo?: UserRepo) {
   const routes = new Hono();
+
+  async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
+    if (!userRepo) return [];
+    const userId = c.get("sub");
+    if (typeof userId !== "string" || !userId) return [];
+    return userRepo.getAllEmailsForUser(userId);
+  }
 
   /* ── Static-path routes (must come before /:id) ─────── */
 
@@ -225,12 +234,14 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
+    const userEmails = await getUserEmails(c);
     const results = await search(db, parsed.data.query, {
       source: parsed.data.source,
       category: parsed.data.category,
       limit: parsed.data.limit,
       after: after ?? undefined,
       before: before ?? undefined,
+      userEmails,
     });
     return c.json({ results });
   });
@@ -238,7 +249,8 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
   /** Get full content of a file, including who has access and linked entities. */
   routes.get("/files/:fileId/content", async (c) => {
     const fileId = c.req.param("fileId");
-    const file = await getFileContent(db, fileId);
+    const userEmails = await getUserEmails(c);
+    const file = await getFileContent(db, fileId, userEmails);
     if (!file) {
       return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     }

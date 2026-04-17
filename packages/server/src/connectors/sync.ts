@@ -522,6 +522,31 @@ async function recoverStaleSyncs(db: Kysely<DB>, logger: Logger): Promise<void> 
 }
 
 /**
+ * Recover files stuck in embedding_status = "processing" after a crash.
+ * Resets them to "pending" so the enrichment loop re-picks them up.
+ * Threshold: 1 hour — enrichment runs should complete well within that.
+ */
+export async function recoverStaleEnrichments(db: Kysely<DB>, logger: Logger): Promise<void> {
+  const staleThreshold = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  const stale = await db
+    .selectFrom("indexed_files")
+    .select(["id", "file_name"])
+    .where("embedding_status", "=", "processing")
+    .where("synced_at", "<", staleThreshold)
+    .execute();
+
+  if (stale.length === 0) return;
+
+  for (const file of stale) {
+    await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "=", file.id).execute();
+    logger.warn({ fileId: file.id, fileName: file.file_name }, "Recovered stale enriching file");
+  }
+
+  logger.info({ count: stale.length }, "Recovered stale enriching files");
+}
+
+/**
  * Create a simple interval-based sync scheduler.
  * Recovers any stuck syncs on startup, then runs periodically.
  * Returns a cleanup function to stop the scheduler.
@@ -544,6 +569,11 @@ export function startSyncScheduler(
   // Recover any connectors stuck in "syncing" from a previous crash
   recoverStaleSyncs(db, logger).catch((err) => {
     logger.error({ err }, "Failed to recover stale syncs on startup");
+  });
+
+  // Recover any files stuck in enrichment "processing" from a previous crash
+  recoverStaleEnrichments(db, logger).catch((err) => {
+    logger.error({ err }, "Failed to recover stale enrichments on startup");
   });
 
   // Startup enrichment disabled — enrichment now runs only when explicitly

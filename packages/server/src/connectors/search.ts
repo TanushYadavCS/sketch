@@ -29,6 +29,8 @@ export interface SearchResult {
   source: string;
   contentCategory: string;
   summary: string | null;
+  /** External provider ID (e.g. ClickUp task id, Fireflies transcript id). Some sources prefix subtypes (e.g. `doc:`, `db-`, `project-`). */
+  providerFileId: string;
   providerUrl: string | null;
   sourcePath: string | null;
   sourceUpdatedAt: string | null;
@@ -104,6 +106,7 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
         indexed_files.source,
         indexed_files.content_category as "contentCategory",
         indexed_files.summary,
+        indexed_files.provider_file_id as "providerFileId",
         indexed_files.provider_url as "providerUrl",
         indexed_files.source_path as "sourcePath",
         indexed_files.source_updated_at as "sourceUpdatedAt",
@@ -130,6 +133,7 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
 			indexed_files.source,
 			indexed_files.content_category as "contentCategory",
 			indexed_files.summary,
+			indexed_files.provider_file_id as "providerFileId",
 			indexed_files.provider_url as "providerUrl",
 			indexed_files.source_path as "sourcePath",
 			indexed_files.source_updated_at as "sourceUpdatedAt",
@@ -249,6 +253,84 @@ export async function getFileContent(
 }
 
 /**
+ * Filter a list of indexed file IDs down to only those the user can access.
+ * Applies the 3-tier RBAC model (unrestricted / scope-level / per-file).
+ * Returns the input set unchanged when userEmails is empty (no filtering).
+ */
+export async function filterAccessibleFileIds(
+  db: Kysely<DB>,
+  fileIds: string[],
+  userEmails: string[],
+): Promise<Set<string>> {
+  if (fileIds.length === 0) return new Set();
+  if (userEmails.length === 0) return new Set(fileIds);
+
+  const files = await db
+    .selectFrom("indexed_files")
+    .select(["id", "access_scope_id"])
+    .where("id", "in", fileIds)
+    .execute();
+
+  const [fileAccessRows, scopeMemberRows] = await Promise.all([
+    db.selectFrom("file_access").select(["indexed_file_id", "email"]).where("indexed_file_id", "in", fileIds).execute(),
+    (async () => {
+      const scopeIds = files.map((f) => f.access_scope_id).filter((s): s is string => !!s);
+      if (scopeIds.length === 0) return [];
+      return db
+        .selectFrom("access_scope_members")
+        .select(["access_scope_id", "email"])
+        .where("access_scope_id", "in", scopeIds)
+        .where("email", "in", userEmails)
+        .execute();
+    })(),
+  ]);
+
+  const fileAccessByFile = new Map<string, Set<string>>();
+  for (const row of fileAccessRows) {
+    const set = fileAccessByFile.get(row.indexed_file_id) ?? new Set<string>();
+    set.add(row.email);
+    fileAccessByFile.set(row.indexed_file_id, set);
+  }
+  const scopeMemberByScope = new Map<string, Set<string>>();
+  for (const row of scopeMemberRows) {
+    const set = scopeMemberByScope.get(row.access_scope_id) ?? new Set<string>();
+    set.add(row.email);
+    scopeMemberByScope.set(row.access_scope_id, set);
+  }
+
+  const emailSet = new Set(userEmails);
+  const allowed = new Set<string>();
+  for (const file of files) {
+    const perFile = fileAccessByFile.get(file.id);
+    const hasScope = file.access_scope_id != null;
+    const hasFileAccess = (perFile?.size ?? 0) > 0;
+
+    if (!hasScope && !hasFileAccess) {
+      allowed.add(file.id);
+      continue;
+    }
+
+    if (hasScope && file.access_scope_id) {
+      const scopeMembers = scopeMemberByScope.get(file.access_scope_id);
+      if (scopeMembers && scopeMembers.size > 0) {
+        allowed.add(file.id);
+        continue;
+      }
+    }
+
+    if (hasFileAccess && perFile) {
+      for (const email of emailSet) {
+        if (perFile.has(email)) {
+          allowed.add(file.id);
+          break;
+        }
+      }
+    }
+  }
+  return allowed;
+}
+
+/**
  * List all indexed sources with file counts.
  * Useful for the agent to report what data is available.
  */
@@ -267,6 +349,29 @@ export async function listIndexedSources(
     fileCount: Number(r.fileCount),
     lastSynced: r.lastSynced,
   }));
+}
+
+/**
+ * Summary of sources with at least one indexed file, for inclusion in the
+ * agent's system prompt. A source qualifies as "indexed" when it has ≥ 1 file
+ * in `indexed_files` (trusting that anyone who wired a connector and has files
+ * will keep them refreshed). Empty sources are excluded to avoid telling the
+ * agent to Search against nothing.
+ */
+export async function listIndexedSourcesForPrompt(
+  db: Kysely<DB>,
+): Promise<Array<{ source: string; fileCount: number }>> {
+  const results = await db
+    .selectFrom("indexed_files")
+    .select(["source", sql<number>`count(*)`.as("fileCount")])
+    .where("is_archived", "=", 0)
+    .groupBy("source")
+    .having(sql<number>`count(*)`, ">", 0)
+    .execute();
+
+  return results
+    .map((r) => ({ source: r.source, fileCount: Number(r.fileCount) }))
+    .sort((a, b) => b.fileCount - a.fileCount);
 }
 
 /**
@@ -349,6 +454,8 @@ export interface HybridSearchResult {
   source: string;
   contentCategory: string;
   summary: string | null;
+  /** External provider ID (e.g. ClickUp task id, Fireflies transcript id). Some sources prefix subtypes (e.g. `doc:`, `db-`, `project-`). */
+  providerFileId: string;
   providerUrl: string | null;
   sourcePath: string | null;
   sourceUpdatedAt: string | null;
@@ -591,6 +698,7 @@ export async function hybridSearch(
       "source",
       "content_category",
       "summary",
+      "provider_file_id",
       "provider_url",
       "source_path",
       "source_updated_at",
@@ -702,6 +810,7 @@ export async function hybridSearch(
         source: f.source,
         contentCategory: f.content_category,
         summary: f.summary,
+        providerFileId: f.provider_file_id,
         providerUrl: f.provider_url,
         sourcePath: f.source_path,
         sourceUpdatedAt: f.source_updated_at,

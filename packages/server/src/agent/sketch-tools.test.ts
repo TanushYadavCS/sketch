@@ -74,6 +74,7 @@ describe("handleGetTeamDirectory", () => {
       userRepo: {
         list: async () => [alice, bob],
         findById: async () => undefined,
+        getAllEmailsForUser: async () => [],
       },
       currentUserId: "user-alice",
     });
@@ -89,6 +90,7 @@ describe("handleGetTeamDirectory", () => {
       userRepo: {
         list: async () => [user],
         findById: async () => undefined,
+        getAllEmailsForUser: async () => [],
       },
       currentUserId: "user-alice",
     });
@@ -113,7 +115,11 @@ describe("handleSendMessageToUser", () => {
       { recipientUserId: "user-bob", message: "Need your latest update." },
       {
         inboxMessagesRepo: { create: createInboxMessage, listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
-        userRepo: { list: async () => [], findById: async (id) => (id === "user-bob" ? bob : undefined) },
+        userRepo: {
+          list: async () => [],
+          findById: async (id) => (id === "user-bob" ? bob : undefined),
+          getAllEmailsForUser: async () => [],
+        },
         sendDm,
         currentUserId: "user-alice",
       },
@@ -145,7 +151,7 @@ describe("handleSendMessageToUser", () => {
       { recipientUserId: "user-alice", message: "hi" },
       {
         inboxMessagesRepo: { create: vi.fn(), listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
-        userRepo: { list: async () => [], findById: async () => undefined },
+        userRepo: { list: async () => [], findById: async () => undefined, getAllEmailsForUser: async () => [] },
         sendDm: vi.fn(),
         currentUserId: "user-alice",
       },
@@ -159,7 +165,7 @@ describe("handleSendMessageToUser", () => {
       { recipientUserId: "user-ghost", message: "hi" },
       {
         inboxMessagesRepo: { create: vi.fn(), listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
-        userRepo: { list: async () => [], findById: async () => undefined },
+        userRepo: { list: async () => [], findById: async () => undefined, getAllEmailsForUser: async () => [] },
         sendDm: vi.fn(),
         currentUserId: "user-alice",
       },
@@ -174,7 +180,11 @@ describe("handleSendMessageToUser", () => {
       { recipientUserId: "user-charlie", message: "hi" },
       {
         inboxMessagesRepo: { create: vi.fn(), listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
-        userRepo: { list: async () => [], findById: async (id) => (id === "user-charlie" ? charlie : undefined) },
+        userRepo: {
+          list: async () => [],
+          findById: async (id) => (id === "user-charlie" ? charlie : undefined),
+          getAllEmailsForUser: async () => [],
+        },
         sendDm: vi.fn(),
         currentUserId: "user-alice",
       },

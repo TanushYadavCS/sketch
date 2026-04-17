@@ -20,7 +20,7 @@ import { resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
-import { search } from "../connectors/search";
+import { filterAccessibleFileIds, getFileContent, search } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createEntityRepository } from "../db/repositories/entities";
@@ -58,7 +58,11 @@ export interface SketchMcpDeps {
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   toolConfig?: { BASE_URL?: string; PORT: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
-  userRepo?: { list: () => Promise<SelectableUser[]>; findById: (id: string) => Promise<SelectableUser | undefined> };
+  userRepo?: {
+    list: () => Promise<SelectableUser[]>;
+    findById: (id: string) => Promise<SelectableUser | undefined>;
+    getAllEmailsForUser: (id: string) => Promise<string[]>;
+  };
   currentUserId?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
@@ -647,6 +651,11 @@ export async function handleSendMessageToUser(
 export function createSketchMcpServer(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
 
+  async function resolveUserEmails(): Promise<string[]> {
+    if (!deps.currentUserId || !deps.userRepo?.getAllEmailsForUser) return [];
+    return deps.userRepo.getAllEmailsForUser(deps.currentUserId);
+  }
+
   const tools = [
     tool(
       "SendFileToChat",
@@ -807,12 +816,14 @@ Use this to find information before asking others. Examples:
               }
 
               // Hybrid search for documents/content
+              const userEmails = await resolveUserEmails();
               const results = await search(deps.db, searchQuery, {
                 source,
                 limit: resultLimit ?? 10,
                 after,
                 before,
                 entityId,
+                userEmails,
               });
 
               // Auto-boost: rank entity-linked files higher when not hard-filtered
@@ -832,9 +843,11 @@ Use this to find information before asking others. Examples:
               for (const r of results) {
                 const sourceLabel = r.source.charAt(0).toUpperCase() + r.source.slice(1).replace(/_/g, " ");
                 const date = r.sourceUpdatedAt ? new Date(r.sourceUpdatedAt).toISOString().split("T")[0] : "";
-                const urlSuffix = r.providerUrl ? ` — ${r.providerUrl}` : "";
 
-                lines.push(`**${r.fileName}** (${sourceLabel}${date ? `, ${date}` : ""}${urlSuffix})`);
+                lines.push(`**${r.fileName}** (${sourceLabel}${date ? `, ${date}` : ""})`);
+                lines.push(`  sketchId: ${r.id}`);
+                lines.push(`  providerId: ${r.providerFileId} (source=${r.source})`);
+                if (r.providerUrl) lines.push(`  url: ${r.providerUrl}`);
                 if (r.summary) {
                   lines.push(`> ${r.summary.slice(0, 200)}${r.summary.length > 200 ? "..." : ""}`);
                 } else if (r.snippet) {
@@ -948,10 +961,26 @@ Use this after SearchEntities to dive deeper into a specific entity. The respons
                 return { content: [{ type: "text" as const, text: `Entity ${entityId} not found.` }] };
               }
 
-              const mentions = await entityRepo.getMentionsForEntity(entityId, {
-                limit: limit ?? 20,
+              const requestedLimit = limit ?? 20;
+              const userEmails = await resolveUserEmails();
+              // When RBAC is active, fetch an over-bound so access filtering doesn't starve the results.
+              const rawMentions = await entityRepo.getMentionsForEntity(entityId, {
+                limit: userEmails.length > 0 ? Math.max(requestedLimit * 5, 100) : requestedLimit,
                 since,
               });
+
+              const accessibleIds =
+                userEmails.length > 0
+                  ? await filterAccessibleFileIds(
+                      deps.db,
+                      rawMentions.map((m) => m.indexed_file_id),
+                      userEmails,
+                    )
+                  : null;
+
+              const mentions = (
+                accessibleIds ? rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)) : rawMentions
+              ).slice(0, requestedLimit);
 
               // Enrich mentions with file metadata
               const lines: string[] = [];
@@ -962,7 +991,7 @@ Use this after SearchEntities to dive deeper into a specific entity. The respons
                 `Type: ${entity.source_type}${entity.subtype ? ` (${entity.subtype})` : ""} | Status: ${entity.status}`,
               );
               lines.push(
-                `Total mentions found: ${mentions.length}${mentions.length === (limit ?? 20) ? " (limit reached, use 'since' or increase 'limit' for more)" : ""}`,
+                `Total mentions found: ${mentions.length}${mentions.length === requestedLimit ? " (limit reached, use 'since' or increase 'limit' for more)" : ""}`,
               );
               lines.push("");
 
@@ -989,6 +1018,37 @@ Use this after SearchEntities to dive deeper into a specific entity. The respons
               if (mentions.length === 0) {
                 lines.push("No mentions found for this entity.");
               }
+
+              return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+            },
+          ),
+
+          tool(
+            "GetFileContent",
+            `Retrieve the full content of an indexed file by its ID. Use this after Search returns a relevant result and you need the complete text — e.g. full meeting transcript, complete document, or full task description.
+
+The ID comes from a previous Search result.`,
+            {
+              fileId: z.string().describe("The indexed file ID from a Search result."),
+            },
+            async ({ fileId }) => {
+              if (!deps.db) {
+                return { content: [{ type: "text" as const, text: "File content not available." }] };
+              }
+              const userEmails = await resolveUserEmails();
+              const file = await getFileContent(deps.db, fileId, userEmails);
+
+              if (!file) {
+                return { content: [{ type: "text" as const, text: `File ${fileId} not found.` }] };
+              }
+
+              const lines: string[] = [];
+              const sourceLabel = file.source.charAt(0).toUpperCase() + file.source.slice(1).replace(/_/g, " ");
+              lines.push(`# ${file.fileName}`);
+              lines.push(`Source: ${sourceLabel}${file.fileType ? ` (${file.fileType})` : ""}`);
+              if (file.providerUrl) lines.push(`URL: ${file.providerUrl}`);
+              lines.push("");
+              lines.push(file.content ?? file.summary ?? "(no content)");
 
               return { content: [{ type: "text" as const, text: lines.join("\n") }] };
             },

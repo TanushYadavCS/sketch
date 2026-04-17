@@ -187,6 +187,18 @@ export async function matchEntities(
 }
 
 /**
+ * Filter a list of file IDs down to those still present in `indexed_files`.
+ * Preserves input order. Used to keep `entity_candidates.seen_file_ids`
+ * (a JSON blob, not a FK) in sync with reality before FK-guarded inserts.
+ */
+async function pruneMissingFileIds(db: Kysely<DB>, fileIds: string[]): Promise<string[]> {
+  if (fileIds.length === 0) return [];
+  const rows = await db.selectFrom("indexed_files").select("id").where("id", "in", fileIds).execute();
+  const live = new Set(rows.map((r) => r.id));
+  return fileIds.filter((id) => live.has(id));
+}
+
+/**
  * Handle unmatched mentions: create or update entity candidates.
  * Promotes candidates to real entities when seen in enough files.
  */
@@ -211,12 +223,16 @@ export async function handleCandidates(
       .executeTakeFirst();
 
     if (existing) {
-      // Update existing candidate
-      const seenFileIds: string[] = JSON.parse(existing.seen_file_ids);
-      if (seenFileIds.includes(fileId)) continue; // Already counted this file
+      // Update existing candidate. Prune any file IDs whose indexed_files row
+      // no longer exists (dev resets, manual DB ops) — seen_file_ids is a JSON
+      // blob, not a FK, so stale IDs accumulate and would break the FK-guarded
+      // backfill below on promotion.
+      const rawSeenFileIds: string[] = JSON.parse(existing.seen_file_ids);
+      if (rawSeenFileIds.includes(fileId)) continue; // Already counted this file
 
+      const seenFileIds = await pruneMissingFileIds(db, rawSeenFileIds);
       seenFileIds.push(fileId);
-      const newCount = existing.seen_count + 1;
+      const newCount = seenFileIds.length;
 
       await db
         .updateTable("entity_candidates")
@@ -244,16 +260,25 @@ export async function handleCandidates(
           .where("id", "=", existing.id)
           .execute();
 
-        // Backfill entity_mentions for all files where this candidate was seen
-        for (const seenFileId of seenFileIds) {
+        // Backfill entity_mentions. The prune above makes this mostly a no-op,
+        // but re-check at insert time so a file deleted between prune and loop
+        // can't crash the whole promotion.
+        const liveFileIds = await pruneMissingFileIds(db, seenFileIds);
+        for (const seenFileId of liveFileIds) {
           await entityRepo.createMention({
             entityId: entity.id,
             indexedFileId: seenFileId,
           });
         }
+        if (liveFileIds.length < seenFileIds.length) {
+          logger.warn(
+            { entityId: entity.id, total: seenFileIds.length, skipped: seenFileIds.length - liveFileIds.length },
+            "Skipped mention backfill for missing indexed files",
+          );
+        }
 
         logger.info(
-          { entityName: mention.mention, entityId: entity.id, fileCount: seenFileIds.length },
+          { entityName: mention.mention, entityId: entity.id, fileCount: liveFileIds.length },
           "Promoted entity candidate",
         );
 

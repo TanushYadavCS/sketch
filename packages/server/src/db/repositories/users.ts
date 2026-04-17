@@ -24,6 +24,26 @@ export function createUserRepository(db: Kysely<DB>) {
       return db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirst();
     },
 
+    async getAllEmailsForUser(userId: string): Promise<string[]> {
+      const [user, identities] = await Promise.all([
+        db.selectFrom("users").select("email").where("id", "=", userId).executeTakeFirst(),
+        db
+          .selectFrom("user_provider_identities")
+          .select("provider_email")
+          .where("user_id", "=", userId)
+          .where("provider_email", "is not", null)
+          .execute(),
+      ]);
+      const emails: string[] = [];
+      if (user?.email) emails.push(user.email);
+      for (const row of identities) {
+        if (row.provider_email && !emails.includes(row.provider_email)) {
+          emails.push(row.provider_email);
+        }
+      }
+      return emails;
+    },
+
     async create(data: {
       name: string;
       slackUserId?: string;

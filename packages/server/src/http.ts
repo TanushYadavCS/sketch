@@ -195,7 +195,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     app.route("/api/entities", entityRoutes(db));
 
     if (deps?.logger) {
-      app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger));
+      app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users));
     }
 
     const identities = createProviderIdentityRepository(db);

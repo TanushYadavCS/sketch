@@ -13,7 +13,7 @@ import type { Kysely } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { startSyncScheduler } from "./sync";
+import { recoverStaleEnrichments, startSyncScheduler } from "./sync";
 
 // Stub the heavy enrichment/sync work to keep tests fast
 vi.mock("./enrichment", () => ({
@@ -62,6 +62,103 @@ describe("startSyncScheduler", () => {
     await handle.stop();
     await expect(db.destroy()).resolves.toBeUndefined();
     db = null;
+  });
+});
+
+describe("recoverStaleEnrichments", () => {
+  let db: Kysely<DB> | null = null;
+  const logger = createTestLogger();
+
+  afterEach(async () => {
+    if (db) {
+      try {
+        await db.destroy();
+      } catch {
+        // already destroyed
+      }
+      db = null;
+    }
+  });
+
+  async function insertFile(database: Kysely<DB>, id: string, opts: { embeddingStatus: string; syncedAt: string }) {
+    await database
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "connector-recover",
+        provider_file_id: id,
+        file_name: `${id}.txt`,
+        file_type: "text",
+        content_category: "document",
+        source: "google_drive",
+        source_path: `/${id}`,
+        provider_url: null,
+        content: "content",
+        summary: null,
+        context_note: null,
+        access_scope_id: null,
+        source_updated_at: new Date().toISOString(),
+        synced_at: opts.syncedAt,
+        embedding_status: opts.embeddingStatus,
+      })
+      .execute();
+  }
+
+  it("resets files stuck in processing older than 1 hour to pending", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-recover",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await insertFile(db, "file-stale", { embeddingStatus: "processing", syncedAt: twoHoursAgo });
+
+    await recoverStaleEnrichments(db, logger);
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select("embedding_status")
+      .where("id", "=", "file-stale")
+      .executeTakeFirst();
+    expect(row?.embedding_status).toBe("pending");
+  });
+
+  it("leaves recent processing files alone", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-recover",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    await insertFile(db, "file-fresh", { embeddingStatus: "processing", syncedAt: fiveMinAgo });
+
+    await recoverStaleEnrichments(db, logger);
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select("embedding_status")
+      .where("id", "=", "file-fresh")
+      .executeTakeFirst();
+    expect(row?.embedding_status).toBe("processing");
+  });
+
+  it("does nothing when there are no stuck files", async () => {
+    db = await createTestDb();
+    await expect(recoverStaleEnrichments(db, logger)).resolves.toBeUndefined();
   });
 });
 
