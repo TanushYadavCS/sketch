@@ -48,6 +48,17 @@ import { createWhatsAppProgressTransport } from "./progress-transport";
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
+
+function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 
 export interface WhatsAppAdapterDeps {
@@ -155,6 +166,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           senderName: sender?.name ?? "Unknown",
           message: row.message,
           createdAt: row.created_at,
+          kind: row.kind,
+          metadata: parseInboxMetadata(row.metadata),
         };
       }),
     );

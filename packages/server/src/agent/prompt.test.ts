@@ -590,6 +590,43 @@ describe("buildSketchContext", () => {
       expect(result).toContain("</inbox>");
     });
 
+    it("renders workflow inbox items with explicit fields", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        inboxMessages: [
+          {
+            id: "inbox-1",
+            senderName: "System",
+            message: "Fallback message",
+            createdAt: new Date().toISOString(),
+            kind: "managed_onboarding_intro",
+            metadata: {
+              stage: "awaiting_recipients",
+              source: "managed_slack_onboarding",
+              originalMessage: "Who should I introduce myself to first?",
+              instructions: ["Resolve names", "Ask for confirmation"],
+              selectedNames: [],
+              draftMessage: null,
+            },
+          },
+        ],
+      });
+
+      expect(result).toContain("Type: managed_onboarding_intro");
+      expect(result).toContain("Status: awaiting_recipients");
+      expect(result).toContain("Source: managed_slack_onboarding");
+      expect(result).toContain("Original message:");
+      expect(result).toContain("Who should I introduce myself to first?");
+      expect(result).toContain("- Resolve names");
+      expect(result).toContain("Selected recipients:");
+      expect(result).toContain("None yet");
+      expect(result).toContain("Draft message:");
+    });
+
     it("omits inbox tag when there are no inbox messages", () => {
       const result = buildSketchContext({
         messages: [],

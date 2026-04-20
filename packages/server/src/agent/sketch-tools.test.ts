@@ -8,7 +8,9 @@ import {
   UploadCollector,
   createSketchMcpServer,
   handleGetTeamDirectory,
+  handleResolveInboxWorkflow,
   handleSendMessageToUser,
+  handleUpdateInboxWorkflow,
 } from "./sketch-tools";
 
 function makeUser(overrides: Partial<Selectable<UsersTable>> = {}): Selectable<UsersTable> {
@@ -112,7 +114,14 @@ describe("handleSendMessageToUser", () => {
     const result = await handleSendMessageToUser(
       { recipientUserId: "user-bob", message: "Need your latest update." },
       {
-        inboxMessagesRepo: { create: createInboxMessage, listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
+        inboxMessagesRepo: {
+          create: createInboxMessage,
+          listPendingForRecipient: vi.fn(),
+          markConsumed: vi.fn(),
+          findById: vi.fn(),
+          updateWorkflow: vi.fn(),
+          resolve: vi.fn(),
+        },
         userRepo: { list: async () => [], findById: async (id) => (id === "user-bob" ? bob : undefined) },
         sendDm,
         currentUserId: "user-alice",
@@ -144,7 +153,14 @@ describe("handleSendMessageToUser", () => {
     const result = await handleSendMessageToUser(
       { recipientUserId: "user-alice", message: "hi" },
       {
-        inboxMessagesRepo: { create: vi.fn(), listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
+        inboxMessagesRepo: {
+          create: vi.fn(),
+          listPendingForRecipient: vi.fn(),
+          markConsumed: vi.fn(),
+          findById: vi.fn(),
+          updateWorkflow: vi.fn(),
+          resolve: vi.fn(),
+        },
         userRepo: { list: async () => [], findById: async () => undefined },
         sendDm: vi.fn(),
         currentUserId: "user-alice",
@@ -158,7 +174,14 @@ describe("handleSendMessageToUser", () => {
     const result = await handleSendMessageToUser(
       { recipientUserId: "user-ghost", message: "hi" },
       {
-        inboxMessagesRepo: { create: vi.fn(), listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
+        inboxMessagesRepo: {
+          create: vi.fn(),
+          listPendingForRecipient: vi.fn(),
+          markConsumed: vi.fn(),
+          findById: vi.fn(),
+          updateWorkflow: vi.fn(),
+          resolve: vi.fn(),
+        },
         userRepo: { list: async () => [], findById: async () => undefined },
         sendDm: vi.fn(),
         currentUserId: "user-alice",
@@ -173,7 +196,14 @@ describe("handleSendMessageToUser", () => {
     const result = await handleSendMessageToUser(
       { recipientUserId: "user-charlie", message: "hi" },
       {
-        inboxMessagesRepo: { create: vi.fn(), listPendingForRecipient: vi.fn(), markConsumed: vi.fn() },
+        inboxMessagesRepo: {
+          create: vi.fn(),
+          listPendingForRecipient: vi.fn(),
+          markConsumed: vi.fn(),
+          findById: vi.fn(),
+          updateWorkflow: vi.fn(),
+          resolve: vi.fn(),
+        },
         userRepo: { list: async () => [], findById: async (id) => (id === "user-charlie" ? charlie : undefined) },
         sendDm: vi.fn(),
         currentUserId: "user-alice",
@@ -195,5 +225,77 @@ describe("handleSendMessageToUser", () => {
     );
 
     expect(result.content[0].text).toBe("Error: messaging is not available in this context.");
+  });
+});
+
+describe("handleUpdateInboxWorkflow", () => {
+  it("updates explicit inbox workflows for the current user", async () => {
+    const findById = vi.fn().mockResolvedValue({
+      id: "inbox-1",
+      recipient_user_id: "user-alice",
+      resolution_mode: "explicit",
+      resolved_at: null,
+    });
+    const updateWorkflow = vi.fn().mockResolvedValue({
+      id: "inbox-1",
+      metadata: JSON.stringify({ stage: "awaiting_confirmation" }),
+    });
+
+    const result = await handleUpdateInboxWorkflow(
+      { inboxMessageId: "inbox-1", metadata: { stage: "awaiting_confirmation" } },
+      {
+        inboxMessagesRepo: {
+          create: vi.fn(),
+          listPendingForRecipient: vi.fn(),
+          markConsumed: vi.fn(),
+          findById,
+          updateWorkflow,
+          resolve: vi.fn(),
+        },
+        currentUserId: "user-alice",
+      },
+    );
+
+    expect(updateWorkflow).toHaveBeenCalledWith("inbox-1", { stage: "awaiting_confirmation" });
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      inboxMessageId: "inbox-1",
+      status: "updated",
+      metadata: { stage: "awaiting_confirmation" },
+    });
+  });
+});
+
+describe("handleResolveInboxWorkflow", () => {
+  it("resolves explicit inbox workflows for the current user", async () => {
+    const resolve = vi.fn().mockResolvedValue({
+      id: "inbox-1",
+      resolved_at: "2026-04-20T10:00:00.000Z",
+    });
+
+    const result = await handleResolveInboxWorkflow(
+      { inboxMessageId: "inbox-1" },
+      {
+        inboxMessagesRepo: {
+          create: vi.fn(),
+          listPendingForRecipient: vi.fn(),
+          markConsumed: vi.fn(),
+          findById: vi.fn().mockResolvedValue({
+            id: "inbox-1",
+            recipient_user_id: "user-alice",
+            resolution_mode: "explicit",
+            resolved_at: null,
+          }),
+          updateWorkflow: vi.fn(),
+          resolve,
+        },
+        currentUserId: "user-alice",
+      },
+    );
+
+    expect(resolve).toHaveBeenCalledWith("inbox-1");
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      inboxMessageId: "inbox-1",
+      status: "resolved",
+    });
   });
 });

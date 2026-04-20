@@ -52,6 +52,17 @@ type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 
+function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SlackAdapterDeps {
   db: Kysely<DB>;
   config: Config;
@@ -192,6 +203,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           senderName: sender?.name ?? "Unknown",
           message: row.message,
           createdAt: row.created_at,
+          kind: row.kind,
+          metadata: parseInboxMetadata(row.metadata),
         };
       }),
     );
