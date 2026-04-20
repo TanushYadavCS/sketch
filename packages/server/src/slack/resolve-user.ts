@@ -8,6 +8,7 @@
  * a different Slack ID to avoid accidental identity merging.
  */
 import type { Logger } from "../logger";
+import { upsertSlackIdentity } from "./upsert-identity";
 
 type UserRow = {
   id: string;
@@ -54,25 +55,32 @@ export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUs
     );
 
     if (userInfo.email) {
-      const existing = await users.findByEmail(userInfo.email);
-      logger.debug(
-        {
-          email: userInfo.email,
-          found: !!existing,
-          existingId: existing?.id,
-          existingSlackId: existing?.slack_user_id,
-        },
-        "resolveSlackUser: findByEmail result",
-      );
+      const result = await upsertSlackIdentity(users, {
+        name: userInfo.realName,
+        email: userInfo.email,
+        slackUserId,
+      });
 
-      if (existing && !existing.slack_user_id) {
-        user = await users.update(existing.id, { slackUserId, emailVerified: true });
-        logger.info({ userId: user.id, name: user.name }, "Linked Slack ID to existing user by email");
-      } else if (existing?.slack_user_id) {
+      if (result.status === "conflict") {
         logger.debug(
-          { existingId: existing.id, existingSlackId: existing.slack_user_id, newSlackId: slackUserId },
+          {
+            existingId: result.user.id,
+            existingSlackId: result.conflict.existingSlackUserId,
+            newSlackId: result.conflict.incomingSlackUserId,
+          },
           "resolveSlackUser: skipped linking, user already has a Slack ID",
         );
+      } else {
+        const resolvedUser = result.user;
+        user = resolvedUser;
+        if (result.status === "created") {
+          logger.info({ userId: resolvedUser.id, name: resolvedUser.name }, "New user created");
+        } else if (result.status === "updated") {
+          logger.info(
+            { userId: resolvedUser.id, name: resolvedUser.name },
+            "Linked Slack ID to existing user by email",
+          );
+        }
       }
     }
     if (!user) {

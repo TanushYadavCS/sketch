@@ -69,6 +69,18 @@ export function createInboxMessagesRepository(db: Kysely<DB>) {
       return db.selectFrom("inbox_messages").selectAll().where("id", "=", id).executeTakeFirst();
     },
 
+    async findUnresolvedByRecipientAndKind(recipientUserId: string, kind: string) {
+      return db
+        .selectFrom("inbox_messages")
+        .selectAll()
+        .where("recipient_user_id", "=", recipientUserId)
+        .where("kind", "=", kind)
+        .where("resolution_mode", "=", "explicit")
+        .where("resolved_at", "is", null)
+        .orderBy("created_at", "desc")
+        .executeTakeFirst();
+    },
+
     async updateWorkflow(id: string, metadata: Record<string, unknown>) {
       const existing = await db.selectFrom("inbox_messages").selectAll().where("id", "=", id).executeTakeFirst();
       if (!existing || existing.resolution_mode !== "explicit" || existing.resolved_at) return undefined;

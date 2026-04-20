@@ -1,9 +1,9 @@
 /**
  * Sketch MCP tools: SendFileToChat (file upload), getProviderConfig (integration credentials),
  * ManageScheduledTasks (create/list/update/pause/resume/remove scheduled agent runs),
- * GetTeamDirectory (discover team members), SendMessageToUser (send a DM and
- * create a one-way inbox record for the recipient), and inbox workflow helpers
- * for updating and resolving explicit inbox tasks.
+ * GetTeamDirectory (discover team members), SearchUsers, SendMessageToUser,
+ * SendMessageToUsers, and inbox workflow helpers for updating and resolving
+ * explicit inbox tasks.
  *
  * Uses createSdkMcpServer() for in-memory tool dispatch. UploadCollector is created
  * per agent run. getProviderConfig reads integration provider credentials from the DB
@@ -32,6 +32,16 @@ import type { WorkflowStep } from "../workflows/types";
 
 type SelectableUser = Selectable<UsersTable>;
 
+interface SearchableUserRepo {
+  list: () => Promise<SelectableUser[]>;
+  findById: (id: string) => Promise<SelectableUser | undefined>;
+  findByEmail?: (email: string) => Promise<SelectableUser | undefined>;
+  findBySlackId?: (slackUserId: string) => Promise<SelectableUser | undefined>;
+  findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
+  searchByNamePrefix?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+  searchByNameSubstring?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+}
+
 export class UploadCollector {
   private pending: string[] = [];
 
@@ -58,7 +68,7 @@ export interface SketchMcpDeps {
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   toolConfig?: { BASE_URL?: string; PORT: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
-  userRepo?: { list: () => Promise<SelectableUser[]>; findById: (id: string) => Promise<SelectableUser | undefined> };
+  userRepo?: SearchableUserRepo;
   currentUserId?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
@@ -596,50 +606,204 @@ export async function handleGetTeamDirectory(
   return { content: [{ type: "text" as const, text: JSON.stringify(directory, null, 2) }] };
 }
 
-export async function handleSendMessageToUser(
-  params: { recipientUserId: string; message: string },
+function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
+  if (recipient.slack_user_id) return "slack";
+  if (recipient.whatsapp_number) return "whatsapp";
+  return null;
+}
+
+function formatUserMatch(user: SelectableUser, matchedBy: string) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    slackUserId: user.slack_user_id,
+    channels: [...(user.slack_user_id ? ["slack"] : []), ...(user.whatsapp_number ? ["whatsapp"] : [])],
+    matchedBy,
+  };
+}
+
+function extractSlackUserId(query: string): string | null {
+  const mentionMatch = query.trim().match(/^<@([A-Z0-9]+)>$/i);
+  if (mentionMatch) return mentionMatch[1];
+  const rawSlackIdMatch = query.trim().match(/^[A-Z][A-Z0-9]{4,}$/i);
+  return rawSlackIdMatch ? rawSlackIdMatch[0] : null;
+}
+
+function looksLikeEmail(query: string): boolean {
+  return query.includes("@");
+}
+
+async function deliverMessageToUser(
+  params: { recipientUserId: string; message: string; storeInInbox?: boolean },
   deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
-): Promise<ToolResult> {
-  if (!deps.inboxMessagesRepo || !deps.userRepo || !deps.sendDm || !deps.currentUserId) {
-    return { content: [{ type: "text" as const, text: "Error: messaging is not available in this context." }] };
+): Promise<
+  | { status: "sent"; recipient: SelectableUser; platform: "slack" | "whatsapp"; inboxMessageId?: string }
+  | { status: "skipped" | "failed"; error: string; recipient?: SelectableUser }
+> {
+  if (!deps.userRepo || !deps.sendDm || !deps.currentUserId) {
+    return { status: "failed", error: "messaging is not available in this context." };
   }
   if (params.recipientUserId === deps.currentUserId) {
-    return { content: [{ type: "text" as const, text: "Error: cannot send a message to yourself." }] };
-  }
-  const recipient = await deps.userRepo.findById(params.recipientUserId);
-  if (!recipient) return { content: [{ type: "text" as const, text: "Error: user not found." }] };
-  if (!recipient.slack_user_id && !recipient.whatsapp_number) {
-    return {
-      content: [
-        { type: "text" as const, text: `Error: ${recipient.name} has no connected channel (Slack or WhatsApp).` },
-      ],
-    };
+    return { status: "failed", error: "cannot send a message to yourself." };
   }
 
-  const platform = recipient.slack_user_id ? "slack" : "whatsapp";
+  const recipient = await deps.userRepo.findById(params.recipientUserId);
+  if (!recipient) return { status: "failed", error: "user not found." };
+
+  const platform = detectPlatform(recipient);
+  if (!platform) {
+    return { status: "failed", error: `${recipient.name} has no connected channel (Slack or WhatsApp).`, recipient };
+  }
+
   const { channelId, messageRef } = await deps.sendDm({
     userId: params.recipientUserId,
     platform,
     message: params.message,
   });
 
-  const inboxMessage = await deps.inboxMessagesRepo.create({
-    senderUserId: deps.currentUserId,
-    recipientUserId: params.recipientUserId,
-    message: params.message,
-    platform,
-    channelId,
-    messageRef,
-  });
+  let inboxMessageId: string | undefined;
+  if (params.storeInInbox !== false) {
+    if (!deps.inboxMessagesRepo) {
+      return { status: "failed", error: "Inbox storage is not available in this context.", recipient };
+    }
+    const inboxMessage = await deps.inboxMessagesRepo.create({
+      senderUserId: deps.currentUserId,
+      recipientUserId: params.recipientUserId,
+      message: params.message,
+      platform,
+      channelId,
+      messageRef,
+    });
+    inboxMessageId = inboxMessage.id;
+  }
+
+  return { status: "sent", recipient, platform, inboxMessageId };
+}
+
+export async function handleSendMessageToUser(
+  params: { recipientUserId: string; message: string },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
+): Promise<ToolResult> {
+  const result = await deliverMessageToUser({ ...params, storeInInbox: true }, deps);
+  if (result.status !== "sent") {
+    return { content: [{ type: "text" as const, text: `Error: ${result.error}` }] };
+  }
 
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ inboxMessageId: inboxMessage.id, recipientName: recipient.name, status: "sent" }),
+        text: JSON.stringify({
+          inboxMessageId: result.inboxMessageId,
+          recipientName: result.recipient.name,
+          status: "sent",
+        }),
       },
     ],
   };
+}
+
+export async function handleSearchUsers(
+  params: { queries: string[] },
+  deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.userRepo) {
+    return { content: [{ type: "text" as const, text: "User search is not available in this context." }] };
+  }
+
+  const results: Array<{ query: string; matches: Array<Record<string, unknown>> }> = [];
+
+  for (const query of params.queries) {
+    const matches: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    const slackUserId = extractSlackUserId(query);
+    const trimmedQuery = query.trim();
+
+    const pushMatch = (user: SelectableUser | undefined, matchedBy: string) => {
+      if (!user || user.id === deps.currentUserId || seen.has(user.id)) return;
+      seen.add(user.id);
+      matches.push(formatUserMatch(user, matchedBy));
+    };
+
+    if (slackUserId) {
+      pushMatch(await deps.userRepo.findBySlackId?.(slackUserId), "slack_user_id");
+    }
+
+    if (looksLikeEmail(trimmedQuery)) {
+      pushMatch(await deps.userRepo.findByEmail?.(trimmedQuery), "exact_email");
+    }
+
+    pushMatch(await deps.userRepo.findByExactName?.(trimmedQuery, deps.currentUserId), "exact_name");
+
+    const prefixMatches = deps.userRepo.searchByNamePrefix
+      ? await deps.userRepo.searchByNamePrefix(trimmedQuery, 5, deps.currentUserId)
+      : [];
+    for (const user of prefixMatches) {
+      pushMatch(user, "prefix_name");
+    }
+
+    if (trimmedQuery.length >= 3) {
+      const substringMatches = deps.userRepo.searchByNameSubstring
+        ? await deps.userRepo.searchByNameSubstring(trimmedQuery, 5, deps.currentUserId)
+        : [];
+      for (const user of substringMatches) {
+        pushMatch(user, "substring_name");
+      }
+    }
+
+    results.push({ query, matches });
+  }
+
+  return { content: [{ type: "text" as const, text: JSON.stringify({ results }) }] };
+}
+
+export async function handleSendMessageToUsers(
+  params: { recipientUserIds: string[]; message: string; storeInInbox?: boolean },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
+): Promise<ToolResult> {
+  const seen = new Set<string>();
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const recipientUserId of params.recipientUserIds) {
+    if (seen.has(recipientUserId)) {
+      results.push({ recipientUserId, status: "skipped", error: "Duplicate recipient in request" });
+      continue;
+    }
+    seen.add(recipientUserId);
+
+    try {
+      const result = await deliverMessageToUser(
+        { recipientUserId, message: params.message, storeInInbox: params.storeInInbox },
+        deps,
+      );
+
+      if (result.status === "sent") {
+        results.push({
+          recipientUserId,
+          recipientName: result.recipient.name,
+          status: "sent",
+          platform: result.platform,
+          ...(result.inboxMessageId ? { inboxMessageId: result.inboxMessageId } : {}),
+        });
+      } else {
+        results.push({
+          recipientUserId,
+          recipientName: result.recipient?.name,
+          status: result.status,
+          error: result.error,
+        });
+      }
+    } catch (error) {
+      results.push({
+        recipientUserId,
+        status: "failed",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  return { content: [{ type: "text" as const, text: JSON.stringify({ results }) }] };
 }
 
 export async function handleUpdateInboxWorkflow(
@@ -803,6 +967,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ),
 
     tool(
+      "SearchUsers",
+      "Resolve names, emails, Slack mentions, and Slack user IDs into tenant users. Returns ranked candidates so you can confirm recipients before sending messages.",
+      {
+        queries: z.array(z.string()).describe("Names, emails, Slack mentions, or Slack user IDs to resolve."),
+      },
+      async (params) => handleSearchUsers(params, deps),
+    ),
+
+    tool(
       "SendMessageToUser",
       "Send a DM to a team member via their connected channel (Slack or WhatsApp). The exact message is also stored as a one-way inbox item so their agent can see it on their next private chat.",
       {
@@ -810,6 +983,20 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         message: z.string().describe("The exact message text to send to the recipient."),
       },
       async (params) => handleSendMessageToUser(params, deps),
+    ),
+
+    tool(
+      "SendMessageToUsers",
+      "Send the same DM to multiple team members. When storeInInbox is true, the sent message is also stored as a one-way inbox item for each successful recipient.",
+      {
+        recipientUserIds: z.array(z.string()).describe("The recipient user IDs to message."),
+        message: z.string().describe("The exact message text to send to every recipient."),
+        storeInInbox: z
+          .boolean()
+          .optional()
+          .describe("Whether to store the sent message in each recipient's inbox. Defaults to true."),
+      },
+      async (params) => handleSendMessageToUsers(params, deps),
     ),
 
     tool(
