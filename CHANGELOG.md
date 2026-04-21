@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.19.4] -- 2026-04-21
+
+- Fix(slack): wrap `reactions.add` and `reactions.remove` in try/catch with warn log. A failed acknowledgement reaction (e.g., `missing_scope` on tokens issued without `reactions:write`) no longer kills the message queue work item and blocks the agent reply. Also replaces the silent swallow on `removeReaction` with a visible warn.
+
 ## [0.19.3] -- 2026-04-21
 
 - Managed intro workflows: inbox-backed admin approval flow, bulk Slack user sync, `SearchUsers`, `SendMessageToUsers`, and managed onboarding intro bootstrap endpoints
