@@ -41,6 +41,21 @@ export interface ResolveSlackUserDeps {
   logger: Logger;
 }
 
+export class SlackIdentityConflictError extends Error {
+  constructor(
+    readonly conflict: {
+      email: string;
+      existingUserId: string;
+      existingSlackUserId: string;
+      incomingSlackUserId: string;
+    },
+  ) {
+    super(
+      `Email ${conflict.email} is already linked to Slack user ${conflict.existingSlackUserId}; refusing to link ${conflict.incomingSlackUserId}`,
+    );
+  }
+}
+
 export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUserDeps): Promise<UserRow> {
   const { users, getUserInfo, logger } = deps;
 
@@ -62,25 +77,29 @@ export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUs
       });
 
       if (result.status === "conflict") {
-        logger.debug(
+        logger.warn(
           {
             existingId: result.user.id,
+            email: result.conflict.email,
             existingSlackId: result.conflict.existingSlackUserId,
             newSlackId: result.conflict.incomingSlackUserId,
           },
-          "resolveSlackUser: skipped linking, user already has a Slack ID",
+          "resolveSlackUser: email already linked to a different Slack user",
         );
-      } else {
-        const resolvedUser = result.user;
-        user = resolvedUser;
-        if (result.status === "created") {
-          logger.info({ userId: resolvedUser.id, name: resolvedUser.name }, "New user created");
-        } else if (result.status === "updated") {
-          logger.info(
-            { userId: resolvedUser.id, name: resolvedUser.name },
-            "Linked Slack ID to existing user by email",
-          );
-        }
+        throw new SlackIdentityConflictError({
+          email: result.conflict.email,
+          existingUserId: result.user.id,
+          existingSlackUserId: result.conflict.existingSlackUserId,
+          incomingSlackUserId: result.conflict.incomingSlackUserId,
+        });
+      }
+
+      const resolvedUser = result.user;
+      user = resolvedUser;
+      if (result.status === "created") {
+        logger.info({ userId: resolvedUser.id, name: resolvedUser.name }, "New user created");
+      } else if (result.status === "updated") {
+        logger.info({ userId: resolvedUser.id, name: resolvedUser.name }, "Linked Slack ID to existing user by email");
       }
     }
     if (!user) {

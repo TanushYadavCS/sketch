@@ -1,6 +1,48 @@
 import { randomUUID } from "node:crypto";
-import { type Kysely, type Selectable, sql } from "kysely";
+import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { DB, UsersTable } from "../schema";
+
+type UserDb = Kysely<DB> | Transaction<DB>;
+type UserRow = Selectable<UsersTable>;
+
+export interface UserRepository {
+  list(): Promise<UserRow[]>;
+  findBySlackId(slackUserId: string): Promise<UserRow | undefined>;
+  findByWhatsappNumber(whatsappNumber: string): Promise<UserRow | undefined>;
+  findByEmail(email: string): Promise<UserRow | undefined>;
+  findById(id: string): Promise<UserRow | undefined>;
+  findByExactName(name: string, excludeUserId?: string): Promise<UserRow | undefined>;
+  searchByNamePrefix(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
+  searchByNameSubstring(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
+  create(data: {
+    name: string;
+    slackUserId?: string;
+    whatsappNumber?: string;
+    email?: string | null;
+    emailVerified?: boolean;
+    description?: string;
+    type?: string;
+    role?: string;
+    reportsTo?: string;
+  }): Promise<UserRow>;
+  update(
+    id: string,
+    data: {
+      name?: string;
+      email?: string | null;
+      emailVerified?: boolean;
+      whatsappNumber?: string | null;
+      slackUserId?: string | null;
+      description?: string | null;
+      role?: string | null;
+      reportsTo?: string | null;
+      toolProgress?: string | null;
+      reasoningText?: boolean | null;
+    },
+  ): Promise<UserRow>;
+  remove(id: string): Promise<unknown>;
+  transaction<T>(callback: (repo: UserRepository) => Promise<T>): Promise<T>;
+}
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -18,7 +60,7 @@ function excludeUserIdSql(excludeUserId?: string) {
   return excludeUserId ? sql`AND id != ${excludeUserId}` : sql``;
 }
 
-export function createUserRepository(db: Kysely<DB>) {
+export function createUserRepository(db: UserDb): UserRepository {
   return {
     async list() {
       return db.selectFrom("users").selectAll().orderBy("created_at", "desc").execute();
@@ -171,6 +213,10 @@ export function createUserRepository(db: Kysely<DB>) {
 
     async remove(id: string) {
       return db.deleteFrom("users").where("id", "=", id).execute();
+    },
+
+    async transaction<T>(callback: (repo: ReturnType<typeof createUserRepository>) => Promise<T>) {
+      return db.transaction().execute(async (trx) => callback(createUserRepository(trx)));
     },
   };
 }

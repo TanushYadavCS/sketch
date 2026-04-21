@@ -617,13 +617,15 @@ describe("buildSketchContext", () => {
       });
 
       expect(result).toContain("Type: managed_onboarding_intro");
+      expect(result).toContain("InboxMessageId: inbox-1");
       expect(result).toContain("Status: awaiting_recipients");
       expect(result).toContain("Source: managed_slack_onboarding");
       expect(result).toContain("Original message:");
       expect(result).toContain("Who should I introduce myself to first?");
       expect(result).toContain("- Resolve names");
-      expect(result).toContain("Selected recipients:");
+      expect(result).toContain("Selected recipient user ids:");
       expect(result).toContain("None yet");
+      expect(result).toContain("Selected recipients:");
       expect(result).toContain("Draft message:");
     });
 

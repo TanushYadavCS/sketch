@@ -607,6 +607,35 @@ describe("PUT /api/system/users", () => {
     expect(body.error.code).toBe("CONFLICT");
   });
 
+  it("rolls back earlier user writes when a later row conflicts", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await userRepo.create({
+      email: "alice@acme.com",
+      name: "Alice",
+      slackUserId: "U123",
+      emailVerified: true,
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [
+          { email: "bob@acme.com", name: "Bob Shah", slackUserId: "U222" },
+          { email: "alice@acme.com", name: "Alice", slackUserId: "U999" },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await userRepo.findByEmail("bob@acme.com")).toBeUndefined();
+  });
+
   it("returns 400 when a row is missing email", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);

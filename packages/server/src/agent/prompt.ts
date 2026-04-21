@@ -72,19 +72,29 @@ function renderInboxMessage(message: InboxMessageContext): string[] {
   const instructions = Array.isArray(metadata.instructions)
     ? metadata.instructions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
+  const selectedUserIds = Array.isArray(metadata.selectedUserIds)
+    ? metadata.selectedUserIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
   const selectedNames = Array.isArray(metadata.selectedNames)
     ? metadata.selectedNames.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
   const draftMessage =
     typeof metadata.draftMessage === "string" && metadata.draftMessage.trim().length > 0 ? metadata.draftMessage : null;
 
-  const lines = [`Type: ${message.kind}`, `Status: ${status}`];
+  const lines = [`Type: ${message.kind}`, `InboxMessageId: ${message.id}`, `Status: ${status}`];
   if (source) lines.push(`Source: ${source}`);
   lines.push("", "Original message:", originalMessage, "", "Instructions:");
   if (instructions.length === 0) {
     lines.push("None");
   } else {
     for (const instruction of instructions) lines.push(`- ${instruction}`);
+  }
+
+  lines.push("", "Selected recipient user ids:");
+  if (selectedUserIds.length === 0) {
+    lines.push("None yet");
+  } else {
+    for (const userId of selectedUserIds) lines.push(`- ${userId}`);
   }
 
   lines.push("", "Selected recipients:");

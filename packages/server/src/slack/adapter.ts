@@ -43,7 +43,7 @@ import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile } from "./bot";
 import { createSlackMessageHandler } from "./message-handler";
 import { createSlackProgressTransport } from "./progress-transport";
-import { resolveSlackUser } from "./resolve-user";
+import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import type { BufferedMessage, ThreadBuffer } from "./thread-buffer";
 import type { UserCache } from "./user-cache";
 
@@ -214,7 +214,24 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   // DM handler
   slackBot.onMessage(async (message) => {
-    const user = await resolveUser(message.userId);
+    let user: Awaited<ReturnType<typeof resolveUser>>;
+    try {
+      user = await resolveUser(message.userId);
+    } catch (err) {
+      if (err instanceof SlackIdentityConflictError) {
+        logger.warn(
+          {
+            slackUserId: message.userId,
+            email: err.conflict.email,
+            existingUserId: err.conflict.existingUserId,
+            existingSlackUserId: err.conflict.existingSlackUserId,
+          },
+          "Ignoring DM because Slack identity conflicts with an existing user",
+        );
+        return;
+      }
+      throw err;
+    }
     const userQueue = queue.getQueue(user.id);
 
     userQueue.enqueue(async () => {
@@ -670,6 +687,19 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
       } catch (err) {
+        if (err instanceof SlackIdentityConflictError) {
+          logger.warn(
+            {
+              slackUserId: message.userId,
+              channelId: message.channelId,
+              email: err.conflict.email,
+              existingUserId: err.conflict.existingUserId,
+              existingSlackUserId: err.conflict.existingSlackUserId,
+            },
+            "Ignoring channel mention because Slack identity conflicts with an existing user",
+          );
+          return;
+        }
         logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
         await flushSlackProgressTransport(progressTransport, logger, {
           userId: user?.id,

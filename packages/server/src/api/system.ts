@@ -119,6 +119,18 @@ function parseWorkflowMetadata(value: string | null): { openingMessageSent?: boo
   }
 }
 
+class SystemUserSyncConflictError extends Error {
+  constructor(
+    readonly conflict: {
+      email: string;
+      existingSlackUserId: string;
+      incomingSlackUserId: string;
+    },
+  ) {
+    super(`User ${conflict.email} is already linked to Slack user ${conflict.existingSlackUserId}`);
+  }
+}
+
 async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -295,33 +307,45 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
     }
 
-    let created = 0;
-    let updated = 0;
+    try {
+      const result = await deps.userRepo.transaction(async (users) => {
+        let created = 0;
+        let updated = 0;
 
-    for (const user of parsed.data.users) {
-      const result = await upsertSlackIdentity(deps.userRepo, {
-        name: user.name,
-        email: user.email,
-        slackUserId: user.slackUserId,
+        for (const user of parsed.data.users) {
+          const upsertResult = await upsertSlackIdentity(users, {
+            name: user.name,
+            email: user.email,
+            slackUserId: user.slackUserId,
+          });
+
+          if (upsertResult.status === "created") created += 1;
+          if (upsertResult.status === "updated") updated += 1;
+
+          if (upsertResult.status === "conflict") {
+            throw new SystemUserSyncConflictError(upsertResult.conflict);
+          }
+        }
+
+        return { created, updated };
       });
 
-      if (result.status === "created") created += 1;
-      if (result.status === "updated") updated += 1;
-
-      if (result.status === "conflict") {
-        return c.json(
-          {
-            error: {
-              code: "CONFLICT",
-              message: `User ${result.conflict.email} is already linked to Slack user ${result.conflict.existingSlackUserId}`,
-            },
-          },
-          409,
-        );
+      return c.json({ ok: true, created: result.created, updated: result.updated });
+    } catch (error) {
+      if (!(error instanceof SystemUserSyncConflictError)) {
+        throw error;
       }
-    }
 
-    return c.json({ ok: true, created, updated });
+      return c.json(
+        {
+          error: {
+            code: "CONFLICT",
+            message: error.message,
+          },
+        },
+        409,
+      );
+    }
   });
 
   routes.get("/whatsapp", (c) => {
