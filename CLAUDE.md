@@ -73,6 +73,8 @@ sketch/
 - Run `pnpm dev` from repo root — tsx watches `packages/server/src/index.ts`
 - At the end of every feature, run all quality checks: `pnpm biome check`, `pnpm typecheck`, `pnpm test`, `pnpm build`
 - Do not use `npx tsc --noEmit` from the repo root. There is no root `tsconfig.json`, so use `pnpm typecheck` instead.
+- Release rule: only create release tags from commits that are already on `main`. Do not tag feature branches. If release prep is done on another branch, merge or cherry-pick it onto `main` first, then create the tag from `main`.
+- Deployment rule: only trigger release/deploy workflows from `main` (or tags created from `main`).
 
 ## Key Design Decisions
 
