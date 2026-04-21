@@ -169,6 +169,36 @@ describe("handleSendMessageToUser", () => {
     });
   });
 
+  it("routes to WhatsApp when that is the recipient's only connected channel", async () => {
+    const bob = makeUser({ id: "user-bob", name: "Bob", slack_user_id: null, whatsapp_number: "+1234567890" });
+    const sendDm = vi.fn().mockResolvedValue({ channelId: "1234567890@s.whatsapp.net", messageRef: "" });
+    const createInboxMessage = vi.fn().mockResolvedValue({ id: "inbox-1" });
+
+    await handleSendMessageToUser(
+      { recipientUserId: "user-bob", message: "Need your latest update." },
+      {
+        inboxMessagesRepo: { ...makeInboxMessagesRepoMock(), create: createInboxMessage },
+        userRepo: makeUserRepoMock({ findById: async (id: string) => (id === "user-bob" ? bob : undefined) }),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+    );
+
+    expect(sendDm).toHaveBeenCalledWith({
+      userId: "user-bob",
+      platform: "whatsapp",
+      message: "Need your latest update.",
+    });
+    expect(createInboxMessage).toHaveBeenCalledWith({
+      senderUserId: "user-alice",
+      recipientUserId: "user-bob",
+      message: "Need your latest update.",
+      platform: "whatsapp",
+      channelId: "1234567890@s.whatsapp.net",
+      messageRef: "",
+    });
+  });
+
   it("rejects sending to self", async () => {
     const result = await handleSendMessageToUser(
       { recipientUserId: "user-alice", message: "hi" },

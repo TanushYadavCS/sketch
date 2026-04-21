@@ -79,6 +79,10 @@ export interface WhatsAppAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
+    channelId: string;
+    messageRef: string;
+  }>;
 }
 
 async function flushWhatsAppProgressTransport(
@@ -110,6 +114,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm,
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -135,21 +140,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     } catch (err) {
       logger.debug({ err, jid, emoji }, "Failed to update WhatsApp reaction");
     }
-  };
-
-  /**
-   * Sends a DM to a user via their WhatsApp number. Used both in normal DM handling and in
-   * outreach response runs so the same function is available at adapter level.
-   */
-  const sendDmViaWhatsApp = async ({
-    userId,
-    message: dmMessage,
-  }: { userId: string; platform: string; message: string }) => {
-    const recipient = await repos.users.findById(userId);
-    if (!recipient?.whatsapp_number) throw new Error("No WhatsApp number for recipient");
-    const jid = `${recipient.whatsapp_number.replace("+", "")}@s.whatsapp.net`;
-    await whatsapp.sendText(jid, dmMessage);
-    return { channelId: jid, messageRef: "" };
   };
 
   const loadPendingInboxMessages = async (
@@ -327,7 +317,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             inboxMessagesRepo,
             userRepo: repos.users,
             currentUserId: user.id,
-            sendDm: sendDmViaWhatsApp,
+            sendDm,
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
@@ -557,7 +547,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           toolConfig,
           inboxMessagesRepo,
           userRepo: repos.users,
-          sendDm: sendDmViaWhatsApp,
+          sendDm,
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });

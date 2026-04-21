@@ -124,6 +124,7 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
       markConsumed: vi.fn().mockResolvedValue(undefined),
       create: vi.fn(),
     } as unknown as WhatsAppAdapterDeps["inboxMessagesRepo"],
+    sendDm: vi.fn().mockResolvedValue({ channelId: "outreach@s.whatsapp.net", messageRef: "" }),
     ...overrides,
   };
 }
@@ -769,7 +770,7 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userRepo).toBe(deps.repos.users);
       expect(agentCall.inboxMessagesRepo).toBe(deps.inboxMessagesRepo);
       expect(agentCall.currentUserId).toBe("u1");
-      expect(agentCall.sendDm).toBeTypeOf("function");
+      expect(agentCall.sendDm).toBe(deps.sendDm);
     });
 
     it("passes user email to agent for group mentions", async () => {

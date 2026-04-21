@@ -84,6 +84,10 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
+    channelId: string;
+    messageRef: string;
+  }>;
 }
 
 export async function validateSlackTokens(botToken: string, appToken?: string) {
@@ -143,6 +147,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm,
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -170,23 +175,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   const resolveCommandReasoningText = (command: ReturnType<typeof parseSketchCommand>): ReasoningTextCommand | null => {
     if (!command?.startsWith("reasoning_text_") || command === "reasoning_text_query") return null;
     return command.slice("reasoning_text_".length) as ReasoningTextCommand;
-  };
-
-  /**
-   * Sends a DM to a user via their Slack channel. Fetches fresh settings on each call so the
-   * token is always current. Used both in normal DM handling and in outreach response runs.
-   */
-  const sendDmViaSlack = async ({
-    userId,
-    message: dmMessage,
-  }: { userId: string; platform: string; message: string }) => {
-    const settings = await repos.settings.get();
-    const recipient = await repos.users.findById(userId);
-    if (!recipient?.slack_user_id) throw new Error("No Slack ID for recipient");
-    const channelId = await slackBot.openDmChannel(recipient.slack_user_id, settings?.slack_bot_token ?? undefined);
-    if (!channelId) throw new Error("Failed to open DM channel");
-    const messageRef = await slackBot.postMessage(channelId, dmMessage);
-    return { channelId, messageRef };
   };
 
   const loadPendingInboxMessages = async (
@@ -226,7 +214,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             existingUserId: err.conflict.existingUserId,
             existingSlackUserId: err.conflict.existingSlackUserId,
           },
-          "Ignoring DM because Slack identity conflicts with an existing user",
+          "Skipping DM because Slack identity conflicts with an existing user",
+        );
+        await slackBot.postMessage(
+          message.channelId,
+          "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
         );
         return;
       }
@@ -380,7 +372,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           inboxMessagesRepo,
           userRepo: repos.users,
           currentUserId: user.id,
-          sendDm: sendDmViaSlack,
+          sendDm,
         });
 
         await flushSlackProgressTransport(progressTransport, logger, { userId: user.id, channelId: message.channelId });
@@ -661,7 +653,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           toolConfig,
           inboxMessagesRepo,
           userRepo: repos.users,
-          sendDm: sendDmViaSlack,
+          sendDm,
         });
 
         await flushSlackProgressTransport(progressTransport, logger, {
@@ -696,7 +688,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               existingUserId: err.conflict.existingUserId,
               existingSlackUserId: err.conflict.existingSlackUserId,
             },
-            "Ignoring channel mention because Slack identity conflicts with an existing user",
+            "Skipping channel mention because Slack identity conflicts with an existing user",
+          );
+          await slackBot.postThreadReply(
+            message.channelId,
+            threadTs,
+            "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
           );
           return;
         }
