@@ -41,14 +41,13 @@ export interface SkillDraft {
 
 interface SkillDetailEditProps {
   skill: Skill | null; // null = create mode
-  activeTab: "details" | "permissions";
-  onTabChange: (tab: "details" | "permissions") => void;
   onBack: () => void;
   onSave: (draft: SkillDraft) => Promise<void>;
   onCancel: () => void;
 }
 
-export function SkillDetailEdit({ skill, activeTab, onTabChange, onBack, onSave, onCancel }: SkillDetailEditProps) {
+export function SkillDetailEdit({ skill, onBack, onSave, onCancel }: SkillDetailEditProps) {
+  const activeTab = "details" as "details" | "permissions";
   const isNew = !skill;
 
   const [name, setName] = useState(skill?.name ?? "");
@@ -215,27 +214,7 @@ export function SkillDetailEdit({ skill, activeTab, onTabChange, onBack, onSave,
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="mt-4">
-        <div className="flex gap-4 border-b border-border">
-          {(["details", "permissions"] as const).map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => onTabChange(tab)}
-              className={cn(
-                "relative py-2 text-sm capitalize transition-colors",
-                activeTab === tab
-                  ? "font-medium text-foreground"
-                  : "font-normal text-muted-foreground/60 hover:text-muted-foreground",
-              )}
-            >
-              {tab}
-              {activeTab === tab && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-primary" />}
-            </button>
-          ))}
-        </div>
-
         {/* Details Tab */}
         {activeTab === "details" && (
           <div className="mt-6 space-y-5">

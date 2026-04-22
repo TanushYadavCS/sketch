@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ArrowClockwiseIcon, CheckCircleIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
+import { ArrowClockwiseIcon, CheckCircleIcon, QrCodeIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
 import QRCode from "qrcode";
 
 import { api } from "@/lib/api";
@@ -95,7 +95,8 @@ export function WhatsAppQR({ onConnected, onError, autoStart = true }: WhatsAppQ
   if (state === "idle") {
     return (
       <div className="flex flex-col items-center gap-3 py-4">
-        <Button variant="outline" size="sm" onClick={startPairing}>
+        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={startPairing}>
+          <QrCodeIcon size={14} weight="bold" />
           Generate QR Code
         </Button>
       </div>
@@ -143,7 +144,7 @@ export function WhatsAppQR({ onConnected, onError, autoStart = true }: WhatsAppQ
         <div className="flex size-48 items-center justify-center rounded-lg border bg-muted">
           <p className="text-sm text-muted-foreground">QR code expired</p>
         </div>
-        <Button variant="outline" size="sm" onClick={startPairing}>
+        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={startPairing}>
           <ArrowClockwiseIcon className="size-3.5" />
           Refresh QR Code
         </Button>
@@ -155,7 +156,7 @@ export function WhatsAppQR({ onConnected, onError, autoStart = true }: WhatsAppQ
     <div className="flex flex-col items-center gap-3 py-4">
       <WarningIcon className="size-8 text-destructive" />
       <p className="text-sm text-destructive">{errorMessage ?? "Something went wrong"}</p>
-      <Button variant="outline" size="sm" onClick={startPairing}>
+      <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={startPairing}>
         <ArrowClockwiseIcon className="size-3.5" />
         Try Again
       </Button>

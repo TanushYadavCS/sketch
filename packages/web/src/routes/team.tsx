@@ -20,7 +20,7 @@ import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Card, CardContent } from "@sketch/ui/components/card";
 import { Skeleton } from "@sketch/ui/components/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@sketch/ui/components/tabs";
+import { TabButton } from "@sketch/ui/components/tab-button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
 import { getInitials } from "@sketch/ui/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -51,26 +51,35 @@ export function TeamPage() {
   const users = data?.users ?? [];
 
   return (
-    <div className="px-6 py-8">
-      <div className="mx-auto max-w-3xl">
+    <div className="px-10 py-8">
+      <div className="mx-auto max-w-4xl">
         <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold">Team</h1>
-          <Button size="sm" onClick={() => setShowAddDialog(true)}>
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">Team</h1>
+            <p className="mt-2 text-sm text-muted-foreground">Manage your workspace members and roles.</p>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5 hover:bg-brand-accent/8"
+            onClick={() => setShowAddDialog(true)}
+          >
             <PlusIcon size={14} weight="bold" />
             Add member
           </Button>
         </div>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-6">
-        <div className="mx-auto w-full max-w-3xl">
-          <TabsList>
-            <TabsTrigger value="list">List</TabsTrigger>
-            <TabsTrigger value="chart">Chart</TabsTrigger>
-          </TabsList>
+      <div className="mx-auto mt-6 w-full max-w-4xl">
+        <div className="flex items-center gap-6 border-b border-border">
+          <TabButton label="List" isActive={activeTab === "list"} onClick={() => setActiveTab("list")} />
+          <TabButton label="Chart" isActive={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
         </div>
-        <TabsContent value="list">
-          <div className="mx-auto w-full max-w-3xl">
+      </div>
+
+      <div className="mt-5">
+        {activeTab === "list" ? (
+          <div className="mx-auto w-full max-w-4xl">
             {isLoading ? (
               <LoadingSkeleton />
             ) : users.length === 0 ? (
@@ -85,9 +94,14 @@ export function TeamPage() {
               />
             )}
           </div>
-        </TabsContent>
-        <TabsContent value="chart">{isLoading ? <LoadingSkeleton /> : <OrgChart users={users} />}</TabsContent>
-      </Tabs>
+        ) : isLoading ? (
+          <div className="mx-auto w-full max-w-4xl">
+            <LoadingSkeleton />
+          </div>
+        ) : (
+          <OrgChart users={users} />
+        )}
+      </div>
 
       <AddMemberDialog
         open={showAddDialog}

@@ -1,6 +1,6 @@
 import { ChannelPlatformIcon } from "@/components/skills/channel-platform-icon";
 import type { Skill } from "@/lib/skills-data";
-import { getActiveChannels, getActiveIndividuals, getCategoryLabel, isSkillEnabled } from "@/lib/skills-data";
+import { getActiveChannels, getActiveIndividuals, isSkillEnabled } from "@/lib/skills-data";
 import {
   ArrowLeftIcon,
   CaretRightIcon,
@@ -21,11 +21,10 @@ import { cn } from "@sketch/ui/lib/utils";
 import { Building2, Download, MessageCircle, Star, Store, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface SkillDetailViewProps {
   skill: Skill;
-  activeTab: "details" | "permissions";
-  onTabChange: (tab: "details" | "permissions") => void;
   onBack: () => void;
   onEdit: () => void;
   onDuplicate: (skill: Skill) => void;
@@ -36,8 +35,6 @@ interface SkillDetailViewProps {
 
 export function SkillDetailView({
   skill,
-  activeTab,
-  onTabChange,
   onBack,
   onEdit,
   onDuplicate,
@@ -45,10 +42,6 @@ export function SkillDetailView({
   isExplorePreview = false,
   onAddSkill,
 }: SkillDetailViewProps) {
-  const enabled = isSkillEnabled(skill.status);
-  const activeChannels = getActiveChannels(skill.status);
-  const activeIndividuals = getActiveIndividuals(skill.status);
-
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [scrolled, setScrolled] = useState(false);
 
@@ -113,50 +106,9 @@ export function SkillDetailView({
         </div>
       </div>
 
-      {/* Explore preview: Details only */}
-      {isExplorePreview ? (
-        <div className="mt-6">
-          <DetailsContent skill={skill} />
-        </div>
-      ) : (
-        <div className="mt-4">
-          <div className="flex gap-4 border-b border-border">
-            {(["details", "permissions"] as const).map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                onClick={() => onTabChange(tab)}
-                className={cn(
-                  "relative py-2 text-sm capitalize transition-colors",
-                  activeTab === tab
-                    ? "font-medium text-foreground"
-                    : "font-normal text-muted-foreground/60 hover:text-muted-foreground",
-                )}
-              >
-                {tab}
-                {activeTab === tab && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-primary" />}
-              </button>
-            ))}
-          </div>
-
-          {activeTab === "details" && (
-            <div className="mt-6">
-              <DetailsContent skill={skill} />
-            </div>
-          )}
-
-          {activeTab === "permissions" && (
-            <div className="mt-6">
-              <AdminPermissionsView
-                skill={skill}
-                enabled={enabled}
-                activeChannels={activeChannels}
-                activeIndividuals={activeIndividuals}
-              />
-            </div>
-          )}
-        </div>
-      )}
+      <div className="mt-6">
+        <DetailsContent skill={skill} />
+      </div>
     </div>
   );
 }
@@ -179,16 +131,9 @@ function DetailsContent({ skill }: { skill: Skill }) {
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Body</h2>
         <div className="mt-2 rounded-xl border border-border bg-muted/30 p-4">
           <div className="markdown-body">
-            <ReactMarkdown>{skill.body}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{skill.body}</ReactMarkdown>
           </div>
         </div>
-      </div>
-
-      <div>
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Category</h2>
-        <span className="mt-2 inline-flex items-center rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
-          {getCategoryLabel(skill.category)}
-        </span>
       </div>
 
       {skill.source && (

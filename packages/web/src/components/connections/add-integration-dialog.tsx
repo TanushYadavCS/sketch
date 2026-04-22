@@ -359,12 +359,14 @@ export function AddIntegrationDialog({
 
             <DialogFooter>
               <Button
-                className="w-full"
+                variant="ghost"
+                className="w-full gap-1.5 hover:bg-brand-accent/8"
                 onClick={() => {
                   onSuccess();
                   resetAndClose();
                 }}
               >
+                <CheckIcon size={14} weight="bold" />
                 Done
               </Button>
             </DialogFooter>

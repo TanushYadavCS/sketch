@@ -114,12 +114,7 @@ describe("SkillsPage", () => {
       expect(screen.getByText("CRM Lead Creator")).toBeInTheDocument();
     });
 
-    const searchToggle = screen
-      .getAllByRole("button")
-      .find((btn) => btn.querySelector("svg") && btn.textContent?.trim() === "") as HTMLElement;
-    await user.click(searchToggle);
-
-    const searchInput = await screen.findByPlaceholderText(/Search active skills/i);
+    const searchInput = screen.getByPlaceholderText(/Search active skills/i);
     await user.type(searchInput, "CRM");
 
     expect(screen.getByText("CRM Lead Creator")).toBeInTheDocument();
@@ -248,21 +243,5 @@ describe("SkillsPage", () => {
     await waitFor(() => {
       expect(deleteFn).toHaveBeenCalledWith("s1");
     });
-  });
-
-  it("switches between active and explore tabs", async () => {
-    skillsHandler();
-    const user = userEvent.setup();
-    renderWithProviders(<SkillsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("CRM Lead Creator")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByText("explore"));
-
-    expect(screen.getByText("CRM Lead Creator")).toBeInTheDocument();
-    expect(screen.getByText("Meeting Scheduler")).toBeInTheDocument();
-    expect(screen.getByText("Slack Notifier")).toBeInTheDocument();
   });
 });

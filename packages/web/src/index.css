@@ -68,7 +68,23 @@
   }
 
   .markdown-body table {
-    @apply block max-w-full overflow-x-auto;
+    @apply my-2 block max-w-full overflow-x-auto border-collapse text-sm;
+  }
+
+  .markdown-body thead {
+    @apply border-b border-border;
+  }
+
+  .markdown-body th {
+    @apply px-3 py-1.5 text-left font-semibold text-foreground;
+  }
+
+  .markdown-body tbody tr {
+    @apply border-b border-border last:border-b-0;
+  }
+
+  .markdown-body td {
+    @apply px-3 py-1.5 align-top;
   }
 
   .markdown-body img {
