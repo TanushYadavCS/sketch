@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.19.5] -- 2026-04-22
+
+- Fix(system): invoke `onLlmSettingsUpdated` after `PUT /api/system/llm` writes settings, so the managed platform's onboarding path refreshes the running tenant's `process.env` (CLAUDE_CODE_USE_BEDROCK / AWS_* / ANTHROPIC_MODEL) without a restart. Previously, newly claimed spares had correct DB settings but stale env, causing the Claude Code subprocess to exit with code 1 on the first agent run. The symmetric `/api/setup` path already fired this hook; this change threads it through the managed path.
+
 ## [0.19.4] -- 2026-04-21
 
 - Fix(slack): wrap `reactions.add` and `reactions.remove` in try/catch with warn log. A failed acknowledgement reaction (e.g., `missing_scope` on tokens issued without `reactions:write`) no longer kills the message queue work item and blocks the agent reply. Also replaces the silent swallow on `removeReaction` with a visible warn.
