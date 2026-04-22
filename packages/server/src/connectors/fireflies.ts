@@ -28,6 +28,18 @@ const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * Fireflies post-processes recordings into queryable transcripts for
+ * ~15–45 min after a meeting ends. During that window the transcript
+ * is invisible to the API. If we advance the cursor to `now`, a
+ * transcript whose meeting `date` predates the cursor when it finally
+ * becomes listable is filtered out by Fireflies' `fromDate` forever.
+ *
+ * Lag the cursor by 2h so the next sync always re-queries the recent
+ * window. Content-hash dedup makes re-fetches cheap.
+ */
+const FIREFLIES_PROCESSING_LAG_MS = 2 * 60 * 60 * 1000;
+
 interface FirefliesTranscript {
   id: string;
   title: string;
@@ -321,7 +333,7 @@ export function createFirefliesConnector(): Connector {
     },
 
     async getCursor() {
-      return new Date().toISOString();
+      return new Date(Date.now() - FIREFLIES_PROCESSING_LAG_MS).toISOString();
     },
   };
 }
