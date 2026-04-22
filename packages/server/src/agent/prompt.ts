@@ -31,6 +31,8 @@ export interface InboxMessageContext {
   senderName: string;
   message: string;
   createdAt: string;
+  kind?: string;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface SketchContextParams {
@@ -53,6 +55,57 @@ export interface SketchContextParams {
     groupName: string;
     groupDescription?: string;
   };
+}
+
+function renderInboxMessage(message: InboxMessageContext): string[] {
+  if (message.kind !== "managed_onboarding_intro") {
+    return [`From ${message.senderName}, ${formatTimeAgo(message.createdAt)}:`, message.message];
+  }
+
+  const metadata = message.metadata ?? {};
+  const status = typeof metadata.stage === "string" ? metadata.stage : "unknown";
+  const source = typeof metadata.source === "string" ? metadata.source : null;
+  const originalMessage =
+    typeof metadata.originalMessage === "string" && metadata.originalMessage.trim().length > 0
+      ? metadata.originalMessage
+      : message.message;
+  const instructions = Array.isArray(metadata.instructions)
+    ? metadata.instructions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const selectedUserIds = Array.isArray(metadata.selectedUserIds)
+    ? metadata.selectedUserIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const selectedNames = Array.isArray(metadata.selectedNames)
+    ? metadata.selectedNames.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const draftMessage =
+    typeof metadata.draftMessage === "string" && metadata.draftMessage.trim().length > 0 ? metadata.draftMessage : null;
+
+  const lines = [`Type: ${message.kind}`, `InboxMessageId: ${message.id}`, `Status: ${status}`];
+  if (source) lines.push(`Source: ${source}`);
+  lines.push("", "Original message:", originalMessage, "", "Instructions:");
+  if (instructions.length === 0) {
+    lines.push("None");
+  } else {
+    for (const instruction of instructions) lines.push(`- ${instruction}`);
+  }
+
+  lines.push("", "Selected recipient user ids:");
+  if (selectedUserIds.length === 0) {
+    lines.push("None yet");
+  } else {
+    for (const userId of selectedUserIds) lines.push(`- ${userId}`);
+  }
+
+  lines.push("", "Selected recipients:");
+  if (selectedNames.length === 0) {
+    lines.push("None yet");
+  } else {
+    for (const name of selectedNames) lines.push(`- ${name}`);
+  }
+
+  lines.push("", "Draft message:", draftMessage ?? "None yet");
+  return lines;
 }
 
 export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): string[] {
@@ -170,7 +223,7 @@ export function buildSystemContext(params: {
     "",
     "<time> - Current date, time, and timezone.",
     "<workspace> - Your working directory and shared org directory paths.",
-    "<inbox> - Private messages sent to this user by teammates or other agents. Treat them as natural conversational context and act on them when useful.",
+    "<inbox> - Private messages or pending workflow tasks sent to this user. Treat them as natural conversational context and act on them when useful.",
     "<user> - Identity and contact info of the current user (in DMs).",
     "<sender> - Identity of the current speaker (in shared contexts like channels and groups).",
     "<channel> - Metadata about the current Slack channel in shared contexts.",
@@ -298,8 +351,7 @@ export function buildSketchContext(params: SketchContextParams): string {
   if (inboxMessages && inboxMessages.length > 0) {
     const lines: string[] = [];
     for (const message of inboxMessages) {
-      lines.push(`From ${message.senderName}, ${formatTimeAgo(message.createdAt)}:`);
-      lines.push(message.message);
+      lines.push(...renderInboxMessage(message));
       lines.push("");
     }
     if (lines[lines.length - 1] === "") lines.pop();

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.19.3] -- 2026-04-21
+
+- Managed intro workflows: inbox-backed admin approval flow, bulk Slack user sync, `SearchUsers`, `SendMessageToUsers`, and managed onboarding intro bootstrap endpoints
+- Cross-channel teammate messaging: shared delivery routing now sends intro/outreach DMs on the recipient's available channel instead of being pinned to the current adapter
+- Fix: expose workflow ids and selected recipient ids in prompt inbox context so the agent can reliably advance explicit inbox workflows
+- Fix: make bulk Slack user sync atomic and preserve inbox/onboarding state integrity on conflicts
+- Fix: harden Slack identity conflict handling to avoid duplicate-user creation and show a user-visible reconnect message instead of silently dropping conflicted Slack messages
+
 ## [0.19.2] -- 2026-04-16
 
 - Fix: sync deduped progress state. Renderer now owns dedup/line state and returns `void`; transport exposes `syncLines(lines)` and reconciles Slack/WhatsApp message segments against the full desired state each tick. Closes a drift bug where the renderer's deduped view disagreed with the transport's incremental segment state, producing stale or duplicated progress lines on repeated tool calls.

@@ -288,11 +288,15 @@ export interface InboxMessagesTable {
   sender_user_id: string;
   recipient_user_id: string;
   message: string;
+  kind: Generated<string>;
+  metadata: string | null;
+  resolution_mode: Generated<string>;
   platform: string;
   channel_id: string | null;
   message_ref: string | null;
   created_at: Generated<string>;
   consumed_at: string | null;
+  resolved_at: string | null;
 }
 
 export interface EntitiesTable {

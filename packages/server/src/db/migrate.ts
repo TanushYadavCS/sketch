@@ -41,6 +41,7 @@ import * as m034 from "./migrations/034-smart-enrichment";
 import * as m035 from "./migrations/035-org-context";
 import * as m036 from "./migrations/036-browse-cache";
 import * as m037 from "./migrations/037-sync-interval";
+import * as m038 from "./migrations/038-inbox-workflows";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -86,6 +87,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "035-org-context": m035,
           "036-browse-cache": m036,
           "037-sync-interval": m037,
+          "038-inbox-workflows": m038,
         };
       },
     },

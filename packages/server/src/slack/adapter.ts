@@ -43,7 +43,7 @@ import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile } from "./bot";
 import { createSlackMessageHandler } from "./message-handler";
 import { createSlackProgressTransport } from "./progress-transport";
-import { resolveSlackUser } from "./resolve-user";
+import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import type { BufferedMessage, ThreadBuffer } from "./thread-buffer";
 import type { UserCache } from "./user-cache";
 
@@ -51,6 +51,17 @@ type UserRepository = ReturnType<typeof createUserRepository>;
 type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
+
+function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface SlackAdapterDeps {
   db: Kysely<DB>;
@@ -73,6 +84,10 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
+    channelId: string;
+    messageRef: string;
+  }>;
 }
 
 export async function validateSlackTokens(botToken: string, appToken?: string) {
@@ -132,6 +147,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm,
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -161,23 +177,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     return command.slice("reasoning_text_".length) as ReasoningTextCommand;
   };
 
-  /**
-   * Sends a DM to a user via their Slack channel. Fetches fresh settings on each call so the
-   * token is always current. Used both in normal DM handling and in outreach response runs.
-   */
-  const sendDmViaSlack = async ({
-    userId,
-    message: dmMessage,
-  }: { userId: string; platform: string; message: string }) => {
-    const settings = await repos.settings.get();
-    const recipient = await repos.users.findById(userId);
-    if (!recipient?.slack_user_id) throw new Error("No Slack ID for recipient");
-    const channelId = await slackBot.openDmChannel(recipient.slack_user_id, settings?.slack_bot_token ?? undefined);
-    if (!channelId) throw new Error("Failed to open DM channel");
-    const messageRef = await slackBot.postMessage(channelId, dmMessage);
-    return { channelId, messageRef };
-  };
-
   const loadPendingInboxMessages = async (
     recipientUserId: string,
   ): Promise<{ ids: string[]; messages: InboxMessageContext[] }> => {
@@ -192,6 +191,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           senderName: sender?.name ?? "Unknown",
           message: row.message,
           createdAt: row.created_at,
+          kind: row.kind,
+          metadata: parseInboxMetadata(row.metadata),
         };
       }),
     );
@@ -201,7 +202,28 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   // DM handler
   slackBot.onMessage(async (message) => {
-    const user = await resolveUser(message.userId);
+    let user: Awaited<ReturnType<typeof resolveUser>>;
+    try {
+      user = await resolveUser(message.userId);
+    } catch (err) {
+      if (err instanceof SlackIdentityConflictError) {
+        logger.warn(
+          {
+            slackUserId: message.userId,
+            email: err.conflict.email,
+            existingUserId: err.conflict.existingUserId,
+            existingSlackUserId: err.conflict.existingSlackUserId,
+          },
+          "Skipping DM because Slack identity conflicts with an existing user",
+        );
+        await slackBot.postMessage(
+          message.channelId,
+          "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
+        );
+        return;
+      }
+      throw err;
+    }
     const userQueue = queue.getQueue(user.id);
 
     userQueue.enqueue(async () => {
@@ -350,7 +372,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           inboxMessagesRepo,
           userRepo: repos.users,
           currentUserId: user.id,
-          sendDm: sendDmViaSlack,
+          sendDm,
         });
 
         await flushSlackProgressTransport(progressTransport, logger, { userId: user.id, channelId: message.channelId });
@@ -631,7 +653,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           toolConfig,
           inboxMessagesRepo,
           userRepo: repos.users,
-          sendDm: sendDmViaSlack,
+          sendDm,
         });
 
         await flushSlackProgressTransport(progressTransport, logger, {
@@ -657,6 +679,24 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
       } catch (err) {
+        if (err instanceof SlackIdentityConflictError) {
+          logger.warn(
+            {
+              slackUserId: message.userId,
+              channelId: message.channelId,
+              email: err.conflict.email,
+              existingUserId: err.conflict.existingUserId,
+              existingSlackUserId: err.conflict.existingSlackUserId,
+            },
+            "Skipping channel mention because Slack identity conflicts with an existing user",
+          );
+          await slackBot.postThreadReply(
+            message.channelId,
+            threadTs,
+            "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
+          );
+          return;
+        }
         logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
         await flushSlackProgressTransport(progressTransport, logger, {
           userId: user?.id,

@@ -142,6 +142,43 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
   const groupBuffer = new GroupBuffer();
 
+  const sendDirectMessage = async ({
+    userId,
+    platform,
+    message,
+  }: {
+    userId: string;
+    platform: string;
+    message: string;
+  }) => {
+    const recipient = await users.findById(userId);
+
+    if (platform === "slack") {
+      if (!recipient?.slack_user_id) throw new Error("No Slack ID for recipient");
+      const currentSlack = slack;
+      if (!currentSlack) throw new Error("Slack bot is not connected");
+
+      const settings = await settingsRepo.get();
+      const channelId = await currentSlack.openDmChannel(
+        recipient.slack_user_id,
+        settings?.slack_bot_token ?? undefined,
+      );
+      if (!channelId) throw new Error("Failed to open DM channel");
+
+      const messageRef = await currentSlack.postMessage(channelId, message);
+      return { channelId, messageRef };
+    }
+
+    if (platform === "whatsapp") {
+      if (!recipient?.whatsapp_number) throw new Error("No WhatsApp number for recipient");
+      const channelId = `${recipient.whatsapp_number.replace("+", "")}@s.whatsapp.net`;
+      await whatsapp.sendText(channelId, message);
+      return { channelId, messageRef: "" };
+    }
+
+    throw new Error(`Unsupported platform: ${platform}`);
+  };
+
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly
   const scheduler = new TaskScheduler({
     db,
@@ -185,6 +222,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm: sendDirectMessage,
   };
 
   const startSlackBotIfConfigured = createSlackStartupManager({
@@ -227,6 +265,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm: sendDirectMessage,
   });
 
   // 9. HTTP server

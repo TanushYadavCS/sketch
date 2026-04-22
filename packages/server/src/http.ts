@@ -33,6 +33,7 @@ import { whatsappRoutes } from "./api/whatsapp";
 import { createWorkspaceApi } from "./api/workspace";
 import type { Config } from "./config";
 import { createConnectorRepository } from "./db/repositories/connectors";
+import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
@@ -60,6 +61,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const app = new Hono();
   const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const users = createUserRepository(db);
+  const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
@@ -219,7 +221,19 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         systemSecret: config.SYSTEM_SECRET,
         onSlackTokensUpdated: onSlackTokensUpdated ? () => onSlackTokensUpdated() : undefined,
         userRepo: users,
+        inboxMessagesRepo: inboxMessages,
         mcpServers,
+        sendSlackDmToSlackUser: deps?.getSlack
+          ? async ({ slackUserId, message }) => {
+              const slack = deps.getSlack?.();
+              if (!slack) throw new Error("Slack not configured");
+              const settingsRow = await settings.get();
+              const channelId = await slack.openDmChannel(slackUserId, settingsRow?.slack_bot_token ?? undefined);
+              if (!channelId) throw new Error("Failed to open DM channel");
+              const messageRef = await slack.postMessage(channelId, message);
+              return { channelId, messageRef };
+            }
+          : undefined,
         whatsappStatus: whatsapp
           ? () => ({
               connected: whatsapp.isConnected,

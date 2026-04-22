@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
+import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -30,7 +31,12 @@ function createTestSystemApp(
     systemSecret: string;
     onSlackTokensUpdated?: ReturnType<typeof vi.fn>;
     userRepo?: ReturnType<typeof createUserRepository>;
+    inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
     mcpServers?: ReturnType<typeof createMcpServerRepository>;
+    sendSlackDmToSlackUser?: (params: {
+      slackUserId: string;
+      message: string;
+    }) => Promise<{ channelId: string; messageRef: string }>;
     whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;
     cancelWhatsAppPairing?: ReturnType<typeof vi.fn>;
@@ -527,6 +533,129 @@ describe("POST /api/system/users", () => {
   });
 });
 
+describe("PUT /api/system/users", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("bulk upserts users by Slack ID and email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      email: "alice@acme.com",
+      name: "Alice Old",
+      emailVerified: true,
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [
+          { email: "alice@acme.com", name: "Alice Johnson", slackUserId: "U111" },
+          { email: "bob@acme.com", name: "Bob Shah", slackUserId: "U222" },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, created: 1, updated: 1 });
+
+    const alice = await userRepo.findById(existing.id);
+    expect(alice?.name).toBe("Alice Johnson");
+    expect(alice?.slack_user_id).toBe("U111");
+
+    const bob = await userRepo.findByEmail("bob@acme.com");
+    expect(bob?.name).toBe("Bob Shah");
+    expect(bob?.slack_user_id).toBe("U222");
+  });
+
+  it("returns 409 when an email is already linked to a different Slack user", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await userRepo.create({
+      email: "alice@acme.com",
+      name: "Alice",
+      slackUserId: "U123",
+      emailVerified: true,
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ email: "alice@acme.com", name: "Alice", slackUserId: "U999" }],
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.code).toBe("CONFLICT");
+  });
+
+  it("rolls back earlier user writes when a later row conflicts", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await userRepo.create({
+      email: "alice@acme.com",
+      name: "Alice",
+      slackUserId: "U123",
+      emailVerified: true,
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [
+          { email: "bob@acme.com", name: "Bob Shah", slackUserId: "U222" },
+          { email: "alice@acme.com", name: "Alice", slackUserId: "U999" },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await userRepo.findByEmail("bob@acme.com")).toBeUndefined();
+  });
+
+  it("returns 400 when a row is missing email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ name: "Alice", slackUserId: "U111" }],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("PUT /api/system/llm", () => {
   let db: Kysely<DB>;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -883,6 +1012,140 @@ describe("DELETE /api/system/whatsapp/pair", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ok: true });
+  });
+});
+
+describe("POST /api/system/onboarding-introductions", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("creates the workflow row and sends the admin opener once", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendSlackDmToSlackUser = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    await settingsRepo.create({ adminEmail: "admin@acme.com", adminPasswordHash: "hash", botName: "Sketch" });
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      slackUserId: "UADMIN",
+      emailVerified: true,
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendSlackDmToSlackUser,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: "started" });
+    expect(sendSlackDmToSlackUser).toHaveBeenCalledWith({
+      slackUserId: "UADMIN",
+      message: "I've added your team to Sketch. Who should I introduce myself to first? Reply with names or @mentions.",
+    });
+
+    const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
+    expect(workflow).toBeDefined();
+    expect(workflow?.message).toContain("Who should I introduce myself to first?");
+    expect(workflow?.resolution_mode).toBe("explicit");
+    expect(workflow?.metadata).toContain('"openingMessageSent":true');
+  });
+
+  it("returns already_exists when the opener was already delivered", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendSlackDmToSlackUser = vi.fn();
+    await settingsRepo.create({ adminEmail: "admin@acme.com", adminPasswordHash: "hash", botName: "Sketch" });
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      slackUserId: "UADMIN",
+      emailVerified: true,
+    });
+    await inboxMessagesRepo.create({
+      senderUserId: admin.id,
+      recipientUserId: admin.id,
+      message: "I've added your team to Sketch. Who should I introduce myself to first? Reply with names or @mentions.",
+      kind: "managed_onboarding_intro",
+      metadata: {
+        openingMessageSent: true,
+      },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendSlackDmToSlackUser,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: "already_exists" });
+    expect(sendSlackDmToSlackUser).not.toHaveBeenCalled();
+  });
+
+  it("retries opener delivery when a workflow exists but opener was not sent", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendSlackDmToSlackUser = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    await settingsRepo.create({ adminEmail: "admin@acme.com", adminPasswordHash: "hash", botName: "Sketch" });
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      slackUserId: "UADMIN",
+      emailVerified: true,
+    });
+    const workflow = await inboxMessagesRepo.create({
+      senderUserId: admin.id,
+      recipientUserId: admin.id,
+      message: "I've added your team to Sketch. Who should I introduce myself to first? Reply with names or @mentions.",
+      kind: "managed_onboarding_intro",
+      metadata: {
+        openingMessageSent: false,
+      },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendSlackDmToSlackUser,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: "started" });
+    const updated = await inboxMessagesRepo.findById(workflow.id);
+    expect(updated?.metadata).toContain('"openingMessageSent":true');
   });
 });
 

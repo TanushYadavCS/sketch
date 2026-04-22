@@ -1,8 +1,67 @@
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
-import type { DB } from "../schema";
+import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
+import type { DB, UsersTable } from "../schema";
 
-export function createUserRepository(db: Kysely<DB>) {
+type UserDb = Kysely<DB> | Transaction<DB>;
+type UserRow = Selectable<UsersTable>;
+
+export interface UserRepository {
+  list(): Promise<UserRow[]>;
+  findBySlackId(slackUserId: string): Promise<UserRow | undefined>;
+  findByWhatsappNumber(whatsappNumber: string): Promise<UserRow | undefined>;
+  findByEmail(email: string): Promise<UserRow | undefined>;
+  findById(id: string): Promise<UserRow | undefined>;
+  getAllEmailsForUser(id: string): Promise<string[]>;
+  findByExactName(name: string, excludeUserId?: string): Promise<UserRow | undefined>;
+  searchByNamePrefix(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
+  searchByNameSubstring(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
+  create(data: {
+    name: string;
+    slackUserId?: string;
+    whatsappNumber?: string;
+    email?: string | null;
+    emailVerified?: boolean;
+    description?: string;
+    type?: string;
+    role?: string;
+    reportsTo?: string;
+  }): Promise<UserRow>;
+  update(
+    id: string,
+    data: {
+      name?: string;
+      email?: string | null;
+      emailVerified?: boolean;
+      whatsappNumber?: string | null;
+      slackUserId?: string | null;
+      description?: string | null;
+      role?: string | null;
+      reportsTo?: string | null;
+      toolProgress?: string | null;
+      reasoningText?: boolean | null;
+    },
+  ): Promise<UserRow>;
+  remove(id: string): Promise<unknown>;
+  transaction<T>(callback: (repo: UserRepository) => Promise<T>): Promise<T>;
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function normalizeName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function escapeLike(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+function excludeUserIdSql(excludeUserId?: string) {
+  return excludeUserId ? sql`AND id != ${excludeUserId}` : sql``;
+}
+
+export function createUserRepository(db: UserDb): UserRepository {
   return {
     async list() {
       return db.selectFrom("users").selectAll().orderBy("created_at", "desc").execute();
@@ -17,7 +76,13 @@ export function createUserRepository(db: Kysely<DB>) {
     },
 
     async findByEmail(email: string) {
-      return db.selectFrom("users").selectAll().where("email", "=", email).executeTakeFirst();
+      const rows = await sql<Selectable<UsersTable>>`
+        SELECT *
+        FROM users
+        WHERE lower(email) = ${normalizeEmail(email)}
+        LIMIT 1
+      `.execute(db);
+      return rows.rows[0];
     },
 
     async findById(id: string) {
@@ -42,6 +107,50 @@ export function createUserRepository(db: Kysely<DB>) {
         }
       }
       return emails;
+    },
+
+    async findByExactName(name: string, excludeUserId?: string) {
+      const rows = await sql<Selectable<UsersTable>>`
+        SELECT *
+        FROM users
+        WHERE lower(trim(name)) = ${normalizeName(name)}
+        ${excludeUserIdSql(excludeUserId)}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `.execute(db);
+      return rows.rows[0];
+    },
+
+    async searchByNamePrefix(query: string, limit = 5, excludeUserId?: string) {
+      const normalizedQuery = normalizeName(query);
+      const prefix = `${escapeLike(normalizedQuery)}%`;
+      const tokenPrefix = `% ${escapeLike(normalizedQuery)}%`;
+      const rows = await sql<Selectable<UsersTable>>`
+        SELECT *
+        FROM users
+        WHERE (
+          lower(name) LIKE ${prefix} ESCAPE '\\'
+          OR lower(name) LIKE ${tokenPrefix} ESCAPE '\\'
+        )
+        ${excludeUserIdSql(excludeUserId)}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `.execute(db);
+      return rows.rows;
+    },
+
+    async searchByNameSubstring(query: string, limit = 5, excludeUserId?: string) {
+      const normalizedQuery = normalizeName(query);
+      const pattern = `%${escapeLike(normalizedQuery)}%`;
+      const rows = await sql<Selectable<UsersTable>>`
+        SELECT *
+        FROM users
+        WHERE lower(name) LIKE ${pattern} ESCAPE '\\'
+        ${excludeUserIdSql(excludeUserId)}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `.execute(db);
+      return rows.rows;
     },
 
     async create(data: {
@@ -99,7 +208,8 @@ export function createUserRepository(db: Kysely<DB>) {
         } else {
           // Reset verification when email changes
           const existing = await db.selectFrom("users").select("email").where("id", "=", id).executeTakeFirst();
-          if (existing && existing.email !== data.email) {
+          const nextEmail = data.email ?? null;
+          if (existing && existing.email !== nextEmail) {
             values.email_verified_at = null;
           }
         }
@@ -124,6 +234,10 @@ export function createUserRepository(db: Kysely<DB>) {
 
     async remove(id: string) {
       return db.deleteFrom("users").where("id", "=", id).execute();
+    },
+
+    async transaction<T>(callback: (repo: ReturnType<typeof createUserRepository>) => Promise<T>) {
+      return db.transaction().execute(async (trx) => callback(createUserRepository(trx)));
     },
   };
 }
