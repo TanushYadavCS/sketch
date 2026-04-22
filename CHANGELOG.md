@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.19.6] -- 2026-04-22
+
+- UI: visual refresh with Inter as the primary sans font, `--brand-accent` theme token (#FEED01), button/dialog polish (shadow-xs, rounded-xl dialogs), and layout rhythm normalization (`max-w-4xl px-10 py-8`, uniform header typography) across channels, team, skills, scheduled-tasks, and connections routes. Empty states restyled with a dashed brand-accent tint and white icon circle.
+- UI: unify Team, Integrations, and Usage tab style behind a shared `@sketch/ui/components/tab-button` (uppercase mono label + yellow underline). Team's List/Chart switches to the shared pattern with Chart rendered full-width.
+- UI: trim skills surface -- remove Explore tab, category filter pills, and per-card category pills; hide the Details/Permissions tab (always render Details, with markdown-table rendering via remark-gfm and tightened skill-card header).
+- UI: hide Workspace from the sidebar and disable its route (route code retained).
+- Fix(skill-sync): honor `sync.managedPaths` in the featured-skills manifest so specific files (e.g. `SKILL.md`) on already-installed skills are re-synced on startup while the rest of the local skill directory is preserved. Enables managed updates to featured skills without overwriting user edits.
+
 ## [0.19.5] -- 2026-04-22
 
 - Fix(system): invoke `onLlmSettingsUpdated` after `PUT /api/system/llm` writes settings, so the managed platform's onboarding path refreshes the running tenant's `process.env` (CLAUDE_CODE_USE_BEDROCK / AWS_* / ANTHROPIC_MODEL) without a restart. Previously, newly claimed spares had correct DB settings but stale env, causing the Claude Code subprocess to exit with code 1 on the first agent run. The symmetric `/api/setup` path already fired this hook; this change threads it through the managed path.
