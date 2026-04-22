@@ -210,6 +210,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
   if (config.SYSTEM_SECRET) {
     const onSlackTokensUpdated = deps?.onSlackTokensUpdated;
+    const onLlmSettingsUpdated = deps?.onLlmSettingsUpdated;
     const whatsapp = deps?.whatsapp;
 
     let pairingInProgress = false;
@@ -220,6 +221,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       systemRoutes(settings, {
         systemSecret: config.SYSTEM_SECRET,
         onSlackTokensUpdated: onSlackTokensUpdated ? () => onSlackTokensUpdated() : undefined,
+        onLlmSettingsUpdated: onLlmSettingsUpdated ? () => onLlmSettingsUpdated() : undefined,
         userRepo: users,
         inboxMessagesRepo: inboxMessages,
         mcpServers,
