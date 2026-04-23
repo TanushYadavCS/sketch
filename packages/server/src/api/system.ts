@@ -21,6 +21,8 @@ interface SystemDeps {
   systemSecret: string;
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   onSlackTokensUpdated?: Function;
+  // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
+  onLlmSettingsUpdated?: Function;
   userRepo?: UserRepo;
   inboxMessagesRepo?: InboxMessagesRepo;
   mcpServers?: McpServersRepo;
@@ -254,6 +256,10 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         awsRegion: data.region,
         modelId: data.modelId,
       });
+    }
+
+    if (deps.onLlmSettingsUpdated) {
+      await deps.onLlmSettingsUpdated();
     }
 
     return c.json({ ok: true });

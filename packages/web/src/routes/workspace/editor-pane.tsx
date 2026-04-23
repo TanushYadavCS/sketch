@@ -223,8 +223,8 @@ export function EditorPane({
           <p className="text-sm text-muted-foreground mb-6 max-w-md">
             Choose a file from the sidebar to start editing, or upload a new file to get started.
           </p>
-          <Button onClick={onUploadClick}>
-            <UploadSimpleIcon size={16} className="mr-2" />
+          <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={onUploadClick}>
+            <UploadSimpleIcon size={14} weight="bold" />
             Upload File
           </Button>
         </div>

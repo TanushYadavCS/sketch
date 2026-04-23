@@ -55,13 +55,13 @@ export function IntegrationsSection({
           ))}
         </div>
       ) : connections.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-12 text-center">
-          <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-            <PlugIcon size={24} className="text-muted-foreground" />
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
+          <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
+            <PlugIcon size={24} className="text-[#8B7A00]" />
           </div>
-          <p className="mt-4 text-sm font-medium">No apps connected yet</p>
-          <p className="mt-1 max-w-xs text-xs text-muted-foreground">Add an integration to connect your apps.</p>
-          <Button size="sm" className="mt-4 gap-1.5" onClick={onAdd}>
+          <p className="mt-3 text-sm font-medium">No apps connected yet</p>
+          <p className="mt-1.5 text-sm text-muted-foreground">Add an integration to connect your apps.</p>
+          <Button variant="ghost" size="sm" className="mt-4 gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
             <PlusIcon size={14} weight="bold" />
             Add integration
           </Button>

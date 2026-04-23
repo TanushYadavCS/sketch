@@ -181,10 +181,10 @@ export function ScheduledTasksPage() {
   const isAdmin = auth.role === "admin";
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
+    <div className="mx-auto max-w-4xl px-10 py-8">
       <div>
-        <h1 className="text-xl font-bold">Automations</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
+        <h1 className="text-xl font-semibold text-foreground">Automations</h1>
+        <p className="mt-2 text-sm text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
       </div>
 
       <div className="mt-6">
@@ -803,12 +803,12 @@ function DeleteTaskDialog({
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-12 text-center">
-      <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-        <ClockIcon size={24} className="text-muted-foreground" />
+    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
+      <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
+        <ClockIcon size={24} className="text-[#8B7A00]" />
       </div>
-      <p className="mt-4 text-sm font-medium">No automations yet</p>
-      <p className="mt-1 max-w-xs text-xs text-muted-foreground">
+      <p className="mt-3 text-sm font-medium">No automations yet</p>
+      <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
         Create an automation by asking the assistant to set up a recurring task or multi-step workflow.
       </p>
     </div>

@@ -20,7 +20,7 @@ import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
 import { PlusIcon } from "@phosphor-icons/react";
 import type { McpServerRecord } from "@sketch/shared";
-import { cn } from "@sketch/ui/lib/utils";
+import { TabButton } from "@sketch/ui/components/tab-button";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -49,7 +49,7 @@ function ConnectionsCallback() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
+    <div className="mx-auto max-w-4xl px-10 py-8">
       <p className="text-sm text-muted-foreground">Connection complete. You can close this window.</p>
     </div>
   );
@@ -60,22 +60,6 @@ function ConnectionsCallback() {
 // ---------------------------------------------------------------------------
 
 type IntegrationsTab = "applications" | "mcps";
-
-function TabButton({ label, isActive, onClick }: { label: string; isActive: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "relative pb-3 font-mono text-[12px] uppercase tracking-[0.07em] transition-colors",
-        isActive ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {label}
-      {isActive ? <span className="absolute inset-x-0 bottom-0 h-[3px] rounded-full bg-[#FEED01]" /> : null}
-    </button>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -117,10 +101,10 @@ function ConnectionsPage() {
   const isLoading = serversQuery.isLoading;
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
+    <div className="mx-auto max-w-4xl px-10 py-8">
       <div>
-        <h1 className="text-xl font-bold">Integrations</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Connect apps and tools to extend your workspace.</p>
+        <h1 className="text-xl font-semibold text-foreground">Integrations</h1>
+        <p className="mt-2 text-sm text-muted-foreground">Connect apps and tools to extend your workspace.</p>
       </div>
 
       <div className="mt-6 flex items-center gap-6 border-b border-border">

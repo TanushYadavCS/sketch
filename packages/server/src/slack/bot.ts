@@ -315,13 +315,19 @@ export class SlackBot {
   }
 
   async addReaction(channelId: string, ts: string, emoji: string): Promise<void> {
-    await this.app.client.reactions.add({ channel: channelId, timestamp: ts, name: emoji });
+    try {
+      await this.app.client.reactions.add({ channel: channelId, timestamp: ts, name: emoji });
+    } catch (err) {
+      this.logger.warn({ err, emoji }, "Slack reactions.add failed");
+    }
   }
 
   async removeReaction(channelId: string, ts: string, emoji: string): Promise<void> {
     try {
       await this.app.client.reactions.remove({ channel: channelId, timestamp: ts, name: emoji });
-    } catch {}
+    } catch (err) {
+      this.logger.warn({ err, emoji }, "Slack reactions.remove failed");
+    }
   }
 
   async getUserInfo(userId: string): Promise<{ name: string; realName: string; email: string | null }> {

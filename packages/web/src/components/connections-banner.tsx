@@ -348,13 +348,13 @@ export function ConnectionsBanner({ onConnect }: { onConnect: () => void }) {
       <div className="relative z-10 max-w-[60%] px-8 py-6">
         {/* Heading */}
         <h2
-          className="mb-2.5 text-xl font-semibold leading-snug tracking-tight whitespace-nowrap text-white"
-          style={{ fontFamily: "'Instrument Sans', sans-serif" }}
+          className="mb-2.5 text-[18px] font-normal leading-snug tracking-tight whitespace-nowrap text-white"
+          style={{ fontFamily: "'Gloria Hallelujah', cursive" }}
         >
           Let your team connect their{" "}
           <span
-            className="bg-gradient-to-r from-white to-[#FEED01] bg-clip-text font-bold italic text-transparent"
-            style={{ fontFamily: "Palatino, 'Palatino Linotype', 'Book Antiqua', serif" }}
+            className="bg-gradient-to-r from-white to-[#FEED01] bg-clip-text font-normal italic text-transparent"
+            style={{ fontFamily: "'Gloria Hallelujah', cursive" }}
           >
             own apps, securely.
           </span>
@@ -362,8 +362,8 @@ export function ConnectionsBanner({ onConnect }: { onConnect: () => void }) {
 
         {/* Body */}
         <p
-          className="my-3 text-[13.5px] font-normal leading-relaxed text-[#9ca3af]"
-          style={{ fontFamily: "'Instrument Sans', sans-serif" }}
+          className="my-3 text-[13px] font-normal leading-relaxed text-[#9ca3af]"
+          style={{ fontFamily: "'Inter', sans-serif" }}
         >
           Each member authorizes with their own credentials —
           <br />
@@ -375,9 +375,9 @@ export function ConnectionsBanner({ onConnect }: { onConnect: () => void }) {
           type="button"
           onClick={onConnect}
           className="group inline-flex cursor-pointer items-center border-none bg-transparent p-0"
-          style={{ fontFamily: "'Instrument Sans', sans-serif" }}
+          style={{ fontFamily: "'Inter', sans-serif" }}
         >
-          <span className="text-[13.5px] font-semibold text-[#FEED01] transition-colors duration-200 group-hover:text-white">
+          <span className="text-[13px] font-medium text-[#FEED01] transition-colors duration-200 group-hover:text-white">
             Connect
           </span>
           <span className="ml-1.5 text-base text-[#FEED01] transition-all duration-200 group-hover:ml-2.5 group-hover:text-white">

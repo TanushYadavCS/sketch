@@ -1,8 +1,8 @@
+import { TabButton } from "@sketch/ui/components/tab-button";
 import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute } from "../dashboard";
 import { PersonalView } from "./personal-view";
-import { TabButton } from "./shared";
 import type { AdminTab, TimePeriod } from "./shared";
 import { TeamView } from "./team-view";
 

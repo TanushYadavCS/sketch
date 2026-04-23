@@ -30,22 +30,22 @@ export function McpServersSection({
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm font-medium text-muted-foreground">MCP Servers</p>
-        <Button size="sm" className="gap-1.5" onClick={onAdd}>
+        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
           <PlusIcon size={14} weight="bold" />
           New server
         </Button>
       </div>
 
       {servers.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-12 text-center">
-          <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-            <GearIcon size={24} className="text-muted-foreground" />
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-brand-accent/[0.04] px-6 pt-8 pb-10 text-center">
+          <div className="flex size-12 items-center justify-center rounded-full border border-brand-accent bg-white">
+            <GearIcon size={24} className="text-[#8B7A00]" />
           </div>
-          <p className="mt-4 text-sm font-medium">No MCP servers configured</p>
-          <p className="mt-1 max-w-xs text-xs text-muted-foreground">
+          <p className="mt-3 text-sm font-medium">No MCP servers configured</p>
+          <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
             Connect a custom MCP server to give the agent access to your internal tools.
           </p>
-          <Button size="sm" className="mt-4 gap-1.5" onClick={onAdd}>
+          <Button variant="ghost" size="sm" className="mt-4 gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
             <PlusIcon size={14} weight="bold" />
             New server
           </Button>

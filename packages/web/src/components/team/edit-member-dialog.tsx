@@ -9,7 +9,15 @@ import { ConnectorLogo } from "@/components/connector-logos";
 import type { ProviderIdentity, User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { getIntegration } from "@/lib/integrations";
-import { CheckCircleIcon, ClockIcon, RobotIcon, SlackLogoIcon, SpinnerGapIcon, XIcon } from "@phosphor-icons/react";
+import {
+  CheckCircleIcon,
+  ClockIcon,
+  LinkIcon,
+  RobotIcon,
+  SlackLogoIcon,
+  SpinnerGapIcon,
+  XIcon,
+} from "@phosphor-icons/react";
 import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
@@ -575,7 +583,13 @@ function ProviderLinkRow({
         <p className="text-sm font-medium text-muted-foreground">{displayName}</p>
         <p className="text-xs text-muted-foreground/70">Not linked</p>
       </div>
-      <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setIsEditing(true)}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 gap-1.5 text-xs hover:bg-brand-accent/8"
+        onClick={() => setIsEditing(true)}
+      >
+        <LinkIcon size={12} weight="bold" />
         Link
       </Button>
     </div>

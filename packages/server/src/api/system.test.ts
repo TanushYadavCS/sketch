@@ -30,6 +30,7 @@ function createTestSystemApp(
   deps: {
     systemSecret: string;
     onSlackTokensUpdated?: ReturnType<typeof vi.fn>;
+    onLlmSettingsUpdated?: ReturnType<typeof vi.fn>;
     userRepo?: ReturnType<typeof createUserRepository>;
     inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
     mcpServers?: ReturnType<typeof createMcpServerRepository>;
@@ -733,6 +734,29 @@ describe("PUT /api/system/llm", () => {
     expect(settings?.aws_access_key_id).toBe("AKIAIOSFODNN7EXAMPLE");
     expect(settings?.aws_secret_access_key).toBe("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
     expect(settings?.aws_region).toBe("us-east-1");
+  });
+
+  it("invokes onLlmSettingsUpdated after a successful update", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const onLlmSettingsUpdated = vi.fn().mockResolvedValue(undefined);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, onLlmSettingsUpdated });
+
+    const res = await app.request("/api/system/llm", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "bedrock",
+        accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        region: "us-east-1",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(onLlmSettingsUpdated).toHaveBeenCalledOnce();
   });
 
   it("returns 400 for invalid provider", async () => {

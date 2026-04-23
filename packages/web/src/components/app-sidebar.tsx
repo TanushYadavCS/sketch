@@ -11,7 +11,6 @@ import {
   ChartBarIcon,
   ChatCircleIcon,
   DesktopIcon,
-  FolderIcon,
   FolderSimpleIcon,
   LinkSimpleIcon,
   MoonIcon,
@@ -62,7 +61,6 @@ const allPrimaryNav: NavItem[] = [
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
   { label: "Automations", icon: <CalendarDotsIcon size={18} />, href: "/scheduled-tasks" },
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
-  { label: "Workspace", icon: <FolderIcon size={18} />, href: "/workspace" },
   { label: "Integrations", icon: <LinkSimpleIcon size={18} />, href: "/integrations" },
   { label: "Usage", icon: <ChartBarIcon size={18} />, href: "/usage" },
 ];

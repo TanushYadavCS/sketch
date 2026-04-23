@@ -6,18 +6,10 @@ import { SkillDetailView } from "@/components/skills/skill-detail-view";
 import { SkillsEmptyState } from "@/components/skills/skills-empty-state";
 import { SkillsFilterBar } from "@/components/skills/skills-filter-bar";
 import { api } from "@/lib/api";
-import {
-  type Skill,
-  type SkillCategory,
-  categoryMeta,
-  fromApiSkill,
-  getCategoryLabel,
-  isSkillEnabled,
-} from "@/lib/skills-data";
+import { type Skill, categoryMeta, fromApiSkill, isSkillEnabled } from "@/lib/skills-data";
 import { PlusIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Skeleton } from "@sketch/ui/components/skeleton";
-import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";
@@ -26,11 +18,8 @@ import { dashboardRoute } from "./dashboard";
 /**
  * Skills page — create, manage, and configure skills (custom agent behaviors).
  *
- * Two listing tabs:
- *  - Active   → skills currently enabled for the current user
- *  - Explore  → all skills; clicking one opens an explore-preview with "Add Skill" CTA
- *
- * Page modes: listing → view | explore-preview → edit | create
+ * Shows active skills (those enabled for the current user) with a search box.
+ * Page modes: listing → view | edit | create
  */
 
 export const skillsRoute = createRoute({
@@ -39,20 +28,13 @@ export const skillsRoute = createRoute({
   component: SkillsPage,
 });
 
-type PageMode = "listing" | "view" | "edit" | "create" | "explore-preview";
-type ListingTab = "active" | "explore";
+type PageMode = "listing" | "view" | "edit" | "create";
 
 export function SkillsPage() {
   // ── Core state ────────────────────────────────────────────
   const [mode, setMode] = useState<PageMode>("listing");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeCategories, setActiveCategories] = useState<SkillCategory[]>([]);
-  const [activeTab, setActiveTab] = useState<"details" | "permissions">("details");
-
-  // ── Listing tabs ──────────────────────────────────────────
-  const [listingTab, setListingTab] = useState<ListingTab>("active");
-  const [viewOrigin, setViewOrigin] = useState<ListingTab>("active");
 
   // ── Dialogs ────────────────────────────────────────────────
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -97,8 +79,6 @@ export function SkillsPage() {
       void queryClient.invalidateQueries({ queryKey: ["skills"] });
       setSelectedSkillId(created.id);
       setMode("view");
-      setListingTab("active");
-      setViewOrigin("active");
       toast.success("Skill created");
     },
     onError: (err) => {
@@ -132,7 +112,6 @@ export function SkillsPage() {
       );
       void queryClient.invalidateQueries({ queryKey: ["skills"] });
       setMode("view");
-      setViewOrigin("active");
       toast.success("Skill updated");
     },
     onError: (err) => {
@@ -168,45 +147,23 @@ export function SkillsPage() {
 
   // TODO: Switch the active tab to per-user visibility once viewer identity is available
   // by using `isSkillActiveForUser` and `getSkillSourcesForUser`.
-  const totalActiveCount = useMemo(() => skills.filter((s) => isSkillEnabled(s.status)).length, [skills]);
-
   const activeSkills = useMemo(() => {
     let result = skills.filter((s) => isSkillEnabled(s.status));
-    if (activeCategories.length > 0) {
-      result = result.filter((s) => activeCategories.includes(s.category));
-    }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter((s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
     }
     return result;
-  }, [skills, activeCategories, searchQuery]);
-
-  const exploreSkills = useMemo(() => {
-    let result = skills;
-    if (activeCategories.length > 0) {
-      result = result.filter((s) => activeCategories.includes(s.category));
-    }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter((s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
-    }
-    return result;
-  }, [skills, activeCategories, searchQuery]);
+  }, [skills, searchQuery]);
 
   const selectedSkill = useMemo(() => skills.find((s) => s.id === selectedSkillId) ?? null, [skills, selectedSkillId]);
 
   // ── Handlers ──────────────────────────────────────────────
 
-  const handleCardClick = useCallback(
-    (skillId: string) => {
-      setSelectedSkillId(skillId);
-      setActiveTab("details");
-      setMode(listingTab === "explore" ? "explore-preview" : "view");
-      setViewOrigin(listingTab);
-    },
-    [listingTab],
-  );
+  const handleCardClick = useCallback((skillId: string) => {
+    setSelectedSkillId(skillId);
+    setMode("view");
+  }, []);
 
   const handleEditClick = useCallback(() => {
     setMode("edit");
@@ -214,19 +171,12 @@ export function SkillsPage() {
 
   const handleCreateClick = useCallback(() => {
     setSelectedSkillId(null);
-    setActiveTab("details");
     setMode("create");
   }, []);
 
   const handleBackToListing = useCallback(() => {
     setSelectedSkillId(null);
-    setActiveTab("details");
     setMode("listing");
-  }, []);
-
-  const handleAddSkill = useCallback(() => {
-    setActiveTab("permissions");
-    setMode("edit");
   }, []);
 
   const handleSave = useCallback(
@@ -249,12 +199,10 @@ export function SkillsPage() {
     if (mode === "create") {
       setSelectedSkillId(null);
       setMode("listing");
-    } else if (viewOrigin === "explore") {
-      setMode("explore-preview");
     } else {
       setMode("view");
     }
-  }, [mode, viewOrigin]);
+  }, [mode]);
 
   const handleDuplicate = useCallback(
     (skill: Skill) => {
@@ -283,20 +231,10 @@ export function SkillsPage() {
     setMode("listing");
   }, [skillToDelete, deleteSkillMutation]);
 
-  const handleCategoryToggle = useCallback((category: SkillCategory) => {
-    setActiveCategories((prev) => (prev.includes(category) ? prev.filter((c) => c !== category) : [...prev, category]));
-  }, []);
-
-  const handleListingTabChange = useCallback((tab: ListingTab) => {
-    setListingTab(tab);
-    setSearchQuery("");
-    setActiveCategories([]);
-  }, []);
-
   // ── Loading skeleton ───────────────────────────────────────
   if (skillsQuery.isLoading && skills.length === 0) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-4xl px-10 py-8">
         <div className="flex items-start justify-between">
           <Skeleton className="h-7 w-24" />
           <Skeleton className="h-8 w-32" />
@@ -317,10 +255,10 @@ export function SkillsPage() {
 
   if (skillsQuery.isError && skills.length === 0) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-4xl px-10 py-8">
         <div>
-          <h1 className="text-xl font-bold">Skills</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
+          <h1 className="text-xl font-semibold text-foreground">Skills</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
         </div>
         <div className="mt-6 rounded-xl border border-destructive/20 bg-destructive/5 p-6">
           <h2 className="text-sm font-semibold text-destructive">Couldn&apos;t load skills</h2>
@@ -338,39 +276,12 @@ export function SkillsPage() {
     );
   }
 
-  // ── Explore-preview mode ───────────────────────────────────
-  if (mode === "explore-preview" && selectedSkill) {
-    return (
-      <div className="mx-auto max-w-3xl px-6 py-8">
-        <SkillDetailView
-          skill={selectedSkill}
-          activeTab="details"
-          onTabChange={() => {}}
-          onBack={handleBackToListing}
-          onEdit={handleEditClick}
-          onDuplicate={handleDuplicate}
-          onDelete={handleDeleteClick}
-          isExplorePreview
-          onAddSkill={handleAddSkill}
-        />
-        <DeleteSkillDialog
-          open={deleteDialogOpen}
-          onOpenChange={setDeleteDialogOpen}
-          skillName={skillToDelete?.name ?? null}
-          onConfirm={handleDeleteConfirm}
-        />
-      </div>
-    );
-  }
-
   // ── View mode ──────────────────────────────────────────────
   if (mode === "view" && selectedSkill) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-4xl px-10 py-8">
         <SkillDetailView
           skill={selectedSkill}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
           onBack={handleBackToListing}
           onEdit={handleEditClick}
           onDuplicate={handleDuplicate}
@@ -389,11 +300,9 @@ export function SkillsPage() {
   // ── Edit / Create mode ─────────────────────────────────────
   if (mode === "edit" || mode === "create") {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-4xl px-10 py-8">
         <SkillDetailEdit
           skill={mode === "edit" && selectedSkill ? selectedSkill : null}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
           onBack={handleCancelEdit}
           onSave={handleSave}
           onCancel={handleCancelEdit}
@@ -409,62 +318,29 @@ export function SkillsPage() {
   }
 
   // ── Listing mode ───────────────────────────────────────────
-  const displayedSkills = listingTab === "active" ? activeSkills : exploreSkills;
-  const showEmptyState = displayedSkills.length === 0;
-  const emptyVariant: "no-skills" | "no-results" | "no-category" =
-    skills.length === 0
-      ? "no-skills"
-      : searchQuery.trim()
-        ? "no-results"
-        : activeCategories.length > 0
-          ? "no-category"
-          : "no-skills";
+  const showEmptyState = activeSkills.length === 0;
+  const emptyVariant: "no-skills" | "no-results" =
+    skills.length === 0 ? "no-skills" : searchQuery.trim() ? "no-results" : "no-skills";
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
+    <div className="mx-auto max-w-4xl px-10 py-8">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold">Skills</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
+          <h1 className="text-xl font-semibold text-foreground">Skills</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
         </div>
-        <Button size="sm" className="gap-1.5" onClick={handleCreateClick}>
+        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={handleCreateClick}>
           <PlusIcon size={14} weight="bold" />
           Create Skill
         </Button>
       </div>
 
-      {/* Active / Explore tabs */}
-      <div className="mt-4 flex gap-4 border-b border-border">
-        {(["active", "explore"] as const).map((tab) => {
-          const count = tab === "active" ? totalActiveCount : skills.length;
-          return (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => handleListingTabChange(tab)}
-              className={cn(
-                "relative py-2 text-sm capitalize transition-colors",
-                listingTab === tab
-                  ? "font-medium text-foreground"
-                  : "font-normal text-muted-foreground/60 hover:text-muted-foreground",
-              )}
-            >
-              {tab}
-              <span className="ml-1.5 text-xs font-normal text-muted-foreground/60">{count}</span>
-              {listingTab === tab && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-primary" />}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Filter bar */}
+      {/* Search */}
       <SkillsFilterBar
-        activeCategories={activeCategories}
-        onCategoryToggle={handleCategoryToggle}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        searchPlaceholder={listingTab === "active" ? "Search active skills..." : "Search all skills..."}
+        searchPlaceholder="Search active skills..."
       />
 
       {/* Grid or empty state */}
@@ -473,13 +349,12 @@ export function SkillsPage() {
           <SkillsEmptyState
             variant={emptyVariant}
             searchQuery={searchQuery}
-            category={activeCategories.length > 0 ? activeCategories.map(getCategoryLabel).join(", ") : undefined}
             onCreateClick={handleCreateClick}
             onClearSearch={searchQuery.trim() ? () => setSearchQuery("") : undefined}
           />
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {displayedSkills.map((skill) => (
+            {activeSkills.map((skill) => (
               <SkillCard
                 key={skill.id}
                 skill={skill}

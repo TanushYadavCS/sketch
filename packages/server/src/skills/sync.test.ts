@@ -43,6 +43,17 @@ const MANIFEST_WITH_SKILLS = JSON.stringify({
   },
 });
 
+const MANIFEST_WITH_MANAGED_PATHS = JSON.stringify({
+  skills: {
+    canvas: {
+      path: "skills/canvas",
+      sync: {
+        managedPaths: ["SKILL.md", "canvas-cli.js"],
+      },
+    },
+  },
+});
+
 describe("syncFeaturedSkills", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -192,5 +203,207 @@ describe("syncFeaturedSkills", () => {
     await syncFeaturedSkills(fakeConfig, logger as never);
 
     expect(mkdirSync).toHaveBeenCalledWith(SKILLS_TARGET, { recursive: true });
+  });
+
+  it("copies the full skill directory on first install even when managed paths are configured", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(MANIFEST_WITH_MANAGED_PATHS);
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).toHaveBeenCalledTimes(1);
+    expect(cpSync).toHaveBeenCalledWith(join(SKILLS_CACHE, "skills/canvas"), join(SKILLS_TARGET, "canvas"), {
+      recursive: true,
+    });
+  });
+
+  it("updates only managed paths for existing skills", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      if (s === join(SKILLS_TARGET, "canvas")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas", "SKILL.md")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas", "canvas-cli.js")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(MANIFEST_WITH_MANAGED_PATHS);
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).toHaveBeenCalledTimes(2);
+    expect(cpSync).toHaveBeenCalledWith(
+      join(SKILLS_CACHE, "skills/canvas", "SKILL.md"),
+      join(SKILLS_TARGET, "canvas", "SKILL.md"),
+      {
+        force: true,
+        recursive: true,
+      },
+    );
+    expect(cpSync).toHaveBeenCalledWith(
+      join(SKILLS_CACHE, "skills/canvas", "canvas-cli.js"),
+      join(SKILLS_TARGET, "canvas", "canvas-cli.js"),
+      {
+        force: true,
+        recursive: true,
+      },
+    );
+  });
+
+  it("supports nested managed paths", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      if (s === join(SKILLS_TARGET, "md-to-pdf")) return true;
+      if (s === join(SKILLS_CACHE, "skills/md-to-pdf")) return true;
+      if (s === join(SKILLS_CACHE, "skills/md-to-pdf", "SKILL.md")) return true;
+      if (s === join(SKILLS_CACHE, "skills/md-to-pdf", "assets/default.css")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        skills: {
+          "md-to-pdf": {
+            path: "skills/md-to-pdf",
+            sync: {
+              managedPaths: ["SKILL.md", "assets/default.css"],
+            },
+          },
+        },
+      }),
+    );
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(mkdirSync).toHaveBeenCalledWith(join(SKILLS_TARGET, "md-to-pdf", "assets"), { recursive: true });
+    expect(cpSync).toHaveBeenCalledWith(
+      join(SKILLS_CACHE, "skills/md-to-pdf", "assets/default.css"),
+      join(SKILLS_TARGET, "md-to-pdf", "assets/default.css"),
+      { force: true, recursive: true },
+    );
+  });
+
+  it("preserves non-managed files for existing skills", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      if (s === join(SKILLS_TARGET, "identity")) return true;
+      if (s === join(SKILLS_CACHE, "skills/identity")) return true;
+      if (s === join(SKILLS_CACHE, "skills/identity", "SKILL.md")) return true;
+      if (s === join(SKILLS_CACHE, "skills/identity", "SKILL-CONTEXT.md")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        skills: {
+          identity: {
+            path: "skills/identity",
+            sync: {
+              managedPaths: ["SKILL.md"],
+            },
+          },
+        },
+      }),
+    );
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).toHaveBeenCalledTimes(1);
+    expect(cpSync).toHaveBeenCalledWith(
+      join(SKILLS_CACHE, "skills/identity", "SKILL.md"),
+      join(SKILLS_TARGET, "identity", "SKILL.md"),
+      {
+        force: true,
+        recursive: true,
+      },
+    );
+    expect(cpSync).not.toHaveBeenCalledWith(
+      join(SKILLS_CACHE, "skills/identity", "SKILL-CONTEXT.md"),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("warns and skips managed sync when SKILL.md is missing from managedPaths", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      if (s === join(SKILLS_TARGET, "canvas")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas", "canvas-cli.js")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        skills: {
+          canvas: {
+            path: "skills/canvas",
+            sync: {
+              managedPaths: ["canvas-cli.js"],
+            },
+          },
+        },
+      }),
+    );
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "canvas", managedPaths: ["canvas-cli.js"] }),
+      "Managed skill sync requires SKILL.md in managedPaths",
+    );
+  });
+
+  it("warns and skips invalid managed paths", async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s === SKILLS_CACHE) return true;
+      if (s.endsWith("manifest.json")) return true;
+      if (s === join(SKILLS_TARGET, "canvas")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas")) return true;
+      if (s === join(SKILLS_CACHE, "skills/canvas", "SKILL.md")) return true;
+      return false;
+    });
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        skills: {
+          canvas: {
+            path: "skills/canvas",
+            sync: {
+              managedPaths: ["SKILL.md", "../secrets.env", "/absolute/path"],
+            },
+          },
+        },
+      }),
+    );
+
+    const logger = makeLogger();
+    await syncFeaturedSkills(fakeConfig, logger as never);
+
+    expect(cpSync).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "canvas", relativePath: "../secrets.env" }),
+      "Skipping invalid managed skill sync path",
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "canvas", relativePath: "/absolute/path" }),
+      "Skipping invalid managed skill sync path",
+    );
   });
 });
