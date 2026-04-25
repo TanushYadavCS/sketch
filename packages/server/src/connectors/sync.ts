@@ -177,14 +177,31 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           continue;
         }
 
-        // Skip unchanged items early — just update synced_at timestamp
+        // Skip unchanged items early — update metadata and synced_at timestamp.
+        // Content hash matches, so we don't re-process content, but metadata
+        // (file name, path, URL, timestamps) may have changed at the source.
         const existing = existingHashes.get(item.providerFileId);
         if (existing && existing.contentHash === item.contentHash) {
           await db
             .updateTable("indexed_files")
-            .set({ synced_at: new Date().toISOString() })
+            .set({
+              synced_at: new Date().toISOString(),
+              file_name: item.fileName ?? undefined,
+              source_path: item.sourcePath ?? undefined,
+              provider_url: item.providerUrl ?? undefined,
+              file_type: item.fileType ?? undefined,
+              content_category: item.contentCategory ?? undefined,
+              source_created_at: item.sourceCreatedAt ?? undefined,
+              source_updated_at: item.sourceUpdatedAt ?? undefined,
+              mime_type: item.mimeType ?? undefined,
+            })
             .where("id", "=", existing.id)
             .execute();
+
+          // Track which connector discovered this file (idempotent).
+          // Without this, unchanged files never get linked to a new connector
+          // config, breaking connector-scoped counts/listing and orphan logic.
+          await repo.linkConnectorFile(config.id, existing.id);
 
           // Sync ACL even when content is unchanged — permissions may have
           // changed (e.g. attendee removed, scope membership updated).
