@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
@@ -46,7 +46,6 @@ async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promis
       content,
       summary: null,
       context_note: null,
-      tags: null,
       access_scope_id: null,
       source_updated_at: new Date().toISOString(),
       synced_at: new Date().toISOString(),
@@ -141,21 +140,11 @@ describe("runEnrichment — batch chunk insert", () => {
     await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "=", fileId).execute();
 
     const logger = createTestLogger();
-    const llmCall = vi.fn().mockResolvedValue({
-      text: JSON.stringify({
-        tags: ["test"],
-        summary: "Test summary",
-        temporal_references: [],
-      }),
-      inputTokens: 10,
-      outputTokens: 10,
-    });
 
     await runEnrichment({
       db,
       logger,
       embeddingProvider: null,
-      llmCall,
       fileIds: [fileId],
     });
 

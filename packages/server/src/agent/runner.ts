@@ -10,6 +10,7 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
+import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -130,6 +131,7 @@ export interface RunAgentParams {
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
     findById: (id: string) => Promise<Selectable<UsersTable> | undefined>;
+    getAllEmailsForUser: (id: string) => Promise<string[]>;
   };
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
@@ -137,6 +139,15 @@ export interface RunAgentParams {
     channelId: string;
     messageRef: string;
   }>;
+  channelContext?: {
+    channelName: string;
+  };
+  groupContext?: {
+    groupName: string;
+    groupDescription?: string;
+  };
+  enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
+  experimentalFlag?: boolean;
 }
 
 /**
@@ -170,10 +181,19 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const existingSessionId = isFresh ? undefined : await getSessionId(params.db, params.workspaceKey, params.threadTs);
   const absWorkspace = resolve(workspaceDir);
 
+  const indexedSources = params.experimentalFlag
+    ? await listIndexedSourcesForPrompt(params.db).catch((err) => {
+        logger.warn({ err }, "Failed to list indexed sources for prompt");
+        return [];
+      })
+    : [];
+
   const systemAppend = buildSystemContext({
     platform: params.platform,
     orgName: params.orgName,
     botName: params.botName,
+    experimentalFlag: params.experimentalFlag,
+    indexedSources,
   });
 
   let sessionId = "";
@@ -243,6 +263,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
+    enqueueMessage: params.enqueueMessage,
+    experimentalFlag: params.experimentalFlag,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir);

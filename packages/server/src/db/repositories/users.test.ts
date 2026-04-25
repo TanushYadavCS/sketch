@@ -238,6 +238,89 @@ describe("update()", () => {
   });
 });
 
+describe("getAllEmailsForUser()", () => {
+  it("returns only users.email when no provider identities exist", async () => {
+    const user = await users.create({ name: "Solo", email: "solo@example.com" });
+    const emails = await users.getAllEmailsForUser(user.id);
+    expect(emails).toEqual(["solo@example.com"]);
+  });
+
+  it("returns empty array when user has no email and no provider identities", async () => {
+    const user = await users.create({ name: "NoEmail", slackUserId: "U300" });
+    const emails = await users.getAllEmailsForUser(user.id);
+    expect(emails).toEqual([]);
+  });
+
+  it("returns user email plus provider emails", async () => {
+    const user = await users.create({ name: "Multi", email: "multi@example.com" });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "pi-1",
+        user_id: user.id,
+        provider: "google",
+        provider_user_id: "g-123",
+        provider_email: "multi.google@example.com",
+      })
+      .execute();
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "pi-2",
+        user_id: user.id,
+        provider: "fireflies",
+        provider_user_id: "f-123",
+        provider_email: "multi.fireflies@example.com",
+      })
+      .execute();
+
+    const emails = await users.getAllEmailsForUser(user.id);
+    expect(emails).toEqual(
+      expect.arrayContaining(["multi@example.com", "multi.google@example.com", "multi.fireflies@example.com"]),
+    );
+    expect(emails).toHaveLength(3);
+  });
+
+  it("deduplicates when a provider email matches users.email", async () => {
+    const user = await users.create({ name: "Dup", email: "dup@example.com" });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "pi-3",
+        user_id: user.id,
+        provider: "google",
+        provider_user_id: "g-456",
+        provider_email: "dup@example.com",
+      })
+      .execute();
+
+    const emails = await users.getAllEmailsForUser(user.id);
+    expect(emails).toEqual(["dup@example.com"]);
+  });
+
+  it("ignores provider identities with null provider_email", async () => {
+    const user = await users.create({ name: "NullProv", email: "np@example.com" });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "pi-4",
+        user_id: user.id,
+        provider: "slack",
+        provider_user_id: "U-nullable",
+        provider_email: null,
+      })
+      .execute();
+
+    const emails = await users.getAllEmailsForUser(user.id);
+    expect(emails).toEqual(["np@example.com"]);
+  });
+
+  it("returns empty array for unknown user id", async () => {
+    const emails = await users.getAllEmailsForUser("nope");
+    expect(emails).toEqual([]);
+  });
+});
+
 describe("remove()", () => {
   it("deletes user", async () => {
     const created = await users.create({ name: "Jack", slackUserId: "U013" });

@@ -4,13 +4,13 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { runEnrichment } from "../connectors/enrichment";
-import { createLlmCallFn } from "../connectors/llm";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 
 const searchConfigSchema = z.object({
   geminiApiKey: z.string().nullable().optional(),
   enrichmentEnabled: z.boolean().optional(),
+  syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
 });
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -32,6 +32,7 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
     return c.json({
       geminiApiKeyConfigured: !!row?.gemini_api_key,
       enrichmentEnabled: row?.enrichment_enabled ?? 1,
+      syncIntervalMinutes: row?.sync_interval_minutes ?? 30,
     });
   });
 
@@ -46,12 +47,14 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
     const updates: Parameters<typeof settings.update>[0] = {};
     if (parsed.data.geminiApiKey !== undefined) updates.geminiApiKey = parsed.data.geminiApiKey;
     if (parsed.data.enrichmentEnabled !== undefined) updates.enrichmentEnabled = parsed.data.enrichmentEnabled ? 1 : 0;
+    if (parsed.data.syncIntervalMinutes !== undefined) updates.syncIntervalMinutes = parsed.data.syncIntervalMinutes;
 
     await settings.update(updates);
     const row = await settings.get();
     return c.json({
       geminiApiKeyConfigured: !!row?.gemini_api_key,
       enrichmentEnabled: row?.enrichment_enabled ?? 1,
+      syncIntervalMinutes: row?.sync_interval_minutes ?? 30,
     });
   });
 
@@ -74,7 +77,7 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
       db,
       logger: logger.child({ component: "enrichment" }),
       embeddingProvider,
-      llmCall: createLlmCallFn(),
+      geminiApiKey: row?.gemini_api_key,
     }).catch((err) => {
       logger.error({ err }, "Manual enrichment run failed");
     });

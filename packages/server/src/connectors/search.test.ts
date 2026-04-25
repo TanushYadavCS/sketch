@@ -8,7 +8,13 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
-import { browseFiles, searchFiles } from "./search";
+import {
+  browseFiles,
+  filterAccessibleFileIds,
+  getFileContent,
+  listIndexedSourcesForPrompt,
+  searchFiles,
+} from "./search";
 
 /** Insert a minimal indexed_files row for testing path matching. */
 async function insertFile(db: Kysely<DB>, id: string, sourcePath: string, source = "google_drive") {
@@ -27,7 +33,6 @@ async function insertFile(db: Kysely<DB>, id: string, sourcePath: string, source
       content: null,
       summary: null,
       context_note: null,
-      tags: null,
       access_scope_id: null,
       source_updated_at: new Date().toISOString(),
       synced_at: new Date().toISOString(),
@@ -133,7 +138,6 @@ describe("searchFiles — FTS5 query sanitization", () => {
         content: "quarterly planning document for Q1 2025",
         summary: null,
         context_note: null,
-        tags: null,
         access_scope_id: null,
         source_updated_at: new Date().toISOString(),
         synced_at: new Date().toISOString(),
@@ -175,8 +179,301 @@ describe("searchFiles — FTS5 query sanitization", () => {
     expect(results[0].fileName).toBe("planning.txt");
   });
 
+  it("search results include providerFileId (needed for integration handoff)", async () => {
+    const results = await searchFiles(db, "planning");
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].providerFileId).toBe("fts-provider");
+  });
+
   it("an empty or all-special-chars query returns empty array without throwing", async () => {
     await expect(searchFiles(db, "   ")).resolves.toEqual([]);
     await expect(searchFiles(db, "***")).resolves.toBeInstanceOf(Array);
+  });
+});
+
+describe("filterAccessibleFileIds — 3-tier RBAC", () => {
+  let db: Kysely<DB>;
+
+  async function insertFileWithAccess(
+    id: string,
+    opts: { accessScopeId?: string | null; fileAccessEmails?: string[] } = {},
+  ) {
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "connector-rbac",
+        provider_file_id: id,
+        file_name: `${id}.txt`,
+        file_type: "text",
+        content_category: "document",
+        source: "google_drive",
+        source_path: `/${id}`,
+        provider_url: null,
+        content: "content",
+        summary: null,
+        context_note: null,
+        access_scope_id: opts.accessScopeId ?? null,
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+      })
+      .execute();
+    for (const email of opts.fileAccessEmails ?? []) {
+      await db.insertInto("file_access").values({ indexed_file_id: id, email }).execute();
+    }
+  }
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-rbac",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+    // Set up two access scopes with members
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-a",
+        connector_config_id: "connector-rbac",
+        scope_type: "drive",
+        provider_scope_id: "drive-a",
+      })
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-b",
+        connector_config_id: "connector-rbac",
+        scope_type: "drive",
+        provider_scope_id: "drive-b",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-a", email: "alice@example.com" })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-b", email: "bob@example.com" })
+      .execute();
+
+    // File 1: unrestricted (no scope, no file_access)
+    await insertFileWithAccess("file-unrestricted");
+    // File 2: scope-a (alice can see)
+    await insertFileWithAccess("file-scope-a", { accessScopeId: "scope-a" });
+    // File 3: scope-b (bob can see)
+    await insertFileWithAccess("file-scope-b", { accessScopeId: "scope-b" });
+    // File 4: per-file access for charlie only
+    await insertFileWithAccess("file-per-file", { fileAccessEmails: ["charlie@example.com"] });
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("returns all files when userEmails is empty (no filtering)", async () => {
+    const accessible = await filterAccessibleFileIds(
+      db,
+      ["file-unrestricted", "file-scope-a", "file-scope-b", "file-per-file"],
+      [],
+    );
+    expect(accessible.size).toBe(4);
+  });
+
+  it("returns unrestricted files for any user", async () => {
+    const accessible = await filterAccessibleFileIds(db, ["file-unrestricted"], ["nobody@example.com"]);
+    expect(accessible.has("file-unrestricted")).toBe(true);
+  });
+
+  it("scope-level access: alice sees scope-a, not scope-b", async () => {
+    const accessible = await filterAccessibleFileIds(db, ["file-scope-a", "file-scope-b"], ["alice@example.com"]);
+    expect(accessible.has("file-scope-a")).toBe(true);
+    expect(accessible.has("file-scope-b")).toBe(false);
+  });
+
+  it("per-file access: only the explicit email allows access", async () => {
+    const accessibleForCharlie = await filterAccessibleFileIds(db, ["file-per-file"], ["charlie@example.com"]);
+    expect(accessibleForCharlie.has("file-per-file")).toBe(true);
+
+    const accessibleForAlice = await filterAccessibleFileIds(db, ["file-per-file"], ["alice@example.com"]);
+    expect(accessibleForAlice.has("file-per-file")).toBe(false);
+  });
+
+  it("empty fileIds returns empty set", async () => {
+    const accessible = await filterAccessibleFileIds(db, [], ["alice@example.com"]);
+    expect(accessible.size).toBe(0);
+  });
+});
+
+describe("getFileContent — RBAC", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-content",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-c",
+        connector_config_id: "connector-content",
+        scope_type: "drive",
+        provider_scope_id: "drive-c",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-c", email: "member@example.com" })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-restricted",
+        connector_config_id: "connector-content",
+        provider_file_id: "pf-restricted",
+        file_name: "secret.txt",
+        file_type: "text",
+        content_category: "document",
+        source: "google_drive",
+        source_path: "/secret",
+        provider_url: null,
+        content: "top secret content",
+        summary: null,
+        context_note: null,
+        access_scope_id: "scope-c",
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+      })
+      .execute();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("returns file when no userEmails provided (admin/API without auth)", async () => {
+    const file = await getFileContent(db, "file-restricted");
+    expect(file).toBeTruthy();
+    expect(file?.content).toBe("top secret content");
+  });
+
+  it("returns file when user is in the scope", async () => {
+    const file = await getFileContent(db, "file-restricted", ["member@example.com"]);
+    expect(file).toBeTruthy();
+    expect(file?.fileName).toBe("secret.txt");
+  });
+
+  it("returns null when user is not in the scope", async () => {
+    const file = await getFileContent(db, "file-restricted", ["outsider@example.com"]);
+    expect(file).toBeNull();
+  });
+
+  it("returns null for missing file id", async () => {
+    const file = await getFileContent(db, "does-not-exist", ["member@example.com"]);
+    expect(file).toBeNull();
+  });
+});
+
+describe("listIndexedSourcesForPrompt", () => {
+  let db: Kysely<DB>;
+
+  async function insertBasicFile(id: string, source: string, isArchived: 0 | 1 = 0) {
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "connector-idx",
+        provider_file_id: id,
+        file_name: `${id}.txt`,
+        file_type: "text",
+        content_category: "document",
+        source,
+        source_path: `/${id}`,
+        provider_url: null,
+        content: null,
+        summary: null,
+        context_note: null,
+        access_scope_id: null,
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+        is_archived: isArchived,
+      })
+      .execute();
+  }
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-idx",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("returns empty array when no files are indexed", async () => {
+    const rows = await listIndexedSourcesForPrompt(db);
+    expect(rows).toEqual([]);
+  });
+
+  it("lists sources with file counts, sorted by count desc", async () => {
+    await insertBasicFile("f1", "fireflies");
+    await insertBasicFile("f2", "fireflies");
+    await insertBasicFile("f3", "google_drive");
+    await insertBasicFile("f4", "google_drive");
+    await insertBasicFile("f5", "google_drive");
+
+    const rows = await listIndexedSourcesForPrompt(db);
+    expect(rows).toEqual([
+      { source: "google_drive", fileCount: 3 },
+      { source: "fireflies", fileCount: 2 },
+    ]);
+  });
+
+  it("excludes archived files from counts", async () => {
+    await insertBasicFile("live", "fireflies");
+    await insertBasicFile("archived", "fireflies", 1);
+    const rows = await listIndexedSourcesForPrompt(db);
+    expect(rows).toEqual([{ source: "fireflies", fileCount: 1 }]);
+  });
+
+  it("excludes sources that have only archived files (count would be 0)", async () => {
+    await insertBasicFile("a1", "notion", 1);
+    const rows = await listIndexedSourcesForPrompt(db);
+    expect(rows).toEqual([]);
   });
 });

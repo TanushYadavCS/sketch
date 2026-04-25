@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { BINARY_EXTRACTABLE_MIMES, extractTextFromBinary } from "./extractors";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SyncedItem } from "./types";
+import type { BrowseTreeItem, Connector, ConnectorCredentials, OAuthCredentials, SyncedItem } from "./types";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -620,6 +620,34 @@ export function createGoogleDriveConnector(): Connector {
         return refreshOAuthToken(credentials);
       }
       return null;
+    },
+
+    async browse({ credentials }) {
+      const validCreds = await ensureValidToken(credentials as OAuthCredentials);
+      const sharedDrives = await listSharedDrives(validCreds.access_token);
+      const rootFolders = await listMyDriveFolders(validCreds.access_token);
+      return {
+        type: "tree" as const,
+        items: rootFolders.map((f) => ({ id: f.id, name: f.name, hasChildren: true })),
+        groups:
+          sharedDrives.length > 0
+            ? [
+                {
+                  id: "shared-drives",
+                  name: "Shared Drives",
+                  items: sharedDrives.map((d) => ({ id: d.id, name: d.name })),
+                },
+              ]
+            : undefined,
+      };
+    },
+
+    async browseChildren({ credentials, parentId }) {
+      const validCreds = await ensureValidToken(credentials as OAuthCredentials);
+      const items = await listFolderContents(validCreds.access_token, parentId);
+      return items
+        .filter((i) => i.mimeType === "application/vnd.google-apps.folder")
+        .map((i): BrowseTreeItem => ({ id: i.id, name: i.name, hasChildren: true }));
     },
   };
 }

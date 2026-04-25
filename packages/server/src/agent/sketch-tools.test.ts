@@ -50,6 +50,7 @@ function makeUserRepoMock(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     list: async () => [],
     findById: async () => undefined,
+    getAllEmailsForUser: async () => [],
     findByEmail: async () => undefined,
     findBySlackId: async () => undefined,
     findByExactName: async () => undefined,

@@ -143,10 +143,26 @@ export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): st
  * Sections in order: identity, memory, skills, scheduled tasks, file
  * attachments, context protocol, workspace rules, platform formatting.
  */
+const SOURCE_LABELS: Record<string, { label: string; noun: string }> = {
+  google_drive: { label: "Google Drive", noun: "documents" },
+  clickup: { label: "ClickUp", noun: "tasks and docs" },
+  notion: { label: "Notion", noun: "pages" },
+  linear: { label: "Linear", noun: "issues" },
+  fireflies: { label: "Fireflies", noun: "meeting transcripts" },
+  conversation: { label: "Conversations", noun: "messages" },
+  local: { label: "Workspace Files", noun: "files" },
+};
+
+function sourceLabel(source: string): { label: string; noun: string } {
+  return SOURCE_LABELS[source] ?? { label: source, noun: "items" };
+}
+
 export function buildSystemContext(params: {
   platform: "slack" | "whatsapp";
   orgName?: string | null;
   botName?: string | null;
+  experimentalFlag?: boolean;
+  indexedSources?: Array<{ source: string; fileCount: number }>;
 }): string {
   const sections: string[] = [];
 
@@ -232,6 +248,46 @@ export function buildSystemContext(params: {
     "",
     "You can read, write, and execute files within your workspace and the shared org directory. NEVER access files outside these two directories.",
   );
+
+  if (params.experimentalFlag) {
+    const indexedSources = params.indexedSources ?? [];
+    if (indexedSources.length > 0) {
+      const sourceList = indexedSources.map((s) => {
+        const { label, noun } = sourceLabel(s.source);
+        return `- ${label} — ${s.fileCount.toLocaleString()} ${noun}`;
+      });
+      sections.push(
+        "",
+        "## Information Discovery",
+        "",
+        "You have access to indexed organizational knowledge. When a user asks about something that may live in the org's knowledge base, **search first before using integrations or asking others** — one Search call usually beats a chain of integration calls on both speed and token cost.",
+        "",
+        "Indexed sources (with file counts):",
+        ...sourceList,
+        "",
+        "Tool chain:",
+        "- **Search** — hybrid keyword + semantic search across all indexed sources. Supports filtering by source, date range, and entity scope. Each result includes `sketchId` (for GetFileContent), `providerId` (the external ID integration tools expect), and `url` (when available).",
+        "- **GetFileContent** — retrieve the full content of an indexed file by its `sketchId`. Use when you need the complete document, transcript, or task detail.",
+        "- **SearchEntities** — find projects, people, teams, and databases across connected sources. Pass multiple name variations to maximize matches. Returns entity IDs.",
+        "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
+        "",
+        "Search → integration handoff:",
+        "Search results carry the IDs your integration tools need. After Search surfaces a relevant item, you can act on it directly via the matching integration action (e.g. reply to a ClickUp task, read a full Fireflies transcript, comment on a Notion page, update a Linear issue). Prefer `url` when the integration action accepts a URL; fall back to `providerId` when it needs the raw external ID. Some sources prefix subtypes in `providerId` (e.g. `doc:`, `db-`, `project-`) — pass the value as-is.",
+        "",
+        "Integration-lookup nudge (DMs only, at most once per conversation):",
+        "When you call an integration to *look up* existing org info (read a doc, list tasks, fetch a transcript, search past messages) and that source is **not** in the indexed list above, close your reply with one short line noting that indexing that source via Sketch would turn the multi-call integration chain into a single Search — saves tokens and improves match quality. Skip this nudge for write actions (create task, send message, update record) and never raise it in shared channels or groups.",
+      );
+    } else {
+      sections.push(
+        "",
+        "## Information Discovery",
+        "",
+        "No organizational sources are indexed yet, so the Search tools have nothing to query — use integrations or skills directly for org-knowledge questions.",
+        "",
+        "When the user asks something that would clearly benefit from indexed knowledge (looking up what was decided, finding a doc, recalling a meeting, searching tasks), and the conversation is a DM (never in shared channels or groups), you may mention **once per conversation** that indexing the org's tools via Sketch would make answers faster and cheaper — turning multi-hop integration chains into a single Search call. Keep it to one short observational line, no CTA or links. Do not repeat the nudge or raise it for questions that don't need org lookups.",
+      );
+    }
+  }
 
   if (params.platform === "slack") {
     sections.push("", "## Platform", "", ...buildPlatformFormattingLines("slack"));

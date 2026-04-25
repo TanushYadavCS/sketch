@@ -88,6 +88,24 @@ sketch/
 - Static migration imports instead of FileMigrationProvider (for tsdown bundler compatibility)
 - `CURRENT_TIMESTAMP` in migrations for cross-dialect compatibility (SQLite + Postgres)
 
+## Feature Gating (`EXPERIMENTAL_FLAG`)
+
+New features that aren't ready for general availability are gated behind `config.EXPERIMENTAL_FLAG` (env var, defaults to `false`). If the flag is off, the feature must be **completely invisible** — no routes, no tools, no prompt references, no UI. Gate at all 4 layers:
+
+1. **HTTP routes** (`http.ts`): Wrap new API routes in `if (config.EXPERIMENTAL_FLAG) { app.route(...) }`
+2. **Agent tools** (`sketch-tools.ts`): Conditionally include tools using the spread pattern:
+   ```ts
+   ...(deps.experimentalFlag
+     ? [tool("MyTool", ...), tool("AnotherTool", ...)]
+     : ([] as ReturnType<typeof tool>[])),
+   ```
+3. **System prompt** (`prompt.ts`): Wrap any instructions referencing experimental tools in `if (params.experimentalFlag) { ... }` so the agent isn't told about tools it can't use
+4. **Frontend** (`app-sidebar.tsx`): Hide navigation items using `setupStatus.experimentalFlag`
+
+The flag flows: `config` → `bootstrap.ts` (injected in `trackedRunAgent`) → `RunAgentParams` → both `SketchMcpDeps` (tools) and `buildSystemContext` (prompt).
+
+Currently gated: Files UI, Connections UI, entity/connector/identity/OAuth APIs, agent search tools (Search, SearchEntities, GetEntityContext), and Information Discovery system prompt section.
+
 ## Related Repos
 
 - **sketch-platform** (`~/Projects/sketch-platform/`, `canvasxai/sketch-platform`, private): Management plane for the managed offering. Separate pnpm monorepo with `packages/api/` (backend), `packages/web/` (frontend), `packages/infra/` (CDK, planned). Planning docs for both repos live here in `.planning/`.

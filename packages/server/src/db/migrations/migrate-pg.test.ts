@@ -28,7 +28,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   }, 30000);
 
-  it("runs all migrations on a fresh Postgres database without error", async () => {
+  it("runs all 038 migrations on a fresh Postgres database without error", async () => {
     // createTestPgDb() already ran migrations — just verify no error was thrown.
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
@@ -36,11 +36,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(rows.rows.length).toBeGreaterThan(0);
   }, 30000);
 
-  it("records all 32 migration entries in kysely_migration", async () => {
+  it("records all 38 migration entries in kysely_migration", async () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(33);
+    expect(rows.rows).toHaveLength(38);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -67,6 +67,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[30]).toBe("031-extend-scheduled-tasks");
     expect(names[31]).toBe("032-output-style");
     expect(names[32]).toBe("033-inbox-workflows");
+    expect(names[33]).toBe("034-drop-tags-from-fts");
+    expect(names[34]).toBe("035-smart-enrichment");
+    expect(names[35]).toBe("036-org-context");
+    expect(names[36]).toBe("037-browse-cache");
+    expect(names[37]).toBe("038-sync-interval");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -75,7 +80,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(33);
+    expect(rows.rows).toHaveLength(38);
   });
 
   it("creates the users table", async () => {

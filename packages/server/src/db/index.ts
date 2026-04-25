@@ -29,6 +29,7 @@ export async function createDatabase(config: Config): Promise<Kysely<DB>> {
   const sqlite = new Database(config.SQLITE_PATH);
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
+  sqlite.pragma("busy_timeout = 5000");
 
   // Load sqlite-vec extension for vector search. Treat as optional — the
   // extension may not be present in all environments. When unavailable, search
