@@ -239,23 +239,12 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).not.toContain("## About Sketch");
     });
-
-    it("does not contain Information Discovery section by default", () => {
-      const result = buildSystemContext({ platform: "slack" });
-      expect(result).not.toContain("## Information Discovery");
-    });
-
-    it("does not contain Information Discovery section when experimentalFlag is false", () => {
-      const result = buildSystemContext({ platform: "slack", experimentalFlag: false });
-      expect(result).not.toContain("## Information Discovery");
-    });
   });
 
-  describe("Information Discovery (experimental)", () => {
+  describe("Information Discovery", () => {
     it("with indexed sources: includes the tool chain, dynamic source list, and integration nudge", () => {
       const result = buildSystemContext({
         platform: "slack",
-        experimentalFlag: true,
         indexedSources: [
           { source: "fireflies", fileCount: 83 },
           { source: "google_drive", fileCount: 247 },
@@ -276,7 +265,7 @@ describe("buildSystemContext", () => {
     });
 
     it("empty state: no tool chain, just the conditional indexing nudge", () => {
-      const result = buildSystemContext({ platform: "slack", experimentalFlag: true, indexedSources: [] });
+      const result = buildSystemContext({ platform: "slack", indexedSources: [] });
       expect(result).toContain("## Information Discovery");
       expect(result).toContain("No organizational sources are indexed yet");
       expect(result).not.toContain("**Search**");
@@ -285,14 +274,13 @@ describe("buildSystemContext", () => {
     });
 
     it("defaults to empty state when indexedSources is omitted", () => {
-      const result = buildSystemContext({ platform: "slack", experimentalFlag: true });
+      const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("No organizational sources are indexed yet");
     });
 
     it("Information Discovery appears before Platform section", () => {
       const result = buildSystemContext({
         platform: "slack",
-        experimentalFlag: true,
         indexedSources: [{ source: "fireflies", fileCount: 10 }],
       });
       const idIdx = result.indexOf("## Information Discovery");

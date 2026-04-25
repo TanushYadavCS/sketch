@@ -155,16 +155,12 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/auth", authRoutes(settings, db, { config, logger, userRepo: users, sendMagicLink }));
   app.route(
     "/api/setup",
-    setupRoutes(
-      settings,
-      {
-        managedUrl: config.MANAGED_URL,
-        onSlackTokensUpdated: deps?.onSlackTokensUpdated,
-        onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
-        userRepo: users,
-      },
-      config.EXPERIMENTAL_FLAG,
-    ),
+    setupRoutes(settings, {
+      managedUrl: config.MANAGED_URL,
+      onSlackTokensUpdated: deps?.onSlackTokensUpdated,
+      onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
+      userRepo: users,
+    }),
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger));
   app.route("/api/skills", skillsRoutes(config));
@@ -192,20 +188,17 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/channels/email", emailRoutes(settings));
 
   app.route("/api/usage", usageRoutes(db));
-  // Files feature — gated behind EXPERIMENTAL_FLAG
-  if (config.EXPERIMENTAL_FLAG) {
-    app.route("/api/entities", entityRoutes(db));
+  app.route("/api/entities", entityRoutes(db));
 
-    if (deps?.logger) {
-      app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users));
-    }
+  if (deps?.logger) {
+    app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users));
+  }
 
-    const identities = createProviderIdentityRepository(db);
-    app.route("/api/identities", providerIdentityRoutes(identities, users));
+  const identities = createProviderIdentityRepository(db);
+  app.route("/api/identities", providerIdentityRoutes(identities, users));
 
-    if (deps?.logger) {
-      app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
-    }
+  if (deps?.logger) {
+    app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
   }
 
   if (config.SYSTEM_SECRET) {

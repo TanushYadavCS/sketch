@@ -80,7 +80,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     SLACK_THREAD_HISTORY_LIMIT: 50,
     MAX_FILE_SIZE_MB: 20,
     MAX_UPLOAD_SIZE_MB: 50,
-    EXPERIMENTAL_FLAG: true,
+    EXPERIMENTAL_FLAG: false,
     DATA_DIR: "./data",
     CLAUDE_CONFIG_DIR: join(tmpdir(), "test-claude"),
     SKETCH_CONFIG_DIR: join(tmpdir(), "test-sketch"),

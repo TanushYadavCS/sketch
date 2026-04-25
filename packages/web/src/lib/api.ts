@@ -117,7 +117,6 @@ export interface SetupStatus {
   llmConnected: boolean;
   llmProvider: "anthropic" | "bedrock" | null;
   managedUrl?: string;
-  experimentalFlag?: boolean;
 }
 
 export interface EntityListItem {

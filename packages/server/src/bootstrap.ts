@@ -91,7 +91,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const trackedRunAgent = async (params: RunAgentParams): Promise<AgentResult> => {
     const runId = randomUUID();
     const span = tracer.startSpan("chat sketch");
-    const enrichedParams = { ...params, experimentalFlag: config.EXPERIMENTAL_FLAG };
+    const enrichedParams = { ...params };
     setAgentRunAttributes(span, enrichedParams, runId);
 
     try {

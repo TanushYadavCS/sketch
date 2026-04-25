@@ -92,7 +92,7 @@ interface SetupDeps {
   userRepo?: ReturnType<typeof createUserRepository>;
 }
 
-export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}, experimentalFlag = false) {
+export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   const routes = new Hono();
 
   routes.get("/status", async (c) => {
@@ -129,7 +129,6 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}, experi
       llmConnected: hasLlm,
       llmProvider: row?.llm_provider === "bedrock" ? "bedrock" : row?.llm_provider === "anthropic" ? "anthropic" : null,
       ...(deps.managedUrl ? { managedUrl: deps.managedUrl } : {}),
-      experimentalFlag,
     });
   });
 

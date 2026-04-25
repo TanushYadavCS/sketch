@@ -147,7 +147,6 @@ export interface RunAgentParams {
     groupDescription?: string;
   };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
-  experimentalFlag?: boolean;
 }
 
 /**
@@ -181,18 +180,15 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const existingSessionId = isFresh ? undefined : await getSessionId(params.db, params.workspaceKey, params.threadTs);
   const absWorkspace = resolve(workspaceDir);
 
-  const indexedSources = params.experimentalFlag
-    ? await listIndexedSourcesForPrompt(params.db).catch((err) => {
-        logger.warn({ err }, "Failed to list indexed sources for prompt");
-        return [];
-      })
-    : [];
+  const indexedSources = await listIndexedSourcesForPrompt(params.db).catch((err) => {
+    logger.warn({ err }, "Failed to list indexed sources for prompt");
+    return [];
+  });
 
   const systemAppend = buildSystemContext({
     platform: params.platform,
     orgName: params.orgName,
     botName: params.botName,
-    experimentalFlag: params.experimentalFlag,
     indexedSources,
   });
 
@@ -264,7 +260,6 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
-    experimentalFlag: params.experimentalFlag,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir);
