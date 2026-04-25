@@ -66,12 +66,12 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[29]).toBe("030-inbox-messages");
     expect(names[30]).toBe("031-extend-scheduled-tasks");
     expect(names[31]).toBe("032-output-style");
-    expect(names[32]).toBe("033-drop-tags-from-fts");
-    expect(names[33]).toBe("034-smart-enrichment");
-    expect(names[34]).toBe("035-org-context");
-    expect(names[35]).toBe("036-browse-cache");
-    expect(names[36]).toBe("037-sync-interval");
-    expect(names[37]).toBe("038-inbox-workflows");
+    expect(names[32]).toBe("033-inbox-workflows");
+    expect(names[33]).toBe("034-drop-tags-from-fts");
+    expect(names[34]).toBe("035-smart-enrichment");
+    expect(names[35]).toBe("036-org-context");
+    expect(names[36]).toBe("037-browse-cache");
+    expect(names[37]).toBe("038-sync-interval");
   });
 
   it("running migrations twice is idempotent", async () => {

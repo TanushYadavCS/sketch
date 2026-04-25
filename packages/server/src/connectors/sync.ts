@@ -186,6 +186,15 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
             .where("id", "=", existing.id)
             .execute();
 
+          // Sync ACL even when content is unchanged — permissions may have
+          // changed (e.g. attendee removed, scope membership updated).
+          if (item.accessScope) {
+            const scopeId = await repo.upsertAccessScope(config.id, item.accessScope);
+            await repo.setFileAccessScope(existing.id, scopeId);
+          } else if (item.accessEmails && item.accessEmails.length > 0) {
+            await repo.syncFileAccessEmails(existing.id, item.accessEmails);
+          }
+
           // Link parent entities on skipped items (they may have been
           // seeded after the item was first created). Check existence to avoid duplicates.
           if (item.parentEntities && item.parentEntities.length > 0) {
