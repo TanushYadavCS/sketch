@@ -126,6 +126,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
       markConsumed: vi.fn().mockResolvedValue(undefined),
       create: vi.fn(),
     } as unknown as SlackAdapterDeps["inboxMessagesRepo"],
+    sendDm: vi.fn().mockResolvedValue({ channelId: "D_outreach", messageRef: "outreach-ts" }),
     ...overrides,
   };
 }
@@ -237,6 +238,33 @@ describe("slack/adapter", () => {
       expect(agentCall.userMessage).toContain("hello");
       expect(agentCall.platform).toBe("slack");
       expect(agentCall.userName).toBe("Alice");
+    });
+
+    it("replies with an identity-mapping error when Slack resolution conflicts", async () => {
+      const baseDeps = makeDeps();
+      const deps = makeDeps({
+        repos: {
+          ...baseDeps.repos,
+          users: {
+            findBySlackId: vi.fn().mockResolvedValue(undefined),
+            findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
+            findByEmail: vi.fn().mockResolvedValue(makeUser({ id: "u-existing", slack_user_id: "S_EXISTING" })),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["users"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
+        "D1",
+        expect.stringContaining("conflicts with an existing Sketch identity"),
+      );
     });
 
     it("uploads pending files after agent run", async () => {
@@ -558,7 +586,35 @@ describe("slack/adapter", () => {
       expect(agentCall.userRepo).toBe(deps.repos.users);
       expect(agentCall.inboxMessagesRepo).toBe(deps.inboxMessagesRepo);
       expect(agentCall.currentUserId).toBe("u1");
-      expect(agentCall.sendDm).toBeTypeOf("function");
+      expect(agentCall.sendDm).toBe(deps.sendDm);
+    });
+
+    it("replies in thread when Slack identity resolution conflicts", async () => {
+      const baseDeps = makeDeps();
+      const deps = makeDeps({
+        repos: {
+          ...baseDeps.repos,
+          users: {
+            findBySlackId: vi.fn().mockResolvedValue(undefined),
+            findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
+            findByEmail: vi.fn().mockResolvedValue(makeUser({ id: "u-existing", slack_user_id: "S_EXISTING" })),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["users"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
+        "C1",
+        "1",
+        expect.stringContaining("conflicts with an existing Sketch identity"),
+      );
     });
 
     it("resets the current thread when a channel mention sends /new", async () => {

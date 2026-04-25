@@ -184,13 +184,34 @@ function FileDetailContent({
 
       {access && access.members.length > 0 && <AccessSection access={access} />}
 
-      {file.content && (
-        <div>
-          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Content Preview</p>
-          <pre className="mt-1 max-h-96 overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-xs leading-relaxed whitespace-pre-wrap">
-            {file.content.length > 2000 ? `${file.content.slice(0, 2000)}\u2026` : file.content}
-          </pre>
-        </div>
+      {file.content && <ContentPreview content={file.content} />}
+    </div>
+  );
+}
+
+const CONTENT_PREVIEW_LIMIT = 2000;
+
+function ContentPreview({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const isLong = content.length > CONTENT_PREVIEW_LIMIT;
+  const displayContent = expanded || !isLong ? content : `${content.slice(0, CONTENT_PREVIEW_LIMIT)}\u2026`;
+
+  return (
+    <div>
+      <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Content</p>
+      <pre
+        className={`mt-1 overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-xs leading-relaxed whitespace-pre-wrap ${expanded ? "max-h-[70vh]" : "max-h-96"}`}
+      >
+        {displayContent}
+      </pre>
+      {isLong && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="mt-1 text-[11px] text-primary hover:underline"
+        >
+          {expanded ? "Show less" : `Show full content (${(content.length / 1000).toFixed(1)}k chars)`}
+        </button>
       )}
     </div>
   );

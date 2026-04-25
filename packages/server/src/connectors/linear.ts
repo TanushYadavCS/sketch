@@ -337,6 +337,7 @@ export function createLinearConnector(): Connector {
 
   return {
     type: "linear",
+    promotableFileTypes: ["project"],
 
     async validateCredentials(credentials) {
       const token = getAccessToken(credentials);

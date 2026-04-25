@@ -240,9 +240,65 @@ describe("buildSystemContext", () => {
       expect(result).not.toContain("## About Sketch");
     });
 
-    it("does not contain Information Discovery section", () => {
+    it("does not contain Information Discovery section by default", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).not.toContain("## Information Discovery");
+    });
+
+    it("does not contain Information Discovery section when experimentalFlag is false", () => {
+      const result = buildSystemContext({ platform: "slack", experimentalFlag: false });
+      expect(result).not.toContain("## Information Discovery");
+    });
+  });
+
+  describe("Information Discovery (experimental)", () => {
+    it("with indexed sources: includes the tool chain, dynamic source list, and integration nudge", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        experimentalFlag: true,
+        indexedSources: [
+          { source: "fireflies", fileCount: 83 },
+          { source: "google_drive", fileCount: 247 },
+        ],
+      });
+      expect(result).toContain("## Information Discovery");
+      expect(result).toContain("**Search**");
+      expect(result).toContain("**GetFileContent**");
+      expect(result).toContain("**SearchEntities**");
+      expect(result).toContain("**GetEntityContext**");
+      expect(result).toContain("Fireflies");
+      expect(result).toContain("83");
+      expect(result).toContain("Google Drive");
+      expect(result).toContain("247");
+      expect(result).toContain("Search → integration handoff");
+      expect(result).toContain("providerId");
+      expect(result).toContain("at most once per conversation");
+    });
+
+    it("empty state: no tool chain, just the conditional indexing nudge", () => {
+      const result = buildSystemContext({ platform: "slack", experimentalFlag: true, indexedSources: [] });
+      expect(result).toContain("## Information Discovery");
+      expect(result).toContain("No organizational sources are indexed yet");
+      expect(result).not.toContain("**Search**");
+      expect(result).not.toContain("**GetFileContent**");
+      expect(result).toContain("once per conversation");
+    });
+
+    it("defaults to empty state when indexedSources is omitted", () => {
+      const result = buildSystemContext({ platform: "slack", experimentalFlag: true });
+      expect(result).toContain("No organizational sources are indexed yet");
+    });
+
+    it("Information Discovery appears before Platform section", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        experimentalFlag: true,
+        indexedSources: [{ source: "fireflies", fileCount: 10 }],
+      });
+      const idIdx = result.indexOf("## Information Discovery");
+      const platformIdx = result.indexOf("## Platform");
+      expect(idIdx).toBeGreaterThanOrEqual(0);
+      expect(platformIdx).toBeGreaterThan(idIdx);
     });
 
     it("does not contain Bot Identity section header", () => {
@@ -583,6 +639,45 @@ describe("buildSketchContext", () => {
       expect(result).toContain("From Bob, 10m ago:");
       expect(result).toContain("Please send the latest update.");
       expect(result).toContain("</inbox>");
+    });
+
+    it("renders workflow inbox items with explicit fields", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "hello",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        inboxMessages: [
+          {
+            id: "inbox-1",
+            senderName: "System",
+            message: "Fallback message",
+            createdAt: new Date().toISOString(),
+            kind: "managed_onboarding_intro",
+            metadata: {
+              stage: "awaiting_recipients",
+              source: "managed_slack_onboarding",
+              originalMessage: "Who should I introduce myself to first?",
+              instructions: ["Resolve names", "Ask for confirmation"],
+              selectedNames: [],
+              draftMessage: null,
+            },
+          },
+        ],
+      });
+
+      expect(result).toContain("Type: managed_onboarding_intro");
+      expect(result).toContain("InboxMessageId: inbox-1");
+      expect(result).toContain("Status: awaiting_recipients");
+      expect(result).toContain("Source: managed_slack_onboarding");
+      expect(result).toContain("Original message:");
+      expect(result).toContain("Who should I introduce myself to first?");
+      expect(result).toContain("- Resolve names");
+      expect(result).toContain("Selected recipient user ids:");
+      expect(result).toContain("None yet");
+      expect(result).toContain("Selected recipients:");
+      expect(result).toContain("Draft message:");
     });
 
     it("omits inbox tag when there are no inbox messages", () => {

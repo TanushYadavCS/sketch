@@ -44,6 +44,27 @@ describe("create()", () => {
     expect(row.message_ref).toBe("1111.0001");
     expect(row.created_at).toBeDefined();
     expect(row.consumed_at).toBeNull();
+    expect(row.kind).toBe("note");
+    expect(row.metadata).toBeNull();
+    expect(row.resolution_mode).toBe("auto_consume");
+    expect(row.resolved_at).toBeNull();
+  });
+
+  it("creates workflow inbox rows with metadata and explicit resolution mode", async () => {
+    const row = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Choose who should get intros.",
+      kind: "managed_onboarding_intro",
+      metadata: { stage: "awaiting_recipients" },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    expect(row.kind).toBe("managed_onboarding_intro");
+    expect(row.metadata).toBe(JSON.stringify({ stage: "awaiting_recipients" }));
+    expect(row.resolution_mode).toBe("explicit");
+    expect(row.resolved_at).toBeNull();
   });
 });
 
@@ -111,6 +132,47 @@ describe("listPendingForRecipient()", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(pending.id);
   });
+
+  it("includes explicit workflow rows until they are resolved", async () => {
+    const workflow = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Pending workflow",
+      kind: "managed_onboarding_intro",
+      metadata: { stage: "awaiting_recipients" },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    await db
+      .updateTable("inbox_messages")
+      .set({ consumed_at: "2026-04-10T10:00:00.000Z" })
+      .where("id", "=", workflow.id)
+      .execute();
+
+    const rows = await repo.listPendingForRecipient(recipientUserId);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(workflow.id);
+  });
+
+  it("excludes explicit workflow rows once resolved", async () => {
+    const workflow = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Resolved workflow",
+      kind: "managed_onboarding_intro",
+      metadata: { stage: "awaiting_confirmation" },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    await repo.resolve(workflow.id, "2026-04-10T12:00:00.000Z");
+
+    const rows = await repo.listPendingForRecipient(recipientUserId);
+
+    expect(rows).toHaveLength(0);
+  });
 });
 
 describe("markConsumed()", () => {
@@ -136,5 +198,96 @@ describe("markConsumed()", () => {
 
     expect(updatedFirst?.consumed_at).toBe("2026-04-10T11:00:00.000Z");
     expect(untouchedSecond?.consumed_at).toBeNull();
+  });
+
+  it("does not consume explicit workflow rows", async () => {
+    const workflow = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Workflow",
+      kind: "managed_onboarding_intro",
+      metadata: { stage: "awaiting_recipients" },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    await repo.markConsumed([workflow.id], "2026-04-10T11:00:00.000Z");
+
+    const row = await db
+      .selectFrom("inbox_messages")
+      .selectAll()
+      .where("id", "=", workflow.id)
+      .executeTakeFirstOrThrow();
+    expect(row.consumed_at).toBeNull();
+  });
+});
+
+describe("findById()", () => {
+  it("returns the inbox row when found", async () => {
+    const row = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Lookup me",
+      platform: "slack",
+    });
+
+    const found = await repo.findById(row.id);
+    expect(found?.id).toBe(row.id);
+  });
+});
+
+describe("updateWorkflow()", () => {
+  it("merges metadata into an explicit workflow row", async () => {
+    const workflow = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Workflow",
+      kind: "managed_onboarding_intro",
+      metadata: { stage: "awaiting_recipients", selectedNames: [] },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    const updated = await repo.updateWorkflow(workflow.id, {
+      stage: "awaiting_confirmation",
+      draftMessage: "Hi team",
+    });
+
+    expect(updated?.metadata).toBe(
+      JSON.stringify({
+        stage: "awaiting_confirmation",
+        selectedNames: [],
+        draftMessage: "Hi team",
+      }),
+    );
+  });
+
+  it("returns undefined for non-explicit inbox rows", async () => {
+    const note = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Plain note",
+      platform: "slack",
+    });
+
+    const updated = await repo.updateWorkflow(note.id, { stage: "ignored" });
+    expect(updated).toBeUndefined();
+  });
+});
+
+describe("resolve()", () => {
+  it("sets resolved_at on explicit workflow rows", async () => {
+    const workflow = await repo.create({
+      senderUserId,
+      recipientUserId,
+      message: "Workflow",
+      kind: "managed_onboarding_intro",
+      metadata: { stage: "awaiting_confirmation" },
+      resolutionMode: "explicit",
+      platform: "slack",
+    });
+
+    const resolved = await repo.resolve(workflow.id, "2026-04-10T12:00:00.000Z");
+    expect(resolved?.resolved_at).toBe("2026-04-10T12:00:00.000Z");
   });
 });

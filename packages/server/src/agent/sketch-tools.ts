@@ -1,8 +1,9 @@
 /**
  * Sketch MCP tools: SendFileToChat (file upload), getProviderConfig (integration credentials),
  * ManageScheduledTasks (create/list/update/pause/resume/remove scheduled agent runs),
- * GetTeamDirectory (discover team members), and SendMessageToUser (send a DM and
- * create a one-way inbox record for the recipient).
+ * GetTeamDirectory (discover team members), SearchUsers, SendMessageToUser,
+ * SendMessageToUsers, and inbox workflow helpers for updating and resolving
+ * explicit inbox tasks.
  *
  * Uses createSdkMcpServer() for in-memory tool dispatch. UploadCollector is created
  * per agent run. getProviderConfig reads integration provider credentials from the DB
@@ -20,6 +21,7 @@ import { resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
+import { filterAccessibleFileIds, getFileContent, search } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createEntityRepository } from "../db/repositories/entities";
@@ -30,6 +32,17 @@ import type { TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
 
 type SelectableUser = Selectable<UsersTable>;
+
+interface SearchableUserRepo {
+  list: () => Promise<SelectableUser[]>;
+  findById: (id: string) => Promise<SelectableUser | undefined>;
+  getAllEmailsForUser: (id: string) => Promise<string[]>;
+  findByEmail?: (email: string) => Promise<SelectableUser | undefined>;
+  findBySlackId?: (slackUserId: string) => Promise<SelectableUser | undefined>;
+  findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
+  searchByNamePrefix?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+  searchByNameSubstring?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+}
 
 export class UploadCollector {
   private pending: string[] = [];
@@ -57,12 +70,14 @@ export interface SketchMcpDeps {
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   toolConfig?: { BASE_URL?: string; PORT: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
-  userRepo?: { list: () => Promise<SelectableUser[]>; findById: (id: string) => Promise<SelectableUser | undefined> };
+  userRepo?: SearchableUserRepo;
   currentUserId?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
+  enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
+  experimentalFlag?: boolean;
 }
 
 const workflowStepSchema = z.object({
@@ -595,47 +610,272 @@ export async function handleGetTeamDirectory(
   return { content: [{ type: "text" as const, text: JSON.stringify(directory, null, 2) }] };
 }
 
-export async function handleSendMessageToUser(
-  params: { recipientUserId: string; message: string },
+function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
+  if (recipient.slack_user_id) return "slack";
+  if (recipient.whatsapp_number) return "whatsapp";
+  return null;
+}
+
+function formatUserMatch(user: SelectableUser, matchedBy: string) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    slackUserId: user.slack_user_id,
+    channels: [...(user.slack_user_id ? ["slack"] : []), ...(user.whatsapp_number ? ["whatsapp"] : [])],
+    matchedBy,
+  };
+}
+
+function extractSlackUserId(query: string): string | null {
+  const mentionMatch = query.trim().match(/^<@([A-Z0-9]+)>$/i);
+  if (mentionMatch) return mentionMatch[1];
+  const rawSlackIdMatch = query.trim().match(/^[A-Z][A-Z0-9]{4,}$/i);
+  return rawSlackIdMatch ? rawSlackIdMatch[0] : null;
+}
+
+function looksLikeEmail(query: string): boolean {
+  return query.includes("@");
+}
+
+async function deliverMessageToUser(
+  params: { recipientUserId: string; message: string; storeInInbox?: boolean },
   deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
-): Promise<ToolResult> {
-  if (!deps.inboxMessagesRepo || !deps.userRepo || !deps.sendDm || !deps.currentUserId) {
-    return { content: [{ type: "text" as const, text: "Error: messaging is not available in this context." }] };
+): Promise<
+  | { status: "sent"; recipient: SelectableUser; platform: "slack" | "whatsapp"; inboxMessageId?: string }
+  | { status: "skipped" | "failed"; error: string; recipient?: SelectableUser }
+> {
+  if (!deps.userRepo || !deps.sendDm || !deps.currentUserId) {
+    return { status: "failed", error: "messaging is not available in this context." };
   }
   if (params.recipientUserId === deps.currentUserId) {
-    return { content: [{ type: "text" as const, text: "Error: cannot send a message to yourself." }] };
-  }
-  const recipient = await deps.userRepo.findById(params.recipientUserId);
-  if (!recipient) return { content: [{ type: "text" as const, text: "Error: user not found." }] };
-  if (!recipient.slack_user_id && !recipient.whatsapp_number) {
-    return {
-      content: [
-        { type: "text" as const, text: `Error: ${recipient.name} has no connected channel (Slack or WhatsApp).` },
-      ],
-    };
+    return { status: "failed", error: "cannot send a message to yourself." };
   }
 
-  const platform = recipient.slack_user_id ? "slack" : "whatsapp";
+  const recipient = await deps.userRepo.findById(params.recipientUserId);
+  if (!recipient) return { status: "failed", error: "user not found." };
+
+  const platform = detectPlatform(recipient);
+  if (!platform) {
+    return { status: "failed", error: `${recipient.name} has no connected channel (Slack or WhatsApp).`, recipient };
+  }
+
   const { channelId, messageRef } = await deps.sendDm({
     userId: params.recipientUserId,
     platform,
     message: params.message,
   });
 
-  const inboxMessage = await deps.inboxMessagesRepo.create({
-    senderUserId: deps.currentUserId,
-    recipientUserId: params.recipientUserId,
-    message: params.message,
-    platform,
-    channelId,
-    messageRef,
-  });
+  let inboxMessageId: string | undefined;
+  if (params.storeInInbox !== false) {
+    if (!deps.inboxMessagesRepo) {
+      return { status: "failed", error: "Inbox storage is not available in this context.", recipient };
+    }
+    const inboxMessage = await deps.inboxMessagesRepo.create({
+      senderUserId: deps.currentUserId,
+      recipientUserId: params.recipientUserId,
+      message: params.message,
+      platform,
+      channelId,
+      messageRef,
+    });
+    inboxMessageId = inboxMessage.id;
+  }
+
+  return { status: "sent", recipient, platform, inboxMessageId };
+}
+
+export async function handleSendMessageToUser(
+  params: { recipientUserId: string; message: string },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
+): Promise<ToolResult> {
+  const result = await deliverMessageToUser({ ...params, storeInInbox: true }, deps);
+  if (result.status !== "sent") {
+    return { content: [{ type: "text" as const, text: `Error: ${result.error}` }] };
+  }
 
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ inboxMessageId: inboxMessage.id, recipientName: recipient.name, status: "sent" }),
+        text: JSON.stringify({
+          inboxMessageId: result.inboxMessageId,
+          recipientName: result.recipient.name,
+          status: "sent",
+        }),
+      },
+    ],
+  };
+}
+
+export async function handleSearchUsers(
+  params: { queries: string[] },
+  deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.userRepo) {
+    return { content: [{ type: "text" as const, text: "User search is not available in this context." }] };
+  }
+
+  const results: Array<{ query: string; matches: Array<Record<string, unknown>> }> = [];
+
+  for (const query of params.queries) {
+    const matches: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    const slackUserId = extractSlackUserId(query);
+    const trimmedQuery = query.trim();
+
+    const pushMatch = (user: SelectableUser | undefined, matchedBy: string) => {
+      if (!user || user.id === deps.currentUserId || seen.has(user.id)) return;
+      seen.add(user.id);
+      matches.push(formatUserMatch(user, matchedBy));
+    };
+
+    if (slackUserId) {
+      pushMatch(await deps.userRepo.findBySlackId?.(slackUserId), "slack_user_id");
+    }
+
+    if (looksLikeEmail(trimmedQuery)) {
+      pushMatch(await deps.userRepo.findByEmail?.(trimmedQuery), "exact_email");
+    }
+
+    pushMatch(await deps.userRepo.findByExactName?.(trimmedQuery, deps.currentUserId), "exact_name");
+
+    const prefixMatches = deps.userRepo.searchByNamePrefix
+      ? await deps.userRepo.searchByNamePrefix(trimmedQuery, 5, deps.currentUserId)
+      : [];
+    for (const user of prefixMatches) {
+      pushMatch(user, "prefix_name");
+    }
+
+    if (trimmedQuery.length >= 3) {
+      const substringMatches = deps.userRepo.searchByNameSubstring
+        ? await deps.userRepo.searchByNameSubstring(trimmedQuery, 5, deps.currentUserId)
+        : [];
+      for (const user of substringMatches) {
+        pushMatch(user, "substring_name");
+      }
+    }
+
+    results.push({ query, matches });
+  }
+
+  return { content: [{ type: "text" as const, text: JSON.stringify({ results }) }] };
+}
+
+export async function handleSendMessageToUsers(
+  params: { recipientUserIds: string[]; message: string; storeInInbox?: boolean },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
+): Promise<ToolResult> {
+  const seen = new Set<string>();
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const recipientUserId of params.recipientUserIds) {
+    if (seen.has(recipientUserId)) {
+      results.push({ recipientUserId, status: "skipped", error: "Duplicate recipient in request" });
+      continue;
+    }
+    seen.add(recipientUserId);
+
+    try {
+      const result = await deliverMessageToUser(
+        { recipientUserId, message: params.message, storeInInbox: params.storeInInbox },
+        deps,
+      );
+
+      if (result.status === "sent") {
+        results.push({
+          recipientUserId,
+          recipientName: result.recipient.name,
+          status: "sent",
+          platform: result.platform,
+          ...(result.inboxMessageId ? { inboxMessageId: result.inboxMessageId } : {}),
+        });
+      } else {
+        results.push({
+          recipientUserId,
+          recipientName: result.recipient?.name,
+          status: result.status,
+          error: result.error,
+        });
+      }
+    } catch (error) {
+      results.push({
+        recipientUserId,
+        status: "failed",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  return { content: [{ type: "text" as const, text: JSON.stringify({ results }) }] };
+}
+
+export async function handleUpdateInboxWorkflow(
+  params: { inboxMessageId: string; metadata: Record<string, unknown> },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.inboxMessagesRepo || !deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Error: inbox workflows are not available in this context." }] };
+  }
+
+  const existing = await deps.inboxMessagesRepo.findById(params.inboxMessageId);
+  if (!existing || existing.recipient_user_id !== deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Error: inbox workflow not found." }] };
+  }
+  if (existing.resolution_mode !== "explicit") {
+    return { content: [{ type: "text" as const, text: "Error: inbox item is not an explicit workflow." }] };
+  }
+  if (existing.resolved_at) {
+    return { content: [{ type: "text" as const, text: "Error: inbox workflow is already resolved." }] };
+  }
+
+  const updated = await deps.inboxMessagesRepo.updateWorkflow(params.inboxMessageId, params.metadata);
+  if (!updated) {
+    return { content: [{ type: "text" as const, text: "Error: failed to update inbox workflow." }] };
+  }
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          inboxMessageId: updated.id,
+          status: "updated",
+          metadata: updated.metadata ? JSON.parse(updated.metadata) : null,
+        }),
+      },
+    ],
+  };
+}
+
+export async function handleResolveInboxWorkflow(
+  params: { inboxMessageId: string },
+  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.inboxMessagesRepo || !deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Error: inbox workflows are not available in this context." }] };
+  }
+
+  const existing = await deps.inboxMessagesRepo.findById(params.inboxMessageId);
+  if (!existing || existing.recipient_user_id !== deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Error: inbox workflow not found." }] };
+  }
+  if (existing.resolution_mode !== "explicit") {
+    return { content: [{ type: "text" as const, text: "Error: inbox item is not an explicit workflow." }] };
+  }
+  if (existing.resolved_at) {
+    return { content: [{ type: "text" as const, text: "Error: inbox workflow is already resolved." }] };
+  }
+
+  const resolved = await deps.inboxMessagesRepo.resolve(params.inboxMessageId);
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          inboxMessageId: params.inboxMessageId,
+          status: resolved?.resolved_at ? "resolved" : "not_found",
+        }),
       },
     ],
   };
@@ -643,6 +883,11 @@ export async function handleSendMessageToUser(
 
 export function createSketchMcpServer(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
+
+  async function resolveUserEmails(): Promise<string[]> {
+    if (!deps.currentUserId || !deps.userRepo?.getAllEmailsForUser) return [];
+    return deps.userRepo.getAllEmailsForUser(deps.currentUserId);
+  }
 
   const tools = [
     tool(
@@ -731,6 +976,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ),
 
     tool(
+      "SearchUsers",
+      "Resolve names, emails, Slack mentions, and Slack user IDs into tenant users. Returns ranked candidates so you can confirm recipients before sending messages.",
+      {
+        queries: z.array(z.string()).describe("Names, emails, Slack mentions, or Slack user IDs to resolve."),
+      },
+      async (params) => handleSearchUsers(params, deps),
+    ),
+
+    tool(
       "SendMessageToUser",
       "Send a DM to a team member via their connected channel (Slack or WhatsApp). The exact message is also stored as a one-way inbox item so their agent can see it on their next private chat.",
       {
@@ -741,147 +995,341 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ),
 
     tool(
-      "SearchEntities",
-      `Search for entities (projects, people, teams, databases) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
-
-Use this when the user asks about a project, person, or any named thing tracked across the org's tools. Pass multiple name variations (e.g. ["Beetu", "B2", "beetu app"]) to maximize matches.`,
+      "SendMessageToUsers",
+      "Send the same DM to multiple team members. When storeInInbox is true, the sent message is also stored as a one-way inbox item for each successful recipient.",
       {
-        queries: z
-          .array(z.string())
-          .describe("Array of name variations to search for. Runs substring match per query, dedupes results."),
-        types: z
-          .array(z.string())
+        recipientUserIds: z.array(z.string()).describe("The recipient user IDs to message."),
+        message: z.string().describe("The exact message text to send to every recipient."),
+        storeInInbox: z
+          .boolean()
           .optional()
-          .describe(
-            "Filter by entity source_type. Examples: 'person', 'clickup_space', 'clickup_folder', 'linear_project', 'notion_database'.",
-          ),
+          .describe("Whether to store the sent message in each recipient's inbox. Defaults to true."),
       },
-      async ({ queries, types }) => {
-        if (!deps.db) {
-          return { content: [{ type: "text" as const, text: "Entity search not available." }] };
-        }
-        const entityRepo = createEntityRepository(deps.db);
-        const seen = new Set<string>();
-        const results: Array<Record<string, unknown>> = [];
-
-        for (const query of queries) {
-          const matches = await entityRepo.searchEntities(query, {
-            sourceTypes: types,
-            limit: 20,
-          });
-          for (const entity of matches) {
-            if (!seen.has(entity.id)) {
-              seen.add(entity.id);
-              results.push({
-                id: entity.id,
-                name: entity.name,
-                sourceType: entity.source_type,
-                subtype: entity.subtype,
-                aliases: entity.aliases ? JSON.parse(entity.aliases) : [],
-                status: entity.status,
-                hotness: entity.hotness,
-              });
-            }
-          }
-        }
-
-        // Layer 2: users table fallback if no entity matches
-        if (results.length === 0 && deps.userRepo) {
-          const users = await deps.userRepo.list();
-          for (const query of queries) {
-            const q = query.toLowerCase();
-            for (const user of users) {
-              if (user.name.toLowerCase().includes(q) && !seen.has(user.id)) {
-                seen.add(user.id);
-                results.push({
-                  id: user.id,
-                  name: user.name,
-                  sourceType: "person",
-                  subtype: "internal",
-                  aliases: [],
-                  status: "confirmed",
-                  source: "team_directory",
-                });
-              }
-            }
-          }
-        }
-
-        if (results.length === 0) {
-          return { content: [{ type: "text" as const, text: "No entities found matching those queries." }] };
-        }
-
-        return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
-      },
+      async (params) => handleSendMessageToUsers(params, deps),
     ),
 
     tool(
-      "GetEntityContext",
-      `Get cross-source context for an entity — all recent mentions across meetings, tasks, docs, and other indexed content. Returns a formatted timeline showing where and when this entity was referenced.
+      "UpdateInboxWorkflow",
+      "Update the metadata for one of your explicit inbox workflow items. Use this to save workflow stage, selected recipients, draft text, or reminder state.",
+      {
+        inboxMessageId: z.string().describe("The inbox workflow ID to update."),
+        metadata: z.record(z.string(), z.unknown()).describe("A partial metadata object to merge into the workflow."),
+      },
+      async (params) => handleUpdateInboxWorkflow(params, deps),
+    ),
+
+    tool(
+      "ResolveInboxWorkflow",
+      "Resolve one of your explicit inbox workflow items so it stops appearing in future inbox context.",
+      {
+        inboxMessageId: z.string().describe("The inbox workflow ID to resolve."),
+      },
+      async (params) => handleResolveInboxWorkflow(params, deps),
+    ),
+
+    // --- Experimental search tools (gated behind EXPERIMENTAL_FLAG) ---
+    ...(deps.experimentalFlag
+      ? [
+          tool(
+            "Search",
+            `Search across all indexed knowledge — docs, tasks, meetings, conversations, and workspace files. Uses hybrid search (keyword + semantic) for best results. Automatically surfaces matching entities for context.
+
+When results mention a specific entity (project, client, person), results linked to that entity are boosted to the top. For hard-scoped search within a single entity's files, pass the entityId from a previous Search result.
+
+Use this to find information before asking others. Examples:
+- "What did we decide about the auth approach?"
+- "Epik demo playbook"
+- "API migration status"
+- "standup notes from last week"`,
+            {
+              query: z.string().describe("Natural language search query"),
+              entityId: z
+                .string()
+                .optional()
+                .describe(
+                  "Hard-filter search to files linked to this entity only. Use the entity ID from a previous Search result's matching entities.",
+                ),
+              source: z
+                .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "local"])
+                .optional()
+                .describe("Filter to a specific source. Omit to search all."),
+              after: z.string().optional().describe("Only results updated after this ISO date"),
+              before: z.string().optional().describe("Only results updated before this ISO date"),
+              limit: z.number().optional().describe("Max results (default 10)"),
+            },
+            async ({ query: searchQuery, entityId, source, after, before, limit: resultLimit }) => {
+              if (!deps.db) {
+                return { content: [{ type: "text" as const, text: "Search not available." }] };
+              }
+
+              const lines: string[] = [];
+
+              // Auto-search entities matching the query for context
+              const entityRepo = createEntityRepository(deps.db);
+              const entityMatches = entityId ? [] : await entityRepo.searchEntities(searchQuery, { limit: 5 });
+              if (entityMatches.length > 0) {
+                const entityParts = entityMatches.map((e) => {
+                  const aliases = e.aliases ? (JSON.parse(e.aliases) as string[]) : [];
+                  const aliasStr = aliases.length > 0 ? `, aliases: ${aliases.join(", ")}` : "";
+                  const subtypeStr = e.subtype ? ` (${e.subtype})` : "";
+                  return `${e.name} (${e.id}) [${e.source_type}${subtypeStr}${aliasStr}]`;
+                });
+                lines.push(`**Matching entities**: ${entityParts.join(" | ")}`);
+                lines.push("");
+              }
+
+              // Get entity-linked file IDs for auto-boost (when not hard-filtered)
+              let entityFileIds: Set<string> | undefined;
+              if (!entityId && entityMatches.length > 0) {
+                const entityIds = entityMatches.map((e) => e.id);
+                const mentions = await deps.db
+                  .selectFrom("entity_mentions")
+                  .select("indexed_file_id")
+                  .where("entity_id", "in", entityIds)
+                  .execute();
+                entityFileIds = new Set(mentions.map((m) => m.indexed_file_id));
+              }
+
+              // Hybrid search for documents/content
+              const userEmails = await resolveUserEmails();
+              const results = await search(deps.db, searchQuery, {
+                source,
+                limit: resultLimit ?? 10,
+                after,
+                before,
+                entityId,
+                userEmails,
+              });
+
+              // Auto-boost: rank entity-linked files higher when not hard-filtered
+              if (entityFileIds && entityFileIds.size > 0) {
+                results.sort((a, b) => {
+                  const aLinked = entityFileIds?.has(a.id) ? 1 : 0;
+                  const bLinked = entityFileIds?.has(b.id) ? 1 : 0;
+                  if (aLinked !== bLinked) return bLinked - aLinked;
+                  return b.score - a.score;
+                });
+              }
+
+              if (results.length === 0 && entityMatches.length === 0) {
+                return { content: [{ type: "text" as const, text: `No results found for "${searchQuery}".` }] };
+              }
+
+              for (const r of results) {
+                const sourceLabel = r.source.charAt(0).toUpperCase() + r.source.slice(1).replace(/_/g, " ");
+                const date = r.sourceUpdatedAt ? new Date(r.sourceUpdatedAt).toISOString().split("T")[0] : "";
+
+                lines.push(`**${r.fileName}** (${sourceLabel}${date ? `, ${date}` : ""})`);
+                lines.push(`  sketchId: ${r.id}`);
+                lines.push(`  providerId: ${r.providerFileId} (source=${r.source})`);
+                if (r.providerUrl) lines.push(`  url: ${r.providerUrl}`);
+                if (r.summary) {
+                  lines.push(`> ${r.summary.slice(0, 200)}${r.summary.length > 200 ? "..." : ""}`);
+                } else if (r.snippet) {
+                  lines.push(`> ${r.snippet.slice(0, 200)}${r.snippet.length > 200 ? "..." : ""}`);
+                }
+                lines.push("");
+              }
+
+              return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+            },
+          ),
+
+          tool(
+            "SearchEntities",
+            `Search for entities (projects, people, teams, databases) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
+
+Use this when the user asks about a project, person, or any named thing tracked across the org's tools. Pass multiple name variations (e.g. ["Beetu", "B2", "beetu app"]) to maximize matches.`,
+            {
+              queries: z
+                .array(z.string())
+                .describe("Array of name variations to search for. Runs substring match per query, dedupes results."),
+              types: z
+                .array(z.string())
+                .optional()
+                .describe(
+                  "Filter by entity source_type. Examples: 'person', 'clickup_space', 'clickup_folder', 'linear_project', 'notion_database'.",
+                ),
+            },
+            async ({ queries, types }) => {
+              if (!deps.db) {
+                return { content: [{ type: "text" as const, text: "Entity search not available." }] };
+              }
+              const entityRepo = createEntityRepository(deps.db);
+              const seen = new Set<string>();
+              const results: Array<Record<string, unknown>> = [];
+
+              for (const query of queries) {
+                const matches = await entityRepo.searchEntities(query, {
+                  sourceTypes: types,
+                  limit: 20,
+                });
+                for (const entity of matches) {
+                  if (!seen.has(entity.id)) {
+                    seen.add(entity.id);
+                    results.push({
+                      id: entity.id,
+                      name: entity.name,
+                      sourceType: entity.source_type,
+                      subtype: entity.subtype,
+                      aliases: entity.aliases ? JSON.parse(entity.aliases) : [],
+                      status: entity.status,
+                      hotness: entity.hotness,
+                    });
+                  }
+                }
+              }
+
+              // Layer 2: users table fallback if no entity matches
+              if (results.length === 0 && deps.userRepo) {
+                const users = await deps.userRepo.list();
+                for (const query of queries) {
+                  const q = query.toLowerCase();
+                  for (const user of users) {
+                    if (user.name.toLowerCase().includes(q) && !seen.has(user.id)) {
+                      seen.add(user.id);
+                      results.push({
+                        id: user.id,
+                        name: user.name,
+                        sourceType: "person",
+                        subtype: "internal",
+                        aliases: [],
+                        status: "confirmed",
+                        source: "team_directory",
+                      });
+                    }
+                  }
+                }
+              }
+
+              if (results.length === 0) {
+                return { content: [{ type: "text" as const, text: "No entities found matching those queries." }] };
+              }
+
+              return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+            },
+          ),
+
+          tool(
+            "GetEntityContext",
+            `Get cross-source context for an entity — all recent mentions across meetings, tasks, docs, and other indexed content. Returns a formatted timeline showing where and when this entity was referenced.
 
 Use this after SearchEntities to dive deeper into a specific entity. The response is a human-readable summary, not raw data.`,
-      {
-        entityId: z.string().describe("The entity ID from SearchEntities results."),
-        limit: z.number().optional().describe("Max mentions to return. Default 20. Agent can request more if needed."),
-        since: z
-          .string()
-          .optional()
-          .describe("ISO date string. Only return mentions after this date. Example: '2026-03-01'."),
-      },
-      async ({ entityId, limit, since }) => {
-        if (!deps.db) {
-          return { content: [{ type: "text" as const, text: "Entity context not available." }] };
-        }
-        const entityRepo = createEntityRepository(deps.db);
-        const entity = await entityRepo.getEntity(entityId);
-        if (!entity) {
-          return { content: [{ type: "text" as const, text: `Entity ${entityId} not found.` }] };
-        }
+            {
+              entityId: z.string().describe("The entity ID from SearchEntities results."),
+              limit: z
+                .number()
+                .optional()
+                .describe("Max mentions to return. Default 20. Agent can request more if needed."),
+              since: z
+                .string()
+                .optional()
+                .describe("ISO date string. Only return mentions after this date. Example: '2026-03-01'."),
+            },
+            async ({ entityId, limit, since }) => {
+              if (!deps.db) {
+                return { content: [{ type: "text" as const, text: "Entity context not available." }] };
+              }
+              const entityRepo = createEntityRepository(deps.db);
+              const entity = await entityRepo.getEntity(entityId);
+              if (!entity) {
+                return { content: [{ type: "text" as const, text: `Entity ${entityId} not found.` }] };
+              }
 
-        const mentions = await entityRepo.getMentionsForEntity(entityId, {
-          limit: limit ?? 20,
-          since,
-        });
+              const requestedLimit = limit ?? 20;
+              const userEmails = await resolveUserEmails();
+              // When RBAC is active, fetch an over-bound so access filtering doesn't starve the results.
+              const rawMentions = await entityRepo.getMentionsForEntity(entityId, {
+                limit: userEmails.length > 0 ? Math.max(requestedLimit * 5, 100) : requestedLimit,
+                since,
+              });
 
-        // Enrich mentions with file metadata
-        const lines: string[] = [];
-        const aliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
-        const aliasStr = aliases.length > 0 ? ` (aliases: ${aliases.join(", ")})` : "";
-        lines.push(`## ${entity.name}${aliasStr}`);
-        lines.push(
-          `Type: ${entity.source_type}${entity.subtype ? ` (${entity.subtype})` : ""} | Status: ${entity.status}`,
-        );
-        lines.push(
-          `Total mentions found: ${mentions.length}${mentions.length === (limit ?? 20) ? " (limit reached, use 'since' or increase 'limit' for more)" : ""}`,
-        );
-        lines.push("");
+              const accessibleIds =
+                userEmails.length > 0
+                  ? await filterAccessibleFileIds(
+                      deps.db,
+                      rawMentions.map((m) => m.indexed_file_id),
+                      userEmails,
+                    )
+                  : null;
 
-        for (const mention of mentions) {
-          const file = await deps.db
-            .selectFrom("indexed_files")
-            .select(["file_name", "file_type", "source", "source_path", "provider_url"])
-            .where("id", "=", mention.indexed_file_id)
-            .executeTakeFirst();
+              const mentions = (
+                accessibleIds ? rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)) : rawMentions
+              ).slice(0, requestedLimit);
 
-          if (!file) continue;
+              // Enrich mentions with file metadata
+              const lines: string[] = [];
+              const aliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
+              const aliasStr = aliases.length > 0 ? ` (aliases: ${aliases.join(", ")})` : "";
+              lines.push(`## ${entity.name}${aliasStr}`);
+              lines.push(
+                `Type: ${entity.source_type}${entity.subtype ? ` (${entity.subtype})` : ""} | Status: ${entity.status}`,
+              );
+              lines.push(
+                `Total mentions found: ${mentions.length}${mentions.length === requestedLimit ? " (limit reached, use 'since' or increase 'limit' for more)" : ""}`,
+              );
+              lines.push("");
 
-          const date = new Date(mention.mentioned_at).toISOString().split("T")[0];
-          const sourceLabel = file.source.charAt(0).toUpperCase() + file.source.slice(1);
-          const urlSuffix = file.provider_url ? ` (${file.provider_url})` : "";
-          lines.push(`**${date}** — ${sourceLabel}: "${file.file_name}"${urlSuffix}`);
-          if (mention.context_snippet) {
-            lines.push(`  ${mention.context_snippet.slice(0, 200)}`);
-          }
-          lines.push("");
-        }
+              for (const mention of mentions) {
+                const file = await deps.db
+                  .selectFrom("indexed_files")
+                  .select(["file_name", "file_type", "source", "source_path", "provider_url"])
+                  .where("id", "=", mention.indexed_file_id)
+                  .executeTakeFirst();
 
-        if (mentions.length === 0) {
-          lines.push("No mentions found for this entity.");
-        }
+                if (!file) continue;
 
-        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
-      },
-    ),
+                const sourceDate = mention.source_updated_at ?? mention.source_created_at ?? mention.mentioned_at;
+                const date = new Date(sourceDate).toISOString().split("T")[0];
+                const sourceLabel = file.source.charAt(0).toUpperCase() + file.source.slice(1);
+                const urlSuffix = file.provider_url ? ` (${file.provider_url})` : "";
+                lines.push(`**${date}** — ${sourceLabel}: "${file.file_name}"${urlSuffix}`);
+                if (mention.context_snippet) {
+                  lines.push(`  ${mention.context_snippet.slice(0, 200)}`);
+                }
+                lines.push("");
+              }
+
+              if (mentions.length === 0) {
+                lines.push("No mentions found for this entity.");
+              }
+
+              return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+            },
+          ),
+
+          tool(
+            "GetFileContent",
+            `Retrieve the full content of an indexed file by its ID. Use this after Search returns a relevant result and you need the complete text — e.g. full meeting transcript, complete document, or full task description.
+
+The ID comes from a previous Search result.`,
+            {
+              fileId: z.string().describe("The indexed file ID from a Search result."),
+            },
+            async ({ fileId }) => {
+              if (!deps.db) {
+                return { content: [{ type: "text" as const, text: "File content not available." }] };
+              }
+              const userEmails = await resolveUserEmails();
+              const file = await getFileContent(deps.db, fileId, userEmails);
+
+              if (!file) {
+                return { content: [{ type: "text" as const, text: `File ${fileId} not found.` }] };
+              }
+
+              const lines: string[] = [];
+              const sourceLabel = file.source.charAt(0).toUpperCase() + file.source.slice(1).replace(/_/g, " ");
+              lines.push(`# ${file.fileName}`);
+              lines.push(`Source: ${sourceLabel}${file.fileType ? ` (${file.fileType})` : ""}`);
+              if (file.providerUrl) lines.push(`URL: ${file.providerUrl}`);
+              lines.push("");
+              lines.push(file.content ?? file.summary ?? "(no content)");
+
+              return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+            },
+          ),
+        ]
+      : ([] as ReturnType<typeof tool>[])),
   ];
 
   return createSdkMcpServer({ name: "sketch", tools });

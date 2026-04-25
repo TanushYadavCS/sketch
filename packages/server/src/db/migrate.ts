@@ -36,7 +36,13 @@ import * as m029 from "./migrations/029-settings-model-id";
 import * as m030 from "./migrations/030-inbox-messages";
 import * as m031 from "./migrations/031-extend-scheduled-tasks";
 import * as m032 from "./migrations/032-output-style";
-import * as m033 from "./migrations/033-drop-outreach-messages";
+import * as m033 from "./migrations/033-inbox-workflows";
+import * as m034 from "./migrations/034-drop-tags-from-fts";
+import * as m035 from "./migrations/035-smart-enrichment";
+import * as m036 from "./migrations/036-org-context";
+import * as m037 from "./migrations/037-browse-cache";
+import * as m038 from "./migrations/038-sync-interval";
+import * as m039 from "./migrations/039-drop-outreach-messages";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -77,7 +83,13 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "030-inbox-messages": m030,
           "031-extend-scheduled-tasks": m031,
           "032-output-style": m032,
-          "033-drop-outreach-messages": m033,
+          "033-inbox-workflows": m033,
+          "034-drop-tags-from-fts": m034,
+          "035-smart-enrichment": m035,
+          "036-org-context": m036,
+          "037-browse-cache": m037,
+          "038-sync-interval": m038,
+          "039-drop-outreach-messages": m039,
         };
       },
     },

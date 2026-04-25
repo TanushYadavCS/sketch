@@ -8,7 +8,7 @@
  * Today: 4 connectors. Tomorrow: 50+. This registry scales to both.
  */
 
-export type IntegrationType = "google_drive" | "clickup" | "notion" | "linear";
+export type IntegrationType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -81,6 +81,10 @@ export interface IntegrationDefinition {
   credentialUrl: string;
   /** Step-by-step instructions for connecting. */
   connectSteps: string[];
+  /** Scope picker type for the connect/manage dialog. */
+  scopeType: "none" | "flat" | "nested" | "tree";
+  /** Noun for scope items in the picker (pages, spaces, folders). */
+  scopeItemNoun?: string;
 }
 
 /**
@@ -113,6 +117,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       },
     ],
     scopeLabel: "folders",
+    scopeType: "tree",
+    scopeItemNoun: "folders",
     itemNoun: "files",
     credentialUrl: "https://console.cloud.google.com/apis/credentials",
     connectSteps: [
@@ -139,6 +145,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       },
     ],
     scopeLabel: "spaces",
+    scopeType: "nested",
+    scopeItemNoun: "spaces",
     itemNoun: "tasks",
     credentialUrl: "https://app.clickup.com/settings/apps",
     connectSteps: [
@@ -164,6 +172,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       },
     ],
     scopeLabel: "pages",
+    scopeType: "flat",
+    scopeItemNoun: "pages",
     itemNoun: "pages",
     credentialUrl: "https://www.notion.so/my-integrations",
     connectSteps: [
@@ -190,9 +200,36 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       },
     ],
     scopeLabel: "teams",
+    scopeType: "none",
     itemNoun: "issues",
     credentialUrl: "https://linear.app/settings/api",
     connectSteps: ["Go to Linear Settings → API → Personal API keys", "Create a new API key", "Paste the key below"],
+  },
+  {
+    type: "fireflies",
+    name: "Fireflies",
+    description: "Meeting transcripts and summaries",
+    category: "Meetings",
+    color: "#6C3AFF",
+    authType: "api_key",
+    authFields: [
+      {
+        key: "api_key",
+        label: "API Key",
+        type: "password",
+        placeholder: "...",
+        helpText: "Fireflies API key from integrations settings",
+      },
+    ],
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://app.fireflies.ai/integrations/custom/fireflies",
+    connectSteps: [
+      "Go to Fireflies Settings → Integrations → Fireflies API",
+      "Generate an API key",
+      "Paste the key below",
+    ],
   },
 ];
 

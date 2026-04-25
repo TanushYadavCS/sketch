@@ -71,7 +71,10 @@ sketch/
 - No inline comments. Use docstrings to explain decisions when the code isn't self-evident.
 - Vitest for testing
 - Run `pnpm dev` from repo root — tsx watches `packages/server/src/index.ts`
-- At the end of every feature, run all quality checks: `pnpm biome check`, `npx tsc --noEmit`, `pnpm test`, `pnpm build`
+- At the end of every feature, run all quality checks: `pnpm biome check`, `pnpm typecheck`, `pnpm test`, `pnpm build`
+- Do not use `npx tsc --noEmit` from the repo root. There is no root `tsconfig.json`, so use `pnpm typecheck` instead.
+- Release rule: only create release tags from commits that are already on `main`. Do not tag feature branches. If release prep is done on another branch, merge or cherry-pick it onto `main` first, then create the tag from `main`.
+- Deployment rule: only trigger release/deploy workflows from `main` (or tags created from `main`).
 
 ## Key Design Decisions
 
@@ -84,6 +87,24 @@ sketch/
 - LLM access: Anthropic API, Bedrock (`CLAUDE_CODE_USE_BEDROCK`), Vertex, or custom `ANTHROPIC_BASE_URL`
 - Static migration imports instead of FileMigrationProvider (for tsdown bundler compatibility)
 - `CURRENT_TIMESTAMP` in migrations for cross-dialect compatibility (SQLite + Postgres)
+
+## Feature Gating (`EXPERIMENTAL_FLAG`)
+
+New features that aren't ready for general availability are gated behind `config.EXPERIMENTAL_FLAG` (env var, defaults to `false`). If the flag is off, the feature must be **completely invisible** — no routes, no tools, no prompt references, no UI. Gate at all 4 layers:
+
+1. **HTTP routes** (`http.ts`): Wrap new API routes in `if (config.EXPERIMENTAL_FLAG) { app.route(...) }`
+2. **Agent tools** (`sketch-tools.ts`): Conditionally include tools using the spread pattern:
+   ```ts
+   ...(deps.experimentalFlag
+     ? [tool("MyTool", ...), tool("AnotherTool", ...)]
+     : ([] as ReturnType<typeof tool>[])),
+   ```
+3. **System prompt** (`prompt.ts`): Wrap any instructions referencing experimental tools in `if (params.experimentalFlag) { ... }` so the agent isn't told about tools it can't use
+4. **Frontend** (`app-sidebar.tsx`): Hide navigation items using `setupStatus.experimentalFlag`
+
+The flag flows: `config` → `bootstrap.ts` (injected in `trackedRunAgent`) → `RunAgentParams` → both `SketchMcpDeps` (tools) and `buildSystemContext` (prompt).
+
+Currently gated: Files UI, Connections UI, entity/connector/identity/OAuth APIs, agent search tools (Search, SearchEntities, GetEntityContext), and Information Discovery system prompt section.
 
 ## Related Repos
 

@@ -31,6 +31,8 @@ export interface InboxMessageContext {
   senderName: string;
   message: string;
   createdAt: string;
+  kind?: string;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface SketchContextParams {
@@ -53,6 +55,57 @@ export interface SketchContextParams {
     groupName: string;
     groupDescription?: string;
   };
+}
+
+function renderInboxMessage(message: InboxMessageContext): string[] {
+  if (message.kind !== "managed_onboarding_intro") {
+    return [`From ${message.senderName}, ${formatTimeAgo(message.createdAt)}:`, message.message];
+  }
+
+  const metadata = message.metadata ?? {};
+  const status = typeof metadata.stage === "string" ? metadata.stage : "unknown";
+  const source = typeof metadata.source === "string" ? metadata.source : null;
+  const originalMessage =
+    typeof metadata.originalMessage === "string" && metadata.originalMessage.trim().length > 0
+      ? metadata.originalMessage
+      : message.message;
+  const instructions = Array.isArray(metadata.instructions)
+    ? metadata.instructions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const selectedUserIds = Array.isArray(metadata.selectedUserIds)
+    ? metadata.selectedUserIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const selectedNames = Array.isArray(metadata.selectedNames)
+    ? metadata.selectedNames.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const draftMessage =
+    typeof metadata.draftMessage === "string" && metadata.draftMessage.trim().length > 0 ? metadata.draftMessage : null;
+
+  const lines = [`Type: ${message.kind}`, `InboxMessageId: ${message.id}`, `Status: ${status}`];
+  if (source) lines.push(`Source: ${source}`);
+  lines.push("", "Original message:", originalMessage, "", "Instructions:");
+  if (instructions.length === 0) {
+    lines.push("None");
+  } else {
+    for (const instruction of instructions) lines.push(`- ${instruction}`);
+  }
+
+  lines.push("", "Selected recipient user ids:");
+  if (selectedUserIds.length === 0) {
+    lines.push("None yet");
+  } else {
+    for (const userId of selectedUserIds) lines.push(`- ${userId}`);
+  }
+
+  lines.push("", "Selected recipients:");
+  if (selectedNames.length === 0) {
+    lines.push("None yet");
+  } else {
+    for (const name of selectedNames) lines.push(`- ${name}`);
+  }
+
+  lines.push("", "Draft message:", draftMessage ?? "None yet");
+  return lines;
 }
 
 export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): string[] {
@@ -90,10 +143,26 @@ export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): st
  * Sections in order: identity, memory, skills, scheduled tasks, file
  * attachments, context protocol, workspace rules, platform formatting.
  */
+const SOURCE_LABELS: Record<string, { label: string; noun: string }> = {
+  google_drive: { label: "Google Drive", noun: "documents" },
+  clickup: { label: "ClickUp", noun: "tasks and docs" },
+  notion: { label: "Notion", noun: "pages" },
+  linear: { label: "Linear", noun: "issues" },
+  fireflies: { label: "Fireflies", noun: "meeting transcripts" },
+  conversation: { label: "Conversations", noun: "messages" },
+  local: { label: "Workspace Files", noun: "files" },
+};
+
+function sourceLabel(source: string): { label: string; noun: string } {
+  return SOURCE_LABELS[source] ?? { label: source, noun: "items" };
+}
+
 export function buildSystemContext(params: {
   platform: "slack" | "whatsapp";
   orgName?: string | null;
   botName?: string | null;
+  experimentalFlag?: boolean;
+  indexedSources?: Array<{ source: string; fileCount: number }>;
 }): string {
   const sections: string[] = [];
 
@@ -154,7 +223,7 @@ export function buildSystemContext(params: {
     "",
     "<time> - Current date, time, and timezone.",
     "<workspace> - Your working directory and shared org directory paths.",
-    "<inbox> - Private messages sent to this user by teammates or other agents. Treat them as natural conversational context and act on them when useful.",
+    "<inbox> - Private messages or pending workflow tasks sent to this user. Treat them as natural conversational context and act on them when useful.",
     "<user> - Identity and contact info of the current user (in DMs).",
     "<sender> - Identity of the current speaker (in shared contexts like channels and groups).",
     "<channel> - Metadata about the current Slack channel in shared contexts.",
@@ -179,6 +248,46 @@ export function buildSystemContext(params: {
     "",
     "You can read, write, and execute files within your workspace and the shared org directory. NEVER access files outside these two directories.",
   );
+
+  if (params.experimentalFlag) {
+    const indexedSources = params.indexedSources ?? [];
+    if (indexedSources.length > 0) {
+      const sourceList = indexedSources.map((s) => {
+        const { label, noun } = sourceLabel(s.source);
+        return `- ${label} — ${s.fileCount.toLocaleString()} ${noun}`;
+      });
+      sections.push(
+        "",
+        "## Information Discovery",
+        "",
+        "You have access to indexed organizational knowledge. When a user asks about something that may live in the org's knowledge base, **search first before using integrations or asking others** — one Search call usually beats a chain of integration calls on both speed and token cost.",
+        "",
+        "Indexed sources (with file counts):",
+        ...sourceList,
+        "",
+        "Tool chain:",
+        "- **Search** — hybrid keyword + semantic search across all indexed sources. Supports filtering by source, date range, and entity scope. Each result includes `sketchId` (for GetFileContent), `providerId` (the external ID integration tools expect), and `url` (when available).",
+        "- **GetFileContent** — retrieve the full content of an indexed file by its `sketchId`. Use when you need the complete document, transcript, or task detail.",
+        "- **SearchEntities** — find projects, people, teams, and databases across connected sources. Pass multiple name variations to maximize matches. Returns entity IDs.",
+        "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
+        "",
+        "Search → integration handoff:",
+        "Search results carry the IDs your integration tools need. After Search surfaces a relevant item, you can act on it directly via the matching integration action (e.g. reply to a ClickUp task, read a full Fireflies transcript, comment on a Notion page, update a Linear issue). Prefer `url` when the integration action accepts a URL; fall back to `providerId` when it needs the raw external ID. Some sources prefix subtypes in `providerId` (e.g. `doc:`, `db-`, `project-`) — pass the value as-is.",
+        "",
+        "Integration-lookup nudge (DMs only, at most once per conversation):",
+        "When you call an integration to *look up* existing org info (read a doc, list tasks, fetch a transcript, search past messages) and that source is **not** in the indexed list above, close your reply with one short line noting that indexing that source via Sketch would turn the multi-call integration chain into a single Search — saves tokens and improves match quality. Skip this nudge for write actions (create task, send message, update record) and never raise it in shared channels or groups.",
+      );
+    } else {
+      sections.push(
+        "",
+        "## Information Discovery",
+        "",
+        "No organizational sources are indexed yet, so the Search tools have nothing to query — use integrations or skills directly for org-knowledge questions.",
+        "",
+        "When the user asks something that would clearly benefit from indexed knowledge (looking up what was decided, finding a doc, recalling a meeting, searching tasks), and the conversation is a DM (never in shared channels or groups), you may mention **once per conversation** that indexing the org's tools via Sketch would make answers faster and cheaper — turning multi-hop integration chains into a single Search call. Keep it to one short observational line, no CTA or links. Do not repeat the nudge or raise it for questions that don't need org lookups.",
+      );
+    }
+  }
 
   if (params.platform === "slack") {
     sections.push("", "## Platform", "", ...buildPlatformFormattingLines("slack"));
@@ -242,8 +351,7 @@ export function buildSketchContext(params: SketchContextParams): string {
   if (inboxMessages && inboxMessages.length > 0) {
     const lines: string[] = [];
     for (const message of inboxMessages) {
-      lines.push(`From ${message.senderName}, ${formatTimeAgo(message.createdAt)}:`);
-      lines.push(message.message);
+      lines.push(...renderInboxMessage(message));
       lines.push("");
     }
     if (lines[lines.length - 1] === "") lines.pop();

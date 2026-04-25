@@ -11,7 +11,6 @@ import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type AgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import type { Config } from "./config";
-import { createLlmCallFn } from "./connectors/llm";
 import { startSyncScheduler } from "./connectors/sync";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
@@ -92,10 +91,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const trackedRunAgent = async (params: RunAgentParams): Promise<AgentResult> => {
     const runId = randomUUID();
     const span = tracer.startSpan("chat sketch");
-    setAgentRunAttributes(span, params, runId);
+    const enrichedParams = { ...params, experimentalFlag: config.EXPERIMENTAL_FLAG };
+    setAgentRunAttributes(span, enrichedParams, runId);
 
     try {
-      const result = await runAgent(params);
+      const result = await runAgent(enrichedParams);
       setAgentResultAttributes(span, result);
       createToolCallSpans(tracer, span, runId, result.toolCalls);
       span.end();
@@ -142,6 +142,43 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
   const groupBuffer = new GroupBuffer();
 
+  const sendDirectMessage = async ({
+    userId,
+    platform,
+    message,
+  }: {
+    userId: string;
+    platform: string;
+    message: string;
+  }) => {
+    const recipient = await users.findById(userId);
+
+    if (platform === "slack") {
+      if (!recipient?.slack_user_id) throw new Error("No Slack ID for recipient");
+      const currentSlack = slack;
+      if (!currentSlack) throw new Error("Slack bot is not connected");
+
+      const settings = await settingsRepo.get();
+      const channelId = await currentSlack.openDmChannel(
+        recipient.slack_user_id,
+        settings?.slack_bot_token ?? undefined,
+      );
+      if (!channelId) throw new Error("Failed to open DM channel");
+
+      const messageRef = await currentSlack.postMessage(channelId, message);
+      return { channelId, messageRef };
+    }
+
+    if (platform === "whatsapp") {
+      if (!recipient?.whatsapp_number) throw new Error("No WhatsApp number for recipient");
+      const channelId = `${recipient.whatsapp_number.replace("+", "")}@s.whatsapp.net`;
+      await whatsapp.sendText(channelId, message);
+      return { channelId, messageRef: "" };
+    }
+
+    throw new Error(`Unsupported platform: ${platform}`);
+  };
+
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly
   const scheduler = new TaskScheduler({
     db,
@@ -165,9 +202,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, {
-    llmCall: createLlmCallFn(),
-  });
+  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000);
 
   const slackAdapterDeps = {
     db,
@@ -187,6 +222,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm: sendDirectMessage,
   };
 
   const startSlackBotIfConfigured = createSlackStartupManager({
@@ -229,6 +265,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     stepContentRepo,
     automationRunsRepo,
     inboxMessagesRepo,
+    sendDm: sendDirectMessage,
   });
 
   // 9. HTTP server

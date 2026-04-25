@@ -135,6 +135,29 @@ export interface EntityListItem {
   updatedAt: string;
 }
 
+export interface BrowseFlatItem {
+  id: string;
+  name: string;
+  url?: string;
+}
+
+export interface BrowseNestedGroup {
+  id: string;
+  name: string;
+  items: BrowseFlatItem[];
+}
+
+export interface BrowseTreeItem {
+  id: string;
+  name: string;
+  hasChildren?: boolean;
+}
+
+export type BrowseResult =
+  | { type: "flat"; items: BrowseFlatItem[] }
+  | { type: "nested"; groups: BrowseNestedGroup[] }
+  | { type: "tree"; items: BrowseTreeItem[]; groups?: BrowseNestedGroup[] };
+
 export interface ConnectorConfig {
   id: string;
   connectorType: string;
@@ -161,6 +184,8 @@ export interface ConnectorFile {
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
   hasSummary: boolean;
+  summaryStatus: string;
+  embeddingStatus: string;
   accessScope: "restricted" | "unrestricted";
   accessCount: number | null;
 }
@@ -367,13 +392,22 @@ export const api = {
       return request<{ orgName: string | null; botName: string }>("/api/settings/identity");
     },
     searchConfig() {
-      return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number }>("/api/settings/search");
+      return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number; syncIntervalMinutes: number }>(
+        "/api/settings/search",
+      );
     },
-    updateSearchConfig(data: { geminiApiKey?: string | null; enrichmentEnabled?: boolean }) {
-      return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number }>("/api/settings/search", {
-        method: "PUT",
-        body: JSON.stringify(data),
-      });
+    updateSearchConfig(data: {
+      geminiApiKey?: string | null;
+      enrichmentEnabled?: boolean;
+      syncIntervalMinutes?: number;
+    }) {
+      return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number; syncIntervalMinutes: number }>(
+        "/api/settings/search",
+        {
+          method: "PUT",
+          body: JSON.stringify(data),
+        },
+      );
     },
     runEnrichment() {
       return request<{ success: boolean; message: string }>("/api/settings/search/enrichments", {
@@ -399,22 +433,56 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    disconnect(id: string) {
-      return request<{ success: boolean }>(`/api/connectors/${id}`, { method: "DELETE" });
+    disconnect(id: string, opts?: { deleteEntities?: boolean }) {
+      const params = opts?.deleteEntities ? "?deleteEntities=true" : "";
+      return request<{ success: boolean }>(`/api/connectors/${id}${params}`, { method: "DELETE" });
+    },
+    entityCount(id: string) {
+      return request<{ count: number }>(`/api/connectors/${id}/entity-count`);
     },
     sync(id: string) {
       return request<{ sync: { connectorId: string; status: string } }>(`/api/connectors/${id}/syncs`, {
         method: "POST",
       });
     },
+    progress() {
+      return request<{
+        active: Array<{
+          connectorId: string;
+          connectorType: string;
+          phase: "syncing" | "enriching";
+          itemsProcessed: number;
+          itemsCreated: number;
+          itemsSkipped: number;
+          startedAt: string;
+        }>;
+        pendingEnrichment: number;
+        enrichmentActive: boolean;
+        enrichmentStats: {
+          total: number;
+          enriched: number;
+          summarized: number;
+        };
+      }>("/api/connectors/progress");
+    },
     files(id: string) {
       return request<{ files: ConnectorFile[] }>(`/api/connectors/${id}/files`);
     },
-    allFiles(opts?: { limit?: number; offset?: number; source?: string }) {
+    allFiles(opts?: {
+      limit?: number;
+      offset?: number;
+      source?: string;
+      category?: string;
+      status?: string;
+      access?: string;
+    }) {
       const params = new URLSearchParams();
       if (opts?.limit) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
       if (opts?.source) params.set("source", opts.source);
+      if (opts?.category) params.set("category", opts.category);
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.access) params.set("access", opts.access);
       const qs = params.toString();
       return request<{ files: UnifiedFile[]; total: number; hasMore: boolean }>(
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
@@ -469,6 +537,78 @@ export const api = {
       return request<{
         items: Array<{ id: string; name: string; mimeType: string; isFolder: boolean }>;
       }>(`/api/connectors/google-drive/browse/${connectorId}/folder/${folderId}`);
+    },
+    browseClickUp(credentials: { api_key: string }) {
+      return request<{
+        workspaces: Array<{
+          id: string;
+          name: string;
+          memberCount: number;
+          spaces: Array<{ id: string; name: string; private: boolean }>;
+        }>;
+      }>("/api/connectors/clickup/browse", {
+        method: "POST",
+        body: JSON.stringify({ credentials }),
+      });
+    },
+    browseClickUpExisting(connectorId: string) {
+      return request<{
+        workspaces: Array<{
+          id: string;
+          name: string;
+          memberCount: number;
+          selected: boolean;
+          spaces: Array<{ id: string; name: string; private: boolean; selected: boolean }>;
+        }>;
+      }>(`/api/connectors/clickup/browse/${connectorId}`);
+    },
+    browseNotionStart(credentials: { api_key: string }) {
+      return request<{ browseId: string }>("/api/connectors/notion/browse", {
+        method: "POST",
+        body: JSON.stringify({ credentials }),
+      });
+    },
+    browseNotionStatus(browseId: string) {
+      return request<{
+        scanning: boolean;
+        pagesScanned: number;
+        rootPages: Array<{ id: string; title: string; url: string }>;
+        error?: string;
+      }>(`/api/connectors/notion/browse-status/${browseId}`);
+    },
+    browseNotionExisting(connectorId: string) {
+      return request<{
+        rootPages: Array<{ id: string; title: string; url: string; selected: boolean }>;
+      }>(`/api/connectors/notion/browse/${connectorId}`);
+    },
+    /** Generic browse for new connection — delegates to connector.browse() */
+    browse(connectorType: string, credentials: Record<string, unknown>) {
+      return request<BrowseResult | { type: "async"; jobId: string }>("/api/connectors/browse", {
+        method: "POST",
+        body: JSON.stringify({ connectorType, credentials }),
+      });
+    },
+    /** Generic browse for existing connector. Returns cached data if available. */
+    browseExisting(connectorId: string, refresh = false) {
+      const qs = refresh ? "?refresh=true" : "";
+      return request<
+        (BrowseResult | { type: "async"; jobId: string }) & { scopeConfig?: Record<string, unknown>; cached?: boolean }
+      >(`/api/connectors/${connectorId}/browse${qs}`);
+    },
+    /** Poll async browse status */
+    browseStatus(jobId: string) {
+      return request<{
+        scanning: boolean;
+        pagesScanned: number;
+        rootPages: Array<{ id: string; title: string; url: string }>;
+        error?: string;
+      }>(`/api/connectors/browse-status/${jobId}`);
+    },
+    /** Browse folder children for tree pickers */
+    browseChildren(connectorId: string, parentId: string) {
+      return request<{ items: Array<{ id: string; name: string; hasChildren?: boolean }> }>(
+        `/api/connectors/${connectorId}/browse-children/${parentId}`,
+      );
     },
     updateScope(id: string, scopeConfig: Record<string, unknown>) {
       return request<{
@@ -725,6 +865,7 @@ export const api = {
           contextSnippet: string | null;
           chunkIndex: number | null;
           mentionedAt: string;
+          sourceDate: string;
           file: {
             id: string;
             fileName: string;
@@ -745,6 +886,12 @@ export const api = {
     },
     deleteTentative() {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
+    },
+    reset(categories: string[]) {
+      return request<{ message: string; entitiesDeleted: number; candidatesCleared: number }>("/api/entities/reset", {
+        method: "POST",
+        body: JSON.stringify({ categories }),
+      });
     },
     update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
       return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ResolveSlackUserDeps } from "./resolve-user";
-import { resolveSlackUser } from "./resolve-user";
+import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 
 const makeUser = (
   overrides: Partial<
@@ -100,18 +100,14 @@ describe("resolveSlackUser", () => {
     expect(result).toBe(linked);
   });
 
-  it("does not overwrite existing Slack ID when email matches a different Slack user", async () => {
+  it("throws when email matches a different Slack user that already has a Slack identity", async () => {
     const otherSlackUser = makeUser({ id: "u3", email: "alice@example.com", slack_user_id: "U999" });
-    const created = makeUser({ id: "u-new", slack_user_id: "U001", email: "alice@example.com" });
     const deps = makeDeps();
     vi.mocked(deps.users.findByEmail).mockResolvedValue(otherSlackUser);
-    vi.mocked(deps.users.create).mockResolvedValue(created);
 
-    const result = await resolveSlackUser("U001", deps);
-
+    await expect(resolveSlackUser("U001", deps)).rejects.toBeInstanceOf(SlackIdentityConflictError);
     expect(deps.users.update).not.toHaveBeenCalled();
-    expect(deps.users.create).toHaveBeenCalled();
-    expect(result).toBe(created);
+    expect(deps.users.create).not.toHaveBeenCalled();
   });
 
   it("creates new user when no match by Slack ID or email", async () => {

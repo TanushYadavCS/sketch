@@ -1,5 +1,4 @@
 import type { Skill } from "@/lib/skills-data";
-import { getCategoryLabel } from "@/lib/skills-data";
 import { DotsThreeIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -40,17 +39,12 @@ export function SkillCard({ skill, onCardClick, onDuplicate, onDelete }: SkillCa
         }
       }}
     >
-      {/* Top row: category pill + source tags + overflow */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-          <span className="inline-flex shrink-0 items-center rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
-            {getCategoryLabel(skill.category)}
-          </span>
-        </div>
-
+      {/* Top row: skill name + overflow menu */}
+      <div className="flex items-start justify-between gap-2">
+        <p className="min-w-0 flex-1 truncate text-base font-semibold">{skill.name}</p>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-7 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <Button variant="ghost" size="icon" className="-mr-2 size-7 shrink-0" onClick={(e) => e.stopPropagation()}>
               <DotsThreeIcon size={16} className="text-muted-foreground" />
             </Button>
           </DropdownMenuTrigger>
@@ -64,9 +58,6 @@ export function SkillCard({ skill, onCardClick, onDuplicate, onDelete }: SkillCa
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-
-      {/* Skill name */}
-      <p className="mt-3 truncate text-sm font-medium">{skill.name}</p>
 
       {/* Description */}
       {skill.description && (

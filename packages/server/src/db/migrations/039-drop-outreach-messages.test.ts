@@ -1,5 +1,5 @@
 /**
- * Tests for the 033-drop-outreach-messages migration.
+ * Tests for the 039-drop-outreach-messages migration.
  *
  * Runs 017 up() first to create the outreach_messages table (along with the users
  * table it references), then runs 033 up() and verifies the table and both indexes
@@ -9,7 +9,7 @@ import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { up as up017 } from "./017-outreach-messages";
-import { down as down033, up as up033 } from "./033-drop-outreach-messages";
+import { down as down033, up as up033 } from "./039-drop-outreach-messages";
 
 function createBlankDb(): Kysely<unknown> {
   return new Kysely<unknown>({
@@ -39,7 +39,7 @@ async function indexExists(db: Kysely<unknown>, name: string): Promise<boolean> 
   return result.rows.length > 0;
 }
 
-describe("033-drop-outreach-messages migration", () => {
+describe("039-drop-outreach-messages migration", () => {
   let db: Kysely<unknown>;
 
   beforeEach(async () => {

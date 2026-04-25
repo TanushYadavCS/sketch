@@ -65,9 +65,18 @@ export function SearchBar({
 
       <FilterDropdown
         label="Status"
-        value={statusFilter === "enriched" ? "Enriched" : statusFilter === "raw" ? "Raw" : null}
+        value={
+          statusFilter === "enriched"
+            ? "Enriched"
+            : statusFilter === "pending"
+              ? "Pending"
+              : statusFilter === "raw"
+                ? "Raw"
+                : null
+        }
         options={[
           { value: "raw", label: "Raw" },
+          { value: "pending", label: "Pending" },
           { value: "enriched", label: "Enriched" },
         ]}
         onChange={onStatusChange}

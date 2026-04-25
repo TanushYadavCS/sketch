@@ -32,7 +32,11 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
     /** Find connector configs that are ready to sync. */
     async findSyncableConfigs() {
-      return db.selectFrom("connector_configs").selectAll().where("sync_status", "in", ["active", "pending"]).execute();
+      return db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("sync_status", "in", ["active", "pending", "error"])
+        .execute();
     },
 
     /** Create a new connector config. */
@@ -69,6 +73,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
         syncCursor: string | null;
         lastSyncedAt: string | null;
         errorMessage: string | null;
+        browseCache: string | null;
       }>,
     ) {
       const values: Record<string, unknown> = {};
@@ -78,6 +83,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       if (data.syncCursor !== undefined) values.sync_cursor = data.syncCursor;
       if (data.lastSyncedAt !== undefined) values.last_synced_at = data.lastSyncedAt;
       if (data.errorMessage !== undefined) values.error_message = data.errorMessage;
+      if (data.browseCache !== undefined) values.browse_cache = data.browseCache;
 
       if (Object.keys(values).length > 0) {
         values.updated_at = new Date().toISOString();
@@ -85,6 +91,16 @@ export function createConnectorRepository(db: Kysely<DB>) {
       }
 
       return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    },
+
+    /** Get all file IDs linked to a connector. */
+    async getFileIdsForConnector(connectorId: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("connector_files")
+        .select("indexed_file_id")
+        .where("connector_config_id", "=", connectorId)
+        .execute();
+      return rows.map((r) => r.indexed_file_id);
     },
 
     /**
@@ -151,8 +167,6 @@ export function createConnectorRepository(db: Kysely<DB>) {
       fileType: string | null;
       contentCategory: ContentCategory;
       content: string | null;
-      summary: string | null;
-      tags: string | null;
       sourcePath: string | null;
       contentHash: string | null;
       sourceCreatedAt: string | null;
@@ -178,8 +192,6 @@ export function createConnectorRepository(db: Kysely<DB>) {
           file_type: data.fileType,
           content_category: data.contentCategory,
           content: data.content,
-          summary: data.summary,
-          tags: data.tags,
           source_path: data.sourcePath,
           content_hash: data.contentHash,
           is_archived: 0,
@@ -207,8 +219,6 @@ export function createConnectorRepository(db: Kysely<DB>) {
           file_type: data.fileType,
           content_category: data.contentCategory,
           content: data.content,
-          summary: data.summary,
-          tags: data.tags,
           source: data.source,
           source_path: data.sourcePath,
           content_hash: data.contentHash,
@@ -291,11 +301,12 @@ export function createConnectorRepository(db: Kysely<DB>) {
     async syncFileAccessEmails(indexedFileId: string, emails: string[]) {
       await db.deleteFrom("file_access").where("indexed_file_id", "=", indexedFileId).execute();
 
-      if (emails.length === 0) return;
+      const unique = [...new Set(emails)];
+      if (unique.length === 0) return;
 
       await db
         .insertInto("file_access")
-        .values(emails.map((email) => ({ indexed_file_id: indexedFileId, email })))
+        .values(unique.map((email) => ({ indexed_file_id: indexedFileId, email })))
         .execute();
     },
 
@@ -459,11 +470,6 @@ export function createConnectorRepository(db: Kysely<DB>) {
       return orphanedIds.length;
     },
 
-    /** Update a file's summary after LLM generation. */
-    async updateFileSummary(fileId: string, summary: string, tags: string | null) {
-      await db.updateTable("indexed_files").set({ summary, tags }).where("id", "=", fileId).execute();
-    },
-
     /**
      * Search indexed files using FTS5.
      * For the full search API with sanitization, use connectors/search.ts instead.
@@ -531,7 +537,14 @@ export function createConnectorRepository(db: Kysely<DB>) {
      * List files across all connectors with pagination.
      * Ordered by synced_at descending (most recently synced first).
      */
-    async listAllFiles(opts: { limit: number; offset: number; connectorType?: string }) {
+    async listAllFiles(opts: {
+      limit: number;
+      offset: number;
+      connectorType?: string;
+      category?: string;
+      status?: string;
+      access?: string;
+    }) {
       let query = db
         .selectFrom("indexed_files")
         .select([
@@ -547,6 +560,8 @@ export function createConnectorRepository(db: Kysely<DB>) {
           "indexed_files.source_created_at",
           "indexed_files.source_updated_at",
           "indexed_files.summary",
+          "indexed_files.embedding_status",
+          "indexed_files.summary_status",
           "indexed_files.access_scope_id",
         ])
         .where("indexed_files.is_archived", "=", 0);
@@ -554,19 +569,70 @@ export function createConnectorRepository(db: Kysely<DB>) {
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
       }
+      if (opts.category) {
+        query = query.where("indexed_files.content_category", "=", opts.category);
+      }
+      if (opts.status === "enriched") {
+        query = query.where("indexed_files.summary", "is not", null);
+      } else if (opts.status === "pending") {
+        query = query.where((eb) =>
+          eb.or([
+            eb("indexed_files.embedding_status", "in", ["pending", "failed"]),
+            eb("indexed_files.summary_status", "in", ["pending", "failed"]),
+          ]),
+        );
+      } else if (opts.status === "raw") {
+        query = query
+          .where("indexed_files.summary", "is", null)
+          .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
+          .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
+      }
+      if (opts.access === "restricted") {
+        query = query.where("indexed_files.access_scope_id", "is not", null);
+      } else if (opts.access === "unrestricted") {
+        query = query.where("indexed_files.access_scope_id", "is", null);
+      }
 
       return query.orderBy("indexed_files.synced_at", "desc").limit(opts.limit).offset(opts.offset).execute();
     },
 
-    /** Count non-archived files, optionally filtered by source type. */
-    async countAllFiles(connectorType?: string) {
+    /** Count non-archived files with optional filters. */
+    async countAllFiles(filters?: {
+      connectorType?: string;
+      category?: string;
+      status?: string;
+      access?: string;
+    }) {
       let query = db
         .selectFrom("indexed_files")
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
 
-      if (connectorType) {
-        query = query.where("indexed_files.source", "=", connectorType);
+      if (filters?.connectorType) {
+        query = query.where("indexed_files.source", "=", filters.connectorType);
+      }
+      if (filters?.category) {
+        query = query.where("indexed_files.content_category", "=", filters.category);
+      }
+      if (filters?.status === "enriched") {
+        query = query.where("indexed_files.summary", "is not", null);
+      } else if (filters?.status === "pending") {
+        query = query.where((eb) =>
+          eb.or([
+            eb("indexed_files.embedding_status", "in", ["pending", "failed"]),
+            eb("indexed_files.summary_status", "in", ["pending", "failed"]),
+          ]),
+        );
+      } else if (filters?.status === "raw") {
+        query = query
+          .where("indexed_files.summary", "is", null)
+          .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
+          .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
+      }
+      if (filters?.access === "restricted") {
+        query = query.where("indexed_files.access_scope_id", "is not", null);
+      } else if (filters?.access === "unrestricted") {
+        query = query.where("indexed_files.access_scope_id", "is", null);
       }
 
       const result = await query.executeTakeFirstOrThrow();
