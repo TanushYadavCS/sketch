@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 
@@ -174,15 +175,25 @@ export function entityRoutes(db: Kysely<DB>) {
           parts.push(eb("source_type", "not in", ORG_SOURCE_TYPES));
         }
         if (includeAi) {
-          parts.push(eb(sql`json_extract(metadata, '$.origin')`, "=", "ai"));
+          parts.push(
+            eb(isPg(db) ? sql`(metadata::jsonb ->> 'origin')` : sql`json_extract(metadata, '$.origin')`, "=", "ai"),
+          );
         }
         if (includeManual) {
           parts.push(
             eb.and([
               eb("source_type", "in", ORG_SOURCE_TYPES),
               eb.or([
-                eb(sql`json_extract(metadata, '$.origin')`, "is", null),
-                eb(sql`json_extract(metadata, '$.origin')`, "!=", "ai"),
+                eb(
+                  isPg(db) ? sql`(metadata::jsonb ->> 'origin')` : sql`json_extract(metadata, '$.origin')`,
+                  "is",
+                  null,
+                ),
+                eb(
+                  isPg(db) ? sql`(metadata::jsonb ->> 'origin')` : sql`json_extract(metadata, '$.origin')`,
+                  "!=",
+                  "ai",
+                ),
               ]),
             ]),
           );

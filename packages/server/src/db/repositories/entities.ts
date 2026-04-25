@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { isPg } from "../dialect";
 import type { DB } from "../schema";
 
 export interface UpsertEntityData {
@@ -375,7 +376,11 @@ export function createEntityRepository(db: Kysely<DB>) {
           .selectFrom("entities")
           .selectAll()
           .where("source_type", "=", "person")
-          .where(sql`json_extract(metadata, '$.email')`, "=", data.email)
+          .where(
+            isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`,
+            "=",
+            data.email,
+          )
           .executeTakeFirst();
 
         if (byEmail) {
