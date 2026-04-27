@@ -309,6 +309,15 @@ async function* syncTranscripts(
   logger.info({ totalTranscripts }, "Transcripts sync complete");
 }
 
+/**
+ * Last 6 chars of an API key, for display in list views.
+ * Returns null if the key is too short to slice meaningfully.
+ */
+export function buildCredentialHint(apiKey: string): string | null {
+  if (typeof apiKey !== "string" || apiKey.length < 6) return null;
+  return apiKey.slice(-6);
+}
+
 export function createFirefliesConnector(): Connector {
   let lastRequestTime = 0;
   const firefliesRequest = makeFirefliesRequest(

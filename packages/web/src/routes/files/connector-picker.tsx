@@ -9,6 +9,25 @@ import { ConnectorLogo } from "@/components/connector-logos";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
+
+// Per-user integrations (e.g. Fireflies) are managed from Settings → My Connections,
+// not the workspace-level Files connector picker. They still appear as filter chips on
+// the Files page (so admins and members get an identical view of indexed sources), but
+// they're excluded from the "+ Connect" buttons and the BrowseAll catalog.
+const PER_USER_INTEGRATION_TYPES = new Set<IntegrationType>(["fireflies"]);
+const ORG_LEVEL_INTEGRATIONS = INTEGRATIONS.filter((def) => !PER_USER_INTEGRATION_TYPES.has(def.type));
+
+const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
+  error: 4,
+  syncing: 3,
+  pending: 2,
+  active: 1,
+  paused: 0,
+  disabled: 0,
+};
+function mergeStatus(a: string, b: string): string {
+  return (SYNC_STATUS_PRECEDENCE[a] ?? 0) >= (SYNC_STATUS_PRECEDENCE[b] ?? 0) ? a : b;
+}
 import {
   ArrowSquareOutIcon,
   ArrowsClockwiseIcon,
@@ -31,6 +50,7 @@ import { Label } from "@sketch/ui/components/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Switch } from "@sketch/ui/components/switch";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -71,10 +91,20 @@ export function ConnectorPicker({
 }) {
   const [connectingIntegration, setConnectingIntegration] = useState<IntegrationDefinition | null>(null);
   const [showBrowseAll, setShowBrowseAll] = useState(false);
+  const navigate = useNavigate();
 
   const connectedByType = new Map<string, ConnectorConfig>();
+  // Aggregate across multiple configs of the same type — per-user integrations like
+  // Fireflies have one config per user, and the filter chip should show workspace-wide
+  // totals so admins and members see the same Files view.
+  const aggregatedByType = new Map<string, { fileCount: number; syncStatus: string }>();
   for (const c of connectors) {
     connectedByType.set(c.connectorType, c);
+    const cur = aggregatedByType.get(c.connectorType);
+    aggregatedByType.set(c.connectorType, {
+      fileCount: (cur?.fileCount ?? 0) + (c.fileCount ?? 0),
+      syncStatus: cur ? mergeStatus(cur.syncStatus, c.syncStatus) : c.syncStatus,
+    });
   }
 
   const handleConnected = () => {
@@ -113,8 +143,8 @@ export function ConnectorPicker({
         />
 
         {INTEGRATIONS.map((def) => {
-          const connector = connectedByType.get(def.type);
-          if (!connector) return null;
+          const agg = aggregatedByType.get(def.type);
+          if (!agg) return null;
           return (
             <SourceChip
               key={def.type}
@@ -122,15 +152,15 @@ export function ConnectorPicker({
               onClick={() => onSourceFilterChange(sourceFilter === def.type ? null : def.type)}
               onClear={() => onSourceFilterChange(null)}
               label={def.name}
-              count={connector.fileCount ?? 0}
+              count={agg.fileCount}
               color={def.color}
               connectorType={def.type}
-              status={connector.syncStatus}
+              status={agg.syncStatus}
             />
           );
         })}
 
-        {INTEGRATIONS.map((def) => {
+        {ORG_LEVEL_INTEGRATIONS.map((def) => {
           if (connectedByType.has(def.type)) return null;
           return (
             <button
@@ -162,6 +192,13 @@ export function ConnectorPicker({
         connectors={connectors}
         onConnect={(def) => {
           setShowBrowseAll(false);
+          // Per-user connectors live in Settings → My Connections (each user pastes
+          // their own key), so the catalog routes there instead of opening the
+          // workspace-level connect dialog.
+          if (PER_USER_INTEGRATION_TYPES.has(def.type)) {
+            navigate({ to: "/integrations", search: { tab: "my-connections", add: def.type } });
+            return;
+          }
           setConnectingIntegration(def);
         }}
         onManage={(def, connector) => {
@@ -311,12 +348,16 @@ function BrowseConnectorsDialog({
           <>
             <div className="mt-2 space-y-2">
               {INTEGRATIONS.map((def) => {
-                const connector = connectedByType.get(def.type);
+                // Per-user connectors are managed from Settings → My Connections, so the
+                // catalog always shows the Connect affordance for them; clicking routes
+                // the user there rather than opening the workspace-level connect dialog.
+                const isPerUser = PER_USER_INTEGRATION_TYPES.has(def.type);
+                const connector = isPerUser ? null : (connectedByType.get(def.type) ?? null);
                 return (
                   <ConnectorRow
                     key={def.type}
                     definition={def}
-                    connector={connector ?? null}
+                    connector={connector}
                     onConnect={() => onConnect(def)}
                     onManage={() => {
                       if (connector) onManage(def, connector);

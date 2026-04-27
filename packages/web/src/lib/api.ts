@@ -444,6 +444,26 @@ export const api = {
         method: "POST",
       });
     },
+    listMine() {
+      return request<{
+        connectors: Array<{
+          id: string;
+          connectorType: string;
+          credentialHint: string | null;
+          syncStatus: string;
+          lastSyncedAt: string | null;
+          errorMessage: string | null;
+          createdAt: string;
+          fileCount: number;
+        }>;
+      }>("/api/connectors/mine");
+    },
+    rotateKey(id: string, apiKey: string) {
+      return request<{ ok: boolean }>(`/api/connectors/${id}/rotate-key`, {
+        method: "POST",
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+    },
     progress() {
       return request<{
         active: Array<{

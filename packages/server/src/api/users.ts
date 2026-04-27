@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { countRecentTokens, createVerificationToken } from "../auth/email-verify";
 import type { Config } from "../config";
+import { createConnectorRepository } from "../db/repositories/connectors";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -232,6 +233,19 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (sub.includes("@") && existing.email?.toLowerCase() === sub.toLowerCase()) {
       return c.json({ error: { code: "FORBIDDEN", message: "Cannot delete your own account" } }, 403);
     }
+
+    // Archive any per-user connectors (Fireflies etc.) before removing the user.
+    // Scrubs credentials and disables future syncs; leaves indexed_files intact so
+    // other attendees still see previously-synced meetings via file_access.
+    try {
+      const result = await createConnectorRepository(deps.db).archiveConnectorsForOwner(id);
+      if (result.archived > 0) {
+        deps.logger.info({ userId: id, count: result.archived }, "Archived connectors after user removal");
+      }
+    } catch (err) {
+      deps.logger.error({ err, userId: id }, "Failed to archive user connectors");
+    }
+
     await users.remove(id);
     return c.json({ success: true });
   });

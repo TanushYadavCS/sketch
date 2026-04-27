@@ -30,13 +30,75 @@ export function createConnectorRepository(db: Kysely<DB>) {
       return db.selectFrom("connector_configs").selectAll().where("connector_type", "=", connectorType).execute();
     },
 
-    /** Find connector configs that are ready to sync. */
-    async findSyncableConfigs() {
+    /**
+     * Find connector configs that are ready to sync.
+     * `staleAfterMs` skips configs synced within that window so we don't re-attempt
+     * a connector that just finished. Defaults to 15 minutes (half the default tick).
+     */
+    async findSyncableConfigs(opts?: { staleAfterMs?: number }) {
+      const staleAfterMs = opts?.staleAfterMs ?? 15 * 60 * 1000;
+      const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
       return db
         .selectFrom("connector_configs")
         .selectAll()
         .where("sync_status", "in", ["active", "pending", "error"])
+        .where((eb) => eb.or([eb("last_synced_at", "is", null), eb("last_synced_at", "<", cutoff)]))
         .execute();
+    },
+
+    /** Find connector configs stuck in `syncing` state past the staleness threshold. */
+    async findStaleSyncingConfigs(staleThresholdMs: number) {
+      const cutoff = new Date(Date.now() - staleThresholdMs).toISOString();
+      return db
+        .selectFrom("connector_configs")
+        .select(["id", "connector_type", "updated_at"])
+        .where("sync_status", "=", "syncing")
+        .where("updated_at", "<", cutoff)
+        .execute();
+    },
+
+    /** All connector configs owned by a user. */
+    async listByOwner(createdBy: string) {
+      return db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("created_by", "=", createdBy)
+        .orderBy("created_at", "desc")
+        .execute();
+    },
+
+    /**
+     * Archive all connectors owned by a user — flip to disabled and scrub credentials.
+     * Used when a user is removed from the workspace. Their indexed_files remain so
+     * other attendees still see their previously-synced meetings via file_access.
+     */
+    async archiveConnectorsForOwner(createdBy: string): Promise<{ archived: number }> {
+      const owned = await this.listByOwner(createdBy);
+      for (const config of owned) {
+        const scrubbed = JSON.stringify({ type: config.auth_type, scrubbed: true });
+        await db
+          .updateTable("connector_configs")
+          .set({
+            sync_status: "disabled",
+            credentials: scrubbed,
+            credential_hint: null,
+            error_message: "Owner removed from workspace",
+            updated_at: new Date().toISOString(),
+          })
+          .where("id", "=", config.id)
+          .execute();
+      }
+      return { archived: owned.length };
+    },
+
+    /** Find a Fireflies config owned by the given user (at most one per user). */
+    async findFirefliesByOwner(createdBy: string) {
+      return db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("connector_type", "=", "fireflies")
+        .where("created_by", "=", createdBy)
+        .executeTakeFirst();
     },
 
     /** Create a new connector config. */
@@ -46,6 +108,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       credentials: string;
       scopeConfig?: string;
       createdBy: string;
+      credentialHint?: string | null;
     }) {
       const id = randomUUID();
       await db
@@ -57,6 +120,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           credentials: data.credentials,
           scope_config: data.scopeConfig ?? "{}",
           created_by: data.createdBy,
+          credential_hint: data.credentialHint ?? null,
         })
         .execute();
 
@@ -74,6 +138,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
         lastSyncedAt: string | null;
         errorMessage: string | null;
         browseCache: string | null;
+        credentialHint: string | null;
       }>,
     ) {
       const values: Record<string, unknown> = {};
@@ -84,6 +149,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       if (data.lastSyncedAt !== undefined) values.last_synced_at = data.lastSyncedAt;
       if (data.errorMessage !== undefined) values.error_message = data.errorMessage;
       if (data.browseCache !== undefined) values.browse_cache = data.browseCache;
+      if (data.credentialHint !== undefined) values.credential_hint = data.credentialHint;
 
       if (Object.keys(values).length > 0) {
         values.updated_at = new Date().toISOString();

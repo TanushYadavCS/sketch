@@ -611,10 +611,19 @@ async function* fetchDocsFromWorkspace(
   since?: string,
 ): AsyncGenerator<SyncedItem> {
   try {
-    // Paginate through all docs using cursor
+    // Paginate through all docs using cursor.
+    // ClickUp's docs API has been observed returning the same next_cursor across iterations
+    // (a server-side bug), which would otherwise spin this loop forever. Track seen cursors
+    // and bail if one repeats.
     let docCursor: string | undefined;
+    const seenCursors = new Set<string>();
     const allDocs: ClickUpDoc[] = [];
     do {
+      if (docCursor && seenCursors.has(docCursor)) {
+        logger.warn({ workspaceId, docCursor }, "ClickUp doc cursor not advancing, stopping pagination");
+        break;
+      }
+      if (docCursor) seenCursors.add(docCursor);
       const url = docCursor ? `/workspaces/${workspaceId}/docs?cursor=${docCursor}` : `/workspaces/${workspaceId}/docs`;
       const docsRes = (await clickupRequestV3(url, token, logger)) as {
         docs: ClickUpDoc[];

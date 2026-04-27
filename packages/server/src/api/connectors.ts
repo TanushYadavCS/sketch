@@ -17,12 +17,13 @@ import { z } from "zod";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
+import { buildCredentialHint } from "../connectors/fireflies";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
 import { VALID_CONNECTOR_TYPES, getConnector } from "../connectors/registry";
 import { browseFiles, getFileContent, listIndexedSources, search, searchFiles } from "../connectors/search";
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
-import type { ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
+import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createUserRepository } from "../db/repositories/users";
@@ -122,6 +123,11 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
 
   /** Create a new connector — validates credentials then auto-triggers first sync. */
   routes.post("/", async (c) => {
+    const sub = c.get("sub");
+    if (!sub || typeof sub !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
+    }
+
     const body = await c.req.json();
     const parsed = createConnectorSchema.safeParse(body);
     if (!parsed.success) {
@@ -129,11 +135,28 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
+    const connectorType = parsed.data.connectorType as ConnectorType;
+
+    // Per-user uniqueness guard for Fireflies — clearer error than the unique-index violation.
+    if (connectorType === "fireflies") {
+      const existing = await connectorRepo.findFirefliesByOwner(sub);
+      if (existing) {
+        return c.json(
+          {
+            error: {
+              code: "ALREADY_CONNECTED",
+              message: "You already have a Fireflies connection. Rotate the key from Settings instead.",
+            },
+          },
+          409,
+        );
+      }
+    }
+
     // Validate credentials by testing the API connection.
     // For OAuth, also refresh the token so we store a valid access_token.
     let credentials = { type: parsed.data.authType, ...parsed.data.credentials } as ConnectorCredentials;
     try {
-      const connectorType = parsed.data.connectorType as ConnectorType;
       const connector = getConnector(connectorType);
       if (credentials.type === "oauth" && connector.refreshTokens) {
         const refreshed = await connector.refreshTokens(credentials);
@@ -149,12 +172,16 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       );
     }
 
+    const credentialHint =
+      credentials.type === "api_key" && credentials.api_key ? buildCredentialHint(credentials.api_key) : null;
+
     const config = await connectorRepo.createConfig({
-      connectorType: parsed.data.connectorType as ConnectorType,
+      connectorType,
       authType: parsed.data.authType,
       credentials: JSON.stringify(credentials),
       scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,
-      createdBy: "admin",
+      createdBy: sub,
+      credentialHint,
     });
 
     // Auto-trigger first sync + enrichment in background (non-blocking)
@@ -170,6 +197,32 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       },
       201,
     );
+  });
+
+  /** List the JWT user's own connectors (one row per Fireflies/etc API-key connector). */
+  routes.get("/mine", async (c) => {
+    const sub = c.get("sub");
+    if (!sub || typeof sub !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
+    }
+
+    const configs = await connectorRepo.listByOwner(sub);
+    const result = await Promise.all(
+      configs.map(async (config) => {
+        const fileCount = await connectorRepo.countFilesByConnector(config.id);
+        return {
+          id: config.id,
+          connectorType: config.connector_type,
+          credentialHint: config.credential_hint,
+          syncStatus: config.sync_status,
+          lastSyncedAt: config.last_synced_at,
+          errorMessage: config.error_message,
+          createdAt: config.created_at,
+          fileCount,
+        };
+      }),
+    );
+    return c.json({ connectors: result });
   });
 
   /** List all files across connectors with pagination, optional source filter, and access info. */
@@ -773,6 +826,39 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
 
     await connectorRepo.deleteConfig(config.id);
     return c.json({ success: true });
+  });
+
+  /** Rotate the API key for an existing connector. Validates the new key before saving. */
+  routes.post("/:id/rotate-key", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+
+    const parsed = z.object({ api_key: z.string().min(1) }).safeParse(await c.req.json());
+    if (!parsed.success) {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: parsed.error.issues[0]?.message ?? "Invalid request" } },
+        400,
+      );
+    }
+
+    const credentials: ApiKeyCredentials = { type: "api_key", api_key: parsed.data.api_key };
+    try {
+      await getConnector(config.connector_type as ConnectorType).validateCredentials(credentials);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid key";
+      return c.json({ error: { code: "INVALID_CREDENTIALS", message } }, 400);
+    }
+
+    await connectorRepo.updateConfig(config.id, {
+      credentials: JSON.stringify(credentials),
+      credentialHint: buildCredentialHint(parsed.data.api_key),
+      syncStatus: "active",
+      errorMessage: null,
+    });
+
+    return c.json({ ok: true });
   });
 
   /** Update connector scope config (add/remove drives, folders, etc.). */

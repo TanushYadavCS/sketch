@@ -12,7 +12,7 @@ export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear" | "
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
-export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error";
+export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" | "disabled";
 
 export type ContentCategory = "document" | "structured";
 
