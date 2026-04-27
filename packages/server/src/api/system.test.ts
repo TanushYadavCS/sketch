@@ -1198,6 +1198,83 @@ describe("POST /api/system/onboarding-introductions", () => {
     expect(workflow).toBeDefined();
   });
 
+  it("uses the requested admin email instead of the first admin", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendSlackDmToSlackUser = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    await settingsRepo.create({ botName: "Sketch" });
+    await userRepo.create({
+      email: "old-admin@acme.com",
+      name: "Old Admin",
+      emailVerified: true,
+      authRole: "admin",
+    });
+    const currentAdmin = await userRepo.create({
+      email: "current-admin@acme.com",
+      name: "Current Admin",
+      slackUserId: "UCURRENT",
+      emailVerified: true,
+      authRole: "admin",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendSlackDmToSlackUser,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ adminEmail: "current-admin@acme.com" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(sendSlackDmToSlackUser).toHaveBeenCalledWith({
+      slackUserId: "UCURRENT",
+      message: "I've added your team to Sketch. Who should I introduce myself to first? Reply with names or @mentions.",
+    });
+    const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(
+      currentAdmin.id,
+      "managed_onboarding_intro",
+    );
+    expect(workflow).toBeDefined();
+  });
+
+  it("does not start introductions for a requested non-admin user", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendSlackDmToSlackUser = vi.fn();
+    await settingsRepo.create({ botName: "Sketch" });
+    await userRepo.create({
+      email: "member@acme.com",
+      name: "Member",
+      slackUserId: "UMEMBER",
+      emailVerified: true,
+      authRole: "member",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendSlackDmToSlackUser,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ adminEmail: "member@acme.com" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: { code: "BAD_REQUEST", message: "User is not an admin" } });
+    expect(sendSlackDmToSlackUser).not.toHaveBeenCalled();
+  });
+
   it("returns already_exists when the opener was already delivered", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);

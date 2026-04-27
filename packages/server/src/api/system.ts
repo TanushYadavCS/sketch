@@ -89,6 +89,10 @@ const onboardingWorkflowMetadataSchema = z.object({
   openingMessageSent: z.boolean().optional(),
 });
 
+const onboardingIntroductionsSchema = z.object({
+  adminEmail: z.string().email().optional(),
+});
+
 function buildOpeningIntroMessage(botName: string): string {
   return `I've added your team to ${botName}. Who should I introduce myself to first? Reply with names or @mentions.`;
 }
@@ -419,10 +423,20 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "NOT_FOUND", message: "Onboarding introductions not available" } }, 404);
     }
 
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = onboardingIntroductionsSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
+    }
+
     const settingsRow = await settings.get();
-    const admin = await deps.userRepo.findFirstAdmin();
+    const adminEmail = parsed.data.adminEmail?.trim().toLowerCase();
+    const admin = adminEmail ? await deps.userRepo.findByEmail(adminEmail) : await deps.userRepo.findFirstAdmin();
     if (!admin) {
       return c.json({ error: { code: "NOT_FOUND", message: "Admin user not found" } }, 404);
+    }
+    if (adminEmail && admin.auth_role !== "admin") {
+      return c.json({ error: { code: "BAD_REQUEST", message: "User is not an admin" } }, 400);
     }
     if (!admin.slack_user_id) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Admin user has no Slack identity" } }, 400);

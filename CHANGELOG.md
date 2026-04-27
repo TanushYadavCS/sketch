@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.20.1] -- 2026-04-27
+
+- Fix(managed onboarding): let the platform pass the onboarding admin email to `/api/system/onboarding-introductions`, so intro workflows target the current Slack onboarding admin instead of the oldest admin user. Keeps `findFirstAdmin()` only as a compatibility fallback when no email is provided.
+
 ## [0.20.0] -- 2026-04-27
 
 - Auth: move admin authentication into the `users` table with `auth_role`, preserving human/team title data in `users.role`; admins can now use password login and magic-link login, and the sidebar shows the user's auth role.
