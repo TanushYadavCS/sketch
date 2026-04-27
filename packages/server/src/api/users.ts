@@ -19,6 +19,7 @@ import { getSmtpConfig, resolveBaseUrl } from "./shared";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
+type UserRow = Awaited<ReturnType<UserRepo["findById"]>>;
 
 interface UserRoutesDeps {
   settings: SettingsRepo;
@@ -45,6 +46,11 @@ const updateUserSchema = z.object({
   role: z.string().max(100).nullable().optional(),
   reportsTo: z.string().nullable().optional(),
 });
+
+function serializeUser(user: NonNullable<UserRow>) {
+  const { password_hash: _passwordHash, ...safeUser } = user;
+  return safeUser;
+}
 
 async function sendOrLogVerification(
   deps: UserRoutesDeps,
@@ -74,7 +80,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
 
   routes.get("/", async (c) => {
     const list = await users.list();
-    return c.json({ users: list });
+    return c.json({ users: list.map(serializeUser) });
   });
 
   routes.post("/", async (c) => {
@@ -115,7 +121,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user, verificationSent }, 201);
+      return c.json({ user: serializeUser(user), verificationSent }, 201);
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(
@@ -177,7 +183,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user, verificationSent });
+      return c.json({ user: serializeUser(user), verificationSent });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(

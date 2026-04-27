@@ -44,7 +44,7 @@ const tokenSchema = z.object({
 
 const identitySchema = z.object({
   adminEmail: z.string().email(),
-  adminPasswordHash: z.string().min(1),
+  adminPasswordHash: z.string().min(1).nullable().optional(),
   orgName: z.string().optional(),
   botName: z.string().optional(),
   name: z.string().optional(),
@@ -197,31 +197,40 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const { adminEmail, adminPasswordHash, orgName, botName } = parsed.data;
+    const normalizedAdminEmail = adminEmail.trim().toLowerCase();
 
     const existing = await settings.get();
     if (existing) {
       await settings.update({
-        adminEmail,
-        adminPasswordHash,
         ...(orgName !== undefined ? { orgName } : {}),
         ...(botName !== undefined ? { botName } : {}),
       });
     } else {
       await settings.create({
-        adminEmail,
-        adminPasswordHash,
         ...(orgName !== undefined ? { orgName } : {}),
         ...(botName !== undefined ? { botName } : {}),
       });
     }
 
     if (deps.userRepo) {
-      const displayName = parsed.data.name || adminEmail.split("@")[0];
-      const existingUser = await deps.userRepo.findByEmail(adminEmail);
+      const displayName = parsed.data.name || normalizedAdminEmail.split("@")[0];
+      const existingUser = await deps.userRepo.findByEmail(normalizedAdminEmail);
       if (existingUser) {
-        await deps.userRepo.update(existingUser.id, { name: displayName, emailVerified: true });
+        await deps.userRepo.update(existingUser.id, {
+          name: displayName,
+          email: normalizedAdminEmail,
+          emailVerified: true,
+          ...(adminPasswordHash !== undefined ? { passwordHash: adminPasswordHash } : {}),
+          authRole: "admin",
+        });
       } else {
-        await deps.userRepo.create({ name: displayName, email: adminEmail, emailVerified: true });
+        await deps.userRepo.create({
+          name: displayName,
+          email: normalizedAdminEmail,
+          emailVerified: true,
+          passwordHash: adminPasswordHash ?? null,
+          authRole: "admin",
+        });
       }
     }
 
@@ -411,11 +420,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const settingsRow = await settings.get();
-    if (!settingsRow?.admin_email) {
-      return c.json({ error: { code: "BAD_REQUEST", message: "Admin email is not configured" } }, 400);
-    }
-
-    const admin = await deps.userRepo.findByEmail(settingsRow.admin_email);
+    const admin = await deps.userRepo.findFirstAdmin();
     if (!admin) {
       return c.json({ error: { code: "NOT_FOUND", message: "Admin user not found" } }, 404);
     }
@@ -423,7 +428,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Admin user has no Slack identity" } }, 400);
     }
 
-    const openingMessage = buildOpeningIntroMessage(settingsRow.bot_name ?? "Sketch");
+    const openingMessage = buildOpeningIntroMessage(settingsRow?.bot_name ?? "Sketch");
     const existing = await deps.inboxMessagesRepo.findUnresolvedByRecipientAndKind(
       admin.id,
       "managed_onboarding_intro",

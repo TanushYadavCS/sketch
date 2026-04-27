@@ -31,14 +31,14 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       return row;
     },
 
-    async create(data: { adminEmail: string; adminPasswordHash: string; orgName?: string; botName?: string }) {
+    async create(data: { adminEmail?: string; adminPasswordHash?: string; orgName?: string; botName?: string } = {}) {
       const jwtSecret = randomBytes(32).toString("hex");
       await db
         .insertInto("settings")
         .values({
           id: "default",
-          admin_email: data.adminEmail,
-          admin_password_hash: data.adminPasswordHash,
+          ...(data.adminEmail !== undefined ? { admin_email: data.adminEmail } : {}),
+          ...(data.adminPasswordHash !== undefined ? { admin_password_hash: data.adminPasswordHash } : {}),
           jwt_secret: encryptionKey ? encrypt(jwtSecret, encryptionKey) : jwtSecret,
           ...(data.orgName !== undefined ? { org_name: data.orgName } : {}),
           ...(data.botName !== undefined ? { bot_name: data.botName } : {}),

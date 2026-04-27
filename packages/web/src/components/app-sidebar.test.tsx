@@ -77,4 +77,10 @@ describe("AppSidebar", () => {
       expect(screen.queryByRole("link", { name: "Account" })).not.toBeInTheDocument();
     });
   });
+
+  it("shows the signed-in user's auth role in the footer", () => {
+    renderSidebar("admin");
+
+    expect(screen.getByText("Admin")).toBeInTheDocument();
+  });
 });

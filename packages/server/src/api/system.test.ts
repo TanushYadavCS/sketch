@@ -16,8 +16,16 @@ const SEED = { adminEmail: "admin@test.com", adminPasswordHash: "" };
 
 async function seedAdmin(db: Kysely<DB>) {
   const settings = createSettingsRepository(db);
+  const users = createUserRepository(db);
   const hash = await hashPassword("testpassword123");
-  await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: hash });
+  await settings.create();
+  await users.create({
+    name: "admin",
+    email: "admin@test.com",
+    emailVerified: true,
+    passwordHash: hash,
+    authRole: "admin",
+  });
 }
 
 async function rawField(db: Kysely<DB>, field: keyof DB["settings"]): Promise<string | null | undefined> {
@@ -241,10 +249,11 @@ describe("PUT /api/system/identity", () => {
     expect(body).toEqual({ ok: true });
 
     const settings = await settingsRepo.get();
-    expect(settings?.admin_email).toBe("admin@acme.com");
-    expect(settings?.admin_password_hash).toBe(hash);
     expect(settings?.org_name).toBe("Acme Corp");
     expect(settings?.bot_name).toBe("AcmeBot");
+    const admin = await userRepo.findByEmail("admin@acme.com");
+    expect(admin?.auth_role).toBe("admin");
+    expect(admin?.password_hash).toBe(hash);
   });
 
   it("updates existing settings row", async () => {
@@ -270,8 +279,10 @@ describe("PUT /api/system/identity", () => {
     expect(res.status).toBe(200);
 
     const settings = await settingsRepo.get();
-    expect(settings?.admin_email).toBe("updated@acme.com");
     expect(settings?.org_name).toBe("Acme Updated");
+    const admin = await userRepo.findByEmail("updated@acme.com");
+    expect(admin?.auth_role).toBe("admin");
+    expect(admin?.password_hash).toBe(newHash);
   });
 
   it("creates admin user row with name derived from email when name not provided", async () => {
@@ -327,6 +338,34 @@ describe("PUT /api/system/identity", () => {
     expect(user).toBeDefined();
     expect(user?.name).toBe("Roopak Nijhara");
     expect(user?.role).toBeNull();
+    expect(user?.email_verified_at).not.toBeNull();
+  });
+
+  it("creates an auth admin without a password hash when managed identity has no local password", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/identity", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        adminEmail: "oauth-admin@acme.com",
+        orgName: "Acme",
+        name: "OAuth Admin",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+
+    const user = await userRepo.findByEmail("oauth-admin@acme.com");
+    expect(user).toBeDefined();
+    expect(user?.name).toBe("OAuth Admin");
+    expect(user?.auth_role).toBe("admin");
+    expect(user?.password_hash).toBeNull();
     expect(user?.email_verified_at).not.toBeNull();
   });
 
@@ -457,6 +496,7 @@ describe("POST /api/system/users", () => {
     expect(user).toBeDefined();
     expect(user?.role).toBeNull();
     expect(user?.name).toBe("Member Name");
+    expect(user?.auth_role).toBe("member");
     expect(user?.email_verified_at).toBeTruthy();
     expect(body.userId).toBe(user?.id);
   });
@@ -579,6 +619,40 @@ describe("PUT /api/system/users", () => {
     const bob = await userRepo.findByEmail("bob@acme.com");
     expect(bob?.name).toBe("Bob Shah");
     expect(bob?.slack_user_id).toBe("U222");
+    expect(bob?.auth_role).toBe("member");
+  });
+
+  it("preserves admin auth_role when Slack sync matches the admin by email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin Old",
+      emailVerified: true,
+      passwordHash: null,
+      authRole: "admin",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ email: "admin@acme.com", name: "Admin From Slack", slackUserId: "UADMIN" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, created: 0, updated: 1 });
+
+    const syncedAdmin = await userRepo.findById(admin.id);
+    expect(syncedAdmin?.name).toBe("Admin From Slack");
+    expect(syncedAdmin?.slack_user_id).toBe("UADMIN");
+    expect(syncedAdmin?.auth_role).toBe("admin");
+    expect(syncedAdmin?.password_hash).toBeNull();
   });
 
   it("returns 409 when an email is already linked to a different Slack user", async () => {
@@ -1061,6 +1135,8 @@ describe("POST /api/system/onboarding-introductions", () => {
       name: "Admin",
       slackUserId: "UADMIN",
       emailVerified: true,
+      passwordHash: "hash",
+      authRole: "admin",
     });
 
     const app = createTestSystemApp(settingsRepo, {
@@ -1089,6 +1165,39 @@ describe("POST /api/system/onboarding-introductions", () => {
     expect(workflow?.metadata).toContain('"openingMessageSent":true');
   });
 
+  it("uses an auth admin without requiring a local password hash", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendSlackDmToSlackUser = vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" });
+    await settingsRepo.create({ botName: "Sketch" });
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      slackUserId: "UADMIN",
+      emailVerified: true,
+      passwordHash: null,
+      authRole: "admin",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendSlackDmToSlackUser,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: "started" });
+    const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
+    expect(workflow).toBeDefined();
+  });
+
   it("returns already_exists when the opener was already delivered", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
@@ -1100,6 +1209,8 @@ describe("POST /api/system/onboarding-introductions", () => {
       name: "Admin",
       slackUserId: "UADMIN",
       emailVerified: true,
+      passwordHash: "hash",
+      authRole: "admin",
     });
     await inboxMessagesRepo.create({
       senderUserId: admin.id,
@@ -1141,6 +1252,8 @@ describe("POST /api/system/onboarding-introductions", () => {
       name: "Admin",
       slackUserId: "UADMIN",
       emailVerified: true,
+      passwordHash: "hash",
+      authRole: "admin",
     });
     const workflow = await inboxMessagesRepo.create({
       senderUserId: admin.id,

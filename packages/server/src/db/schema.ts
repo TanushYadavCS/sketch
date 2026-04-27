@@ -5,6 +5,8 @@ export interface UsersTable {
   name: string;
   email: string | null;
   email_verified_at: string | null;
+  password_hash: string | null;
+  auth_role: Generated<string>;
   slack_user_id: string | null;
   whatsapp_number: string | null;
   description: string | null;

@@ -2,6 +2,7 @@
  * Tests for workspace file operations API
  * Covers all endpoints and security edge cases
  */
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
@@ -17,8 +18,17 @@ const config = createTestConfig();
 
 async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "testpassword123") {
   const settings = createSettingsRepository(db);
+  const users = createUserRepository(db);
   const hash = await hashPassword(password);
-  await settings.create({ adminEmail: email, adminPasswordHash: hash });
+  const normalizedEmail = email.trim().toLowerCase();
+  await settings.create();
+  await users.create({
+    name: normalizedEmail.split("@")[0],
+    email: normalizedEmail,
+    emailVerified: true,
+    passwordHash: hash,
+    authRole: "admin",
+  });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 }
 
@@ -34,7 +44,7 @@ async function loginAdmin(app: ReturnType<typeof createApp>) {
 async function createMember(db: Kysely<DB>) {
   const users = createUserRepository(db);
   const user = await users.create({ name: "Test Member" });
-  await users.update(user.id, { email: "member@test.com" });
+  await users.update(user.id, { email: `member-${randomUUID()}@test.com` });
   return user;
 }
 

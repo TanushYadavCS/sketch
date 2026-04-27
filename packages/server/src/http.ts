@@ -96,11 +96,20 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     createAuthMiddleware(settings, {
       managedAuthSecret: config.MANAGED_AUTH_SECRET,
       managedUrl: config.MANAGED_URL,
+      hasLocalAdmin: async () => Boolean(await users.findFirstLocalAdmin()),
+      resolveLocalSessionUser: async (sub) => {
+        let user = await users.findById(sub);
+        if (!user && sub.includes("@")) {
+          user = await users.findByEmail(sub);
+        }
+        if (!user) return null;
+        return { id: user.id, authRole: user.auth_role };
+      },
       findUserByEmail: config.MANAGED_AUTH_SECRET
         ? async (email) => {
             const user = await users.findByEmail(email);
             if (!user) return null;
-            return { id: user.id };
+            return { id: user.id, authRole: user.auth_role };
           }
         : undefined,
     }),
