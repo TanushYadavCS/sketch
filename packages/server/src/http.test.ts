@@ -15,8 +15,17 @@ const config = createTestConfig();
 /** Helper to insert an admin account into the settings table. */
 async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "testpassword123") {
   const settings = createSettingsRepository(db);
+  const users = createUserRepository(db);
   const hash = await hashPassword(password);
-  await settings.create({ adminEmail: email, adminPasswordHash: hash });
+  const normalizedEmail = email.trim().toLowerCase();
+  await settings.create();
+  await users.create({
+    name: normalizedEmail.split("@")[0],
+    email: normalizedEmail,
+    emailVerified: true,
+    passwordHash: hash,
+    authRole: "admin",
+  });
 }
 
 describe("HTTP health endpoint", () => {
@@ -634,11 +643,16 @@ describe("Auth endpoints", () => {
 
     it("backfills jwt_secret and logs in when account predates JWT migration", async () => {
       const settings = createSettingsRepository(db);
+      const users = createUserRepository(db);
       const hash = await hashPassword("testpassword123");
-      await db
-        .insertInto("settings")
-        .values({ id: "default", admin_email: "admin@test.com", admin_password_hash: hash })
-        .execute();
+      await db.insertInto("settings").values({ id: "default" }).execute();
+      await users.create({
+        name: "admin",
+        email: "admin@test.com",
+        emailVerified: true,
+        passwordHash: hash,
+        authRole: "admin",
+      });
 
       const app = createApp(db, config);
       const res = await app.request("/api/auth/login", {
@@ -677,7 +691,8 @@ describe("Auth endpoints", () => {
     it("returns authenticated true with valid session", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      const adminUser = await users.create({ name: "admin", email: "admin@test.com", emailVerified: true });
+      const adminUser = await users.findByEmail("admin@test.com");
+      if (!adminUser) throw new Error("Admin user missing");
       const app = createApp(db, config);
 
       const loginRes = await app.request("/api/auth/login", {
@@ -726,7 +741,7 @@ describe("Auth endpoints", () => {
     it("returns authenticated when valid platform cookie and user exists", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      await users.create({ name: "Platform User", email: "platform@test.com", role: "admin" });
+      await users.create({ name: "Platform User", email: "platform@test.com", authRole: "admin" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -742,10 +757,10 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
     });
 
-    it("preserves admin role from managed platform cookie", async () => {
+    it("uses auth_role for managed platform cookie sessions", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      const user = await users.create({ name: "Platform Admin", email: "platform-admin@test.com", role: "admin" });
+      const user = await users.create({ name: "Platform Admin", email: "platform-admin@test.com", authRole: "admin" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -765,7 +780,7 @@ describe("Auth endpoints", () => {
     it("returns authenticated with member details for member users", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      const user = await users.create({ name: "Member User", email: "member@test.com", role: "member" });
+      const user = await users.create({ name: "Member User", email: "member@test.com", authRole: "member" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -814,7 +829,7 @@ describe("Auth endpoints", () => {
     it("returns authenticated false when platform cookie is expired", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      await users.create({ name: "Platform User", email: "platform@test.com", role: "admin" });
+      await users.create({ name: "Platform User", email: "platform@test.com", authRole: "admin" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -831,8 +846,9 @@ describe("Auth endpoints", () => {
     it("local session takes priority over platform cookie", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      const adminUser = await users.create({ name: "admin", email: "admin@test.com", emailVerified: true });
-      await users.create({ name: "Platform User", email: "platform@test.com", role: "member" });
+      const adminUser = await users.findByEmail("admin@test.com");
+      if (!adminUser) throw new Error("Admin user missing");
+      await users.create({ name: "Platform User", email: "platform@test.com", authRole: "member" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -859,7 +875,7 @@ describe("Auth endpoints", () => {
     it("falls through to platform cookie when local session is invalid", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      await users.create({ name: "Platform User", email: "platform@test.com", role: "admin" });
+      await users.create({ name: "Platform User", email: "platform@test.com", authRole: "admin" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -877,7 +893,7 @@ describe("Auth endpoints", () => {
     it("ignores platform cookie when MANAGED_AUTH_SECRET is not configured", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      await users.create({ name: "Platform User", email: "platform@test.com", role: "admin" });
+      await users.create({ name: "Platform User", email: "platform@test.com", authRole: "admin" });
 
       const app = createApp(db, config);
       const token = await makePlatformToken("platform@test.com");
@@ -1275,10 +1291,10 @@ describe("Setup endpoints", () => {
         body: JSON.stringify({ email: "admin@new.com", password: "securepass123" }),
       });
 
-      const settings = createSettingsRepository(db);
-      const row = await settings.get();
-      expect(row?.admin_password_hash).not.toBe("securepass123");
-      expect(row?.admin_password_hash).toContain(":");
+      const users = createUserRepository(db);
+      const user = await users.findByEmail("admin@new.com");
+      expect(user?.password_hash).not.toBe("securepass123");
+      expect(user?.password_hash).toContain(":");
     });
 
     it("creates an authenticated session for subsequent setup steps", async () => {
@@ -1310,10 +1326,10 @@ describe("Setup endpoints", () => {
       const body = await res.json();
       expect(body.success).toBe(true);
 
-      const settings = createSettingsRepository(db);
-      const row = await settings.get();
-      expect(row?.admin_email).toBe("another@admin.com");
-      expect(row?.admin_password_hash).not.toBeNull();
+      const users = createUserRepository(db);
+      const row = await users.findByEmail("another@admin.com");
+      expect(row?.auth_role).toBe("admin");
+      expect(row?.password_hash).not.toBeNull();
 
       const oldLogin = await app.request("/api/auth/login", {
         method: "POST",
@@ -1683,13 +1699,14 @@ describe("Users API", () => {
       expect(res.status).toBe(200);
 
       const body = await res.json();
-      expect(body.users).toHaveLength(2);
+      expect(body.users).toHaveLength(3);
       const names = body.users.map((u: { name: string }) => u.name);
+      expect(names).toContain("admin");
       expect(names).toContain("Alice");
       expect(names).toContain("Bob");
     });
 
-    it("returns empty array when no users", async () => {
+    it("returns the setup admin when no other users exist", async () => {
       const app = createApp(db, config);
       const cookie = await setupAdmin(app);
 
@@ -1697,7 +1714,8 @@ describe("Users API", () => {
       expect(res.status).toBe(200);
 
       const body = await res.json();
-      expect(body.users).toEqual([]);
+      expect(body.users).toHaveLength(1);
+      expect(body.users[0].email).toBe("admin@test.com");
     });
   });
 
@@ -1878,7 +1896,8 @@ describe("Users API", () => {
 
       const getRes = await app.request("/api/users", { headers: { Cookie: cookie } });
       const getBody = await getRes.json();
-      expect(getBody.users).toHaveLength(0);
+      expect(getBody.users).toHaveLength(1);
+      expect(getBody.users[0].email).toBe("admin@test.com");
     });
 
     it("returns 404 for unknown id", async () => {
@@ -1910,8 +1929,6 @@ describe("RBAC", () => {
   /** Seed admin, create admin user row, complete onboarding, return admin cookie + jwt_secret. */
   async function setupWithAdmin(app: ReturnType<typeof createApp>) {
     await seedAdmin(db);
-    const users = createUserRepository(db);
-    await users.create({ name: "admin", email: "admin@test.com", emailVerified: true });
     const settings = createSettingsRepository(db);
     await settings.update({ onboardingCompletedAt: new Date().toISOString() });
     const loginRes = await app.request("/api/auth/login", {

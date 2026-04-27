@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.20.0] -- 2026-04-27
+
+- Auth: move admin authentication into the `users` table with `auth_role`, preserving human/team title data in `users.role`; admins can now use password login and magic-link login, and the sidebar shows the user's auth role.
+- Migration: add `users.auth_role` and `users.password_hash`, merge legacy settings-table admins into users by normalized email, block duplicate normalized emails, and preserve existing admin auth roles during managed Slack/team sync.
+- Managed/system API: update setup, system identity, managed seed, and bulk user sync paths so managed admins are created as users instead of settings-only admins.
+- Files and Information Discovery: ship the files/search, connector, RBAC, enrichment, Fireflies, and entity-discovery overhaul; Information Discovery is now always enabled instead of hidden behind `EXPERIMENTAL_FLAG`.
+- Cleanup: drop the retired `outreach_messages` table and remove remaining outreach schema/prompt references.
+
 ## [0.19.6] -- 2026-04-22
 
 - UI: visual refresh with Inter as the primary sans font, `--brand-accent` theme token (#FEED01), button/dialog polish (shadow-xs, rounded-xl dialogs), and layout rhythm normalization (`max-w-4xl px-10 py-8`, uniform header typography) across channels, team, skills, scheduled-tasks, and connections routes. Empty states restyled with a dashed brand-accent tint and white icon circle.

@@ -8,6 +8,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
@@ -17,8 +18,17 @@ const logger = createTestLogger();
 
 async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "testpassword123") {
   const settings = createSettingsRepository(db);
+  const users = createUserRepository(db);
   const hash = await hashPassword(password);
-  await settings.create({ adminEmail: email, adminPasswordHash: hash });
+  const normalizedEmail = email.trim().toLowerCase();
+  await settings.create();
+  await users.create({
+    name: normalizedEmail.split("@")[0],
+    email: normalizedEmail,
+    emailVerified: true,
+    passwordHash: hash,
+    authRole: "admin",
+  });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 }
 

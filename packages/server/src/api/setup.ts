@@ -2,6 +2,7 @@
  * Setup API routes for the onboarding wizard.
  * Only status/account are public; subsequent setup steps require auth.
  */
+import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { z } from "zod";
 import { hashPassword } from "../auth/password";
@@ -84,12 +85,64 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
 }
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
+type UserRepo = ReturnType<typeof createUserRepository>;
 
 interface SetupDeps {
   managedUrl?: string;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
-  userRepo?: ReturnType<typeof createUserRepository>;
+  userRepo?: UserRepo;
+}
+
+async function ensureSettings(settings: SettingsRepo) {
+  let row = await settings.get();
+  if (!row) {
+    await settings.create();
+    row = await settings.get();
+  }
+  if (!row?.jwt_secret) {
+    const jwtSecret = randomBytes(32).toString("hex");
+    await settings.update({ jwtSecret });
+    row = await settings.get();
+  }
+  return row;
+}
+
+async function upsertSetupAdmin(userRepo: UserRepo, email: string, passwordHash: string) {
+  const existingAdmin = await userRepo.findFirstLocalAdmin();
+  const existingByEmail = await userRepo.findByEmail(email);
+
+  if (existingByEmail) {
+    const user = await userRepo.update(existingByEmail.id, {
+      name: existingByEmail.name || email.split("@")[0],
+      email,
+      emailVerified: true,
+      passwordHash,
+      authRole: "admin",
+    });
+    if (existingAdmin && existingAdmin.id !== existingByEmail.id) {
+      await userRepo.update(existingAdmin.id, { passwordHash: null, authRole: "member" });
+    }
+    return user;
+  }
+
+  if (existingAdmin) {
+    return userRepo.update(existingAdmin.id, {
+      name: existingAdmin.name || email.split("@")[0],
+      email,
+      emailVerified: true,
+      passwordHash,
+      authRole: "admin",
+    });
+  }
+
+  return userRepo.create({
+    name: email.split("@")[0],
+    email,
+    emailVerified: true,
+    passwordHash,
+    authRole: "admin",
+  });
 }
 
 export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
@@ -97,7 +150,8 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
   routes.get("/status", async (c) => {
     const row = await settings.get();
-    const hasAdmin = Boolean(row?.admin_email);
+    const adminUser = deps.userRepo ? await deps.userRepo.findFirstLocalAdmin() : undefined;
+    const hasAdmin = Boolean(adminUser ?? row?.admin_email);
     const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
     const hasSlack = Boolean(row?.slack_bot_token?.trim() && row?.slack_app_token?.trim());
     const hasAnthropic = row?.llm_provider === "anthropic" && Boolean(row?.anthropic_api_key?.trim());
@@ -122,7 +176,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     return c.json({
       completed: isCompleted,
       currentStep,
-      adminEmail: row?.admin_email ?? null,
+      adminEmail: adminUser?.email ?? row?.admin_email ?? null,
       orgName: row?.org_name ?? null,
       botName: row?.bot_name ?? "Sketch",
       slackConnected: hasSlack,
@@ -174,39 +228,35 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     }
 
     const passwordHash = await hashPassword(parsed.data.password);
-    if (!existing?.admin_email) {
-      await settings.create({ adminEmail: parsed.data.email, adminPasswordHash: passwordHash });
-    } else {
-      await settings.update({
-        adminEmail: parsed.data.email,
-        adminPasswordHash: passwordHash,
-      });
+    const email = parsed.data.email.toLowerCase().trim();
+
+    if (!existing) {
+      await settings.create();
+    } else if (!existing.jwt_secret) {
+      await settings.update({ jwtSecret: randomBytes(32).toString("hex") });
     }
 
+    let adminUser: Awaited<ReturnType<UserRepo["findById"]>> | undefined;
     if (deps.userRepo) {
-      const email = parsed.data.email.toLowerCase();
-      const existingUser = await deps.userRepo.findByEmail(email);
-      if (!existingUser) {
-        await deps.userRepo.create({ name: email.split("@")[0], email, emailVerified: true });
-      }
+      adminUser = await upsertSetupAdmin(deps.userRepo, email, passwordHash);
+    } else {
+      await settings.update({ adminEmail: email, adminPasswordHash: passwordHash });
     }
 
-    const row = await settings.get();
+    const row = await ensureSettings(settings);
     if (!row?.jwt_secret) {
       return c.json({ error: { code: "SERVER_ERROR", message: "JWT secret not available" } }, 500);
     }
-    let sub = parsed.data.email;
-    if (deps.userRepo) {
-      const adminUser = await deps.userRepo.findByEmail(parsed.data.email.toLowerCase());
-      if (adminUser) sub = adminUser.id;
-    }
-    await createSession(c, sub, "member", row.jwt_secret);
+    await createSession(c, adminUser?.id ?? email, "admin", row.jwt_secret);
     return c.json({ success: true });
   });
 
   routes.post("/identity", async (c) => {
     const existing = await settings.get();
-    if (!existing?.admin_email) {
+    const hasAdmin = deps.userRepo
+      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      : Boolean(existing?.admin_email);
+    if (!hasAdmin) {
       return c.json(
         { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before setting identity" } },
         409,
@@ -234,7 +284,10 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     }
 
     const existing = await settings.get();
-    if (!existing?.admin_email) {
+    const hasAdmin = deps.userRepo
+      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      : Boolean(existing?.admin_email);
+    if (!hasAdmin) {
       return c.json(
         { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before configuring Slack" } },
         409,
@@ -275,7 +328,10 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
   routes.post("/llm/verify", async (c) => {
     const existing = await settings.get();
-    if (!existing?.admin_email) {
+    const hasAdmin = deps.userRepo
+      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      : Boolean(existing?.admin_email);
+    if (!hasAdmin) {
       return c.json(
         { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before configuring LLM" } },
         409,
@@ -310,7 +366,10 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
   routes.post("/llm", async (c) => {
     const existing = await settings.get();
-    if (!existing?.admin_email) {
+    const hasAdmin = deps.userRepo
+      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      : Boolean(existing?.admin_email);
+    if (!hasAdmin) {
       return c.json(
         { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before configuring LLM" } },
         409,
@@ -351,7 +410,10 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
   routes.post("/complete", async (c) => {
     const existing = await settings.get();
-    if (!existing?.admin_email) {
+    const hasAdmin = deps.userRepo
+      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      : Boolean(existing?.admin_email);
+    if (!hasAdmin) {
       return c.json(
         { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before completing setup" } },
         409,

@@ -34,6 +34,11 @@ const PLATFORM_COOKIE = "sketch_platform_session";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
+type AuthRole = "admin" | "member";
+
+function toAuthRole(value: string | null | undefined): AuthRole {
+  return value === "admin" ? "admin" : "member";
+}
 
 function isSecure(c: Context): boolean {
   return new URL(c.req.url).protocol === "https:";
@@ -49,12 +54,7 @@ function setSessionCookie(c: Context, token: string, secure: boolean) {
   });
 }
 
-export async function createSession(
-  c: Context,
-  sub: string,
-  role: "admin" | "member",
-  jwtSecret: string,
-): Promise<void> {
+export async function createSession(c: Context, sub: string, role: AuthRole, jwtSecret: string): Promise<void> {
   const token = await signJwt(sub, role, jwtSecret);
   setSessionCookie(c, token, isSecure(c));
 }
@@ -72,8 +72,8 @@ export function authRoutes(
   const routes = new Hono();
 
   routes.post("/login", async (c) => {
-    const row = await settings.get();
-    if (!row?.admin_email || !row?.admin_password_hash) {
+    const configuredAdmin = await deps.userRepo.findFirstLocalAdmin();
+    if (!configuredAdmin) {
       return c.json({ error: { code: "SETUP_REQUIRED", message: "Admin account not configured" } }, 503);
     }
 
@@ -82,11 +82,20 @@ export function authRoutes(
       return c.json({ error: { code: "BAD_REQUEST", message: "Email and password required" } }, 400);
     }
 
-    const emailMatch = body.email.toLowerCase() === row.admin_email.toLowerCase();
-    const passwordMatch = emailMatch && (await verifyPassword(body.password, row.admin_password_hash));
+    const user = await deps.userRepo.findByEmail(body.email);
+    const passwordMatch = user?.password_hash ? await verifyPassword(body.password, user.password_hash) : false;
 
-    if (!emailMatch || !passwordMatch) {
+    if (!user || !passwordMatch) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid credentials" } }, 401);
+    }
+
+    let row = await settings.get();
+    if (!row) {
+      await settings.create();
+      row = await settings.get();
+    }
+    if (!row) {
+      return c.json({ error: { code: "SERVER_ERROR", message: "JWT secret not available" } }, 500);
     }
 
     // Backfill jwt_secret for accounts created before the JWT migration
@@ -96,12 +105,8 @@ export function authRoutes(
       await settings.update({ jwtSecret });
     }
 
-    const adminUser = await deps.userRepo.findByEmail(row.admin_email.toLowerCase());
-    const sub = adminUser?.id ?? row.admin_email;
-    // Admin login path — issue an admin JWT so downstream role checks work.
-    // Member sessions from the magic-link path below still get "member".
-    await createSession(c, sub, "admin", jwtSecret);
-    return c.json({ authenticated: true, email: row.admin_email });
+    await createSession(c, user.id, toAuthRole(user.auth_role), jwtSecret);
+    return c.json({ authenticated: true, email: user.email });
   });
 
   routes.post("/logout", (c) => {
@@ -129,9 +134,7 @@ export function authRoutes(
           }
 
           if (user) {
-            // Preserve the role from the existing JWT on refresh (was hardcoded
-            // to "member" before admin role became load-bearing).
-            const role = payload.role === "admin" ? "admin" : "member";
+            const role = toAuthRole(user.auth_role);
             await createSession(c, user.id, role, row.jwt_secret);
             return c.json({
               authenticated: true,
@@ -153,9 +156,10 @@ export function authRoutes(
         if (payload?.email) {
           const user = await db.selectFrom("users").selectAll().where("email", "=", payload.email).executeTakeFirst();
           if (user) {
+            const role = toAuthRole(user.auth_role);
             return c.json({
               authenticated: true,
-              role: payload.role,
+              role,
               userId: user.id,
               name: user.name,
               email: user.email,
@@ -231,7 +235,12 @@ export function authRoutes(
       return c.redirect("/login?error=server_error");
     }
 
-    await createSession(c, userId, "member", settingsRow.jwt_secret);
+    const user = await deps.userRepo.findById(userId);
+    if (!user) {
+      return c.redirect("/login?error=expired_link");
+    }
+
+    await createSession(c, user.id, toAuthRole(user.auth_role), settingsRow.jwt_secret);
     return c.redirect("/");
   });
 

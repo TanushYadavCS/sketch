@@ -17,6 +17,7 @@ export interface User {
   name: string;
   email: string | null;
   email_verified_at: string | null;
+  auth_role: "admin" | "member";
   slack_user_id: string | null;
   whatsapp_number: string | null;
   description: string | null;

@@ -18,6 +18,7 @@ import {
   SunIcon,
   UsersThreeIcon,
 } from "@phosphor-icons/react";
+import { Badge } from "@sketch/ui/components/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,6 +64,12 @@ const allPrimaryNav: NavItem[] = [
   { label: "Usage", icon: <ChartBarIcon size={18} />, href: "/usage" },
 ];
 
+function formatRole(role?: "admin" | "member"): string | null {
+  if (role === "admin") return "Admin";
+  if (role === "member") return "Member";
+  return null;
+}
+
 export function AppSidebar({
   displayName,
   displayIdentifier,
@@ -88,6 +95,7 @@ export function AppSidebar({
   });
 
   const primaryNav = allPrimaryNav;
+  const roleLabel = formatRole(role);
 
   const logoutMutation = useMutation({
     mutationFn: () => api.auth.logout(),
@@ -163,7 +171,14 @@ export function AppSidebar({
               </div>
               <div className="flex min-w-0 flex-1 flex-col text-left text-xs leading-tight">
                 <span className="truncate font-medium">{displayName}</span>
-                <span className="truncate text-muted-foreground">{displayIdentifier}</span>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate text-muted-foreground">{displayIdentifier}</span>
+                  {roleLabel ? (
+                    <Badge variant="secondary" className="h-4 shrink-0 px-1.5 py-0 text-[10px] font-medium">
+                      {roleLabel}
+                    </Badge>
+                  ) : null}
+                </span>
               </div>
               <CaretUpDownIcon size={16} className="shrink-0 text-muted-foreground" />
             </button>

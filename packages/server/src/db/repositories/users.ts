@@ -11,6 +11,8 @@ export interface UserRepository {
   findByWhatsappNumber(whatsappNumber: string): Promise<UserRow | undefined>;
   findByEmail(email: string): Promise<UserRow | undefined>;
   findById(id: string): Promise<UserRow | undefined>;
+  findFirstAdmin(): Promise<UserRow | undefined>;
+  findFirstLocalAdmin(): Promise<UserRow | undefined>;
   getAllEmailsForUser(id: string): Promise<string[]>;
   findByExactName(name: string, excludeUserId?: string): Promise<UserRow | undefined>;
   searchByNamePrefix(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
@@ -21,6 +23,8 @@ export interface UserRepository {
     whatsappNumber?: string;
     email?: string | null;
     emailVerified?: boolean;
+    passwordHash?: string | null;
+    authRole?: "admin" | "member";
     description?: string;
     type?: string;
     role?: string;
@@ -32,6 +36,8 @@ export interface UserRepository {
       name?: string;
       email?: string | null;
       emailVerified?: boolean;
+      passwordHash?: string | null;
+      authRole?: "admin" | "member";
       whatsappNumber?: string | null;
       slackUserId?: string | null;
       description?: string | null;
@@ -79,7 +85,7 @@ export function createUserRepository(db: UserDb): UserRepository {
       const rows = await sql<Selectable<UsersTable>>`
         SELECT *
         FROM users
-        WHERE lower(email) = ${normalizeEmail(email)}
+        WHERE lower(trim(email)) = ${normalizeEmail(email)}
         LIMIT 1
       `.execute(db);
       return rows.rows[0];
@@ -87,6 +93,25 @@ export function createUserRepository(db: UserDb): UserRepository {
 
     async findById(id: string) {
       return db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirst();
+    },
+
+    async findFirstAdmin() {
+      return db
+        .selectFrom("users")
+        .selectAll()
+        .where("auth_role", "=", "admin")
+        .orderBy("created_at", "asc")
+        .executeTakeFirst();
+    },
+
+    async findFirstLocalAdmin() {
+      return db
+        .selectFrom("users")
+        .selectAll()
+        .where("auth_role", "=", "admin")
+        .where("password_hash", "is not", null)
+        .orderBy("created_at", "asc")
+        .executeTakeFirst();
     },
 
     async getAllEmailsForUser(userId: string): Promise<string[]> {
@@ -159,6 +184,8 @@ export function createUserRepository(db: UserDb): UserRepository {
       whatsappNumber?: string;
       email?: string | null;
       emailVerified?: boolean;
+      passwordHash?: string | null;
+      authRole?: "admin" | "member";
       description?: string;
       type?: string;
       role?: string;
@@ -172,6 +199,8 @@ export function createUserRepository(db: UserDb): UserRepository {
           name: data.name,
           email: data.email ?? null,
           email_verified_at: data.email && data.emailVerified ? new Date().toISOString() : null,
+          password_hash: data.passwordHash ?? null,
+          auth_role: data.authRole ?? "member",
           slack_user_id: data.slackUserId ?? null,
           whatsapp_number: data.whatsappNumber ?? null,
           description: data.description ?? null,
@@ -190,6 +219,8 @@ export function createUserRepository(db: UserDb): UserRepository {
         name?: string;
         email?: string | null;
         emailVerified?: boolean;
+        passwordHash?: string | null;
+        authRole?: "admin" | "member";
         whatsappNumber?: string | null;
         slackUserId?: string | null;
         description?: string | null;
@@ -216,6 +247,8 @@ export function createUserRepository(db: UserDb): UserRepository {
       } else if (data.emailVerified) {
         values.email_verified_at = new Date().toISOString();
       }
+      if (data.passwordHash !== undefined) values.password_hash = data.passwordHash;
+      if (data.authRole !== undefined) values.auth_role = data.authRole;
       if (data.whatsappNumber !== undefined) values.whatsapp_number = data.whatsappNumber;
       if (data.slackUserId !== undefined) values.slack_user_id = data.slackUserId;
       if (data.description !== undefined) values.description = data.description;

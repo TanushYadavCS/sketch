@@ -38,7 +38,7 @@ function LoginPage() {
   const navigate = useNavigate();
   const { logoSrc } = useTheme();
   const [step, setStep] = useState<LoginStep>("choose");
-  const [memberEmail, setMemberEmail] = useState("");
+  const [magicLinkEmail, setMagicLinkEmail] = useState("");
   const [sentChannels, setSentChannels] = useState<string[]>([]);
 
   useEffect(() => {
@@ -60,14 +60,16 @@ function LoginPage() {
         <span className="text-lg font-semibold tracking-tight">Sketch</span>
       </div>
 
-      {step === "choose" && <ChooseStep onAdmin={() => setStep("password")} onMember={() => setStep("magic-link")} />}
+      {step === "choose" && (
+        <ChooseStep onPassword={() => setStep("password")} onMagicLink={() => setStep("magic-link")} />
+      )}
       {step === "password" && (
-        <AdminStep onBack={() => setStep("choose")} onSuccess={() => navigate({ to: "/channels" })} />
+        <PasswordStep onBack={() => setStep("choose")} onSuccess={() => navigate({ to: "/channels" })} />
       )}
       {step === "magic-link" && (
-        <MemberStep
-          email={memberEmail}
-          onEmailChange={setMemberEmail}
+        <MagicLinkStep
+          email={magicLinkEmail}
+          onEmailChange={setMagicLinkEmail}
           onBack={() => setStep("choose")}
           onSent={(channels) => {
             setSentChannels(channels);
@@ -76,13 +78,13 @@ function LoginPage() {
         />
       )}
       {step === "magic-link-sent" && (
-        <MagicLinkSentStep email={memberEmail} channels={sentChannels} onBack={() => setStep("magic-link")} />
+        <MagicLinkSentStep email={magicLinkEmail} channels={sentChannels} onBack={() => setStep("magic-link")} />
       )}
     </div>
   );
 }
 
-function ChooseStep({ onAdmin, onMember }: { onAdmin: () => void; onMember: () => void }) {
+function ChooseStep({ onPassword, onMagicLink }: { onPassword: () => void; onMagicLink: () => void }) {
   return (
     <Card className="w-full max-w-[400px]">
       <CardHeader className="text-center">
@@ -90,14 +92,14 @@ function ChooseStep({ onAdmin, onMember }: { onAdmin: () => void; onMember: () =
         <p className="text-sm text-muted-foreground">Choose how you'd like to sign in</p>
       </CardHeader>
       <CardContent className="space-y-3">
-        <Button variant="outline" className="w-full justify-start gap-3 h-12" onClick={onAdmin}>
+        <Button variant="outline" className="w-full justify-start gap-3 h-12" onClick={onPassword}>
           <ShieldIcon size={18} />
           <div className="text-left">
             <div className="text-sm font-medium">Sign in with password</div>
             <div className="text-xs text-muted-foreground">Email and password</div>
           </div>
         </Button>
-        <Button variant="outline" className="w-full justify-start gap-3 h-12" onClick={onMember}>
+        <Button variant="outline" className="w-full justify-start gap-3 h-12" onClick={onMagicLink}>
           <EnvelopeIcon size={18} />
           <div className="text-left">
             <div className="text-sm font-medium">Sign in with magic link</div>
@@ -109,7 +111,7 @@ function ChooseStep({ onAdmin, onMember }: { onAdmin: () => void; onMember: () =
   );
 }
 
-function AdminStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: () => void }) {
+function PasswordStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -140,7 +142,7 @@ function AdminStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: () =>
             <Input
               id="email"
               type="email"
-              placeholder="admin@yourorg.com"
+              placeholder="you@yourorg.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -185,7 +187,7 @@ function AdminStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: () =>
   );
 }
 
-function MemberStep({
+function MagicLinkStep({
   email,
   onEmailChange,
   onBack,

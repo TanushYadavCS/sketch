@@ -15,8 +15,17 @@ const config = createTestConfig();
 
 async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "testpassword123") {
   const settings = createSettingsRepository(db);
+  const users = createUserRepository(db);
   const hash = await hashPassword(password);
-  await settings.create({ adminEmail: email, adminPasswordHash: hash });
+  const normalizedEmail = email.trim().toLowerCase();
+  await settings.create();
+  await users.create({
+    name: normalizedEmail.split("@")[0],
+    email: normalizedEmail,
+    emailVerified: true,
+    passwordHash: hash,
+    authRole: "admin",
+  });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 }
 
@@ -457,18 +466,17 @@ describe("Scheduled Tasks API", () => {
     // UUID-shaped sub, but no such user row (simulates a deleted user holding an old JWT)
     const ghostCookie = await getMemberCookie(db, "00000000-0000-0000-0000-000000000000");
     const ghostList = await app.request("/api/scheduled-tasks", { headers: { Cookie: ghostCookie } });
-    expect(ghostList.status).toBe(200);
-    expect((await ghostList.json()).tasks).toEqual([]);
+    expect(ghostList.status).toBe(401);
 
     const ghostDetail = await app.request("/api/scheduled-tasks/task-alice/runs", { headers: { Cookie: ghostCookie } });
-    expect(ghostDetail.status).toBe(404);
+    expect(ghostDetail.status).toBe(401);
 
     // Email-shaped sub but no row
     const ghostEmailCookie = await getMemberCookie(db, "nobody@test.com");
     const ghostEmailDetail = await app.request("/api/scheduled-tasks/task-alice/runs", {
       headers: { Cookie: ghostEmailCookie },
     });
-    expect(ghostEmailDetail.status).toBe(404);
+    expect(ghostEmailDetail.status).toBe(401);
   });
 
   it("list endpoint calls getRunSummaries exactly once regardless of row count", async () => {

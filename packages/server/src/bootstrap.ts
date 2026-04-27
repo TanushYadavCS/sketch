@@ -94,7 +94,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
-  await runManagedSeed(config, settingsRepo);
+  await runManagedSeed(config, settingsRepo, users);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const automationRunsRepo = createAutomationRunsRepository(db);

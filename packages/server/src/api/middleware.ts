@@ -42,7 +42,13 @@ type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 export interface AuthMiddlewareOpts {
   managedAuthSecret?: string;
   managedUrl?: string;
-  findUserByEmail?: (email: string) => Promise<{ id: string } | null>;
+  findUserByEmail?: (email: string) => Promise<{ id: string; authRole?: string | null } | null>;
+  hasLocalAdmin?: () => Promise<boolean>;
+  resolveLocalSessionUser?: (sub: string) => Promise<{ id: string; authRole?: string | null } | null>;
+}
+
+function toAuthRole(value: string | null | undefined): "admin" | "member" {
+  return value === "admin" ? "admin" : "member";
 }
 
 export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewareOpts) {
@@ -71,7 +77,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     try {
       const row = await settings.get();
       setupComplete = Boolean(row?.onboarding_completed_at);
-      hasAdmin = Boolean(row?.admin_email);
+      hasAdmin = opts?.hasLocalAdmin ? await opts.hasLocalAdmin() : Boolean(row?.admin_email);
       jwtSecret = row?.jwt_secret ?? null;
       if (jwtSecret) cachedSecret = jwtSecret;
     } catch {
@@ -118,7 +124,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
           return c.json({ error: { code: "FORBIDDEN", message: "User not found in this tenant" } }, 403);
         }
 
-        c.set("role", "member");
+        c.set("role", toAuthRole(user.authRole));
         c.set("sub", user.id);
         return next();
       }
@@ -140,8 +146,17 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       return c.json({ error: { code: "UNAUTHORIZED", message: "Session expired" } }, 401);
     }
 
-    c.set("role", payload.role);
-    c.set("sub", payload.sub);
+    if (opts?.resolveLocalSessionUser) {
+      const user = await opts.resolveLocalSessionUser(payload.sub);
+      if (!user) {
+        return c.json({ error: { code: "UNAUTHORIZED", message: "Session expired" } }, 401);
+      }
+      c.set("role", toAuthRole(user.authRole));
+      c.set("sub", user.id);
+    } else {
+      c.set("role", payload.role);
+      c.set("sub", payload.sub);
+    }
 
     return next();
   };
