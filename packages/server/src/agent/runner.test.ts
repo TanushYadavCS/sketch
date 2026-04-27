@@ -198,6 +198,31 @@ describe("runAgent", () => {
     expect(callArgs.options.systemPrompt).not.toContain("Alice");
   });
 
+  it("passes optional model and maxTurns overrides to the SDK query", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const capturedOptions: unknown[] = [];
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      capturedOptions.push(args);
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-overrides" };
+        yield { type: "result", session_id: "sess-overrides", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    await runAgent(
+      makeBaseParams({
+        model: "claude-test-model",
+        maxTurns: 50,
+      }),
+    );
+
+    const callArgs = capturedOptions[capturedOptions.length - 1] as {
+      options: { model?: string; maxTurns?: number };
+    };
+    expect(callArgs.options.model).toBe("claude-test-model");
+    expect(callArgs.options.maxTurns).toBe(50);
+  });
+
   it("returns enriched AgentResult with SDK telemetry fields", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     vi.mocked(query).mockImplementation((() => {

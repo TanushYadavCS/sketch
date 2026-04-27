@@ -198,6 +198,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     stepContentRepo,
     userRepo: users,
+    inboxMessagesRepo,
+    sendDm: sendDirectMessage,
   });
   await scheduler.start();
 

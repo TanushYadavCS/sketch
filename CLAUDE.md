@@ -31,7 +31,6 @@ sketch/
     sketch.db           → SQLite database
     workspaces/{uid}/   → per-user workspace dirs
   .planning/            → internal dev docs (git submodule: sketch-internal-planning)
-    PRODUCT.md          → full product document
     STATE.md            → current state + next steps
     STEEL_THREAD.md     → steel thread implementation plan (done)
   packages/
@@ -114,24 +113,17 @@ Currently gated: Files UI, Connections UI, entity/connector/identity/OAuth APIs,
 
 Internal planning docs live in `.planning/` (git submodule, separate private repo `sketch-internal-planning`):
 
-- **PRODUCT.md** — high-level product document. The "what and why". Evolves slowly.
-- **STATE.md** — current project state, what's done, next steps, current version. Updated at end of every feature implementation and at end of each work session. Quick context resume for new sessions.
+- **STATE.md** — current project state, what's done, next steps, current version. Updated when releasing a new version/tag.
 - **Task files** — one per feature/story (e.g., `STEEL_THREAD.md`, `WHATSAPP_ADAPTER.md`). Implementation plans with phases. Become historical reference once done.
 - **TODO.md** — tracked todos and backlog items. Lives in `.planning/TODO.md`.
 
 Completed task files stay in `.planning/` — useful context when revisiting related areas.
 
-**Planning approach:** Don't use plan mode. Instead, write design/plan docs directly as task files in `.planning/` (e.g., `.planning/FILE_SUPPORT.md`). Discuss and refine in conversation, then write the doc when ready.
-
 **Implementation workflow:**
-1. Discuss and create a plan file in `.planning/`
-2. Send the plan to Codex CLI for review (`codex exec`)
-3. Update the plan based on feedback, then implement
-4. Send the plan + implementation to Codex CLI for review
-5. Update if feedback
-6. Commit, update STATE.md, done
+1. Discuss the change and agree on the approach
+2. Implement the plan
+3. Commit, done. Update STATE.md only when releasing a new version/tag.
 
 ## Reference
 
-Full product document: `.planning/PRODUCT.md`
 Current state: `.planning/STATE.md`

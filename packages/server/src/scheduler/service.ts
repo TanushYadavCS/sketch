@@ -23,6 +23,7 @@ import { ensureChannelWorkspace, ensureGroupWorkspace, ensureWorkspace } from ".
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { createSettingsRepository } from "../db/repositories/settings";
@@ -49,6 +50,8 @@ export interface TaskSchedulerDeps {
   automationRunsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo: ReturnType<typeof createUserRepository>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
+  sendDm?: Parameters<typeof runAgent>[0]["sendDm"];
 }
 
 export class TaskScheduler {
@@ -208,6 +211,10 @@ export class TaskScheduler {
           stepContentRepo: this.deps.stepContentRepo,
           findIntegrationProvider,
           userRepo: this.deps.userRepo,
+          runAgent: this.deps.runAgent,
+          buildMcpServers: this.deps.buildMcpServers,
+          inboxMessagesRepo: this.deps.inboxMessagesRepo,
+          sendDm: this.deps.sendDm,
           sendMessage: onMessage,
         });
       } catch (err) {

@@ -14,24 +14,24 @@ import { createFirefliesConnector } from "./fireflies";
 const silentLogger = pino({ level: "silent" });
 
 describe("Fireflies getCursor lag", () => {
-  it("returns a timestamp at least 2h in the past", async () => {
+  it("returns a timestamp exactly 2h behind the current time", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-27T12:00:00.000Z"));
+
     const connector = createFirefliesConnector();
-    const before = Date.now();
-    const cursor = await connector.getCursor({
-      credentials: { type: "api_key", api_key: "unused" },
-      scopeConfig: {},
-      currentCursor: null,
-      logger: silentLogger,
-    });
-    const after = Date.now();
 
-    expect(cursor).not.toBeNull();
-    const cursorMs = new Date(cursor as string).getTime();
-    const twoHoursMs = 2 * 60 * 60 * 1000;
+    try {
+      const cursor = await connector.getCursor({
+        credentials: { type: "api_key", api_key: "unused" },
+        scopeConfig: {},
+        currentCursor: null,
+        logger: silentLogger,
+      });
 
-    // cursor should be (roughly) now - 2h, allowing a few ms of clock drift
-    expect(cursorMs).toBeLessThanOrEqual(before - twoHoursMs);
-    expect(cursorMs).toBeGreaterThanOrEqual(after - twoHoursMs - 1000);
+      expect(cursor).toBe("2026-04-27T10:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

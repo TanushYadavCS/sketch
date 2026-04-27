@@ -14,9 +14,11 @@ import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
-import { buildPlatformFormattingLines } from "../agent/prompt";
+import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
+import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import type { Logger } from "../logger";
@@ -31,7 +33,11 @@ export interface ExecuteAutomationParams {
   runsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
-  userRepo: { findById: (id: string) => Promise<{ email: string | null } | undefined> };
+  userRepo: NonNullable<RunAgentParams["userRepo"]>;
+  runAgent?: typeof runAgent;
+  buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
+  sendDm?: RunAgentParams["sendDm"];
   sendMessage?: (text: string) => Promise<void>;
 }
 
@@ -40,9 +46,10 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
   // 1. Verify creator exists
   const creatorId = task.created_by;
+  let creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
   let creatorEmail: string | null = null;
   if (creatorId) {
-    const creator = await params.userRepo.findById(creatorId);
+    creator = await params.userRepo.findById(creatorId);
     if (!creator) {
       logger.error({ taskId: task.id, creatorId }, "Automation: creator no longer exists");
       const runId = await runsRepo.create({ taskId: task.id, triggerData });
@@ -76,6 +83,8 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
   // 4. Create run record
   const runId = await runsRepo.create({ taskId: task.id, triggerData });
+  const workspaceDir = resolveWorkspaceDir(params.config.DATA_DIR, task);
+  await mkdir(workspaceDir, { recursive: true });
 
   logger.info(
     {
@@ -118,7 +127,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           logger,
           config: params.config,
           creatorEmail,
-          workspaceDir: resolveWorkspaceDir(params.config.DATA_DIR, task),
+          workspaceDir,
           findIntegrationProvider: params.findIntegrationProvider,
         });
       } else if (step.type === "agent") {
@@ -131,8 +140,19 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           prompt,
           step,
           input: previousOutput,
+          task,
+          db: params.db,
           logger,
-          workspaceDir: resolveWorkspaceDir(params.config.DATA_DIR, task),
+          config: params.config,
+          workspaceDir,
+          creator,
+          creatorEmail,
+          runAgent: params.runAgent,
+          buildMcpServers: params.buildMcpServers,
+          findIntegrationProvider: params.findIntegrationProvider,
+          userRepo: params.userRepo,
+          inboxMessagesRepo: params.inboxMessagesRepo,
+          sendDm: params.sendDm,
           // output_platform lets a workflow deliver to a different channel than
           // its trigger context; fall back to the task's own platform otherwise.
           outputPlatform: (task.output_platform ?? task.platform) as "slack" | "whatsapp",
@@ -212,7 +232,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   }
 
   // 7. Write context file
-  const workspaceDir = resolveWorkspaceDir(params.config.DATA_DIR, task);
   await writeAutomationContext({
     workspaceDir,
     taskId: task.id,
@@ -244,6 +263,17 @@ function resolveWorkspaceDir(dataDir: string, task: ScheduledTaskRow): string {
   }
   const userId = task.created_by ?? task.delivery_target;
   return join(dataDir, "workspaces", userId);
+}
+
+function resolveWorkspaceKey(task: ScheduledTaskRow): string {
+  if (task.context_type === "channel") {
+    return `channel-${task.delivery_target}`;
+  }
+  if (task.context_type === "group") {
+    const groupId = task.delivery_target.replace("@g.us", "");
+    return `wa-group-${groupId}`;
+  }
+  return task.created_by ?? task.delivery_target;
 }
 
 // --- Action step: child process ---
@@ -360,8 +390,19 @@ interface AgentStepParams {
   prompt: string;
   step: WorkflowStep;
   input: unknown;
+  task: ScheduledTaskRow;
+  db: Kysely<DB>;
   logger: Logger;
+  config: ExecuteAutomationParams["config"];
   workspaceDir: string;
+  creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
+  creatorEmail: string | null;
+  runAgent?: typeof runAgent;
+  buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
+  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  userRepo: NonNullable<RunAgentParams["userRepo"]>;
+  inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
+  sendDm?: RunAgentParams["sendDm"];
   outputPlatform: "slack" | "whatsapp";
 }
 
@@ -369,7 +410,7 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   const { prompt, step, input, logger, workspaceDir, outputPlatform } = params;
 
   if (step.agentMode === "sketch") {
-    logger.warn({ stepId: step.id }, "Automation agent: sketch mode not implemented, falling back to light mode");
+    return executeSketchAgentStep(params);
   }
 
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -455,6 +496,88 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   // raw string both renders cleanly in Slack/WhatsApp and makes the run log
   // readable (no `{ "response": "..." }` wrapper in stored step_outputs).
   return lastText;
+}
+
+async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown> {
+  const {
+    prompt,
+    step,
+    input,
+    task,
+    logger,
+    workspaceDir,
+    outputPlatform,
+    creator,
+    creatorEmail,
+    runAgent: runSketchAgent,
+    buildMcpServers,
+  } = params;
+
+  if (!runSketchAgent) {
+    throw new Error("Sketch-mode workflow agent is not available.");
+  }
+
+  const userMessage = buildSketchContext({
+    messages: [],
+    currentUserName: creator?.name ?? "Automation creator",
+    currentUserEmail: creatorEmail,
+    currentMessage: [
+      "You are executing one step of a scheduled workflow.",
+      "Complete the step using the provided input and available tools.",
+      "Do not ask follow-up questions. Return the result for the next workflow step or final delivery.",
+      "",
+      `Step: ${step.label}`,
+      "",
+      "Step prompt:",
+      prompt,
+      "",
+      "Input from previous step:",
+      JSON.stringify(input ?? null, null, 2),
+    ].join("\n"),
+    workspaceDir,
+    orgDir: params.config.CLAUDE_CONFIG_DIR,
+    timezone: task.timezone,
+    taskPrompt: task.title ?? task.prompt,
+  });
+
+  const integrationMcpServers = buildMcpServers ? await buildMcpServers(creatorEmail) : {};
+  const result = await runSketchAgent({
+    db: params.db,
+    workspaceKey: resolveWorkspaceKey(task),
+    userMessage,
+    workspaceDir,
+    claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
+    userName: creator?.name ?? "Automation",
+    userEmail: creatorEmail,
+    logger,
+    platform: outputPlatform,
+    onProgressEvent: async () => {},
+    integrationMcpServers,
+    findIntegrationProvider: params.findIntegrationProvider,
+    sessionMode: "fresh",
+    contextType: "scheduled_task",
+    currentUserId: task.created_by,
+    userRepo: params.userRepo,
+    inboxMessagesRepo: params.inboxMessagesRepo,
+    sendDm: params.sendDm,
+    toolConfig: { BASE_URL: params.config.BASE_URL, PORT: params.config.PORT },
+    model: step.agentModel,
+    maxTurns: 50,
+  });
+
+  if (result.pendingUploads.length > 0) {
+    logger.warn(
+      { stepId: step.id, pendingUploads: result.pendingUploads.length },
+      "Automation agent: sketch-mode file uploads were produced but cannot be delivered from workflow steps",
+    );
+  }
+
+  logger.info(
+    { stepId: step.id, responseLength: result.trace.finalText?.length ?? 0, toolCalls: result.toolCalls.length },
+    "Automation agent: sketch-mode step completed",
+  );
+
+  return result.trace.finalText ?? "";
 }
 
 // --- Context file writer ---
