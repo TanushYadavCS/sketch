@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.21.0] -- 2026-04-27
+
+- Workflows: implement sketch-mode agent steps. Agent steps with `agentMode: "sketch"` now run inside the full Sketch agent (MCP integrations, inbox messaging, cross-channel `sendDm`) instead of falling back to a light Claude Agent SDK call. Scheduler and bootstrap thread `inboxMessagesRepo` and `sendDm` into the automation runtime, and a shared `resolveWorkspaceKey` keeps workflow sessions aligned with channel/group/user workspaces.
+- Docs: expand `AGENTS.md` from a CLAUDE.md pointer into a full project overview mirroring the contributor guide.
+- Tests: stabilize Fireflies connector cursor expectations.
+
 ## [0.20.1] -- 2026-04-27
 
 - Fix(managed onboarding): let the platform pass the onboarding admin email to `/api/system/onboarding-introductions`, so intro workflows target the current Slack onboarding admin instead of the oldest admin user. Keeps `findFirstAdmin()` only as a compatibility fallback when no email is provided.
