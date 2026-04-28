@@ -199,7 +199,19 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 },
               );
             } catch (err) {
-              logger.warn({ err, fileId: file.id }, "Summary-only enrichment failed");
+              logger.warn(
+                {
+                  err,
+                  fileId: file.id,
+                  fileName: file.file_name,
+                  sourcePath: file.source_path,
+                  mimeType: file.mime_type,
+                  contentCategory: file.content_category,
+                  contentChars: file.content?.length ?? 0,
+                  wordCount,
+                },
+                "Summary-only enrichment failed",
+              );
               await db
                 .updateTable("indexed_files")
                 .set({ summary_status: "failed" })

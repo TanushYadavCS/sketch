@@ -164,9 +164,7 @@ function formatTranscriptContent(transcript: FirefliesTranscript): string {
   parts.push(`# ${transcript.title}`);
   parts.push(`Date: ${date.toISOString().split("T")[0]} | Duration: ${durationMin}min`);
 
-  if (transcript.participants.length > 0) {
-    parts.push(`Participants: ${transcript.participants.join(", ")}`);
-  }
+  // Participant emails live in accessEmails for ACL — keeping them out of the body avoids polluting embeddings and the entity extractor.
 
   // AI summary
   if (transcript.summary?.overview) {
@@ -201,7 +199,6 @@ function transcriptToSyncedItem(transcript: FirefliesTranscript): SyncedItem {
     accessEmails.push(transcript.organizer_email);
   }
   for (const p of transcript.participants) {
-    // Participants may be emails or names; only include emails
     if (p.includes("@")) {
       accessEmails.push(p);
     }

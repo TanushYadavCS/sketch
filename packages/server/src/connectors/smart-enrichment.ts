@@ -101,6 +101,7 @@ Extract entities that a business team would want to track and reference across d
 - **Teams**: named organizational teams (e.g., "QC team", "Content Team")
 
 DO NOT extract:
+- Email addresses, phone numbers, URLs, or other system identifiers — these are stored separately. If a person is identifiable by name, use the name (e.g., "Sarah Chen"); never use an email address as the mention.
 - Generic technologies, frameworks, or libraries (Redis, Kafka, Node.js, React, PostgreSQL, Express, Vite)
 - Cloud infrastructure services (ECS, EKS, RDS, S3, Lambda, AWS Batch)
 - Programming concepts or acronyms (LLM, NLP, API, SDK, REST, GraphQL, npm)
@@ -128,7 +129,8 @@ ${truncatedContent}
 </content>`;
 
   return generator.generateJSON<ExtractedMention[]>(prompt, {
-    maxTokens: 1024,
+    maxTokens: 4096,
+    label: `extractEntities:${file.id}`,
   });
 }
 
@@ -345,7 +347,7 @@ Write a 2-3 sentence summary focusing on: what this document is about, key decis
 ${truncatedContent}
 </content>`;
 
-  return generator.generate(prompt, { maxTokens: 256 });
+  return generator.generate(prompt, { maxTokens: 256, label: `generateSummary:${file.id}` });
 }
 
 // ── Entity Fact Extraction ───────────────────────────────────────────────
@@ -388,7 +390,12 @@ ${truncatedContent}
 </content>`;
 
   return new Map(
-    Object.entries(await generator.generateJSON<Record<string, LearnedFact[]>>(prompt, { maxTokens: 2048 })),
+    Object.entries(
+      await generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
+        maxTokens: 4096,
+        label: `extractEntityFacts:${file.id}`,
+      }),
+    ),
   );
 }
 
@@ -405,33 +412,84 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const { db, logger, generator, embeddingProvider } = deps;
   const entityRepo = createEntityRepository(db);
 
-  // ── Stage 1: Entity extraction + matching ──────────────────────
-  const mentions = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
-  logger.debug({ fileId: file.id, mentionCount: mentions.length }, "Extracted entity mentions");
+  const fileMeta = {
+    fileId: file.id,
+    fileName: file.fileName,
+    source: file.source,
+    contentCategory: file.contentCategory,
+    contentChars: file.content.length,
+    truncatedToChars: Math.min(file.content.length, MAX_CONTENT_CHARS),
+    knownEntityCount: deps.knownEntities?.length ?? 0,
+  };
+  logger.info(fileMeta, "smartEnrichFile: start");
+
+  const t0 = Date.now();
+  let mentions: ExtractedMention[];
+  try {
+    mentions = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
+  } catch (err) {
+    logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
+    throw err;
+  }
+  logger.info(
+    { fileId: file.id, stage: "extractEntities", mentionCount: mentions.length, durationMs: Date.now() - t0 },
+    "smartEnrichFile: stage done",
+  );
 
   const { matched, unmatched } = await matchEntities(db, mentions);
   const promoted = await handleCandidates(deps, file.id, unmatched);
 
-  // Combine matched + promoted for context
   const allMatched = [...matched.map((m) => m.entity), ...promoted];
+  logger.debug(
+    { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length, promotedCount: promoted.length },
+    "smartEnrichFile: entity match results",
+  );
 
-  // Create entity mentions for matched entities
   await entityRepo.deleteMentionsForFile(file.id);
   for (const entity of allMatched) {
     await entityRepo.createMention({ entityId: entity.entityId, indexedFileId: file.id });
     await entityRepo.updateHotness(entity.entityId);
   }
 
-  // ── Stage 2: Summary + fact extraction (parallel) ──────────────
-  const [summary, factsMap] = await Promise.all([
+  const t1 = Date.now();
+  const [summaryResult, factsResult] = await Promise.allSettled([
     generateSummary(generator, file, allMatched),
     extractEntityFacts(generator, file, allMatched),
   ]);
 
-  // Store summary
-  await db.updateTable("indexed_files").set({ summary, summary_status: "done" }).where("id", "=", file.id).execute();
+  const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
+  const factsMap = factsResult.status === "fulfilled" ? factsResult.value : new Map<string, LearnedFact[]>();
 
-  logger.debug({ fileId: file.id, summaryLength: summary.length }, "Generated file summary");
+  if (summaryResult.status === "rejected") {
+    logger.error(
+      { ...fileMeta, stage: "generateSummary", err: summaryResult.reason },
+      "smartEnrichFile: stage failed",
+    );
+  }
+  if (factsResult.status === "rejected") {
+    logger.warn(
+      { ...fileMeta, stage: "extractEntityFacts", matchedEntityCount: allMatched.length, err: factsResult.reason },
+      "smartEnrichFile: stage failed (continuing without entity facts)",
+    );
+  }
+
+  if (!summary) {
+    throw summaryResult.status === "rejected" ? summaryResult.reason : new Error("smartEnrichFile: empty summary");
+  }
+
+  logger.info(
+    {
+      fileId: file.id,
+      stage: "summary+facts",
+      summaryLength: summary.length,
+      factEntityCount: factsMap.size,
+      factsExtracted: factsResult.status === "fulfilled",
+      durationMs: Date.now() - t1,
+    },
+    "smartEnrichFile: stage done",
+  );
+
+  await db.updateTable("indexed_files").set({ summary, summary_status: "done" }).where("id", "=", file.id).execute();
 
   // Embed summary into file_embeddings
   if (embeddingProvider && summary) {
