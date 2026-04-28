@@ -89,7 +89,11 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState<string | undefined>(undefined);
 
-  const [llmProvider, setLlmProvider] = useState<"anthropic" | "bedrock">(setupStatus.llmProvider ?? "anthropic");
+  const [llmProvider, setLlmProvider] = useState<"anthropic" | "bedrock">(
+    setupStatus.llmProvider === "anthropic" || setupStatus.llmProvider === "bedrock"
+      ? setupStatus.llmProvider
+      : "anthropic",
+  );
   const [llmConnected, setLlmConnected] = useState(setupStatus.llmConnected);
 
   const goToStep = (nextStep: number) => {

@@ -810,6 +810,52 @@ describe("PUT /api/system/llm", () => {
     expect(settings?.aws_region).toBe("us-east-1");
   });
 
+  it("stores OpenRouter Bedrock credentials in settings", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/llm", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "openrouter_bedrock",
+        apiKey: "sk-or-v1-tenant-virtual-key",
+        modelId: "anthropic/claude-sonnet-4.6@preset/sketch-bedrock",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true });
+
+    const settings = await settingsRepo.get();
+    expect(settings?.llm_provider).toBe("openrouter_bedrock");
+    expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
+    expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+  });
+
+  it("rejects openrouter_bedrock without modelId", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/llm", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "openrouter_bedrock",
+        apiKey: "sk-or-v1-tenant-virtual-key",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
   it("invokes onLlmSettingsUpdated after a successful update", async () => {
     const settingsRepo = createSettingsRepository(db);
     const onLlmSettingsUpdated = vi.fn().mockResolvedValue(undefined);

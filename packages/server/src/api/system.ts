@@ -63,6 +63,11 @@ const llmSchema = z.discriminatedUnion("provider", [
     region: z.string().min(1),
     modelId: z.string().optional(),
   }),
+  z.object({
+    provider: z.literal("openrouter_bedrock"),
+    apiKey: z.string().min(1),
+    modelId: z.string().min(1),
+  }),
 ]);
 
 const systemUserSchema = z.object({
@@ -260,13 +265,21 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         anthropicApiKey: data.apiKey,
         modelId: data.modelId,
       });
-    } else {
+    } else if (data.provider === "bedrock") {
       // TODO: Bedrock credential verification deferred -- no existing verification logic for AWS credentials
       await settings.update({
         llmProvider: "bedrock",
         awsAccessKeyId: data.accessKeyId,
         awsSecretAccessKey: data.secretAccessKey,
         awsRegion: data.region,
+        modelId: data.modelId,
+      });
+    } else {
+      // openrouter_bedrock: caller (platform provisioner) just minted the key, no verification call.
+      // anthropic_api_key column reused for the OR virtual key, model_id holds the <model>@preset/<alias> composite.
+      await settings.update({
+        llmProvider: "openrouter_bedrock",
+        anthropicApiKey: data.apiKey,
         modelId: data.modelId,
       });
     }
