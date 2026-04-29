@@ -103,6 +103,27 @@ function FilesPage() {
       toast.success("Google Drive connected successfully.");
     } else if (oauthStatus === "error") {
       const reason = params.get("reason") ?? "unknown";
+
+      // already_connected: the user already has a Google Drive row. Surface the existing
+      // connector so they can rotate/manage instead of re-authorizing into an orphan row.
+      if (reason === "already_connected" && connectorId) {
+        const connector = connectors.find((c) => c.id === connectorId);
+        if (connector) {
+          const def = getIntegration(connector.connectorType as IntegrationType);
+          if (def) {
+            toast.info("You already have Google Drive connected. Manage it here.", {
+              action: {
+                label: "Manage",
+                onClick: () => setManagingConnector({ definition: def, connector }),
+              },
+            });
+            return;
+          }
+        }
+        toast.info("You already have Google Drive connected. Open Files → Connections to manage it.");
+        return;
+      }
+
       const messages: Record<string, string> = {
         denied: "Google authorization was denied.",
         no_refresh_token:

@@ -24,6 +24,7 @@ import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { SESSION_COOKIE } from "./auth";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type IdentityRepo = ReturnType<typeof createProviderIdentityRepository>;
@@ -84,8 +85,14 @@ export function oauthRoutes(
 
     if (!config?.google_oauth_client_id || !config?.google_oauth_client_secret) {
       return c.json(
-        { error: { code: "NOT_CONFIGURED", message: "Google OAuth client ID and secret must be configured first" } },
-        400,
+        {
+          error: {
+            code: "OAUTH_CLIENT_NOT_CONFIGURED",
+            message: "Ask your admin to configure Google Drive first",
+            connector: "google_drive",
+          },
+        },
+        412,
       );
     }
 
@@ -149,6 +156,14 @@ export function oauthRoutes(
     const config = await settings.get();
     if (!config?.google_oauth_client_id || !config?.google_oauth_client_secret) {
       return c.redirect("/files?oauth=error&reason=not_configured");
+    }
+
+    // Per-user uniqueness: one Google Drive connection per user. If one exists,
+    // bounce the user back with a "rotate via the manage UI" affordance instead
+    // of stacking orphan rows.
+    const existingDrive = await connectors.findByTypeAndOwner("google_drive", userId);
+    if (existingDrive) {
+      return c.redirect(`/files?oauth=error&reason=already_connected&connectorId=${existingDrive.id}`);
     }
 
     // Build redirect URI from BASE_URL or request origin (must match authorize step)
@@ -253,8 +268,11 @@ export function oauthRoutes(
     });
   });
 
-  /** PUT /google/config — save Google OAuth client_id + client_secret. */
+  /** PUT /google/config — save Google OAuth client_id + client_secret. Admin-only. */
   routes.put("/google/config", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const body = await c.req.json().catch(() => ({}));
     const parsed = googleConfigSchema.safeParse(body);
     if (!parsed.success) {

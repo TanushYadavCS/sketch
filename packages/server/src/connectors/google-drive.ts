@@ -554,6 +554,8 @@ export async function resolveFolderPath(
 export function createGoogleDriveConnector(): Connector {
   return {
     type: "google_drive",
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
 
     async validateCredentials(credentials) {
       assertOAuth(credentials);

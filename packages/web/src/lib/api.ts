@@ -433,9 +433,8 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    disconnect(id: string, opts?: { deleteEntities?: boolean }) {
-      const params = opts?.deleteEntities ? "?deleteEntities=true" : "";
-      return request<{ success: boolean }>(`/api/connectors/${id}${params}`, { method: "DELETE" });
+    disconnect(id: string) {
+      return request<{ success: boolean }>(`/api/connectors/${id}`, { method: "DELETE" });
     },
     entityCount(id: string) {
       return request<{ count: number }>(`/api/connectors/${id}/entity-count`);

@@ -766,6 +766,8 @@ export function createNotionConnector(): Connector {
 
   return {
     type: "notion",
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
 
     async validateCredentials(credentials) {
       const token = getAccessToken(credentials);

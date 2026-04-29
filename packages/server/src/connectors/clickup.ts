@@ -343,6 +343,8 @@ async function refreshClickUpToken(credentials: OAuthCredentials): Promise<OAuth
 export function createClickUpConnector(): Connector {
   return {
     type: "clickup",
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
 
     assigneeSourceRefKey(name: string) {
       return `clickup:assignee:${name}`;

@@ -35,7 +35,6 @@ vi.mock("./registry", () => ({
     sync: (...args: unknown[]) => mockConnectorSync(...args),
     getCursor: vi.fn().mockResolvedValue("cursor-v2"),
     validateCredentials: vi.fn().mockResolvedValue(undefined),
-    seedPersonsFromAccess: false,
   })),
 }));
 
@@ -267,16 +266,16 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
     expect(u1.map((r) => r.id)).toEqual(["a"]);
   });
 
-  it("findFirefliesByOwner returns the user's Fireflies config or undefined", async () => {
+  it("findByTypeAndOwner returns the user's per-user config or undefined", async () => {
     db = await createTestDb();
     const repo = createConnectorRepository(db);
-    expect(await repo.findFirefliesByOwner("u1")).toBeUndefined();
+    expect(await repo.findByTypeAndOwner("fireflies", "u1")).toBeUndefined();
 
     await db
       .insertInto("connector_configs")
       .values({ id: "ff1", connector_type: "fireflies", auth_type: "api_key", credentials: "{}", created_by: "u1" })
       .execute();
-    const found = await repo.findFirefliesByOwner("u1");
+    const found = await repo.findByTypeAndOwner("fireflies", "u1");
     expect(found?.id).toBe("ff1");
   });
 

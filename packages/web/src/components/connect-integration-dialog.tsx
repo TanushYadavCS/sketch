@@ -14,6 +14,7 @@ import { ConnectorLogo } from "@/components/connector-logos";
 import { ScopeCount, ScopeGroup, ScopeItem, ScopeList, ScopeSelectAll, ScopeSubItem } from "@/components/scope-picker";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
+import { useDashboardAuth } from "@/routes/dashboard";
 import {
   ArrowLeftIcon,
   ArrowSquareOutIcon,
@@ -72,6 +73,8 @@ export function ConnectIntegrationDialog({
   onOpenChange,
   onConnected,
 }: ConnectIntegrationDialogProps) {
+  const auth = useDashboardAuth();
+  const isAdmin = auth.role === "admin";
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
 
   // Google Drive OAuth state
@@ -373,7 +376,26 @@ export function ConnectIntegrationDialog({
       }}
     >
       <DialogContent>
-        {step === "oauth-config" ? (
+        {step === "oauth-config" && !isAdmin ? (
+          /* Non-admin hits the OAuth-config step: surface the "ask your admin" empty state. */
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                {integration.name} not yet configured
+              </DialogTitle>
+              <DialogDescription>
+                Ask your admin to configure {integration.name} OAuth credentials. Once they do, you can connect with one
+                click.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button>Got it</Button>
+              </DialogClose>
+            </DialogFooter>
+          </>
+        ) : step === "oauth-config" ? (
           /* OAuth redirect: admin configures client_id + client_secret (one-time) */
           <>
             <DialogHeader>
@@ -472,15 +494,17 @@ export function ConnectIntegrationDialog({
               </p>
             </div>
 
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={() => setStep("oauth-config")}
-                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-              >
-                Reconfigure OAuth
-              </button>
-            </div>
+            {isAdmin && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setStep("oauth-config")}
+                  className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Reconfigure OAuth
+                </button>
+              </div>
+            )}
           </>
         ) : step === "credentials" ? (
           /* Non-OAuth-redirect: manual credential entry */

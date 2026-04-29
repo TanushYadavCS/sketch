@@ -5,11 +5,15 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
  *
  * Google Drive gets a drive/folder picker. Other connectors show a generic
  * read-only scope display. Disconnect triggers a confirmation alert dialog.
+ *
+ * Authz: org-wide connectors (perUserAuth: false) are admin-only for edits.
+ * Members see a read-only "Managed by your admin" state with no destructive controls.
  */
 import { GenericScopeEditor } from "@/components/scope-picker";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
+import { useDashboardAuth } from "@/routes/dashboard";
 import {
   ArrowsClockwiseIcon,
   CheckCircleIcon,
@@ -30,9 +34,18 @@ import {
 } from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@sketch/ui/components/dialog";
+import { Input } from "@sketch/ui/components/input";
+import { Label } from "@sketch/ui/components/label";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 export function ManageConnectorDialog({
@@ -51,16 +64,17 @@ export function ManageConnectorDialog({
   onReconnect: (def: IntegrationDefinition) => void;
 }) {
   const queryClient = useQueryClient();
+  const auth = useDashboardAuth();
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
-  const [deleteEntities, setDeleteEntities] = useState(false);
   const [isBrowsingScope, setIsBrowsingScope] = useState(false);
+  const [showRotateKey, setShowRotateKey] = useState(false);
 
-  // Reset checkbox when dialog closes
-  useEffect(() => {
-    if (!showDisconnectConfirm) setDeleteEntities(false);
-  }, [showDisconnectConfirm]);
+  // Edit allowed if admin OR this is the caller's own per-user row.
+  // For org-wide connectors (perUserAuth: false), only admins can edit.
+  const canEdit = auth.role === "admin" || (definition?.perUserAuth ?? false);
 
-  // Fetch entity count when disconnect confirmation opens
+  // Fetch entity count when disconnect confirmation opens — used in the dialog copy
+  // so the user knows how much extracted data they're about to remove.
   const { data: entityCountData } = useQuery({
     queryKey: ["connector-entity-count", connector?.id],
     queryFn: () => api.integrations.entityCount(connector?.id ?? ""),
@@ -78,7 +92,7 @@ export function ManageConnectorDialog({
   });
 
   const disconnectMutation = useMutation({
-    mutationFn: () => api.integrations.disconnect(connector?.id ?? "", { deleteEntities }),
+    mutationFn: () => api.integrations.disconnect(connector?.id ?? ""),
     onSuccess: () => {
       toast.success(`${definition?.name ?? "Connector"} disconnected.`);
       setShowDisconnectConfirm(false);
@@ -96,6 +110,19 @@ export function ManageConnectorDialog({
     },
     onError: (error: Error) => toast.error(error.message),
   });
+
+  // For api_key connectors, "Update credentials" opens a non-destructive rotate
+  // dialog (server validates the new key and replaces in place — no data loss
+  // if the user cancels). For OAuth connectors, fall back to the disconnect →
+  // reauth flow (destructive; can't be avoided without redoing the OAuth
+  // callback uniqueness contract).
+  const updateCredentials = () => {
+    if (definition?.authType === "api_key") {
+      setShowRotateKey(true);
+    } else {
+      reconnectMutation.mutate();
+    }
+  };
 
   const isSyncing = connector?.syncStatus === "syncing";
 
@@ -157,55 +184,69 @@ export function ManageConnectorDialog({
           {isError && (
             <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3">
               {connector.errorMessage && <p className="text-xs text-destructive">{connector.errorMessage}</p>}
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-2 h-7 gap-1.5 text-xs"
-                onClick={() => reconnectMutation.mutate()}
-                disabled={reconnectMutation.isPending}
-              >
-                {reconnectMutation.isPending ? (
-                  <>
-                    <SpinnerGapIcon size={12} className="animate-spin" />
-                    Reconnecting...
-                  </>
-                ) : (
-                  <>
-                    <ArrowsClockwiseIcon size={12} />
-                    Update credentials
-                  </>
-                )}
-              </Button>
+              {canEdit ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 h-7 gap-1.5 text-xs"
+                  onClick={updateCredentials}
+                  disabled={reconnectMutation.isPending}
+                >
+                  {reconnectMutation.isPending ? (
+                    <>
+                      <SpinnerGapIcon size={12} className="animate-spin" />
+                      Reconnecting...
+                    </>
+                  ) : (
+                    <>
+                      <ArrowsClockwiseIcon size={12} />
+                      Update credentials
+                    </>
+                  )}
+                </Button>
+              ) : (
+                <p className="mt-2 text-xs text-muted-foreground">Ask your admin to update the credentials.</p>
+              )}
             </div>
           )}
 
-          <ScopeEditorDispatch
-            scopeType={definition.scopeType}
-            connectorId={connector.id}
-            connectorType={connector.connectorType}
-            scopeConfig={connector.scopeConfig}
-            scopeLabel={definition.scopeLabel}
-            scopeEntries={scopeEntries}
-            onBrowsingChange={setIsBrowsingScope}
-          />
+          {canEdit ? (
+            <ScopeEditorDispatch
+              scopeType={definition.scopeType}
+              connectorId={connector.id}
+              connectorType={connector.connectorType}
+              scopeConfig={connector.scopeConfig}
+              scopeLabel={definition.scopeLabel}
+              scopeEntries={scopeEntries}
+              onBrowsingChange={setIsBrowsingScope}
+            />
+          ) : (
+            <div className="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
+              Managed by your admin. Ask them to change the {definition.scopeLabel} or rotate credentials.
+            </div>
+          )}
 
           <div className="flex items-center justify-between border-t border-border pt-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive"
-              onClick={() => setShowDisconnectConfirm(true)}
-            >
-              <TrashIcon size={12} />
-              Disconnect
-            </Button>
+            {canEdit ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive"
+                onClick={() => setShowDisconnectConfirm(true)}
+              >
+                <TrashIcon size={12} />
+                Disconnect
+              </Button>
+            ) : (
+              <span />
+            )}
             <div className="flex items-center gap-1.5">
-              {!isError && (
+              {canEdit && !isError && (
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1.5 text-xs"
-                  onClick={() => reconnectMutation.mutate()}
+                  onClick={updateCredentials}
                   disabled={reconnectMutation.isPending}
                 >
                   {reconnectMutation.isPending ? (
@@ -238,25 +279,18 @@ export function ManageConnectorDialog({
           <AlertDialogHeader>
             <AlertDialogTitle>Disconnect {definition.name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will remove the connection and all indexed {definition.itemNoun} from {definition.name}. This action
-              cannot be undone.
+              This will remove the connection, all indexed {definition.itemNoun}
+              {entityCount > 0 ? (
+                <>
+                  , and <span className="font-medium text-foreground">{entityCount}</span> extracted{" "}
+                  {entityCount === 1 ? "entity" : "entities"} (people, companies, and other records)
+                </>
+              ) : (
+                ", and any extracted entities (people, companies, and other records)"
+              )}{" "}
+              created from {definition.name} data. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {entityCount > 0 && (
-            <label className="flex items-start gap-2.5 rounded-md border border-border bg-muted/30 px-3 py-2.5 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={deleteEntities}
-                onChange={(e) => setDeleteEntities(e.target.checked)}
-                className="mt-0.5 h-4 w-4 rounded border-border accent-destructive"
-              />
-              <span className="text-xs text-muted-foreground">
-                Also delete <span className="font-medium text-foreground">{entityCount}</span>{" "}
-                {entityCount === 1 ? "entity" : "entities"} created from {definition.name} data (people, companies, and
-                other extracted records)
-              </span>
-            </label>
-          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={disconnectMutation.isPending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -269,7 +303,101 @@ export function ManageConnectorDialog({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <RotateKeyDialog
+        open={showRotateKey}
+        onOpenChange={setShowRotateKey}
+        connectorId={connector.id}
+        connectorName={definition.name}
+        credentialUrl={definition.credentialUrl}
+      />
     </>
+  );
+}
+
+/**
+ * In-place rotate-key dialog. Calls POST /api/connectors/:id/rotate-key, which
+ * validates the new key and swaps it on the existing row. Cancel is safe — the
+ * existing key isn't touched until the new one validates.
+ */
+function RotateKeyDialog({
+  open,
+  onOpenChange,
+  connectorId,
+  connectorName,
+  credentialUrl,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  connectorId: string;
+  connectorName: string;
+  credentialUrl: string;
+}) {
+  const queryClient = useQueryClient();
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: () => api.integrations.rotateKey(connectorId, apiKey.trim()),
+    onSuccess: () => {
+      toast.success("Credentials updated.");
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      setApiKey("");
+      setError(null);
+      onOpenChange(false);
+    },
+    onError: (err: Error) => setError(err.message || "Failed to update credentials"),
+  });
+
+  const handleClose = (next: boolean) => {
+    if (!next) {
+      setApiKey("");
+      setError(null);
+    }
+    onOpenChange(next);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Update {connectorName} credentials</DialogTitle>
+          <DialogDescription>
+            Paste a new API key. The existing key stays in place until the new one validates — cancelling here keeps
+            your current connection intact. Get a key at{" "}
+            <a
+              href={credentialUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              {credentialUrl}
+            </a>
+            .
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="rotate-api-key">New API key</Label>
+          <Input
+            id="rotate-api-key"
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="Paste new API key"
+            autoComplete="off"
+          />
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => handleClose(false)} disabled={mutation.isPending}>
+            Cancel
+          </Button>
+          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending || !apiKey.trim()}>
+            {mutation.isPending ? "Updating…" : "Update credentials"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -28,6 +28,7 @@ import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import { denyIfCannotEdit, denyIfCannotRead, denyIfNotAdmin, isAdmin } from "./auth-helpers";
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -96,12 +97,26 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
 
   /* ── Static-path routes (must come before /:id) ─────── */
 
-  /** List all connectors with file counts. */
+  /**
+   * List connectors with file counts.
+   * Visibility: org-wide rows (perUserAuth: false) visible to all; per-user rows
+   * filtered to admins or the row's owner.
+   */
   routes.get("/", async (c) => {
+    const sub = c.get("sub");
+    const callerIsAdmin = isAdmin(c);
     const configs = await connectorRepo.listConfigs();
 
+    const visible = configs.filter((cfg) => {
+      const meta = getConnector(cfg.connector_type as ConnectorType);
+      if (!meta.perUserAuth) return true;
+      if (callerIsAdmin) return true;
+      return cfg.created_by === sub;
+    });
+
     const connectorsWithCounts = await Promise.all(
-      configs.map(async (cfg) => {
+      visible.map(async (cfg) => {
+        const meta = getConnector(cfg.connector_type as ConnectorType);
         const fileCount = await connectorRepo.countFilesByConnector(cfg.id);
         return {
           id: cfg.id,
@@ -114,6 +129,8 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
           createdBy: cfg.created_by,
           createdAt: cfg.created_at,
           fileCount,
+          perUserAuth: meta.perUserAuth,
+          requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
         };
       }),
     );
@@ -136,16 +153,23 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     const connectorType = parsed.data.connectorType as ConnectorType;
+    const connectorMeta = getConnector(connectorType);
 
-    // Per-user uniqueness guard for Fireflies — clearer error than the unique-index violation.
-    if (connectorType === "fireflies") {
-      const existing = await connectorRepo.findFirefliesByOwner(sub);
+    // Org-wide connectors (perUserAuth: false) are admin-only.
+    if (!connectorMeta.perUserAuth) {
+      const denied = denyIfNotAdmin(c);
+      if (denied) return denied;
+    }
+
+    // Per-user uniqueness guard — clearer error than a unique-index violation.
+    if (connectorMeta.perUserAuth) {
+      const existing = await connectorRepo.findByTypeAndOwner(connectorType, sub);
       if (existing) {
         return c.json(
           {
             error: {
               code: "ALREADY_CONNECTED",
-              message: "You already have a Fireflies connection. Rotate the key from Settings instead.",
+              message: `You already have a ${connectorType} connection. Rotate the key from Settings instead.`,
             },
           },
           409,
@@ -157,12 +181,11 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     // For OAuth, also refresh the token so we store a valid access_token.
     let credentials = { type: parsed.data.authType, ...parsed.data.credentials } as ConnectorCredentials;
     try {
-      const connector = getConnector(connectorType);
-      if (credentials.type === "oauth" && connector.refreshTokens) {
-        const refreshed = await connector.refreshTokens(credentials);
+      if (credentials.type === "oauth" && connectorMeta.refreshTokens) {
+        const refreshed = await connectorMeta.refreshTokens(credentials);
         if (refreshed) credentials = refreshed;
       }
-      await connector.validateCredentials(credentials);
+      await connectorMeta.validateCredentials(credentials);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Invalid credentials";
       logger.warn({ err, connectorType: parsed.data.connectorType }, "Credential validation failed");
@@ -451,6 +474,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     const connector = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, connector.perUserAuth);
+    if (denied) return denied;
+
     if (!connector.browseExisting && !connector.browse) {
       return c.json(
         { error: { code: "NOT_SUPPORTED", message: "This connector does not support scope browsing" } },
@@ -510,6 +536,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     const connector = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, connector.perUserAuth);
+    if (denied) return denied;
+
     if (!connector.browseChildren) {
       return c.json(
         { error: { code: "NOT_SUPPORTED", message: "This connector does not support subtree browsing" } },
@@ -584,6 +613,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Google Drive" } }, 400);
     }
 
+    const denied = denyIfCannotRead(c, config, getConnector("google_drive").perUserAuth);
+    if (denied) return denied;
+
     try {
       const credentials = JSON.parse(config.credentials) as OAuthCredentials;
       const validCreds = await ensureValidToken(credentials);
@@ -632,6 +664,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Google Drive" } }, 400);
     }
 
+    const denied = denyIfCannotRead(c, config, getConnector("google_drive").perUserAuth);
+    if (denied) return denied;
+
     try {
       const credentials = JSON.parse(config.credentials) as OAuthCredentials;
       const validCreds = await ensureValidToken(credentials);
@@ -679,6 +714,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     if (config.connector_type !== "clickup") {
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not ClickUp" } }, 400);
     }
+
+    const denied = denyIfCannotRead(c, config, getConnector("clickup").perUserAuth);
+    if (denied) return denied;
 
     try {
       const credentials = JSON.parse(config.credentials) as { type: string; api_key?: string; access_token?: string };
@@ -751,6 +789,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Notion" } }, 400);
     }
 
+    const denied = denyIfCannotRead(c, config, getConnector("notion").perUserAuth);
+    if (denied) return denied;
+
     try {
       const credentials = JSON.parse(config.credentials) as { type: string; api_key?: string; access_token?: string };
       const token = credentials.api_key ?? credentials.access_token ?? "";
@@ -781,6 +822,10 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    if (denied) return denied;
+
     const fileCount = await connectorRepo.countFilesByConnector(config.id);
     return c.json({
       connector: {
@@ -794,6 +839,8 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
         createdBy: config.created_by,
         createdAt: config.created_at,
         fileCount,
+        perUserAuth: meta.perUserAuth,
+        requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
       },
     });
   });
@@ -804,35 +851,52 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     if (!config) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    if (denied) return denied;
+
     const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
     const entityRepo = createEntityRepository(db);
     const count = await entityRepo.countEntitiesForFiles(fileIds);
     return c.json({ count });
   });
 
-  /** Delete a connector and optionally its associated entities. */
+  /**
+   * Delete a connector and clean up its derived data: entities sourced from this
+   * connector's files are removed; entity_mentions pointing to its files (whether
+   * the entity itself is deleted or sourced elsewhere) are cleaned up in deleteConfig.
+   */
   routes.delete("/:id", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
     if (!config) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const deleteEntities = c.req.query("deleteEntities") === "true";
-    if (deleteEntities) {
-      const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
-      const entityRepo = createEntityRepository(db);
-      await entityRepo.deleteEntitiesForFiles(fileIds);
-    }
+    const denied = denyIfCannotEdit(c, config);
+    if (denied) return denied;
+
+    const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.deleteEntitiesForFiles(fileIds);
 
     await connectorRepo.deleteConfig(config.id);
     return c.json({ success: true });
   });
 
-  /** Rotate the API key for an existing connector. Validates the new key before saving. */
+  /**
+   * Rotate the API key for an existing connector. Owner-only — admins cannot rotate
+   * someone else's key (they don't have it). For OAuth connectors, this 400s on the
+   * api_key validator before authz, so the rule is moot today; it matters when more
+   * api_key-per-user connectors land.
+   */
   routes.post("/:id/rotate-key", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
     if (!config) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+
+    if (config.created_by !== c.get("sub")) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Only the connector's owner can rotate its key" } }, 403);
     }
 
     const parsed = z.object({ api_key: z.string().min(1) }).safeParse(await c.req.json());
@@ -867,6 +931,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     if (!config) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
+
+    const denied = denyIfCannotEdit(c, config);
+    if (denied) return denied;
 
     const body = await c.req.json();
     const parsed = updateScopeSchema.safeParse(body);
@@ -906,6 +973,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
+    const denied = denyIfCannotEdit(c, config);
+    if (denied) return denied;
+
     if (config.sync_status === "syncing") {
       // Reset stale "syncing" status — the previous sync likely crashed
       await connectorRepo.updateConfig(config.id, { syncStatus: "active", errorMessage: null });
@@ -924,6 +994,10 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     if (!config) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
+
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    if (denied) return denied;
 
     const files = await connectorRepo.listFilesByConnector(config.id, { archived: false });
     const fileIds = files.map((f) => f.id);
@@ -958,6 +1032,9 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
+    const denied = denyIfCannotEdit(c, config);
+    if (denied) return denied;
+
     const body = await c.req.json();
     const parsed = enrichSchema.safeParse(body);
     if (!parsed.success) {
@@ -986,6 +1063,13 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     if (!file) {
       return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     }
+
+    const owningConfig = await connectorRepo.findConfigByFileId(fileId);
+    if (!owningConfig) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Owning connector not found" } }, 404);
+    }
+    const denied = denyIfCannotEdit(c, owningConfig);
+    if (denied) return denied;
 
     const settings = await db
       .selectFrom("settings")

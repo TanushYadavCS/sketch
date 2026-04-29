@@ -310,15 +310,18 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           });
         }
 
-        // Seed person entities from file access lists (e.g. Fireflies attendees)
-        if (connector.seedPersonsFromAccess && item.accessEmails) {
-          for (const email of item.accessEmails) {
+        // Seed person entities from connector-supplied attendees.
+        // Skip entries without a name — accessEmails already covers ACL,
+        // and email-as-name rows poison the entity register.
+        if (item.attendees) {
+          for (const a of item.attendees) {
+            if (!a.name) continue;
             await entityRepo.upsertPersonEntity({
-              name: email,
-              email,
+              name: a.name,
+              email: a.email,
               subtype: "external",
               source: config.connector_type,
-              sourceId: `${item.providerFileId}:${email}`,
+              sourceId: `${item.providerFileId}:${a.email ?? a.name}`,
             });
           }
         }

@@ -337,6 +337,8 @@ export function createLinearConnector(): Connector {
 
   return {
     type: "linear",
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
     promotableFileTypes: ["project"],
 
     async validateCredentials(credentials) {

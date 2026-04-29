@@ -40,6 +40,11 @@ const REQUEST_TIMEOUT_MS = 30_000;
  */
 const FIREFLIES_PROCESSING_LAG_MS = 2 * 60 * 60 * 1000;
 
+interface FirefliesSpeaker {
+  id: number;
+  name: string;
+}
+
 interface FirefliesTranscript {
   id: string;
   title: string;
@@ -55,6 +60,13 @@ interface FirefliesTranscript {
     action_items: string | string[] | null;
     keywords: string | string[] | null;
   } | null;
+  /** Speaker diarization result — populated by the per-transcript detail query. */
+  speakers?: FirefliesSpeaker[];
+}
+
+interface FirefliesContact {
+  email: string;
+  name: string;
 }
 
 function getApiKey(credentials: ConnectorCredentials): string {
@@ -189,7 +201,71 @@ function formatTranscriptContent(transcript: FirefliesTranscript): string {
   return parts.join("\n");
 }
 
-function transcriptToSyncedItem(transcript: FirefliesTranscript): SyncedItem {
+/**
+ * Try to match a speaker name to an email by checking if any name token
+ * (length ≥ 3) appears as a substring of the email's local-part. Requires
+ * an unambiguous single match — emits null on zero or multiple hits.
+ */
+function matchSpeakerToEmail(speakerName: string, emails: string[]): string | null {
+  const tokens = speakerName
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length >= 3);
+  if (tokens.length === 0) return null;
+
+  const matches = new Set<string>();
+  for (const email of emails) {
+    const local = email.split("@")[0]?.toLowerCase().replace(/[\d.]/g, "") ?? "";
+    if (tokens.some((t) => local.includes(t))) {
+      matches.add(email);
+    }
+  }
+  return matches.size === 1 ? [...matches][0] : null;
+}
+
+/**
+ * Build the attendees list. Speakers (real names from diarization) seed
+ * person entities; silent attendees stay in accessEmails only.
+ *
+ * Speakers are matched against the participant email list via local-part
+ * substring; on a clean match we emit `{name, email}`, otherwise `{name}`
+ * only and let the contacts directory provide a name-only fallback for
+ * un-matched participants we have a real contact name for.
+ */
+function buildAttendees(transcript: FirefliesTranscript, contacts: Map<string, string>): Array<{ name?: string; email?: string }> {
+  const allEmails: string[] = [];
+  if (transcript.organizer_email) allEmails.push(transcript.organizer_email);
+  for (const p of transcript.participants) {
+    if (p.includes("@")) allEmails.push(p);
+  }
+
+  const attendees: Array<{ name?: string; email?: string }> = [];
+  const claimedEmails = new Set<string>();
+
+  for (const speaker of transcript.speakers ?? []) {
+    const matched = matchSpeakerToEmail(speaker.name, allEmails);
+    if (matched && !claimedEmails.has(matched)) {
+      claimedEmails.add(matched);
+      attendees.push({ name: speaker.name, email: matched });
+    } else {
+      attendees.push({ name: speaker.name });
+    }
+  }
+
+  // Fallback: participants we didn't tie to a speaker — if the contacts
+  // directory has a real name for the email, surface that.
+  for (const email of allEmails) {
+    if (claimedEmails.has(email)) continue;
+    const name = contacts.get(email.toLowerCase());
+    if (name && name.toLowerCase() !== email.toLowerCase()) {
+      attendees.push({ name, email });
+    }
+  }
+
+  return attendees;
+}
+
+function transcriptToSyncedItem(transcript: FirefliesTranscript, contacts: Map<string, string>): SyncedItem {
   const content = formatTranscriptContent(transcript);
   const date = new Date(transcript.date);
 
@@ -204,6 +280,8 @@ function transcriptToSyncedItem(transcript: FirefliesTranscript): SyncedItem {
     }
   }
 
+  const attendees = buildAttendees(transcript, contacts);
+
   return {
     providerFileId: transcript.id,
     providerUrl: transcript.transcript_url,
@@ -216,6 +294,7 @@ function transcriptToSyncedItem(transcript: FirefliesTranscript): SyncedItem {
     sourceCreatedAt: date.toISOString(),
     sourceUpdatedAt: date.toISOString(),
     accessEmails: accessEmails.length > 0 ? accessEmails : null,
+    attendees: attendees.length > 0 ? attendees : undefined,
   };
 }
 
@@ -236,8 +315,8 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime) {
   }
 }`;
 
-/** Fetch a single transcript's summary by ID. */
-const TRANSCRIPT_SUMMARY_QUERY = `
+/** Fetch a single transcript's summary + speakers by ID. */
+const TRANSCRIPT_DETAIL_QUERY = `
 query Transcript($id: String!) {
   transcript(id: $id) {
     summary {
@@ -246,6 +325,22 @@ query Transcript($id: String!) {
       action_items
       keywords
     }
+    speakers {
+      id
+      name
+    }
+  }
+}`;
+
+/**
+ * Contacts directory for the API key owner. Used as a name fallback for
+ * silent participants — Fireflies enriches names here when it can.
+ */
+const USER_CONTACTS_QUERY = `
+query Contacts {
+  contacts {
+    email
+    name
   }
 }`;
 
@@ -261,6 +356,32 @@ query User {
 
 type FirefliesRequestFn = ReturnType<typeof makeFirefliesRequest>;
 
+/** Fetch the contacts directory once per sync; map keyed by lowercased email. */
+async function fetchContactsMap(
+  apiKey: string,
+  logger: Logger,
+  firefliesRequest: FirefliesRequestFn,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  try {
+    const data = await firefliesRequest<{ contacts: FirefliesContact[] | null }>(
+      USER_CONTACTS_QUERY,
+      {},
+      apiKey,
+      logger,
+    );
+    for (const c of data.contacts ?? []) {
+      if (!c.email || !c.name) continue;
+      // Skip stubs where Fireflies hasn't enriched a real name.
+      if (c.name.toLowerCase() === c.email.toLowerCase()) continue;
+      map.set(c.email.toLowerCase(), c.name);
+    }
+  } catch (err) {
+    logger.warn({ err }, "Fireflies contacts directory fetch failed; proceeding without name fallback");
+  }
+  return map;
+}
+
 async function* syncTranscripts(
   apiKey: string,
   sinceTimestamp: string | null,
@@ -269,6 +390,9 @@ async function* syncTranscripts(
 ): AsyncGenerator<SyncedItem> {
   let skip = 0;
   let totalTranscripts = 0;
+
+  const contacts = await fetchContactsMap(apiKey, logger, firefliesRequest);
+  logger.debug({ contactsCount: contacts.size }, "Fireflies contacts directory loaded");
 
   // Pass fromDate to the API so it only returns transcripts newer than our cursor.
   // Without this, a failed sync retries from the old cursor and re-fetches everything.
@@ -285,14 +409,15 @@ async function* syncTranscripts(
     }
 
     for (const transcript of data.transcripts) {
-      // Fetch summary separately — not available in bulk list query
-      const summaryData = await firefliesRequest<{
-        transcript: { summary: FirefliesTranscript["summary"] } | null;
-      }>(TRANSCRIPT_SUMMARY_QUERY, { id: transcript.id }, apiKey, logger);
+      // Fetch summary + speakers separately — neither available in bulk list query
+      const detailData = await firefliesRequest<{
+        transcript: { summary: FirefliesTranscript["summary"]; speakers: FirefliesSpeaker[] | null } | null;
+      }>(TRANSCRIPT_DETAIL_QUERY, { id: transcript.id }, apiKey, logger);
 
-      transcript.summary = summaryData.transcript?.summary ?? null;
+      transcript.summary = detailData.transcript?.summary ?? null;
+      transcript.speakers = detailData.transcript?.speakers ?? [];
 
-      yield transcriptToSyncedItem(transcript);
+      yield transcriptToSyncedItem(transcript, contacts);
       totalTranscripts++;
     }
 
@@ -326,7 +451,8 @@ export function createFirefliesConnector(): Connector {
 
   return {
     type: "fireflies",
-    seedPersonsFromAccess: true,
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
 
     async validateCredentials(credentials) {
       const apiKey = getApiKey(credentials);

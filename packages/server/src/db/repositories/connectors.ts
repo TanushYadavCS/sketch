@@ -91,13 +91,23 @@ export function createConnectorRepository(db: Kysely<DB>) {
       return { archived: owned.length };
     },
 
-    /** Find a Fireflies config owned by the given user (at most one per user). */
-    async findFirefliesByOwner(createdBy: string) {
+    /** Find a connector config of a given type owned by the given user (used for per-user uniqueness). */
+    async findByTypeAndOwner(connectorType: ConnectorType, createdBy: string) {
       return db
         .selectFrom("connector_configs")
         .selectAll()
-        .where("connector_type", "=", "fireflies")
+        .where("connector_type", "=", connectorType)
         .where("created_by", "=", createdBy)
+        .executeTakeFirst();
+    },
+
+    /** Look up the connector config that owns a given indexed file (for file-scoped authz). */
+    async findConfigByFileId(fileId: string) {
+      return db
+        .selectFrom("indexed_files")
+        .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
+        .where("indexed_files.id", "=", fileId)
+        .select(["connector_configs.id", "connector_configs.connector_type", "connector_configs.created_by"])
         .executeTakeFirst();
     },
 
@@ -209,6 +219,12 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
         if (orphanedIds.length > 0) {
           await db.deleteFrom("file_access").where("indexed_file_id", "in", orphanedIds).execute();
+          // Remove entity_mentions pointing to files we're about to archive — covers the
+          // cross-source case where an entity sourced elsewhere was mentioned in this
+          // connector's files. Without this, surviving entities show stale mentions to
+          // archived files. Mentions for entities we delete in deleteEntitiesForFiles are
+          // already handled by FK CASCADE on entity delete.
+          await db.deleteFrom("entity_mentions").where("indexed_file_id", "in", orphanedIds).execute();
           await db
             .updateTable("indexed_files")
             .set({ is_archived: 1, access_scope_id: null })

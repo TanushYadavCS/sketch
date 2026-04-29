@@ -8,14 +8,14 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
 import { ConnectorLogo } from "@/components/connector-logos";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
-import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
+import { INTEGRATIONS, type IntegrationDefinition, getIntegration } from "@/lib/integrations";
+import { useDashboardAuth } from "@/routes/dashboard";
 
 // Per-user integrations (e.g. Fireflies) are managed from Settings → My Connections,
 // not the workspace-level Files connector picker. They still appear as filter chips on
 // the Files page (so admins and members get an identical view of indexed sources), but
 // they're excluded from the "+ Connect" buttons and the BrowseAll catalog.
-const PER_USER_INTEGRATION_TYPES = new Set<IntegrationType>(["fireflies"]);
-const ORG_LEVEL_INTEGRATIONS = INTEGRATIONS.filter((def) => !PER_USER_INTEGRATION_TYPES.has(def.type));
+const ORG_LEVEL_INTEGRATIONS = INTEGRATIONS.filter((def) => !def.perUserAuth);
 
 const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
   error: 4,
@@ -50,7 +50,6 @@ import { Label } from "@sketch/ui/components/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Switch } from "@sketch/ui/components/switch";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -91,7 +90,8 @@ export function ConnectorPicker({
 }) {
   const [connectingIntegration, setConnectingIntegration] = useState<IntegrationDefinition | null>(null);
   const [showBrowseAll, setShowBrowseAll] = useState(false);
-  const navigate = useNavigate();
+  const auth = useDashboardAuth();
+  const isAdmin = auth.role === "admin";
 
   const connectedByType = new Map<string, ConnectorConfig>();
   // Aggregate across multiple configs of the same type — per-user integrations like
@@ -160,21 +160,22 @@ export function ConnectorPicker({
           );
         })}
 
-        {ORG_LEVEL_INTEGRATIONS.map((def) => {
-          if (connectedByType.has(def.type)) return null;
-          return (
-            <button
-              key={def.type}
-              type="button"
-              onClick={() => setConnectingIntegration(def)}
-              className="flex items-center gap-1.5 rounded-full border border-dashed border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-border/80 hover:bg-muted/30 hover:text-foreground"
-            >
-              <PlusIcon size={10} />
-              <ConnectorLogo type={def.type} size={10} />
-              {def.name}
-            </button>
-          );
-        })}
+        {isAdmin &&
+          ORG_LEVEL_INTEGRATIONS.map((def) => {
+            if (connectedByType.has(def.type)) return null;
+            return (
+              <button
+                key={def.type}
+                type="button"
+                onClick={() => setConnectingIntegration(def)}
+                className="flex items-center gap-1.5 rounded-full border border-dashed border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-border/80 hover:bg-muted/30 hover:text-foreground"
+              >
+                <PlusIcon size={10} />
+                <ConnectorLogo type={def.type} size={10} />
+                {def.name}
+              </button>
+            );
+          })}
 
         <button
           type="button"
@@ -190,15 +191,13 @@ export function ConnectorPicker({
         open={showBrowseAll}
         onOpenChange={setShowBrowseAll}
         connectors={connectors}
+        isAdmin={isAdmin}
         onConnect={(def) => {
           setShowBrowseAll(false);
-          // Per-user connectors live in Settings → My Connections (each user pastes
-          // their own key), so the catalog routes there instead of opening the
-          // workspace-level connect dialog.
-          if (PER_USER_INTEGRATION_TYPES.has(def.type)) {
-            navigate({ to: "/integrations", search: { tab: "my-connections", add: def.type } });
-            return;
-          }
+          // All connectors — per-user (Fireflies, Drive) and org-wide (ClickUp,
+          // Notion, Linear) — use the same workspace-level connect dialog. Settings
+          // → My Connections lists/manages already-connected per-user rows but no
+          // longer hosts the add UI.
           setConnectingIntegration(def);
         }}
         onManage={(def, connector) => {
@@ -289,12 +288,14 @@ function BrowseConnectorsDialog({
   open,
   onOpenChange,
   connectors,
+  isAdmin,
   onConnect,
   onManage,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   connectors: ConnectorConfig[];
+  isAdmin: boolean;
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
 }) {
@@ -348,16 +349,16 @@ function BrowseConnectorsDialog({
           <>
             <div className="mt-2 space-y-2">
               {INTEGRATIONS.map((def) => {
-                // Per-user connectors are managed from Settings → My Connections, so the
-                // catalog always shows the Connect affordance for them; clicking routes
-                // the user there rather than opening the workspace-level connect dialog.
-                const isPerUser = PER_USER_INTEGRATION_TYPES.has(def.type);
-                const connector = isPerUser ? null : (connectedByType.get(def.type) ?? null);
+                // For per-user connectors, the row visible to the caller in
+                // /api/connectors is their own (server filters); for org-wide, it's
+                // the shared row. Either way, show Manage when present, Connect when not.
+                const connector = connectedByType.get(def.type) ?? null;
                 return (
                   <ConnectorRow
                     key={def.type}
                     definition={def}
                     connector={connector}
+                    isAdmin={isAdmin}
                     onConnect={() => onConnect(def)}
                     onManage={() => {
                       if (connector) onManage(def, connector);
@@ -532,17 +533,22 @@ function ConnectorSettings() {
 function ConnectorRow({
   definition,
   connector,
+  isAdmin,
   onConnect,
   onManage,
 }: {
   definition: IntegrationDefinition;
   connector: ConnectorConfig | null;
+  isAdmin: boolean;
   onConnect: () => void;
   onManage: () => void;
 }) {
   const queryClient = useQueryClient();
   const isConnected = !!connector;
   const isSyncing = connector?.syncStatus === "syncing";
+  // Org-wide connectors are admin-only to configure. Per-user (Fireflies, Drive) are
+  // always reachable — clicking Connect routes to /integrations or kicks off OAuth.
+  const canConfigure = definition.perUserAuth || isAdmin;
 
   const syncMutation = useMutation({
     mutationFn: () => api.integrations.sync(connector?.id ?? ""),
@@ -590,24 +596,28 @@ function ConnectorRow({
       {isConnected ? (
         <div className="flex items-center gap-1.5">
           <SyncStatusDot status={connector.syncStatus} />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7"
-            onClick={() => syncMutation.mutate()}
-            disabled={isSyncing || syncMutation.isPending}
-          >
-            <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
-          </Button>
+          {canConfigure && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              onClick={() => syncMutation.mutate()}
+              disabled={isSyncing || syncMutation.isPending}
+            >
+              <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
+            </Button>
+          )}
           <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onManage}>
-            Manage
+            {canConfigure ? "Manage" : "View"}
           </Button>
         </div>
-      ) : (
+      ) : canConfigure ? (
         <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onConnect}>
           <PlusIcon size={12} />
           Connect
         </Button>
+      ) : (
+        <span className="text-xs text-muted-foreground">Managed by admin</span>
       )}
     </div>
   );

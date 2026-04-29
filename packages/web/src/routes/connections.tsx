@@ -15,7 +15,6 @@ import { EditMcpDialog } from "@/components/connections/edit-mcp-dialog";
 import { EditProviderDialog } from "@/components/connections/edit-provider-dialog";
 import { IntegrationsSection } from "@/components/connections/integrations-section";
 import { McpServersSection } from "@/components/connections/mcp-servers-section";
-import { MyConnectionsSection } from "@/components/connections/my-connections-section";
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
@@ -60,7 +59,7 @@ function ConnectionsCallback() {
 // Tab button
 // ---------------------------------------------------------------------------
 
-type IntegrationsTab = "applications" | "my-connections" | "mcps";
+type IntegrationsTab = "applications" | "mcps";
 
 // ---------------------------------------------------------------------------
 // Page
@@ -68,16 +67,10 @@ type IntegrationsTab = "applications" | "my-connections" | "mcps";
 
 function ConnectionsPage() {
   const queryClient = useQueryClient();
-  // Read tab + add intent from query params on mount (set by the Files page's
-  // "Connect Fireflies" action so the user lands on the right tab + dialog).
   const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
     if (typeof window === "undefined") return "applications";
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "my-connections" || tab === "mcps" ? tab : "applications";
-  });
-  const [autoAddType] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return new URLSearchParams(window.location.search).get("add");
+    return tab === "mcps" ? "mcps" : "applications";
   });
 
   const serversQuery = useQuery({
@@ -124,19 +117,12 @@ function ConnectionsPage() {
           isActive={activeTab === "applications"}
           onClick={() => setActiveTab("applications")}
         />
-        <TabButton
-          label="My Connections"
-          isActive={activeTab === "my-connections"}
-          onClick={() => setActiveTab("my-connections")}
-        />
         <TabButton label="MCPs" isActive={activeTab === "mcps"} onClick={() => setActiveTab("mcps")} />
       </div>
 
       <div className="mt-5 space-y-8">
         {isLoading ? (
           <LoadingSkeleton />
-        ) : activeTab === "my-connections" ? (
-          <MyConnectionsSection autoAddType={autoAddType} />
         ) : activeTab === "applications" ? (
           <>
             {!provider ? (
