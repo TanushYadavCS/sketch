@@ -63,6 +63,11 @@ const llmSchema = z.discriminatedUnion("provider", [
     region: z.string().min(1),
     modelId: z.string().optional(),
   }),
+  z.object({
+    provider: z.literal("openrouter_bedrock"),
+    apiKey: z.string().min(1),
+    modelId: z.string().min(1),
+  }),
 ]);
 
 const systemUserSchema = z.object({
@@ -87,6 +92,10 @@ const canvasIntegrationSchema = z.object({
 
 const onboardingWorkflowMetadataSchema = z.object({
   openingMessageSent: z.boolean().optional(),
+});
+
+const onboardingIntroductionsSchema = z.object({
+  adminEmail: z.string().email().optional(),
 });
 
 function buildOpeningIntroMessage(botName: string): string {
@@ -256,13 +265,21 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         anthropicApiKey: data.apiKey,
         modelId: data.modelId,
       });
-    } else {
+    } else if (data.provider === "bedrock") {
       // TODO: Bedrock credential verification deferred -- no existing verification logic for AWS credentials
       await settings.update({
         llmProvider: "bedrock",
         awsAccessKeyId: data.accessKeyId,
         awsSecretAccessKey: data.secretAccessKey,
         awsRegion: data.region,
+        modelId: data.modelId,
+      });
+    } else {
+      // openrouter_bedrock: caller (platform provisioner) just minted the key, no verification call.
+      // anthropic_api_key column reused for the OR virtual key, model_id holds the <model>@preset/<alias> composite.
+      await settings.update({
+        llmProvider: "openrouter_bedrock",
+        anthropicApiKey: data.apiKey,
         modelId: data.modelId,
       });
     }
@@ -419,10 +436,20 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "NOT_FOUND", message: "Onboarding introductions not available" } }, 404);
     }
 
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = onboardingIntroductionsSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
+    }
+
     const settingsRow = await settings.get();
-    const admin = await deps.userRepo.findFirstAdmin();
+    const adminEmail = parsed.data.adminEmail?.trim().toLowerCase();
+    const admin = adminEmail ? await deps.userRepo.findByEmail(adminEmail) : await deps.userRepo.findFirstAdmin();
     if (!admin) {
       return c.json({ error: { code: "NOT_FOUND", message: "Admin user not found" } }, 404);
+    }
+    if (adminEmail && admin.auth_role !== "admin") {
+      return c.json({ error: { code: "BAD_REQUEST", message: "User is not an admin" } }, 400);
     }
     if (!admin.slack_user_id) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Admin user has no Slack identity" } }, 400);

@@ -492,6 +492,12 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
   // would never retry until the server restarts.
   await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS);
 
+  // Same idea for enrichment: scheduled runs only claim `pending`/`failed` (so
+  // an in-flight run can't be re-claimed mid-flight and race on chunk inserts),
+  // which means a crashed run's `processing` row would otherwise be stranded
+  // until startup. Reset stale `processing` rows before each tick.
+  await recoverStaleEnrichments(db, logger);
+
   const intervalMs = await getIntervalMsFromSettings(db, DEFAULT_SYNC_INTERVAL_MS);
   const configs = await repo.findSyncableConfigs({ staleAfterMs: Math.floor(intervalMs / 2) });
 

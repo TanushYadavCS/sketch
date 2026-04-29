@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## [0.22.0] -- 2026-04-28
+
+- Agent: new `openrouter_bedrock` LLM provider mode. `applyLlmEnvFromSettings` maps DB settings into `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` env vars when provider is `openrouter_bedrock`, with validation that `apiKey` + `modelId` are present.
+- Managed system API: `PUT /api/system/llm` now accepts the `openrouter_bedrock` variant (`apiKey` + composite `modelId`), so the managed platform can write OpenRouter virtual-key credentials during provisioning/spare setup.
+- Shared: centralised `LlmProvider` type and `isLlmProvider` narrowing helper in `@sketch/shared` so onboarding/setup/web all narrow against the same union; replaced a nested ternary in `/api/setup` with the new helper.
+
+## [0.21.0] -- 2026-04-27
+
+- Workflows: implement sketch-mode agent steps. Agent steps with `agentMode: "sketch"` now run inside the full Sketch agent (MCP integrations, inbox messaging, cross-channel `sendDm`) instead of falling back to a light Claude Agent SDK call. Scheduler and bootstrap thread `inboxMessagesRepo` and `sendDm` into the automation runtime, and a shared `resolveWorkspaceKey` keeps workflow sessions aligned with channel/group/user workspaces.
+- Docs: expand `AGENTS.md` from a CLAUDE.md pointer into a full project overview mirroring the contributor guide.
+- Tests: stabilize Fireflies connector cursor expectations.
+
+## [0.20.1] -- 2026-04-27
+
+- Fix(managed onboarding): let the platform pass the onboarding admin email to `/api/system/onboarding-introductions`, so intro workflows target the current Slack onboarding admin instead of the oldest admin user. Keeps `findFirstAdmin()` only as a compatibility fallback when no email is provided.
+
 ## [0.20.0] -- 2026-04-27
 
 - Auth: move admin authentication into the `users` table with `auth_role`, preserving human/team title data in `users.role`; admins can now use password login and magic-link login, and the sidebar shows the user's auth role.

@@ -164,3 +164,106 @@ describe("runEnrichment — batch chunk insert", () => {
     }
   });
 });
+
+/**
+ * Scheduled enrichment must not claim files already in `processing` — that path
+ * lets two concurrent runs both "claim" the same file (status stays `processing`,
+ * `numUpdatedRows` is 1 for both) and race on chunk_embeddings inserts. Manual
+ * fileIds reruns are the explicit-override escape hatch.
+ */
+describe("runEnrichment — claim semantics", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  async function setStatus(fileId: string, status: "pending" | "failed" | "processing" | "done"): Promise<void> {
+    await db.updateTable("indexed_files").set({ embedding_status: status }).where("id", "=", fileId).execute();
+  }
+
+  async function getStatus(fileId: string): Promise<string | undefined> {
+    const row = await db
+      .selectFrom("indexed_files")
+      .select("embedding_status")
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    return row?.embedding_status ?? undefined;
+  }
+
+  it("scheduled run does NOT pick up files in `processing` status", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "some content here");
+    await setStatus(fileId, "processing");
+
+    const result = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null });
+
+    // The file should be untouched: not in pendingFiles, so neither processed nor skipped.
+    expect(result.filesProcessed).toBe(0);
+    expect(result.filesFailed).toBe(0);
+    expect(result.filesSkipped).toBe(0);
+    expect(await getStatus(fileId)).toBe("processing");
+  });
+
+  it("scheduled run picks up `pending` files", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "some content here");
+    await setStatus(fileId, "pending");
+
+    const result = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null });
+
+    expect(result.filesProcessed).toBe(1);
+    expect(await getStatus(fileId)).toBe("done");
+  });
+
+  it("scheduled run picks up `failed` files (retry)", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "some content here");
+    await setStatus(fileId, "failed");
+
+    const result = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null });
+
+    expect(result.filesProcessed).toBe(1);
+    expect(await getStatus(fileId)).toBe("done");
+  });
+
+  it("explicit fileIds rerun DOES claim a file in `processing` (manual override)", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "some content here");
+    await setStatus(fileId, "processing");
+
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      fileIds: [fileId],
+    });
+
+    expect(result.filesProcessed).toBe(1);
+    expect(await getStatus(fileId)).toBe("done");
+  });
+
+  it("explicit fileIds rerun DOES claim a file in `done` (manual override)", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "some content here");
+    await setStatus(fileId, "done");
+
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      fileIds: [fileId],
+    });
+
+    expect(result.filesProcessed).toBe(1);
+    expect(await getStatus(fileId)).toBe("done");
+  });
+});

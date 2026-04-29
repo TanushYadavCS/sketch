@@ -1,5 +1,6 @@
 import { CheckIcon, MinusIcon } from "@phosphor-icons/react";
 
+import type { LlmProvider } from "@sketch/shared";
 import { Button } from "@sketch/ui/components/button";
 
 interface OnboardingData {
@@ -9,8 +10,14 @@ interface OnboardingData {
   slackWorkspace?: string;
   whatsappConnected: boolean;
   whatsappPhone?: string;
-  llmProvider: "anthropic" | "bedrock";
+  llmProvider: LlmProvider;
 }
+
+const LLM_LABELS: Record<LlmProvider, string> = {
+  anthropic: "Anthropic (Sonnet)",
+  bedrock: "AWS Bedrock (Sonnet)",
+  openrouter_bedrock: "OpenRouter (Sonnet)",
+};
 
 interface StepCompletionProps {
   data: OnboardingData;
@@ -40,7 +47,7 @@ export function StepCompletion({ data, onGoToDashboard, isFinishing }: StepCompl
     },
     {
       label: "LLM",
-      value: data.llmProvider === "anthropic" ? "Anthropic (Sonnet)" : "AWS Bedrock (Sonnet)",
+      value: LLM_LABELS[data.llmProvider],
       connected: true,
     },
   ] as const;

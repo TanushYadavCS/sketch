@@ -16,6 +16,7 @@ import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import type { ExecuteAutomationParams } from "../workflows/runtime";
 import { TaskScheduler } from "./service";
 
 interface MockCronInstance {
@@ -26,10 +27,10 @@ interface MockCronInstance {
 }
 
 const mockCronInstances: MockCronInstance[] = [];
-let lastExecuteAutomationParams: { sendMessage?: (text: string) => Promise<void> } | null = null;
+let lastExecuteAutomationParams: ExecuteAutomationParams | null = null;
 
 vi.mock("../workflows/runtime", () => ({
-  executeAutomation: vi.fn().mockImplementation(async (params: { sendMessage?: (text: string) => Promise<void> }) => {
+  executeAutomation: vi.fn().mockImplementation(async (params: ExecuteAutomationParams) => {
     lastExecuteAutomationParams = params;
     return { runId: "mock-run-1", status: "completed" };
   }),
@@ -130,9 +131,14 @@ function buildDeps(
       findBySlackId: vi.fn().mockResolvedValue(undefined),
       findByWhatsApp: vi.fn().mockResolvedValue(undefined),
       findByEmail: vi.fn().mockResolvedValue(undefined),
+      getAllEmailsForUser: vi.fn().mockResolvedValue(["test@example.com"]),
       create: vi.fn(),
       update: vi.fn(),
     },
+    inboxMessagesRepo: {
+      create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
+    },
+    sendDm: vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" }),
     _mockRunAgent: mockRunAgent,
     _slack: slack,
     _whatsapp: whatsapp,
@@ -422,6 +428,25 @@ describe("executeTask() invokes automation runtime", () => {
 
     expect(executeAutomation).toHaveBeenCalledWith(
       expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
+    );
+  });
+
+  it("forwards sketch-mode agent dependencies to executeAutomation", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({ ...baseTaskFields, platform: "slack", context_type: "dm", created_by: "U_DM_USER" });
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    expect(lastExecuteAutomationParams).toEqual(
+      expect.objectContaining({
+        runAgent: deps.runAgent,
+        buildMcpServers: deps.buildMcpServers,
+        inboxMessagesRepo: deps.inboxMessagesRepo,
+        sendDm: deps.sendDm,
+        userRepo: deps.userRepo,
+      }),
     );
   });
 

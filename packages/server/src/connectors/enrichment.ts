@@ -146,7 +146,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   } else {
     query = query.where((eb) =>
       eb.or([
-        eb("embedding_status", "in", ["pending", "failed", "processing"]),
+        eb("embedding_status", "in", ["pending", "failed"]),
         eb.and([eb("embedding_status", "=", "done"), eb("summary_status", "in", ["pending", "failed"])]),
       ]),
     );
@@ -239,10 +239,13 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
         continue;
       }
 
-      // Full enrichment: optimistic lock, chunk, embed, summarize
-      const claimableStatuses = deps.fileIds
-        ? ["pending", "failed", "processing", "done"]
-        : ["pending", "failed", "processing"];
+      // Full enrichment: optimistic lock, chunk, embed, summarize.
+      // Scheduled runs only claim pending/failed — never `processing`, since
+      // that would let two concurrent runs (e.g. scheduled + manual trigger)
+      // both "claim" the same file and race on chunk_embeddings inserts.
+      // Stuck `processing` rows are recovered by `recoverStaleEnrichments`.
+      // Explicit fileIds reruns can claim any status (manual override).
+      const claimableStatuses = deps.fileIds ? ["pending", "failed", "processing", "done"] : ["pending", "failed"];
       const claimResult = await db
         .updateTable("indexed_files")
         .set({ embedding_status: "processing" })
@@ -410,20 +413,21 @@ async function enrichTextDocument(
 
       const isPostgres = isPg(db);
 
+      const pairs = storedChunks
+        .map((chunk, i) => ({ chunk, embedding: embeddings[i] }))
+        .filter((p): p is { chunk: (typeof storedChunks)[number]; embedding: number[] } => !!p.embedding);
+
       await Promise.all(
-        storedChunks
-          .filter((_, i) => !!embeddings[i])
-          .map((chunk, i) =>
-            isPostgres
-              ? sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (${chunk.id}, ${JSON.stringify(embeddings[i])}::vector)`.execute(
-                  db,
-                )
-              : sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (${chunk.id}, ${JSON.stringify(embeddings[i])})`.execute(
-                  db,
-                ),
-          ),
+        pairs.map(({ chunk, embedding }) =>
+          isPostgres
+            ? sql`INSERT INTO chunk_embeddings (chunk_id, embedding)
+                  VALUES (${chunk.id}, ${JSON.stringify(embedding)}::vector)
+                  ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(db)
+            : sql`INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding)
+                  VALUES (${chunk.id}, ${JSON.stringify(embedding)})`.execute(db),
+        ),
       );
-      logger.info({ fileId: file.id, chunks: storedChunks.length }, "Embeddings created");
+      logger.info({ fileId: file.id, chunks: pairs.length }, "Embeddings created");
     } catch (err) {
       logger.warn({ err, fileId: file.id }, "Embedding failed, entity linking still saved");
     }

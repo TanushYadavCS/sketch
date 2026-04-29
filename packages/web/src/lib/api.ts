@@ -4,7 +4,14 @@
  */
 
 import type { SkillCategory } from "@/lib/skills-data";
-import type { FileMetadata, IntegrationApp, IntegrationConnection, McpServerRecord, PageInfo } from "@sketch/shared";
+import type {
+  FileMetadata,
+  IntegrationApp,
+  IntegrationConnection,
+  LlmProvider,
+  McpServerRecord,
+  PageInfo,
+} from "@sketch/shared";
 
 export type WorkspaceScope = "personal" | "org";
 
@@ -133,7 +140,7 @@ export interface SetupStatus {
   botName: string;
   slackConnected: boolean;
   llmConnected: boolean;
-  llmProvider: "anthropic" | "bedrock" | null;
+  llmProvider: LlmProvider | null;
   managedUrl?: string;
 }
 

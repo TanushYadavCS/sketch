@@ -114,6 +114,8 @@ export interface RunAgentParams {
   botName?: string | null;
   integrationMcpServers?: Record<string, McpServerConfig>;
   findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  model?: string;
+  maxTurns?: number;
   /**
    * Controls session behaviour for scheduled tasks.
    * - "fresh": skip session resume and skip session save (fully ephemeral run)
@@ -314,7 +316,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     const run = query({
       prompt,
       options: {
-        maxTurns: 100,
+        maxTurns: params.maxTurns ?? 100,
+        ...(params.model ? { model: params.model } : {}),
         cwd: workspaceDir,
         resume: existingSessionId,
         env: { ...process.env, ...integrationAccess.envVars },

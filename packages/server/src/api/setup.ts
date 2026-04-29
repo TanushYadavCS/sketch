@@ -3,6 +3,7 @@
  * Only status/account are public; subsequent setup steps require auth.
  */
 import { randomBytes } from "node:crypto";
+import { isLlmProvider } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import { hashPassword } from "../auth/password";
@@ -158,7 +159,11 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     const hasBedrock =
       row?.llm_provider === "bedrock" &&
       Boolean(row?.aws_access_key_id?.trim() && row?.aws_secret_access_key?.trim() && row?.aws_region?.trim());
-    const hasLlm = Boolean(hasAnthropic || hasBedrock);
+    const hasOpenRouter =
+      row?.llm_provider === "openrouter_bedrock" && Boolean(row?.anthropic_api_key?.trim() && row?.model_id?.trim());
+    const hasLlm = Boolean(hasAnthropic || hasBedrock || hasOpenRouter);
+    const provider = row?.llm_provider;
+    const llmProvider = isLlmProvider(provider) ? provider : null;
     const isCompleted = Boolean(row?.onboarding_completed_at);
     const isManaged = Boolean(deps.managedUrl);
     let currentStep: number;
@@ -181,7 +186,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       botName: row?.bot_name ?? "Sketch",
       slackConnected: hasSlack,
       llmConnected: hasLlm,
-      llmProvider: row?.llm_provider === "bedrock" ? "bedrock" : row?.llm_provider === "anthropic" ? "anthropic" : null,
+      llmProvider,
       ...(deps.managedUrl ? { managedUrl: deps.managedUrl } : {}),
     });
   });
