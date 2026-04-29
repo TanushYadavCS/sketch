@@ -331,16 +331,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     const userEmails = await getUserEmails(c);
     const exists = await db
       .selectFrom("indexed_files")
-      .select([
-        "id",
-        "file_name",
-        "file_type",
-        "source",
-        "source_path",
-        "provider_url",
-        "synced_at",
-        "enrichment_status",
-      ])
+      .select(["id", "file_name", "file_type", "source", "source_path", "synced_at", "enrichment_status"])
       .where("id", "=", fileId)
       .executeTakeFirst();
     if (!exists) {
@@ -360,7 +351,6 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
               fileType: exists.file_type,
               source: exists.source,
               sourcePath: exists.source_path,
-              providerUrl: exists.provider_url,
               syncedAt: exists.synced_at,
               enrichmentStatus: exists.enrichment_status,
             },

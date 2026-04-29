@@ -219,7 +219,6 @@ interface GatedFileMeta {
   fileType: string | null;
   source: string;
   sourcePath: string | null;
-  providerUrl: string | null;
   syncedAt: string;
   enrichmentStatus: string;
 }
@@ -268,18 +267,6 @@ function GatedFileDetail({ file, access }: { file: GatedFileMeta; access: FileAc
           <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Path</p>
           <p className="mt-1 text-xs text-muted-foreground">{file.sourcePath}</p>
         </div>
-      )}
-
-      {file.providerUrl && (
-        <a
-          href={file.providerUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
-        >
-          Open in source
-          <ArrowSquareOutIcon size={12} />
-        </a>
       )}
 
       <div className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 px-4 py-8 text-center">
