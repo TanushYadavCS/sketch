@@ -124,12 +124,13 @@ Completed task files stay in `.planning/` — useful context when revisiting rel
 **Planning approach:** Don't use plan mode. Instead, write design/plan docs directly as task files in `.planning/` (e.g., `.planning/FILE_SUPPORT.md`). Discuss and refine in conversation, then write the doc when ready.
 
 **Implementation workflow:**
-1. Discuss and create a plan file in `.planning/`
+1. Discuss and create a plan file in `.planning/{topic}/to-be-developed/`
 2. Send the plan to Codex CLI for review (`codex exec`)
 3. Update the plan based on feedback, then implement
 4. Send the plan + implementation to Codex CLI for review
 5. Update if feedback
 6. Commit, update STATE.md, done
+7. **When opening a PR for a plan, move that plan file from `to-be-developed/` to `implemented/`** (same topic dir, e.g. `access/to-be-developed/FOO.md` → `access/implemented/FOO.md`). Do this as part of the PR — the move is what marks the plan as shipped. Applies to follow-up PRs that complete a plan too. Use `git mv` inside `.planning/` so the submodule history preserves rename detection.
 
 ## Reference
 
