@@ -30,3 +30,14 @@ export function denyIfCannotRead(c: Context, config: { created_by: string }, per
   if (!perUserAuth) return null;
   return denyIfCannotEdit(c, config);
 }
+
+/** File-list viewer descriptor — passed to repo helpers for RBAC. Admins bypass; others filter by email. */
+export interface FileViewer {
+  email: string | null;
+  isAdmin: boolean;
+}
+
+/** Build a FileViewer from the request context. */
+export function getFileViewer(c: Context): FileViewer {
+  return { email: c.get("email") ?? null, isAdmin: isAdmin(c) };
+}

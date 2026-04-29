@@ -28,7 +28,7 @@ import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { denyIfCannotEdit, denyIfCannotRead, denyIfNotAdmin, isAdmin } from "./auth-helpers";
+import { denyIfCannotEdit, denyIfCannotRead, denyIfNotAdmin, getFileViewer, isAdmin } from "./auth-helpers";
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -105,6 +105,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
   routes.get("/", async (c) => {
     const sub = c.get("sub");
     const callerIsAdmin = isAdmin(c);
+    const viewer = getFileViewer(c);
     const configs = await connectorRepo.listConfigs();
 
     const visible = configs.filter((cfg) => {
@@ -117,7 +118,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     const connectorsWithCounts = await Promise.all(
       visible.map(async (cfg) => {
         const meta = getConnector(cfg.connector_type as ConnectorType);
-        const fileCount = await connectorRepo.countFilesByConnector(cfg.id);
+        const fileCount = await connectorRepo.countFilesByConnector(cfg.id, viewer);
         return {
           id: cfg.id,
           connectorType: cfg.connector_type,
@@ -229,10 +230,11 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
       return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
     }
 
+    const viewer = getFileViewer(c);
     const configs = await connectorRepo.listByOwner(sub);
     const result = await Promise.all(
       configs.map(async (config) => {
-        const fileCount = await connectorRepo.countFilesByConnector(config.id);
+        const fileCount = await connectorRepo.countFilesByConnector(config.id, viewer);
         return {
           id: config.id,
           connectorType: config.connector_type,
@@ -257,10 +259,11 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     const status = c.req.query("status") || undefined;
     const access = c.req.query("access") || undefined;
 
+    const viewer = getFileViewer(c);
     const filters = { connectorType: source, category, status, access };
     const [files, total] = await Promise.all([
-      connectorRepo.listAllFiles({ limit, offset, ...filters }),
-      connectorRepo.countAllFiles(filters),
+      connectorRepo.listAllFiles({ limit, offset, viewer, ...filters }),
+      connectorRepo.countAllFiles({ viewer, ...filters }),
     ]);
 
     const fileIds = files.map((f) => f.id);
@@ -826,7 +829,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     const denied = denyIfCannotRead(c, config, meta.perUserAuth);
     if (denied) return denied;
 
-    const fileCount = await connectorRepo.countFilesByConnector(config.id);
+    const fileCount = await connectorRepo.countFilesByConnector(config.id, getFileViewer(c));
     return c.json({
       connector: {
         id: config.id,

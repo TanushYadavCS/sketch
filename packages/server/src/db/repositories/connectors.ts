@@ -13,6 +13,45 @@ import { sql } from "kysely";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
 import type { DB } from "../schema";
 
+/**
+ * File-list viewer for RBAC. Admins bypass; others match by email.
+ *
+ * Source of truth for "can a user see file X" — used by every repo function
+ * that returns indexed files to a UI. The agent/tool path is gated separately.
+ */
+export interface FileViewer {
+  email: string | null;
+  isAdmin: boolean;
+}
+
+/**
+ * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
+ *
+ *   unrestricted  = no scope AND no per-file shares
+ *   scoped        = caller is in access_scope_members for the file's scope
+ *   per-file      = caller has a row in file_access for the file
+ *
+ * v1 matches the caller's primary email only; multi-email users (Slack login email
+ * differs from connector-side email) under-see — the safe failure direction. v2 will
+ * swap `= :email` for `IN (:emails[])` once we wire `getAllEmailsForUser` through.
+ *
+ * Callers must qualify the file table as `indexed_files` (or alias to it) — the
+ * predicate references columns by that name.
+ */
+export function fileVisibilityPredicate(viewer: FileViewer) {
+  const email = viewer.email ?? "";
+  return sql<boolean>`(
+    (indexed_files.access_scope_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = indexed_files.id))
+    OR EXISTS (SELECT 1 FROM access_scope_members asm
+               WHERE asm.access_scope_id = indexed_files.access_scope_id
+                 AND asm.email = ${email})
+    OR EXISTS (SELECT 1 FROM file_access fa
+               WHERE fa.indexed_file_id = indexed_files.id
+                 AND fa.email = ${email})
+  )`;
+}
+
 export function createConnectorRepository(db: Kysely<DB>) {
   return {
     /** List all connector configs. */
@@ -626,6 +665,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       category?: string;
       status?: string;
       access?: string;
+      viewer: FileViewer;
     }) {
       let query = db
         .selectFrom("indexed_files")
@@ -674,12 +714,22 @@ export function createConnectorRepository(db: Kysely<DB>) {
       } else if (opts.access === "unrestricted") {
         query = query.where("indexed_files.access_scope_id", "is", null);
       }
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
+      }
 
-      return query.orderBy("indexed_files.synced_at", "desc").limit(opts.limit).offset(opts.offset).execute();
+      return query
+        .orderBy(
+          sql`coalesce(indexed_files.source_updated_at, indexed_files.source_created_at, indexed_files.synced_at) desc`,
+        )
+        .limit(opts.limit)
+        .offset(opts.offset)
+        .execute();
     },
 
-    /** Count non-archived files with optional filters. */
-    async countAllFiles(filters?: {
+    /** Count non-archived files with optional filters. RBAC-gated for non-admins. */
+    async countAllFiles(opts: {
+      viewer: FileViewer;
       connectorType?: string;
       category?: string;
       status?: string;
@@ -690,47 +740,57 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
 
-      if (filters?.connectorType) {
-        query = query.where("indexed_files.source", "=", filters.connectorType);
+      if (opts.connectorType) {
+        query = query.where("indexed_files.source", "=", opts.connectorType);
       }
-      if (filters?.category) {
-        query = query.where("indexed_files.content_category", "=", filters.category);
+      if (opts.category) {
+        query = query.where("indexed_files.content_category", "=", opts.category);
       }
-      if (filters?.status === "enriched") {
+      if (opts.status === "enriched") {
         query = query.where("indexed_files.summary", "is not", null);
-      } else if (filters?.status === "pending") {
+      } else if (opts.status === "pending") {
         query = query.where((eb) =>
           eb.or([
             eb("indexed_files.embedding_status", "in", ["pending", "failed"]),
             eb("indexed_files.summary_status", "in", ["pending", "failed"]),
           ]),
         );
-      } else if (filters?.status === "raw") {
+      } else if (opts.status === "raw") {
         query = query
           .where("indexed_files.summary", "is", null)
           .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
           .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
       }
-      if (filters?.access === "restricted") {
+      if (opts.access === "restricted") {
         query = query.where("indexed_files.access_scope_id", "is not", null);
-      } else if (filters?.access === "unrestricted") {
+      } else if (opts.access === "unrestricted") {
         query = query.where("indexed_files.access_scope_id", "is", null);
+      }
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
       }
 
       const result = await query.executeTakeFirstOrThrow();
       return Number(result.count);
     },
 
-    /** Count files per connector (via junction table). */
-    async countFilesByConnector(connectorConfigId: string) {
-      const result = await db
+    /**
+     * Count files for a connector (via junction table). RBAC-gated for non-admins.
+     * Drives the source-filter chip count on the Files page — must agree with the
+     * row count returned by listAllFiles for the same viewer.
+     */
+    async countFilesByConnector(connectorConfigId: string, viewer: FileViewer) {
+      let query = db
         .selectFrom("connector_files")
         .innerJoin("indexed_files", "indexed_files.id", "connector_files.indexed_file_id")
         .select(sql`count(*)`.as("count"))
         .where("connector_files.connector_config_id", "=", connectorConfigId)
-        .where("indexed_files.is_archived", "=", 0)
-        .executeTakeFirstOrThrow();
+        .where("indexed_files.is_archived", "=", 0);
+      if (!viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(viewer));
+      }
 
+      const result = await query.executeTakeFirstOrThrow();
       return Number(result.count);
     },
   };

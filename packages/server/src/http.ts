@@ -103,13 +103,13 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           user = await users.findByEmail(sub);
         }
         if (!user) return null;
-        return { id: user.id, authRole: user.auth_role };
+        return { id: user.id, authRole: user.auth_role, email: user.email };
       },
       findUserByEmail: config.MANAGED_AUTH_SECRET
         ? async (email) => {
             const user = await users.findByEmail(email);
             if (!user) return null;
-            return { id: user.id, authRole: user.auth_role };
+            return { id: user.id, authRole: user.auth_role, email: user.email };
           }
         : undefined,
     }),
