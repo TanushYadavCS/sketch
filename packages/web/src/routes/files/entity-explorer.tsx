@@ -42,6 +42,7 @@ import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useDashboardAuth } from "../dashboard";
 import { formatRelativeTime } from "./file-list";
 
 const TYPE_GROUPS: { label: string; types: string[] }[] = [
@@ -116,6 +117,8 @@ function isAiDiscovered(entity: EntityListItem): boolean {
 
 export function EntityExplorer() {
   const queryClient = useQueryClient();
+  const { role } = useDashboardAuth();
+  const isAdmin = role === "admin";
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -228,27 +231,29 @@ export function EntityExplorer() {
           Add Entity
         </Button>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" className="h-7 w-7 p-0">
-              <DotsThreeIcon size={16} />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onClick={() => {
-                setResetCategories(new Set(["connectors", "ai"]));
-                setShowResetDialog(true);
-              }}
-            >
-              <TrashIcon size={14} className="mr-1.5" />
-              Reset Entities...
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {isAdmin && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-7 w-7 p-0">
+                <DotsThreeIcon size={16} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => {
+                  setResetCategories(new Set(["connectors", "ai"]));
+                  setShowResetDialog(true);
+                }}
+              >
+                <TrashIcon size={14} className="mr-1.5" />
+                Reset Entities...
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
-        {tentativeCount > 0 && (
+        {isAdmin && tentativeCount > 0 && (
           <Button
             variant="outline"
             size="sm"
@@ -482,6 +487,8 @@ function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id
 
 function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const { role } = useDashboardAuth();
+  const isAdmin = role === "admin";
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editType, setEditType] = useState("");
@@ -709,7 +716,7 @@ function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onC
           )}
         </div>
 
-        {entity && (
+        {entity && isAdmin && (
           <div className="border-t border-border px-4 py-3">
             <Button
               size="sm"

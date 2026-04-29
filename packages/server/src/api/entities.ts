@@ -5,7 +5,7 @@ import { isPg } from "../db/dialect";
 import { fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
-import { getFileViewer } from "./auth-helpers";
+import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
 export function entityRoutes(db: Kysely<DB>) {
   const routes = new Hono();
@@ -149,14 +149,19 @@ export function entityRoutes(db: Kysely<DB>) {
   /**
    * POST /api/entities/reset
    * Delete entities by category. Body: { categories: ["manual", "connectors", "ai"] }
-   * - manual: org-type entities NOT created by AI (no metadata.origin = "ai")
-   * - connectors: entities with non-org source_types (clickup_*, notion_*, etc.)
-   * - ai: entities with metadata.origin = "ai"
+   * - connectors: came from a sync — non-org source_types (clickup_*, notion_*, …)
+   *   OR an org-typed entity with at least one entity_source_refs row (e.g. person
+   *   entities seeded from Fireflies attendee mapping).
+   * - ai: entities with metadata.origin = "ai".
+   * - manual: org-typed entities with no entity_source_refs and no AI origin —
+   *   genuinely created by hand.
    * Must be registered before /:id to prevent param capture.
    */
   const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
 
   routes.post("/reset", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const body = (await c.req.json()) as { categories?: string[] };
     const categories = new Set(body.categories ?? []);
 
@@ -168,13 +173,14 @@ export function entityRoutes(db: Kysely<DB>) {
     const includeAi = categories.has("ai");
     const includeManual = categories.has("manual");
 
+    const hasSourceRef = sql<boolean>`EXISTS (SELECT 1 FROM entity_source_refs WHERE entity_source_refs.entity_id = entities.id)`;
     const toDelete = await db
       .selectFrom("entities")
       .select("id")
       .where((eb) => {
         const parts = [];
         if (includeConnectors) {
-          parts.push(eb("source_type", "not in", ORG_SOURCE_TYPES));
+          parts.push(eb.or([eb("source_type", "not in", ORG_SOURCE_TYPES), hasSourceRef]));
         }
         if (includeAi) {
           parts.push(
@@ -185,6 +191,7 @@ export function entityRoutes(db: Kysely<DB>) {
           parts.push(
             eb.and([
               eb("source_type", "in", ORG_SOURCE_TYPES),
+              eb.not(hasSourceRef),
               eb.or([
                 eb(
                   isPg(db) ? sql`(metadata::jsonb ->> 'origin')` : sql`json_extract(metadata, '$.origin')`,
@@ -234,6 +241,8 @@ export function entityRoutes(db: Kysely<DB>) {
    * Must be registered before /:id to prevent "tentative" matching as an ID.
    */
   routes.delete("/tentative", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const typeFilter = c.req.query("type")?.split(",").filter(Boolean);
 
     let query = db.selectFrom("entities").select("id").where("status", "=", "tentative");
@@ -341,6 +350,8 @@ export function entityRoutes(db: Kysely<DB>) {
    * Delete an entity and its mentions/source refs (cascade).
    */
   routes.delete("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const entity = await repo.getEntity(c.req.param("id"));
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
