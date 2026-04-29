@@ -329,9 +329,66 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
   routes.get("/files/:fileId/content", async (c) => {
     const fileId = c.req.param("fileId");
     const userEmails = await getUserEmails(c);
+    const exists = await db
+      .selectFrom("indexed_files")
+      .select([
+        "id",
+        "file_name",
+        "file_type",
+        "source",
+        "source_path",
+        "provider_url",
+        "synced_at",
+        "enrichment_status",
+      ])
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    if (!exists) {
+      return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    }
     const file = await getFileContent(db, fileId, userEmails);
     if (!file) {
-      return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+      // Admins already see the file metadata in the list; surface name/source/etc.
+      // here so they can triage which file is gated and ask the owner. For non-admins,
+      // omit metadata — the file isn't in their list, so its name shouldn't leak.
+      const callerIsAdmin = isAdmin(c);
+      const metadata = callerIsAdmin
+        ? {
+            file: {
+              id: exists.id,
+              fileName: exists.file_name,
+              fileType: exists.file_type,
+              source: exists.source,
+              sourcePath: exists.source_path,
+              providerUrl: exists.provider_url,
+              syncedAt: exists.synced_at,
+              enrichmentStatus: exists.enrichment_status,
+            },
+            access: await (async () => {
+              const details = await connectorRepo.getFileAccessDetails(fileId);
+              return {
+                scope: details.length > 0 ? "restricted" : "unrestricted",
+                members: details.map((a) => ({
+                  email: a.email,
+                  userName: a.userName,
+                  userId: a.userId,
+                  source: a.source,
+                  mapped: !!a.userId,
+                })),
+              };
+            })(),
+          }
+        : {};
+      return c.json(
+        {
+          error: {
+            code: "FORBIDDEN",
+            message: "You don't have access to this file's contents.",
+            ...metadata,
+          },
+        },
+        403,
+      );
     }
 
     const accessDetails = await connectorRepo.getFileAccessDetails(fileId);

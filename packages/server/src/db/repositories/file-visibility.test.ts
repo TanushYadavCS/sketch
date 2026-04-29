@@ -10,8 +10,8 @@
  */
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { DB } from "../schema";
 import { createTestDb } from "../../test-utils";
+import type { DB } from "../schema";
 import { type FileViewer, createConnectorRepository } from "./connectors";
 
 describe("file-visibility predicate (RBAC for file list/count)", () => {
@@ -65,7 +65,10 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
         { id: "f-per-file-charlie", ...baseFile, provider_file_id: "p4" },
       ])
       .execute();
-    await db.insertInto("file_access").values({ indexed_file_id: "f-per-file-charlie", email: "charlie@example.com" }).execute();
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: "f-per-file-charlie", email: "charlie@example.com" })
+      .execute();
     await db
       .insertInto("connector_files")
       .values([

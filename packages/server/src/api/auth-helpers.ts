@@ -41,3 +41,13 @@ export interface FileViewer {
 export function getFileViewer(c: Context): FileViewer {
   return { email: c.get("email") ?? null, isAdmin: isAdmin(c) };
 }
+
+/**
+ * Same shape as getFileViewer but always isAdmin: false.
+ * Use for content-read endpoints (file body, mention contexts) — admin role grants
+ * ops access (manage connectors, see metadata) but does NOT confer read access to
+ * private contents. The two named call sites make the asymmetry obvious.
+ */
+export function getContentViewer(c: Context): FileViewer {
+  return { email: c.get("email") ?? null, isAdmin: false };
+}

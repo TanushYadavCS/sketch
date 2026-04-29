@@ -12,6 +12,20 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
+export class ApiRequestError extends Error {
+  status: number;
+  code: string;
+  /** Raw error object from the response — may carry extra fields beyond message/code. */
+  details: Record<string, unknown>;
+  constructor(message: string, status: number, code: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export interface User {
   id: string;
   name: string;
@@ -92,8 +106,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({ error: { code: "UNKNOWN", message: res.statusText } }))) as ApiError;
-    throw new Error(body.error.message);
+    const body = (await res.json().catch(() => ({ error: { code: "UNKNOWN", message: res.statusText } }))) as {
+      error: { code: string; message: string } & Record<string, unknown>;
+    };
+    const { code, message, ...rest } = body.error;
+    throw new ApiRequestError(message, res.status, code, rest);
   }
 
   return res.json() as Promise<T>;
@@ -895,6 +912,7 @@ export const api = {
           };
         }>;
         total: number;
+        hiddenCount: number;
       }>(`/api/entities/${id}/mentions${qs ? `?${qs}` : ""}`);
     },
     create(data: { name: string; sourceType: string; subtype?: string; aliases?: string[] }) {

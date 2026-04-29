@@ -461,10 +461,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const factsMap = factsResult.status === "fulfilled" ? factsResult.value : new Map<string, LearnedFact[]>();
 
   if (summaryResult.status === "rejected") {
-    logger.error(
-      { ...fileMeta, stage: "generateSummary", err: summaryResult.reason },
-      "smartEnrichFile: stage failed",
-    );
+    logger.error({ ...fileMeta, stage: "generateSummary", err: summaryResult.reason }, "smartEnrichFile: stage failed");
   }
   if (factsResult.status === "rejected") {
     logger.warn(

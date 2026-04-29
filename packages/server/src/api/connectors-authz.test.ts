@@ -496,12 +496,7 @@ describe("Connectors API — authorization", () => {
       ["DELETE", "/api/connectors/{id}", "fireflies", undefined],
       ["POST", "/api/connectors/{id}/syncs", "fireflies", undefined],
       ["PATCH", "/api/connectors/{id}/scope", "fireflies", JSON.stringify({ scopeConfig: {} })],
-      [
-        "POST",
-        "/api/connectors/{id}/enrichments",
-        "fireflies",
-        JSON.stringify({ fileIds: ["x"], instruction: "y" }),
-      ],
+      ["POST", "/api/connectors/{id}/enrichments", "fireflies", JSON.stringify({ fileIds: ["x"], instruction: "y" })],
       ["POST", "/api/connectors/{id}/rotate-key", "fireflies", JSON.stringify({ api_key: "new-key" })],
     ] as const;
 

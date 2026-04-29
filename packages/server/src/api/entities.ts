@@ -2,8 +2,10 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { isPg } from "../db/dialect";
+import { fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { getFileViewer } from "./auth-helpers";
 
 export function entityRoutes(db: Kysely<DB>) {
   const routes = new Hono();
@@ -360,6 +362,7 @@ export function entityRoutes(db: Kysely<DB>) {
     const since = c.req.query("since");
     const limit = Math.min(Number(c.req.query("limit")) || 20, 100);
     const offset = Number(c.req.query("offset")) || 0;
+    const viewer = getFileViewer(c);
 
     const entity = await repo.getEntity(entityId);
     if (!entity) {
@@ -399,27 +402,37 @@ export function entityRoutes(db: Kysely<DB>) {
         since,
       );
     }
+    if (!viewer.isAdmin) {
+      query = query.where(fileVisibilityPredicate(viewer));
+    }
 
     query = query.limit(limit).offset(offset);
     const mentions = await query.execute();
 
-    // Total count
-    let countQuery = db
-      .selectFrom("entity_mentions")
-      .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
-      .select(sql<number>`count(entity_mentions.id)`.as("total"))
-      .where("entity_mentions.entity_id", "=", entityId);
-    if (sourceFilter && sourceFilter.length > 0) {
-      countQuery = countQuery.where("indexed_files.source", "in", sourceFilter);
-    }
-    if (since) {
-      countQuery = countQuery.where(
-        sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
-        ">=",
-        since,
-      );
-    }
-    const countResult = await countQuery.executeTakeFirst();
+    const buildCountQuery = (gated: boolean) => {
+      let q = db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select(sql<number>`count(entity_mentions.id)`.as("total"))
+        .where("entity_mentions.entity_id", "=", entityId);
+      if (sourceFilter && sourceFilter.length > 0) {
+        q = q.where("indexed_files.source", "in", sourceFilter);
+      }
+      if (since) {
+        q = q.where(
+          sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+          ">=",
+          since,
+        );
+      }
+      if (gated) q = q.where(fileVisibilityPredicate(viewer));
+      return q;
+    };
+
+    const visibleCount = Number((await buildCountQuery(!viewer.isAdmin).executeTakeFirst())?.total ?? 0);
+    const hiddenCount = viewer.isAdmin
+      ? 0
+      : Math.max(0, Number((await buildCountQuery(false).executeTakeFirst())?.total ?? 0) - visibleCount);
 
     return c.json({
       mentions: mentions.map((m) => ({
@@ -437,7 +450,8 @@ export function entityRoutes(db: Kysely<DB>) {
           providerUrl: m.provider_url,
         },
       })),
-      total: Number(countResult?.total ?? 0),
+      total: visibleCount,
+      hiddenCount,
     });
   });
 

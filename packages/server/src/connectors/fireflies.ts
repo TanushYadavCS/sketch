@@ -232,7 +232,10 @@ function matchSpeakerToEmail(speakerName: string, emails: string[]): string | nu
  * only and let the contacts directory provide a name-only fallback for
  * un-matched participants we have a real contact name for.
  */
-function buildAttendees(transcript: FirefliesTranscript, contacts: Map<string, string>): Array<{ name?: string; email?: string }> {
+function buildAttendees(
+  transcript: FirefliesTranscript,
+  contacts: Map<string, string>,
+): Array<{ name?: string; email?: string }> {
   const allEmails: string[] = [];
   if (transcript.organizer_email) allEmails.push(transcript.organizer_email);
   for (const p of transcript.participants) {
