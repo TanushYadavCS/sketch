@@ -442,6 +442,13 @@ export interface SyncSchedulerDeps {
  */
 export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSchedulerDeps): Promise<void> {
   const repo = createConnectorRepository(db);
+
+  // Scheduled enrichment now only claims `pending`/`failed` files (so two
+  // concurrent runs can't both claim the same file and race on chunk inserts).
+  // Reset stale `processing` rows here so a crashed run is recovered within
+  // one tick instead of waiting for restart.
+  await recoverStaleEnrichments(db, logger);
+
   const configs = await repo.findSyncableConfigs();
 
   logger.info({ connectorCount: configs.length }, "Starting scheduled sync run");
