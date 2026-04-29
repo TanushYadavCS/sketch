@@ -81,6 +81,20 @@ function FilesPage() {
 
   const connectors = connectorsData?.connectors ?? [];
 
+  // Viewer-aware file count per source. Connector-row counts under-count for
+  // members who have file-access via meetings someone else's connector synced;
+  // this aggregates from indexed_files so chips agree with the file list.
+  const { data: sourceCountsData } = useQuery({
+    queryKey: ["file-counts-by-source"],
+    queryFn: () => api.integrations.fileCountsBySource(),
+    refetchInterval: 30000,
+  });
+  const sourceCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const r of sourceCountsData?.counts ?? []) map.set(r.source, r.count);
+    return map;
+  }, [sourceCountsData]);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const oauthStatus = params.get("oauth");
@@ -276,6 +290,7 @@ function FilesPage() {
         <>
           <ConnectorPicker
             connectors={connectors}
+            sourceCounts={sourceCounts}
             totalFiles={totalFiles}
             localFileCount={localFileCount}
             sourceFilter={sourceFilter}

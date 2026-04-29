@@ -66,6 +66,7 @@ const SYNC_INTERVAL_OPTIONS = [
 
 export function ConnectorPicker({
   connectors,
+  sourceCounts,
   totalFiles,
   localFileCount,
   sourceFilter,
@@ -76,6 +77,8 @@ export function ConnectorPicker({
   onForcedConnectDone,
 }: {
   connectors: ConnectorConfig[];
+  /** Viewer-aware file count by source. Source of truth for chip counts. */
+  sourceCounts: Map<string, number>;
   totalFiles: number;
   localFileCount: number;
   sourceFilter: string | null;
@@ -94,15 +97,15 @@ export function ConnectorPicker({
   const isAdmin = auth.role === "admin";
 
   const connectedByType = new Map<string, ConnectorConfig>();
-  // Aggregate across multiple configs of the same type — per-user integrations like
-  // Fireflies have one config per user, and the filter chip should show workspace-wide
-  // totals so admins and members see the same Files view.
-  const aggregatedByType = new Map<string, { fileCount: number; syncStatus: string }>();
+  // aggregatedByType drives sync-status indicator on the chip (which is
+  // connector-row data). Chip *counts* read from `sourceCounts` so a member with
+  // file-access via meetings whose connector row they can't see still sees a
+  // count that matches the file list.
+  const aggregatedByType = new Map<string, { syncStatus: string }>();
   for (const c of connectors) {
     connectedByType.set(c.connectorType, c);
     const cur = aggregatedByType.get(c.connectorType);
     aggregatedByType.set(c.connectorType, {
-      fileCount: (cur?.fileCount ?? 0) + (c.fileCount ?? 0),
       syncStatus: cur ? mergeStatus(cur.syncStatus, c.syncStatus) : c.syncStatus,
     });
   }
@@ -144,7 +147,11 @@ export function ConnectorPicker({
 
         {INTEGRATIONS.map((def) => {
           const agg = aggregatedByType.get(def.type);
-          if (!agg) return null;
+          const count = sourceCounts.get(def.type) ?? 0;
+          // Render if the viewer either owns/can see a connector row of this
+          // type (status info available), or has file-access to indexed files
+          // of this source (count > 0). Skip otherwise.
+          if (!agg && count === 0) return null;
           return (
             <SourceChip
               key={def.type}
@@ -152,10 +159,10 @@ export function ConnectorPicker({
               onClick={() => onSourceFilterChange(sourceFilter === def.type ? null : def.type)}
               onClear={() => onSourceFilterChange(null)}
               label={def.name}
-              count={agg.fileCount}
+              count={count}
               color={def.color}
               connectorType={def.type}
-              status={agg.syncStatus}
+              status={agg?.syncStatus}
             />
           );
         })}

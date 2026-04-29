@@ -158,4 +158,49 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
       }
     });
   });
+
+  describe("countFilesBySource — viewer-aware chip aggregation", () => {
+    it("admin sees every file in the source bucket", async () => {
+      const repo = createConnectorRepository(db);
+      const counts = await repo.countFilesBySource(adminViewer);
+      expect(counts).toEqual([{ source: "google_drive", count: 4 }]);
+    });
+
+    it("alice sees unrestricted + scope-a", async () => {
+      const repo = createConnectorRepository(db);
+      const counts = await repo.countFilesBySource(member("alice@example.com"));
+      expect(counts).toEqual([{ source: "google_drive", count: 2 }]);
+    });
+
+    it("charlie sees unrestricted + their per-file share", async () => {
+      const repo = createConnectorRepository(db);
+      const counts = await repo.countFilesBySource(member("charlie@example.com"));
+      expect(counts).toEqual([{ source: "google_drive", count: 2 }]);
+    });
+
+    it("stranger and null-email see only unrestricted", async () => {
+      const repo = createConnectorRepository(db);
+      const stranger = await repo.countFilesBySource(member("stranger@example.com"));
+      expect(stranger).toEqual([{ source: "google_drive", count: 1 }]);
+      const anon = await repo.countFilesBySource(nullEmail);
+      expect(anon).toEqual([{ source: "google_drive", count: 1 }]);
+    });
+
+    it("count per source agrees with list length filtered by that source for every viewer", async () => {
+      const repo = createConnectorRepository(db);
+      for (const viewer of [
+        adminViewer,
+        member("alice@example.com"),
+        member("bob@example.com"),
+        member("charlie@example.com"),
+        member("stranger@example.com"),
+        nullEmail,
+      ]) {
+        const counts = await repo.countFilesBySource(viewer);
+        const list = await repo.listAllFiles({ limit: 50, offset: 0, viewer, connectorType: "google_drive" });
+        const chip = counts.find((c) => c.source === "google_drive")?.count ?? 0;
+        expect({ viewer: viewer.email, chip }).toEqual({ viewer: viewer.email, chip: list.length });
+      }
+    });
+  });
 });

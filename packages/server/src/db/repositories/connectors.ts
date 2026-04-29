@@ -775,6 +775,29 @@ export function createConnectorRepository(db: Kysely<DB>) {
     },
 
     /**
+     * Count visible files grouped by source. RBAC-gated for non-admins.
+     *
+     * Drives the source-filter chip on the Files page. Connector rows are filtered
+     * by ownership for per-user types (Fireflies etc.), so summing `fileCount`
+     * across visible rows under-counts for a viewer who has file-access via
+     * meetings someone else's connector synced. Aggregating directly from
+     * indexed_files with the same predicate the list uses keeps chip + list
+     * counts in agreement for every viewer.
+     */
+    async countFilesBySource(viewer: FileViewer): Promise<Array<{ source: string; count: number }>> {
+      let query = db
+        .selectFrom("indexed_files")
+        .select(["indexed_files.source", sql<number>`count(*)`.as("count")])
+        .where("indexed_files.is_archived", "=", 0)
+        .groupBy("indexed_files.source");
+      if (!viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(viewer));
+      }
+      const rows = await query.execute();
+      return rows.map((r) => ({ source: r.source, count: Number(r.count) }));
+    },
+
+    /**
      * Count files for a connector (via junction table). RBAC-gated for non-admins.
      * Drives the source-filter chip count on the Files page — must agree with the
      * row count returned by listAllFiles for the same viewer.

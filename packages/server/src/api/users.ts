@@ -243,13 +243,11 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     // Archive any per-user connectors (Fireflies etc.) before removing the user.
     // Scrubs credentials and disables future syncs; leaves indexed_files intact so
     // other attendees still see previously-synced meetings via file_access.
-    try {
-      const result = await createConnectorRepository(deps.db).archiveConnectorsForOwner(id);
-      if (result.archived > 0) {
-        deps.logger.info({ userId: id, count: result.archived }, "Archived connectors after user removal");
-      }
-    } catch (err) {
-      deps.logger.error({ err, userId: id }, "Failed to archive user connectors");
+    // Fail-noisy: if archival throws we let the 500 surface so the admin retries
+    // rather than silently leaving credentials in DB after the user row is gone.
+    const result = await createConnectorRepository(deps.db).archiveConnectorsForOwner(id);
+    if (result.archived > 0) {
+      deps.logger.info({ userId: id, count: result.archived }, "Archived connectors after user removal");
     }
 
     await users.remove(id);

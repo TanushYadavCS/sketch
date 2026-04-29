@@ -434,6 +434,16 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     return c.json({ sources });
   });
 
+  /**
+   * Visible file count per source for the caller. Drives the source-filter chips
+   * on the Files page so they agree with the file-list view, even when the caller
+   * has access via per-file shares to files whose connector row they can't see.
+   */
+  routes.get("/file-counts-by-source", async (c) => {
+    const counts = await connectorRepo.countFilesBySource(getFileViewer(c));
+    return c.json({ counts });
+  });
+
   /** Live sync/enrichment progress + pending enrichment count. */
   routes.get("/progress", async (c) => {
     const [pendingResult, summaryStats] = await Promise.all([

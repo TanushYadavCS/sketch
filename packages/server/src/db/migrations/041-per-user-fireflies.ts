@@ -3,8 +3,12 @@
  *  - credential_hint: last few chars of the API key, stored unencrypted for list views.
  *    Generalizes to any API-key/OAuth-token connector.
  *  - Partial unique index: at most one Fireflies config per (created_by) user.
- *  - Backfill the existing 'admin'-owned Fireflies row to the actual admin user id.
- *    The "admin" is the first user created — there is no DB-level admin role flag.
+ *  - Backfill the existing 'admin'-owned Fireflies row to the earliest admin user.
+ *    Filters by auth_role = 'admin' so a non-admin user (e.g. a teammate created
+ *    before the admin) doesn't inherit ownership and the rotate/delete authority
+ *    that comes with it. If no admin exists yet, the row stays with the literal
+ *    'admin' string (which matches no user id) — safe; admin can re-claim by
+ *    re-connecting from Settings.
  */
 import { type Kysely, sql } from "kysely";
 
@@ -19,10 +23,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await sql`
     UPDATE connector_configs
-    SET created_by = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
+    SET created_by = (SELECT id FROM users WHERE auth_role = 'admin' ORDER BY created_at ASC LIMIT 1)
     WHERE connector_type = 'fireflies'
       AND created_by = 'admin'
-      AND EXISTS (SELECT 1 FROM users)
+      AND EXISTS (SELECT 1 FROM users WHERE auth_role = 'admin')
   `.execute(db);
 }
 

@@ -504,6 +504,9 @@ export const api = {
     files(id: string) {
       return request<{ files: ConnectorFile[] }>(`/api/connectors/${id}/files`);
     },
+    fileCountsBySource() {
+      return request<{ counts: Array<{ source: string; count: number }> }>("/api/connectors/file-counts-by-source");
+    },
     allFiles(opts?: {
       limit?: number;
       offset?: number;
