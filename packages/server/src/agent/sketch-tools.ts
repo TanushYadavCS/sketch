@@ -42,6 +42,7 @@ interface SearchableUserRepo {
   findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
   searchByNamePrefix?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
   searchByNameSubstring?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+  update?: (id: string, data: { timezone?: string | null }) => Promise<SelectableUser>;
 }
 
 export class UploadCollector {
@@ -138,7 +139,12 @@ const manageScheduledTasksSchema = {
 For interval: number of seconds as a plain string, minimum 60. Examples: '120' (every 2 min), '3600' (every hour). Do not use duration strings like '2m' or '1h'.
 For once: ISO 8601 datetime string (e.g. '2026-03-14T15:00:00'). The task runs once at this time then auto-completes.`,
     ),
-  timezone: z.string().optional().describe("IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Defaults to UTC."),
+  timezone: z
+    .string()
+    .optional()
+    .describe(
+      "IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Leave empty in the common case — the user's timezone (shown in <time>) is used automatically. Only set this when the user explicitly names a different timezone for the task.",
+    ),
   session_mode: z
     .enum(["fresh", "persistent", "chat"])
     .optional()
@@ -325,10 +331,12 @@ export async function handleManageScheduledTasks(
         }
       }
 
+      const resolvedTimezone = params.timezone ?? ctx.creatorTimezone ?? "UTC";
+
       if (params.schedule_type === "cron") {
         try {
           const { Cron } = await import("croner");
-          new Cron(params.schedule_value as string, { timezone: params.timezone ?? "UTC" });
+          new Cron(params.schedule_value as string, { timezone: resolvedTimezone });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return text(`Error: invalid cron expression '${params.schedule_value}': ${msg}`);
@@ -389,7 +397,7 @@ export async function handleManageScheduledTasks(
         prompt: title,
         scheduleType,
         scheduleValue,
-        timezone: params.timezone,
+        timezone: resolvedTimezone,
         sessionMode,
         createdBy: ctx.createdBy,
         title: params.title,
@@ -590,6 +598,45 @@ export async function handleManageScheduledTasks(
 }
 
 type ToolResult = { content: { type: "text"; text: string }[] };
+
+/**
+ * Validates a candidate IANA timezone by attempting to construct an Intl
+ * formatter with it. Avoids pulling in a hardcoded list — the runtime's
+ * tz database is the authoritative source.
+ */
+function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function handleSetUserTimezone(
+  params: { timezone: string },
+  deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.userRepo || !deps.userRepo.update || !deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Timezone update is not available in this context." }] };
+  }
+  const tz = params.timezone.trim();
+  if (!tz) {
+    return { content: [{ type: "text" as const, text: "Error: timezone is required." }] };
+  }
+  if (!isValidTimezone(tz)) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Error: '${tz}' is not a valid IANA timezone. Examples: 'Asia/Kolkata', 'America/New_York', 'Europe/London'.`,
+        },
+      ],
+    };
+  }
+  await deps.userRepo.update(deps.currentUserId, { timezone: tz });
+  return { content: [{ type: "text" as const, text: `Timezone set to ${tz}.` }] };
+}
 
 export async function handleGetTeamDirectory(
   deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
@@ -972,6 +1019,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       "Discover team members and their roles. Returns all team members except yourself.",
       {},
       async () => handleGetTeamDirectory(deps),
+    ),
+
+    tool(
+      "SetUserTimezone",
+      "Update the current user's timezone. Use IANA names (e.g. 'Asia/Kolkata', 'America/New_York', 'Europe/London'). Call this when the user explicitly asks to change their timezone — the system already auto-resolves a default from Slack profile / WhatsApp country code.",
+      {
+        timezone: z.string().describe("IANA timezone name, e.g. 'Asia/Kolkata' or 'America/New_York'."),
+      },
+      async (params) => handleSetUserTimezone(params, deps),
     ),
 
     tool(

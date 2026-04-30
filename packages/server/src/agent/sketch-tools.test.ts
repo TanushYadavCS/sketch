@@ -12,6 +12,7 @@ import {
   handleSearchUsers,
   handleSendMessageToUser,
   handleSendMessageToUsers,
+  handleSetUserTimezone,
   handleUpdateInboxWorkflow,
 } from "./sketch-tools";
 
@@ -133,6 +134,60 @@ describe("handleGetTeamDirectory", () => {
   it("returns an error when userRepo is unavailable", async () => {
     const result = await handleGetTeamDirectory({ userRepo: undefined, currentUserId: "user-alice" });
     expect(result.content[0].text).toBe("Team directory not available.");
+  });
+});
+
+describe("handleSetUserTimezone", () => {
+  it("persists a valid IANA timezone for the current user", async () => {
+    const update = vi.fn().mockResolvedValue(makeUser({ id: "user-alice", timezone: "Asia/Kolkata" }));
+    const result = await handleSetUserTimezone(
+      { timezone: "Asia/Kolkata" },
+      { userRepo: makeUserRepoMock({ update }), currentUserId: "user-alice" },
+    );
+
+    expect(update).toHaveBeenCalledWith("user-alice", { timezone: "Asia/Kolkata" });
+    expect(result.content[0].text).toBe("Timezone set to Asia/Kolkata.");
+  });
+
+  it("trims whitespace before validating", async () => {
+    const update = vi.fn().mockResolvedValue(makeUser({ id: "user-alice", timezone: "Europe/London" }));
+    const result = await handleSetUserTimezone(
+      { timezone: "  Europe/London  " },
+      { userRepo: makeUserRepoMock({ update }), currentUserId: "user-alice" },
+    );
+
+    expect(update).toHaveBeenCalledWith("user-alice", { timezone: "Europe/London" });
+    expect(result.content[0].text).toBe("Timezone set to Europe/London.");
+  });
+
+  it("rejects an invalid timezone without persisting", async () => {
+    const update = vi.fn();
+    const result = await handleSetUserTimezone(
+      { timezone: "Not/Real" },
+      { userRepo: makeUserRepoMock({ update }), currentUserId: "user-alice" },
+    );
+
+    expect(update).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("not a valid IANA timezone");
+  });
+
+  it("rejects an empty timezone string", async () => {
+    const update = vi.fn();
+    const result = await handleSetUserTimezone(
+      { timezone: "   " },
+      { userRepo: makeUserRepoMock({ update }), currentUserId: "user-alice" },
+    );
+
+    expect(update).not.toHaveBeenCalled();
+    expect(result.content[0].text).toBe("Error: timezone is required.");
+  });
+
+  it("returns an error when userRepo or currentUserId is missing", async () => {
+    const result = await handleSetUserTimezone(
+      { timezone: "Asia/Kolkata" },
+      { userRepo: undefined, currentUserId: "user-alice" },
+    );
+    expect(result.content[0].text).toBe("Timezone update is not available in this context.");
   });
 });
 
