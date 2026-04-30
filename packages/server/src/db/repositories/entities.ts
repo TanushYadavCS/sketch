@@ -93,6 +93,11 @@ export function createEntityRepository(db: Kysely<DB>) {
       return db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirst();
     },
 
+    async getEntities(ids: string[]) {
+      if (ids.length === 0) return [];
+      return db.selectFrom("entities").selectAll().where("id", "in", ids).execute();
+    },
+
     async getEntitiesBySourceType(sourceType: string) {
       return db.selectFrom("entities").selectAll().where("source_type", "=", sourceType).execute();
     },
@@ -226,7 +231,10 @@ export function createEntityRepository(db: Kysely<DB>) {
 
     // ── Search ──
 
-    async searchEntities(query: string, opts?: { sourceTypes?: string[]; limit?: number }) {
+    async searchEntities(
+      query: string,
+      opts?: { sourceTypes?: string[]; limit?: number; sortBy?: "relevance" | "recency" },
+    ) {
       const pattern = `%${query}%`;
       let q = db
         .selectFrom("entities")
@@ -236,6 +244,33 @@ export function createEntityRepository(db: Kysely<DB>) {
       if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
         q = q.where("source_type", "in", opts.sourceTypes);
       }
+
+      if (opts?.sortBy === "recency") {
+        // Most-recent activity per entity. LEFT JOIN against the aggregated
+        // derived table so entities with zero mentions still appear; coalesce
+        // the timestamp to '' so DESC ordering puts them last in both SQLite
+        // (NULLS-last default) and Postgres (NULLS-first default) without
+        // resorting to dialect-specific NULLS LAST syntax.
+        const lastActivityByEntity = db
+          .selectFrom("entity_mentions")
+          .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+          .select((eb) => [
+            "entity_mentions.entity_id",
+            eb.fn
+              .max(
+                sql<string>`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+              )
+              .as("last_activity"),
+          ])
+          .groupBy("entity_mentions.entity_id")
+          .as("la");
+
+        q = q
+          .leftJoin(lastActivityByEntity, "la.entity_id", "entities.id")
+          .orderBy(sql`COALESCE(la.last_activity, '')`, "desc")
+          .orderBy("entities.name", "asc");
+      }
+
       q = q.limit(opts?.limit ?? 50);
       return q.execute();
     },

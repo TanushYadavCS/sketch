@@ -47,6 +47,7 @@ import * as m040 from "./migrations/040-user-auth-role";
 import * as m041 from "./migrations/041-per-user-fireflies";
 import * as m042 from "./migrations/042-agent-environment-variables";
 import * as m043 from "./migrations/043-sketch-api-key";
+import * as m048 from "./migrations/048-entity-mentions-composite-index";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -98,6 +99,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "041-per-user-fireflies": m041,
           "042-agent-environment-variables": m042,
           "043-sketch-api-key": m043,
+          "048-entity-mentions-composite-index": m048,
         };
       },
     },
