@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.23.0] -- 2026-04-30
+
+- Connectors: add per-user versus org-wide authorization for integrations, including Fireflies per-user sync support and connector credential visibility controls.
+- Files/Search: enforce RBAC across file lists, file details, entity mentions, and connector-backed search so users only see content they are allowed to access.
+- Enrichment: fix Fireflies transcript prompt bloat and close a chunk embedding race during enrichment.
+- Fix(managed OpenRouter): `PUT /api/system/llm` now creates the singleton settings row before storing `openrouter_bedrock` credentials. Newly provisioned spare tenants can persist the managed OpenRouter virtual key and model id even before onboarding creates identity settings.
+
 ## [0.22.0] -- 2026-04-28
 
 - Agent: new `openrouter_bedrock` LLM provider mode. `applyLlmEnvFromSettings` maps DB settings into `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` env vars when provider is `openrouter_bedrock`, with validation that `apiKey` + `modelId` are present.

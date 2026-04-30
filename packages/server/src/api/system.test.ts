@@ -837,6 +837,36 @@ describe("PUT /api/system/llm", () => {
     expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
   });
 
+  it("creates settings before storing OpenRouter Bedrock credentials when the row is missing", async () => {
+    await db.deleteFrom("settings").where("id", "=", "default").execute();
+    const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/llm", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "openrouter_bedrock",
+        apiKey: "sk-or-v1-tenant-virtual-key",
+        modelId: "anthropic/claude-sonnet-4.6@preset/sketch-bedrock",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+
+    const settings = await settingsRepo.get();
+    expect(settings?.llm_provider).toBe("openrouter_bedrock");
+    expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
+    expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+
+    const rawApiKey = await rawField(db, "anthropic_api_key");
+    expect(typeof rawApiKey).toBe("string");
+    expect((rawApiKey as string).startsWith("enc:")).toBe(true);
+  });
+
   it("rejects openrouter_bedrock without modelId", async () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });

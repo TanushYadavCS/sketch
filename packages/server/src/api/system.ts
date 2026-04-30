@@ -169,6 +169,12 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
 export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
   const routes = new Hono();
 
+  async function ensureSettingsRow() {
+    if (!(await settings.get())) {
+      await settings.create();
+    }
+  }
+
   routes.use("/*", async (c, next) => {
     const auth = c.req.header("Authorization");
     if (!auth || auth !== `Bearer ${deps.systemSecret}`) {
@@ -254,6 +260,8 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const data = parsed.data;
+    await ensureSettingsRow();
+
     if (data.provider === "anthropic") {
       try {
         await verifyAnthropicApiKey(data.apiKey);
