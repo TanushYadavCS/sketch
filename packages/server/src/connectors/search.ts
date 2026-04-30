@@ -1104,6 +1104,39 @@ async function browseLatest(
   if (opts.sources?.length) q = q.where("source", "in", opts.sources);
   if (opts.fileIds?.length) q = q.where("id", "in", opts.fileIds);
 
+  if ((opts.userEmails ?? []).length > 0) {
+    const userEmails = opts.userEmails ?? [];
+    q = q.where((eb) =>
+      eb.or([
+        eb.and([
+          eb("indexed_files.access_scope_id", "is", null),
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom("file_access")
+                .select("indexed_file_id")
+                .whereRef("file_access.indexed_file_id", "=", "indexed_files.id"),
+            ),
+          ),
+        ]),
+        eb.exists(
+          eb
+            .selectFrom("access_scope_members")
+            .select("access_scope_id")
+            .whereRef("access_scope_members.access_scope_id", "=", "indexed_files.access_scope_id")
+            .where("access_scope_members.email", "in", userEmails),
+        ),
+        eb.exists(
+          eb
+            .selectFrom("file_access")
+            .select("indexed_file_id")
+            .whereRef("file_access.indexed_file_id", "=", "indexed_files.id")
+            .where("file_access.email", "in", userEmails),
+        ),
+      ]),
+    );
+  }
+
   if (opts.after || opts.before) {
     const after = opts.after;
     const before = opts.before;
@@ -1133,17 +1166,7 @@ async function browseLatest(
 
   const rows = await q.execute();
 
-  const allowedIds =
-    (opts.userEmails ?? []).length > 0
-      ? await filterAccessibleFileIds(
-          db,
-          rows.map((r) => r.id),
-          opts.userEmails ?? [],
-        )
-      : new Set(rows.map((r) => r.id));
-  const visible = rows.filter((r) => allowedIds.has(r.id));
-
-  return visible.slice(0, opts.limit).map((f) => ({
+  return rows.slice(0, opts.limit).map((f) => ({
     id: f.id,
     fileName: f.file_name,
     providerUrl: f.provider_url,
