@@ -22,6 +22,8 @@ export interface GenerateOptions {
   maxTokens?: number;
   /** Response MIME type — set to "application/json" for structured output. */
   responseMimeType?: string;
+  /** Caller label included in error messages and diagnostic logs (e.g. "extractEntities"). */
+  label?: string;
 }
 
 export function createGeminiGenerator(apiKey: string) {
@@ -31,14 +33,17 @@ export function createGeminiGenerator(apiKey: string) {
    * Generate text from a prompt.
    */
   async function generate(prompt: string, opts?: GenerateOptions): Promise<string> {
+    const maxTokens = opts?.maxTokens ?? DEFAULT_MAX_TOKENS;
     const config: Record<string, unknown> = {
-      maxOutputTokens: opts?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      maxOutputTokens: maxTokens,
       thinkingConfig: { thinkingBudget: 0 },
     };
 
     if (opts?.responseMimeType) {
       config.responseMimeType = opts.responseMimeType;
     }
+
+    const labelPrefix = opts?.label ? `[${opts.label}] ` : "";
 
     const response: GenerateContentResponse = await ai.models.generateContent({
       model: MODEL,
@@ -52,13 +57,18 @@ export function createGeminiGenerator(apiKey: string) {
     const candidate = response.candidates?.[0];
     const finishReason = candidate?.finishReason;
     const text = response.text;
+    const usage = response.usageMetadata;
 
     if (!text) {
-      throw new Error(`Gemini: no text in response (finishReason: ${finishReason})`);
+      throw new Error(
+        `Gemini ${labelPrefix}no text in response (finishReason: ${finishReason}, promptChars: ${prompt.length}, maxTokens: ${maxTokens}, promptTokens: ${usage?.promptTokenCount ?? "?"}, candidatesTokens: ${usage?.candidatesTokenCount ?? "?"})`,
+      );
     }
 
     if (finishReason === "MAX_TOKENS") {
-      throw new Error(`Gemini: response truncated (MAX_TOKENS), got ${text.length} chars. Increase maxOutputTokens.`);
+      throw new Error(
+        `Gemini ${labelPrefix}response truncated (MAX_TOKENS), got ${text.length} chars (promptChars: ${prompt.length}, maxTokens: ${maxTokens}, promptTokens: ${usage?.promptTokenCount ?? "?"}, candidatesTokens: ${usage?.candidatesTokenCount ?? "?"}). Increase maxOutputTokens.`,
+      );
     }
 
     return text;
@@ -70,11 +80,12 @@ export function createGeminiGenerator(apiKey: string) {
    */
   async function generateJSON<T>(prompt: string, opts?: Omit<GenerateOptions, "responseMimeType">): Promise<T> {
     const text = await generate(prompt, { ...opts, responseMimeType: "application/json" });
+    const labelPrefix = opts?.label ? `[${opts.label}] ` : "";
     try {
       return JSON.parse(text) as T;
     } catch (err) {
       throw new Error(
-        `Gemini: failed to parse JSON response (${text.length} chars, starts: ${text.slice(0, 100)}): ${err instanceof Error ? err.message : err}`,
+        `Gemini ${labelPrefix}failed to parse JSON response (${text.length} chars, starts: ${text.slice(0, 100)}): ${err instanceof Error ? err.message : err}`,
       );
     }
   }

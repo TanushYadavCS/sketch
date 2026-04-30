@@ -12,7 +12,7 @@ export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear" | "
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
-export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error";
+export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" | "disabled";
 
 export type ContentCategory = "document" | "structured";
 
@@ -85,6 +85,12 @@ export interface SyncedItem {
    */
   assignees?: Array<{ name: string; email?: string }>;
   /**
+   * People meaningfully attached to this item (meeting speakers, doc authors).
+   * Sync seeds person entities from entries where `name` is present; entries
+   * with only `email` are ignored — `accessEmails` already covers ACL.
+   */
+  attendees?: Array<{ name?: string; email?: string }>;
+  /**
    * Parent structural entities this item belongs to (e.g., ClickUp folder/space,
    * Google Drive folder). Linked via entity_mentions during sync.
    * `source` + `sourceId` are used to look up the entity.
@@ -136,6 +142,20 @@ export interface Connector {
   readonly type: ConnectorType;
 
   /**
+   * Whether each user holds their own credential row in connector_configs.
+   * true  = per-user (any authenticated user can create their own; one row per user)
+   * false = org-wide (a single shared credential drives sync for everyone; admin-only)
+   */
+  readonly perUserAuth: boolean;
+
+  /**
+   * Whether an admin must populate provider Client ID/Secret in `settings`
+   * before any user can authorize. Used to surface a "Ask your admin to
+   * configure X first" empty state. Currently only Google Drive.
+   */
+  readonly requiresOAuthClientSetup: boolean;
+
+  /**
    * File types that should be promoted to entities during sync.
    * e.g. Linear returns ["project"] — synced Linear projects become entities.
    * Connectors that seed entities directly via onEntitySeed (e.g. Notion) leave this empty.
@@ -148,12 +168,6 @@ export interface Connector {
    * different conventions (e.g. ClickUp uses `clickup:assignee:{name}`).
    */
   assigneeSourceRefKey?(assigneeName: string): string;
-
-  /**
-   * Whether this connector seeds person entities from file access lists.
-   * If true, sync will create person entities from item.accessEmails.
-   */
-  readonly seedPersonsFromAccess?: boolean;
 
   /** Validate credentials work (test API call). */
   validateCredentials(credentials: ConnectorCredentials): Promise<void>;

@@ -93,6 +93,7 @@ export interface ConnectorConfigsTable {
   last_synced_at: string | null;
   error_message: string | null;
   browse_cache: string | null;
+  credential_hint: string | null;
   created_by: string;
   created_at: Generated<string>;
   updated_at: Generated<string>;

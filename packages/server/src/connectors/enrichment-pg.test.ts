@@ -115,6 +115,36 @@ describe("chunk_embeddings on Postgres", () => {
 
     expect(rows.rows).toHaveLength(0);
   });
+
+  it("upserts chunk_embeddings with ON CONFLICT DO UPDATE (idempotent re-insert)", async () => {
+    // Production code does this on every embedding insert so a concurrent
+    // enrichment run (e.g. scheduled + manual) for the same file no longer
+    // throws `UNIQUE constraint failed on chunk_embeddings primary key`.
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+
+    const chunkId = randomUUID();
+    await db
+      .insertInto("document_chunks")
+      .values({ id: chunkId, indexed_file_id: fileId, chunk_index: 0, content: "hello", token_count: 1 })
+      .execute();
+
+    const vec1 = makeVector(EMBEDDING_DIMENSIONS, { 0: 0.1 });
+    const vec2 = makeVector(EMBEDDING_DIMENSIONS, { 0: 0.9 });
+
+    await sql`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (${chunkId}, ${vec1}::vector)`.execute(db);
+    await sql`
+      INSERT INTO chunk_embeddings (chunk_id, embedding)
+      VALUES (${chunkId}, ${vec2}::vector)
+      ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding
+    `.execute(db);
+
+    const rows = await sql<{ chunk_id: string }>`
+      SELECT chunk_id FROM chunk_embeddings WHERE chunk_id = ${chunkId}
+    `.execute(db);
+
+    expect(rows.rows).toHaveLength(1);
+  });
 });
 
 describe("file_embeddings on Postgres", () => {

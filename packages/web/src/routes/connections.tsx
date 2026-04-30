@@ -67,7 +67,11 @@ type IntegrationsTab = "applications" | "mcps";
 
 function ConnectionsPage() {
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<IntegrationsTab>("applications");
+  const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
+    if (typeof window === "undefined") return "applications";
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return tab === "mcps" ? "mcps" : "applications";
+  });
 
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],

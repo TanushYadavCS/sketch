@@ -67,6 +67,26 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await runMigrations(db);
   logger.info("Database ready");
 
+  // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.
+  // If no users exist yet, the row stays owned by 'admin' and never becomes editable
+  // through the per-user UI — surface a warning so an operator can clean up later.
+  try {
+    const orphaned = await db
+      .selectFrom("connector_configs")
+      .select("id")
+      .where("connector_type", "=", "fireflies")
+      .where("created_by", "=", "admin")
+      .executeTakeFirst();
+    if (orphaned) {
+      logger.warn(
+        { connectorId: orphaned.id },
+        "Found Fireflies config with 'admin' owner and no admin user to assign — manual cleanup required",
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, "Failed to check for orphaned admin Fireflies configs");
+  }
+
   // 2.5. Sync featured skills
   await syncFeaturedSkills(config, logger);
 

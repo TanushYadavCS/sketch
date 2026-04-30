@@ -20,6 +20,8 @@ declare module "hono" {
   interface ContextVariableMap {
     role: "admin" | "member";
     sub: string;
+    /** Caller's primary email — used by file-access RBAC. Null if the user row has no email. */
+    email: string | null;
   }
 }
 
@@ -42,9 +44,11 @@ type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 export interface AuthMiddlewareOpts {
   managedAuthSecret?: string;
   managedUrl?: string;
-  findUserByEmail?: (email: string) => Promise<{ id: string; authRole?: string | null } | null>;
+  findUserByEmail?: (email: string) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
   hasLocalAdmin?: () => Promise<boolean>;
-  resolveLocalSessionUser?: (sub: string) => Promise<{ id: string; authRole?: string | null } | null>;
+  resolveLocalSessionUser?: (
+    sub: string,
+  ) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
 }
 
 function toAuthRole(value: string | null | undefined): "admin" | "member" {
@@ -126,6 +130,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
 
         c.set("role", toAuthRole(user.authRole));
         c.set("sub", user.id);
+        c.set("email", user.email ?? payload.email ?? null);
         return next();
       }
     }
@@ -153,9 +158,11 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       }
       c.set("role", toAuthRole(user.authRole));
       c.set("sub", user.id);
+      c.set("email", user.email ?? payload.email ?? null);
     } else {
       c.set("role", payload.role);
       c.set("sub", payload.sub);
+      c.set("email", payload.email ?? null);
     }
 
     return next();

@@ -5,7 +5,7 @@
  */
 import { ConnectorLogo } from "@/components/connector-logos";
 import type { FileAccess, FileContent, LinkedEntity } from "@/lib/api";
-import { api } from "@/lib/api";
+import { ApiRequestError, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import {
   ArrowSquareOutIcon,
@@ -24,21 +24,31 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; onClose: () => void }) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["file-content", fileId],
     queryFn: () => api.integrations.fileContent(fileId as string),
     enabled: !!fileId,
+    retry: (failureCount, err) =>
+      err instanceof ApiRequestError && (err.status === 403 || err.status === 404) ? false : failureCount < 3,
   });
 
   const file = data?.file;
   const access = data?.access;
   const entities = data?.entities ?? [];
+  const forbidden = error instanceof ApiRequestError && error.status === 403;
+  const notFound = error instanceof ApiRequestError && error.status === 404;
+  // Admin 403s carry file metadata (name, source, scope, owner) for ops triage.
+  // Non-admin 403s omit it — that's deliberate: the file isn't in their list.
+  const gatedMeta = forbidden
+    ? ((error as ApiRequestError).details as { file?: GatedFileMeta; access?: FileAccess } | undefined)
+    : undefined;
+  const titleFile = file?.fileName ?? gatedMeta?.file?.fileName;
 
   return (
     <Sheet open={!!fileId} onOpenChange={(open) => !open && onClose()}>
       <SheetContent side="right" className="flex w-full flex-col sm:max-w-lg">
         <SheetHeader>
-          <SheetTitle className="text-base">{isLoading ? "Loading..." : (file?.fileName ?? "File")}</SheetTitle>
+          <SheetTitle className="text-base">{isLoading ? "Loading..." : (titleFile ?? "File")}</SheetTitle>
         </SheetHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -47,6 +57,20 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-24 rounded-lg" />
               <Skeleton className="h-48 rounded-lg" />
+            </div>
+          ) : forbidden ? (
+            gatedMeta?.file ? (
+              <GatedFileDetail file={gatedMeta.file} access={gatedMeta.access ?? null} />
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-2 px-4 py-12 text-center">
+                <LockSimpleIcon size={24} className="text-muted-foreground" />
+                <p className="text-sm font-medium">You don't have access to this file's contents.</p>
+                <p className="text-xs text-muted-foreground">Ask the file owner to share it with you.</p>
+              </div>
+            )
+          ) : notFound ? (
+            <div className="flex items-center justify-center py-12">
+              <p className="text-sm text-muted-foreground">File not found.</p>
             </div>
           ) : file ? (
             <FileDetailContent file={file} access={access ?? null} entities={entities} />
@@ -185,6 +209,76 @@ function FileDetailContent({
       {access && access.members.length > 0 && <AccessSection access={access} />}
 
       {file.content && <ContentPreview content={file.content} />}
+    </div>
+  );
+}
+
+interface GatedFileMeta {
+  id: string;
+  fileName: string;
+  fileType: string | null;
+  source: string;
+  sourcePath: string | null;
+  syncedAt: string;
+  enrichmentStatus: string;
+}
+
+/** Admin-only "you can see metadata, not contents" view for gated files. */
+function GatedFileDetail({ file, access }: { file: GatedFileMeta; access: FileAccess | null }) {
+  const def = getIntegration(file.source as IntegrationType);
+  return (
+    <div className="space-y-4 px-4 pb-6">
+      <div className="flex flex-wrap gap-2">
+        {def && (
+          <Badge variant="outline" className="gap-1 text-[10px]">
+            <ConnectorLogo type={def.type} size={10} style={{ color: def.color }} />
+            {def.name}
+          </Badge>
+        )}
+        {file.fileType && (
+          <Badge variant="secondary" className="text-[10px]">
+            {file.fileType}
+          </Badge>
+        )}
+        {access && (
+          <Badge
+            variant="outline"
+            className={`gap-0.5 text-[10px] ${
+              access.scope === "restricted" ? "text-amber-500 border-amber-500/30" : "text-muted-foreground"
+            }`}
+          >
+            {access.scope === "restricted" ? (
+              <>
+                <LockSimpleIcon size={10} weight="fill" />
+                {access.members.length} users
+              </>
+            ) : (
+              <>
+                <GlobeIcon size={10} />
+                Open
+              </>
+            )}
+          </Badge>
+        )}
+      </div>
+
+      {file.sourcePath && (
+        <div>
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Path</p>
+          <p className="mt-1 text-xs text-muted-foreground">{file.sourcePath}</p>
+        </div>
+      )}
+
+      <div className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 px-4 py-8 text-center">
+        <LockSimpleIcon size={20} className="text-muted-foreground" />
+        <p className="text-sm font-medium">Contents hidden</p>
+        <p className="text-xs text-muted-foreground">
+          Admin role grants ops access to file metadata, not private contents. Ask a scope member to share if you need
+          to read it.
+        </p>
+      </div>
+
+      {access && access.members.length > 0 && <AccessSection access={access} />}
     </div>
   );
 }

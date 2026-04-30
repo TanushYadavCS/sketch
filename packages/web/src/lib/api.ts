@@ -19,6 +19,20 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
+export class ApiRequestError extends Error {
+  status: number;
+  code: string;
+  /** Raw error object from the response — may carry extra fields beyond message/code. */
+  details: Record<string, unknown>;
+  constructor(message: string, status: number, code: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export interface User {
   id: string;
   name: string;
@@ -99,8 +113,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({ error: { code: "UNKNOWN", message: res.statusText } }))) as ApiError;
-    throw new Error(body.error.message);
+    const body = (await res.json().catch(() => ({ error: { code: "UNKNOWN", message: res.statusText } }))) as {
+      error: { code: string; message: string } & Record<string, unknown>;
+    };
+    const { code, message, ...rest } = body.error;
+    throw new ApiRequestError(message, res.status, code, rest);
   }
 
   return res.json() as Promise<T>;
@@ -440,9 +457,8 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    disconnect(id: string, opts?: { deleteEntities?: boolean }) {
-      const params = opts?.deleteEntities ? "?deleteEntities=true" : "";
-      return request<{ success: boolean }>(`/api/connectors/${id}${params}`, { method: "DELETE" });
+    disconnect(id: string) {
+      return request<{ success: boolean }>(`/api/connectors/${id}`, { method: "DELETE" });
     },
     entityCount(id: string) {
       return request<{ count: number }>(`/api/connectors/${id}/entity-count`);
@@ -450,6 +466,26 @@ export const api = {
     sync(id: string) {
       return request<{ sync: { connectorId: string; status: string } }>(`/api/connectors/${id}/syncs`, {
         method: "POST",
+      });
+    },
+    listMine() {
+      return request<{
+        connectors: Array<{
+          id: string;
+          connectorType: string;
+          credentialHint: string | null;
+          syncStatus: string;
+          lastSyncedAt: string | null;
+          errorMessage: string | null;
+          createdAt: string;
+          fileCount: number;
+        }>;
+      }>("/api/connectors/mine");
+    },
+    rotateKey(id: string, apiKey: string) {
+      return request<{ ok: boolean }>(`/api/connectors/${id}/rotate-key`, {
+        method: "POST",
+        body: JSON.stringify({ api_key: apiKey }),
       });
     },
     progress() {
@@ -474,6 +510,9 @@ export const api = {
     },
     files(id: string) {
       return request<{ files: ConnectorFile[] }>(`/api/connectors/${id}/files`);
+    },
+    fileCountsBySource() {
+      return request<{ counts: Array<{ source: string; count: number }> }>("/api/connectors/file-counts-by-source");
     },
     allFiles(opts?: {
       limit?: number;
@@ -883,6 +922,7 @@ export const api = {
           };
         }>;
         total: number;
+        hiddenCount: number;
       }>(`/api/entities/${id}/mentions${qs ? `?${qs}` : ""}`);
     },
     create(data: { name: string; sourceType: string; subtype?: string; aliases?: string[] }) {

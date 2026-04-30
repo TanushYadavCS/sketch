@@ -384,16 +384,28 @@ export function createEntityRepository(db: Kysely<DB>) {
           .executeTakeFirst();
 
         if (byEmail) {
-          // Add alias if name differs, and ensure email is in aliases for entity linking
           const aliases: string[] = JSON.parse(byEmail.aliases || "[]");
+          let canonicalName = byEmail.name;
           let changed = false;
-          if (
+
+          // Promote a real name when the stored canonical is the email itself —
+          // legacy seeds set name = email; once we learn a real name, upgrade.
+          const storedLooksLikeEmail = byEmail.name.includes("@");
+          const incomingLooksLikeEmail = data.name.includes("@");
+          if (storedLooksLikeEmail && !incomingLooksLikeEmail) {
+            canonicalName = data.name;
+            if (!aliases.some((a) => a.toLowerCase() === byEmail.name.toLowerCase())) {
+              aliases.push(byEmail.name);
+            }
+            changed = true;
+          } else if (
             byEmail.name.toLowerCase() !== data.name.toLowerCase() &&
             !aliases.some((a) => a.toLowerCase() === data.name.toLowerCase())
           ) {
             aliases.push(data.name);
             changed = true;
           }
+
           if (data.email && !aliases.some((a) => a.toLowerCase() === data.email?.toLowerCase())) {
             aliases.push(data.email);
             changed = true;
@@ -401,7 +413,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           if (changed) {
             await db
               .updateTable("entities")
-              .set({ aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
+              .set({ name: canonicalName, aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
               .where("id", "=", byEmail.id)
               .execute();
           }

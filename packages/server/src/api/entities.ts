@@ -2,8 +2,10 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { isPg } from "../db/dialect";
+import { fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
 export function entityRoutes(db: Kysely<DB>) {
   const routes = new Hono();
@@ -147,14 +149,19 @@ export function entityRoutes(db: Kysely<DB>) {
   /**
    * POST /api/entities/reset
    * Delete entities by category. Body: { categories: ["manual", "connectors", "ai"] }
-   * - manual: org-type entities NOT created by AI (no metadata.origin = "ai")
-   * - connectors: entities with non-org source_types (clickup_*, notion_*, etc.)
-   * - ai: entities with metadata.origin = "ai"
+   * - connectors: came from a sync — non-org source_types (clickup_*, notion_*, …)
+   *   OR an org-typed entity with at least one entity_source_refs row (e.g. person
+   *   entities seeded from Fireflies attendee mapping).
+   * - ai: entities with metadata.origin = "ai".
+   * - manual: org-typed entities with no entity_source_refs and no AI origin —
+   *   genuinely created by hand.
    * Must be registered before /:id to prevent param capture.
    */
   const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
 
   routes.post("/reset", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const body = (await c.req.json()) as { categories?: string[] };
     const categories = new Set(body.categories ?? []);
 
@@ -166,13 +173,14 @@ export function entityRoutes(db: Kysely<DB>) {
     const includeAi = categories.has("ai");
     const includeManual = categories.has("manual");
 
+    const hasSourceRef = sql<boolean>`EXISTS (SELECT 1 FROM entity_source_refs WHERE entity_source_refs.entity_id = entities.id)`;
     const toDelete = await db
       .selectFrom("entities")
       .select("id")
       .where((eb) => {
         const parts = [];
         if (includeConnectors) {
-          parts.push(eb("source_type", "not in", ORG_SOURCE_TYPES));
+          parts.push(eb.or([eb("source_type", "not in", ORG_SOURCE_TYPES), hasSourceRef]));
         }
         if (includeAi) {
           parts.push(
@@ -183,6 +191,7 @@ export function entityRoutes(db: Kysely<DB>) {
           parts.push(
             eb.and([
               eb("source_type", "in", ORG_SOURCE_TYPES),
+              eb.not(hasSourceRef),
               eb.or([
                 eb(
                   isPg(db) ? sql`(metadata::jsonb ->> 'origin')` : sql`json_extract(metadata, '$.origin')`,
@@ -232,6 +241,8 @@ export function entityRoutes(db: Kysely<DB>) {
    * Must be registered before /:id to prevent "tentative" matching as an ID.
    */
   routes.delete("/tentative", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const typeFilter = c.req.query("type")?.split(",").filter(Boolean);
 
     let query = db.selectFrom("entities").select("id").where("status", "=", "tentative");
@@ -339,6 +350,8 @@ export function entityRoutes(db: Kysely<DB>) {
    * Delete an entity and its mentions/source refs (cascade).
    */
   routes.delete("/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
     const entity = await repo.getEntity(c.req.param("id"));
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
@@ -360,6 +373,7 @@ export function entityRoutes(db: Kysely<DB>) {
     const since = c.req.query("since");
     const limit = Math.min(Number(c.req.query("limit")) || 20, 100);
     const offset = Number(c.req.query("offset")) || 0;
+    const viewer = getFileViewer(c);
 
     const entity = await repo.getEntity(entityId);
     if (!entity) {
@@ -399,27 +413,37 @@ export function entityRoutes(db: Kysely<DB>) {
         since,
       );
     }
+    if (!viewer.isAdmin) {
+      query = query.where(fileVisibilityPredicate(viewer));
+    }
 
     query = query.limit(limit).offset(offset);
     const mentions = await query.execute();
 
-    // Total count
-    let countQuery = db
-      .selectFrom("entity_mentions")
-      .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
-      .select(sql<number>`count(entity_mentions.id)`.as("total"))
-      .where("entity_mentions.entity_id", "=", entityId);
-    if (sourceFilter && sourceFilter.length > 0) {
-      countQuery = countQuery.where("indexed_files.source", "in", sourceFilter);
-    }
-    if (since) {
-      countQuery = countQuery.where(
-        sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
-        ">=",
-        since,
-      );
-    }
-    const countResult = await countQuery.executeTakeFirst();
+    const buildCountQuery = (gated: boolean) => {
+      let q = db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select(sql<number>`count(entity_mentions.id)`.as("total"))
+        .where("entity_mentions.entity_id", "=", entityId);
+      if (sourceFilter && sourceFilter.length > 0) {
+        q = q.where("indexed_files.source", "in", sourceFilter);
+      }
+      if (since) {
+        q = q.where(
+          sql`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`,
+          ">=",
+          since,
+        );
+      }
+      if (gated) q = q.where(fileVisibilityPredicate(viewer));
+      return q;
+    };
+
+    const visibleCount = Number((await buildCountQuery(!viewer.isAdmin).executeTakeFirst())?.total ?? 0);
+    const hiddenCount = viewer.isAdmin
+      ? 0
+      : Math.max(0, Number((await buildCountQuery(false).executeTakeFirst())?.total ?? 0) - visibleCount);
 
     return c.json({
       mentions: mentions.map((m) => ({
@@ -437,7 +461,8 @@ export function entityRoutes(db: Kysely<DB>) {
           providerUrl: m.provider_url,
         },
       })),
-      total: Number(countResult?.total ?? 0),
+      total: visibleCount,
+      hiddenCount,
     });
   });
 

@@ -85,6 +85,13 @@ export interface IntegrationDefinition {
   scopeType: "none" | "flat" | "nested" | "tree";
   /** Noun for scope items in the picker (pages, spaces, folders). */
   scopeItemNoun?: string;
+  /**
+   * true  = each user holds their own credential row (per-user); any authenticated user can add it.
+   * false = a single org-wide credential drives sync for everyone (admin-only).
+   */
+  perUserAuth: boolean;
+  /** true = admin must populate provider Client ID/Secret in settings before any user can authorize. */
+  requiresOAuthClientSetup: boolean;
 }
 
 /**
@@ -127,6 +134,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Add the redirect URI shown below to your OAuth client",
       "Paste the Client ID and Client Secret, then connect with Google",
     ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
   },
   {
     type: "clickup",
@@ -154,6 +163,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Generate a personal API token",
       "Paste the token below",
     ],
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "notion",
@@ -182,6 +193,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Share specific pages/databases with the integration",
       "Paste the integration token below",
     ],
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "linear",
@@ -204,6 +217,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     itemNoun: "issues",
     credentialUrl: "https://linear.app/settings/api",
     connectSteps: ["Go to Linear Settings → API → Personal API keys", "Create a new API key", "Paste the key below"],
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "fireflies",
@@ -230,8 +245,15 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Generate an API key",
       "Paste the key below",
     ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
   },
 ];
+
+/** All integration types where each user holds their own credential. */
+export const PER_USER_INTEGRATION_TYPES: IntegrationType[] = INTEGRATIONS.filter((i) => i.perUserAuth).map(
+  (i) => i.type,
+);
 
 /** Look up an integration definition by type. */
 export function getIntegration(type: IntegrationType): IntegrationDefinition | undefined {

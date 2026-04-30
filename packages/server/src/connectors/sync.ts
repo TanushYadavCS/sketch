@@ -310,15 +310,18 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           });
         }
 
-        // Seed person entities from file access lists (e.g. Fireflies attendees)
-        if (connector.seedPersonsFromAccess && item.accessEmails) {
-          for (const email of item.accessEmails) {
+        // Seed person entities from connector-supplied attendees.
+        // Skip entries without a name — accessEmails already covers ACL,
+        // and email-as-name rows poison the entity register.
+        if (item.attendees) {
+          for (const a of item.attendees) {
+            if (!a.name) continue;
             await entityRepo.upsertPersonEntity({
-              name: email,
-              email,
+              name: a.name,
+              email: a.email,
               subtype: "external",
               source: config.connector_type,
-              sourceId: `${item.providerFileId}:${email}`,
+              sourceId: `${item.providerFileId}:${a.email ?? a.name}`,
             });
           }
         }
@@ -437,12 +440,66 @@ export interface SyncSchedulerDeps {
 }
 
 /**
+ * Bounded-concurrency runner. `Promise.allSettled` semantics — one item failing
+ * does not abort the others.
+ */
+async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  if (items.length === 0) return;
+  const queue = [...items];
+  const workers: Promise<void>[] = [];
+  const workerCount = Math.min(limit, queue.length);
+  for (let i = 0; i < workerCount; i++) {
+    workers.push(
+      (async () => {
+        while (queue.length > 0) {
+          const item = queue.shift();
+          if (item === undefined) return;
+          await worker(item);
+        }
+      })(),
+    );
+  }
+  await Promise.all(workers);
+}
+
+const SYNC_CONCURRENCY = 4;
+const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
+const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+
+async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Promise<number> {
+  try {
+    const settings = createSettingsRepository(db);
+    const row = await settings.get();
+    const minutes = row?.sync_interval_minutes;
+    if (typeof minutes === "number" && minutes >= 5) {
+      return minutes * 60 * 1000;
+    }
+  } catch {
+    // Fall through to fallback
+  }
+  return fallbackMs;
+}
+
+/**
  * Run sync for all connectors that are due, then run enrichment.
  * Called on a schedule (e.g., every 30 minutes).
  */
 export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSchedulerDeps): Promise<void> {
   const repo = createConnectorRepository(db);
-  const configs = await repo.findSyncableConfigs();
+
+  // Auto-recover any connector stuck in `syncing` past the staleness threshold —
+  // a row stuck mid-process is otherwise excluded from `findSyncableConfigs` and
+  // would never retry until the server restarts.
+  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS);
+
+  // Same idea for enrichment: scheduled runs only claim `pending`/`failed` (so
+  // an in-flight run can't be re-claimed mid-flight and race on chunk inserts),
+  // which means a crashed run's `processing` row would otherwise be stranded
+  // until startup. Reset stale `processing` rows before each tick.
+  await recoverStaleEnrichments(db, logger);
+
+  const intervalMs = await getIntervalMsFromSettings(db, DEFAULT_SYNC_INTERVAL_MS);
+  const configs = await repo.findSyncableConfigs({ staleAfterMs: Math.floor(intervalMs / 2) });
 
   logger.info({ connectorCount: configs.length }, "Starting scheduled sync run");
 
@@ -466,13 +523,13 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     logger.error({ err }, "Failed to seed team directory entities");
   }
 
-  for (const config of configs) {
+  await runWithConcurrency(configs, SYNC_CONCURRENCY, async (config) => {
     try {
       await runConnectorSync(db, config.id, logger);
     } catch (err) {
       logger.error({ err, connectorId: config.id }, "Scheduled sync failed for connector");
     }
-  }
+  });
 
   // Run enrichment after all syncs complete
   try {
@@ -526,25 +583,27 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 }
 
 /**
- * Recover connectors stuck in "syncing" status after a crash/restart.
- * Resets them to "active" so the scheduler can pick them up again.
+ * Recover connectors stuck in "syncing" status. Called on startup with threshold 0
+ * (any in-flight row was orphaned by a crash) and at the top of every scheduler tick
+ * with a non-zero threshold to recover rows that hung mid-run without crashing the
+ * process. Recovered rows are flipped to "error" so `findSyncableConfigs` re-includes
+ * them on the next eligibility pass.
  */
-async function recoverStaleSyncs(db: Kysely<DB>, logger: Logger): Promise<void> {
+async function recoverStaleSyncs(db: Kysely<DB>, logger: Logger, staleThresholdMs = 0): Promise<void> {
   const repo = createConnectorRepository(db);
-  const stale = await db
-    .selectFrom("connector_configs")
-    .select(["id", "connector_type"])
-    .where("sync_status", "=", "syncing")
-    .execute();
+  const stale = await repo.findStaleSyncingConfigs(staleThresholdMs);
 
   if (stale.length === 0) return;
 
+  const reason =
+    staleThresholdMs > 0 ? `Sync stuck for >${Math.round(staleThresholdMs / 60000)}m — auto-recovered` : null;
+
   for (const config of stale) {
-    await repo.updateConfig(config.id, { syncStatus: "active", errorMessage: null });
+    await repo.updateConfig(config.id, { syncStatus: "error", errorMessage: reason });
     logger.warn({ connectorId: config.id, type: config.connector_type }, "Recovered stale syncing connector");
   }
 
-  logger.info({ count: stale.length }, "Recovered stale syncing connectors on startup");
+  logger.info({ count: stale.length }, "Recovered stale syncing connectors");
 }
 
 /**
@@ -581,8 +640,6 @@ export interface SyncSchedulerHandle {
   stop(): Promise<void>;
 }
 
-const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
-
 export function startSyncScheduler(
   db: Kysely<DB>,
   logger: Logger,
@@ -607,23 +664,9 @@ export function startSyncScheduler(
   // DB contention between enrichment and manual syncs.
   logger.info("Startup enrichment skipped (trigger manually from UI)");
 
-  async function getIntervalMs(): Promise<number> {
-    try {
-      const settings = createSettingsRepository(db);
-      const row = await settings.get();
-      const minutes = row?.sync_interval_minutes;
-      if (typeof minutes === "number" && minutes >= 5) {
-        return minutes * 60 * 1000;
-      }
-    } catch {
-      // Fall through to default
-    }
-    return intervalMs;
-  }
-
   async function scheduleNext(): Promise<void> {
     if (aborted) return;
-    const nextMs = await getIntervalMs();
+    const nextMs = await getIntervalMsFromSettings(db, intervalMs);
     timer = setTimeout(async () => {
       if (aborted) return;
       try {

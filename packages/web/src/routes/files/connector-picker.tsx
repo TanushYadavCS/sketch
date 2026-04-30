@@ -8,7 +8,26 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
 import { ConnectorLogo } from "@/components/connector-logos";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
-import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
+import { INTEGRATIONS, type IntegrationDefinition, getIntegration } from "@/lib/integrations";
+import { useDashboardAuth } from "@/routes/dashboard";
+
+// Per-user integrations (e.g. Fireflies) are managed from Settings → My Connections,
+// not the workspace-level Files connector picker. They still appear as filter chips on
+// the Files page (so admins and members get an identical view of indexed sources), but
+// they're excluded from the "+ Connect" buttons and the BrowseAll catalog.
+const ORG_LEVEL_INTEGRATIONS = INTEGRATIONS.filter((def) => !def.perUserAuth);
+
+const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
+  error: 4,
+  syncing: 3,
+  pending: 2,
+  active: 1,
+  paused: 0,
+  disabled: 0,
+};
+function mergeStatus(a: string, b: string): string {
+  return (SYNC_STATUS_PRECEDENCE[a] ?? 0) >= (SYNC_STATUS_PRECEDENCE[b] ?? 0) ? a : b;
+}
 import {
   ArrowSquareOutIcon,
   ArrowsClockwiseIcon,
@@ -47,6 +66,7 @@ const SYNC_INTERVAL_OPTIONS = [
 
 export function ConnectorPicker({
   connectors,
+  sourceCounts,
   totalFiles,
   localFileCount,
   sourceFilter,
@@ -57,6 +77,8 @@ export function ConnectorPicker({
   onForcedConnectDone,
 }: {
   connectors: ConnectorConfig[];
+  /** Viewer-aware file count by source. Source of truth for chip counts. */
+  sourceCounts: Map<string, number>;
   totalFiles: number;
   localFileCount: number;
   sourceFilter: string | null;
@@ -71,10 +93,21 @@ export function ConnectorPicker({
 }) {
   const [connectingIntegration, setConnectingIntegration] = useState<IntegrationDefinition | null>(null);
   const [showBrowseAll, setShowBrowseAll] = useState(false);
+  const auth = useDashboardAuth();
+  const isAdmin = auth.role === "admin";
 
   const connectedByType = new Map<string, ConnectorConfig>();
+  // aggregatedByType drives sync-status indicator on the chip (which is
+  // connector-row data). Chip *counts* read from `sourceCounts` so a member with
+  // file-access via meetings whose connector row they can't see still sees a
+  // count that matches the file list.
+  const aggregatedByType = new Map<string, { syncStatus: string }>();
   for (const c of connectors) {
     connectedByType.set(c.connectorType, c);
+    const cur = aggregatedByType.get(c.connectorType);
+    aggregatedByType.set(c.connectorType, {
+      syncStatus: cur ? mergeStatus(cur.syncStatus, c.syncStatus) : c.syncStatus,
+    });
   }
 
   const handleConnected = () => {
@@ -113,8 +146,12 @@ export function ConnectorPicker({
         />
 
         {INTEGRATIONS.map((def) => {
-          const connector = connectedByType.get(def.type);
-          if (!connector) return null;
+          const agg = aggregatedByType.get(def.type);
+          const count = sourceCounts.get(def.type) ?? 0;
+          // Render if the viewer either owns/can see a connector row of this
+          // type (status info available), or has file-access to indexed files
+          // of this source (count > 0). Skip otherwise.
+          if (!agg && count === 0) return null;
           return (
             <SourceChip
               key={def.type}
@@ -122,29 +159,30 @@ export function ConnectorPicker({
               onClick={() => onSourceFilterChange(sourceFilter === def.type ? null : def.type)}
               onClear={() => onSourceFilterChange(null)}
               label={def.name}
-              count={connector.fileCount ?? 0}
+              count={count}
               color={def.color}
               connectorType={def.type}
-              status={connector.syncStatus}
+              status={agg?.syncStatus}
             />
           );
         })}
 
-        {INTEGRATIONS.map((def) => {
-          if (connectedByType.has(def.type)) return null;
-          return (
-            <button
-              key={def.type}
-              type="button"
-              onClick={() => setConnectingIntegration(def)}
-              className="flex items-center gap-1.5 rounded-full border border-dashed border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-border/80 hover:bg-muted/30 hover:text-foreground"
-            >
-              <PlusIcon size={10} />
-              <ConnectorLogo type={def.type} size={10} />
-              {def.name}
-            </button>
-          );
-        })}
+        {isAdmin &&
+          ORG_LEVEL_INTEGRATIONS.map((def) => {
+            if (connectedByType.has(def.type)) return null;
+            return (
+              <button
+                key={def.type}
+                type="button"
+                onClick={() => setConnectingIntegration(def)}
+                className="flex items-center gap-1.5 rounded-full border border-dashed border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-border/80 hover:bg-muted/30 hover:text-foreground"
+              >
+                <PlusIcon size={10} />
+                <ConnectorLogo type={def.type} size={10} />
+                {def.name}
+              </button>
+            );
+          })}
 
         <button
           type="button"
@@ -160,8 +198,13 @@ export function ConnectorPicker({
         open={showBrowseAll}
         onOpenChange={setShowBrowseAll}
         connectors={connectors}
+        isAdmin={isAdmin}
         onConnect={(def) => {
           setShowBrowseAll(false);
+          // All connectors — per-user (Fireflies, Drive) and org-wide (ClickUp,
+          // Notion, Linear) — use the same workspace-level connect dialog. Settings
+          // → My Connections lists/manages already-connected per-user rows but no
+          // longer hosts the add UI.
           setConnectingIntegration(def);
         }}
         onManage={(def, connector) => {
@@ -252,12 +295,14 @@ function BrowseConnectorsDialog({
   open,
   onOpenChange,
   connectors,
+  isAdmin,
   onConnect,
   onManage,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   connectors: ConnectorConfig[];
+  isAdmin: boolean;
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
 }) {
@@ -311,12 +356,16 @@ function BrowseConnectorsDialog({
           <>
             <div className="mt-2 space-y-2">
               {INTEGRATIONS.map((def) => {
-                const connector = connectedByType.get(def.type);
+                // For per-user connectors, the row visible to the caller in
+                // /api/connectors is their own (server filters); for org-wide, it's
+                // the shared row. Either way, show Manage when present, Connect when not.
+                const connector = connectedByType.get(def.type) ?? null;
                 return (
                   <ConnectorRow
                     key={def.type}
                     definition={def}
-                    connector={connector ?? null}
+                    connector={connector}
+                    isAdmin={isAdmin}
                     onConnect={() => onConnect(def)}
                     onManage={() => {
                       if (connector) onManage(def, connector);
@@ -491,17 +540,22 @@ function ConnectorSettings() {
 function ConnectorRow({
   definition,
   connector,
+  isAdmin,
   onConnect,
   onManage,
 }: {
   definition: IntegrationDefinition;
   connector: ConnectorConfig | null;
+  isAdmin: boolean;
   onConnect: () => void;
   onManage: () => void;
 }) {
   const queryClient = useQueryClient();
   const isConnected = !!connector;
   const isSyncing = connector?.syncStatus === "syncing";
+  // Org-wide connectors are admin-only to configure. Per-user (Fireflies, Drive) are
+  // always reachable — clicking Connect routes to /integrations or kicks off OAuth.
+  const canConfigure = definition.perUserAuth || isAdmin;
 
   const syncMutation = useMutation({
     mutationFn: () => api.integrations.sync(connector?.id ?? ""),
@@ -549,24 +603,28 @@ function ConnectorRow({
       {isConnected ? (
         <div className="flex items-center gap-1.5">
           <SyncStatusDot status={connector.syncStatus} />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7"
-            onClick={() => syncMutation.mutate()}
-            disabled={isSyncing || syncMutation.isPending}
-          >
-            <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
-          </Button>
+          {canConfigure && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              onClick={() => syncMutation.mutate()}
+              disabled={isSyncing || syncMutation.isPending}
+            >
+              <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
+            </Button>
+          )}
           <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onManage}>
-            Manage
+            {canConfigure ? "Manage" : "View"}
           </Button>
         </div>
-      ) : (
+      ) : canConfigure ? (
         <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onConnect}>
           <PlusIcon size={12} />
           Connect
         </Button>
+      ) : (
+        <span className="text-xs text-muted-foreground">Managed by admin</span>
       )}
     </div>
   );

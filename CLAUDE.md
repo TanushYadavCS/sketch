@@ -120,9 +120,13 @@ Internal planning docs live in `.planning/` (git submodule, separate private rep
 Completed task files stay in `.planning/` — useful context when revisiting related areas.
 
 **Implementation workflow:**
-1. Discuss the change and agree on the approach
-2. Implement the plan
-3. Commit, done. Update STATE.md only when releasing a new version/tag.
+1. Discuss and create a plan file in `.planning/{topic}/to-be-developed/`
+2. Send the plan to Codex CLI for review (`codex exec`)
+3. Update the plan based on feedback, then implement
+4. Send the plan + implementation to Codex CLI for review
+5. Update if feedback
+6. Commit, update STATE.md, done
+7. **When opening a PR for a plan, move that plan file from `to-be-developed/` to `implemented/`** (same topic dir, e.g. `access/to-be-developed/FOO.md` → `access/implemented/FOO.md`). Do this as part of the PR — the move is what marks the plan as shipped. Applies to follow-up PRs that complete a plan too. Use `git mv` inside `.planning/` so the submodule history preserves rename detection.
 
 ## Reference
 

@@ -42,6 +42,7 @@ import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useDashboardAuth } from "../dashboard";
 import { formatRelativeTime } from "./file-list";
 
 const TYPE_GROUPS: { label: string; types: string[] }[] = [
@@ -116,6 +117,8 @@ function isAiDiscovered(entity: EntityListItem): boolean {
 
 export function EntityExplorer() {
   const queryClient = useQueryClient();
+  const { role } = useDashboardAuth();
+  const isAdmin = role === "admin";
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -228,27 +231,29 @@ export function EntityExplorer() {
           Add Entity
         </Button>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" className="h-7 w-7 p-0">
-              <DotsThreeIcon size={16} />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onClick={() => {
-                setResetCategories(new Set(["connectors", "ai"]));
-                setShowResetDialog(true);
-              }}
-            >
-              <TrashIcon size={14} className="mr-1.5" />
-              Reset Entities...
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {isAdmin && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-7 w-7 p-0">
+                <DotsThreeIcon size={16} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => {
+                  setResetCategories(new Set(["connectors", "ai"]));
+                  setShowResetDialog(true);
+                }}
+              >
+                <TrashIcon size={14} className="mr-1.5" />
+                Reset Entities...
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
-        {tentativeCount > 0 && (
+        {isAdmin && tentativeCount > 0 && (
           <Button
             variant="outline"
             size="sm"
@@ -482,6 +487,8 @@ function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id
 
 function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const { role } = useDashboardAuth();
+  const isAdmin = role === "admin";
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editType, setEditType] = useState("");
@@ -501,6 +508,7 @@ function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onC
   const entity = entityData?.entity;
   const mentions = mentionsData?.mentions ?? [];
   const totalMentions = mentionsData?.total ?? 0;
+  const hiddenMentions = mentionsData?.hiddenCount ?? 0;
 
   const updateMutation = useMutation({
     mutationFn: (data: { name?: string; sourceType?: string }) => api.entities.update(entityId as string, data),
@@ -650,11 +658,24 @@ function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onC
                     ))}
                   </div>
                 ) : mentions.length === 0 ? (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    No mentions yet. Run enrichment or backfill to populate.
-                  </p>
+                  hiddenMentions > 0 ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {hiddenMentions} {hiddenMentions === 1 ? "mention" : "mentions"} in files you don't have access
+                      to.
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      No mentions yet. Run enrichment or backfill to populate.
+                    </p>
+                  )
                 ) : (
                   <div className="mt-2 space-y-1">
+                    {hiddenMentions > 0 && (
+                      <p className="px-1 pb-1 text-[10px] text-muted-foreground/70">
+                        +{hiddenMentions} {hiddenMentions === 1 ? "mention" : "mentions"} in files you don't have access
+                        to
+                      </p>
+                    )}
                     {mentions.map((mention) => (
                       <div key={mention.id} className="rounded-lg border border-border p-3 text-xs hover:bg-muted/30">
                         <div className="flex items-center justify-between">
@@ -695,7 +716,7 @@ function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onC
           )}
         </div>
 
-        {entity && (
+        {entity && isAdmin && (
           <div className="border-t border-border px-4 py-3">
             <Button
               size="sm"

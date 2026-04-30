@@ -13,6 +13,45 @@ import { sql } from "kysely";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
 import type { DB } from "../schema";
 
+/**
+ * File-list viewer for RBAC. Admins bypass; others match by email.
+ *
+ * Source of truth for "can a user see file X" — used by every repo function
+ * that returns indexed files to a UI. The agent/tool path is gated separately.
+ */
+export interface FileViewer {
+  email: string | null;
+  isAdmin: boolean;
+}
+
+/**
+ * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
+ *
+ *   unrestricted  = no scope AND no per-file shares
+ *   scoped        = caller is in access_scope_members for the file's scope
+ *   per-file      = caller has a row in file_access for the file
+ *
+ * v1 matches the caller's primary email only; multi-email users (Slack login email
+ * differs from connector-side email) under-see — the safe failure direction. v2 will
+ * swap `= :email` for `IN (:emails[])` once we wire `getAllEmailsForUser` through.
+ *
+ * Callers must qualify the file table as `indexed_files` (or alias to it) — the
+ * predicate references columns by that name.
+ */
+export function fileVisibilityPredicate(viewer: FileViewer) {
+  const email = viewer.email ?? "";
+  return sql<boolean>`(
+    (indexed_files.access_scope_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = indexed_files.id))
+    OR EXISTS (SELECT 1 FROM access_scope_members asm
+               WHERE asm.access_scope_id = indexed_files.access_scope_id
+                 AND asm.email = ${email})
+    OR EXISTS (SELECT 1 FROM file_access fa
+               WHERE fa.indexed_file_id = indexed_files.id
+                 AND fa.email = ${email})
+  )`;
+}
+
 export function createConnectorRepository(db: Kysely<DB>) {
   return {
     /** List all connector configs. */
@@ -30,13 +69,85 @@ export function createConnectorRepository(db: Kysely<DB>) {
       return db.selectFrom("connector_configs").selectAll().where("connector_type", "=", connectorType).execute();
     },
 
-    /** Find connector configs that are ready to sync. */
-    async findSyncableConfigs() {
+    /**
+     * Find connector configs that are ready to sync.
+     * `staleAfterMs` skips configs synced within that window so we don't re-attempt
+     * a connector that just finished. Defaults to 15 minutes (half the default tick).
+     */
+    async findSyncableConfigs(opts?: { staleAfterMs?: number }) {
+      const staleAfterMs = opts?.staleAfterMs ?? 15 * 60 * 1000;
+      const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
       return db
         .selectFrom("connector_configs")
         .selectAll()
         .where("sync_status", "in", ["active", "pending", "error"])
+        .where((eb) => eb.or([eb("last_synced_at", "is", null), eb("last_synced_at", "<", cutoff)]))
         .execute();
+    },
+
+    /** Find connector configs stuck in `syncing` state past the staleness threshold. */
+    async findStaleSyncingConfigs(staleThresholdMs: number) {
+      const cutoff = new Date(Date.now() - staleThresholdMs).toISOString();
+      return db
+        .selectFrom("connector_configs")
+        .select(["id", "connector_type", "updated_at"])
+        .where("sync_status", "=", "syncing")
+        .where("updated_at", "<", cutoff)
+        .execute();
+    },
+
+    /** All connector configs owned by a user. */
+    async listByOwner(createdBy: string) {
+      return db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("created_by", "=", createdBy)
+        .orderBy("created_at", "desc")
+        .execute();
+    },
+
+    /**
+     * Archive all connectors owned by a user — flip to disabled and scrub credentials.
+     * Used when a user is removed from the workspace. Their indexed_files remain so
+     * other attendees still see their previously-synced meetings via file_access.
+     */
+    async archiveConnectorsForOwner(createdBy: string): Promise<{ archived: number }> {
+      const owned = await this.listByOwner(createdBy);
+      for (const config of owned) {
+        const scrubbed = JSON.stringify({ type: config.auth_type, scrubbed: true });
+        await db
+          .updateTable("connector_configs")
+          .set({
+            sync_status: "disabled",
+            credentials: scrubbed,
+            credential_hint: null,
+            error_message: "Owner removed from workspace",
+            updated_at: new Date().toISOString(),
+          })
+          .where("id", "=", config.id)
+          .execute();
+      }
+      return { archived: owned.length };
+    },
+
+    /** Find a connector config of a given type owned by the given user (used for per-user uniqueness). */
+    async findByTypeAndOwner(connectorType: ConnectorType, createdBy: string) {
+      return db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("connector_type", "=", connectorType)
+        .where("created_by", "=", createdBy)
+        .executeTakeFirst();
+    },
+
+    /** Look up the connector config that owns a given indexed file (for file-scoped authz). */
+    async findConfigByFileId(fileId: string) {
+      return db
+        .selectFrom("indexed_files")
+        .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
+        .where("indexed_files.id", "=", fileId)
+        .select(["connector_configs.id", "connector_configs.connector_type", "connector_configs.created_by"])
+        .executeTakeFirst();
     },
 
     /** Create a new connector config. */
@@ -46,6 +157,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       credentials: string;
       scopeConfig?: string;
       createdBy: string;
+      credentialHint?: string | null;
     }) {
       const id = randomUUID();
       await db
@@ -57,6 +169,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           credentials: data.credentials,
           scope_config: data.scopeConfig ?? "{}",
           created_by: data.createdBy,
+          credential_hint: data.credentialHint ?? null,
         })
         .execute();
 
@@ -74,6 +187,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
         lastSyncedAt: string | null;
         errorMessage: string | null;
         browseCache: string | null;
+        credentialHint: string | null;
       }>,
     ) {
       const values: Record<string, unknown> = {};
@@ -84,6 +198,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       if (data.lastSyncedAt !== undefined) values.last_synced_at = data.lastSyncedAt;
       if (data.errorMessage !== undefined) values.error_message = data.errorMessage;
       if (data.browseCache !== undefined) values.browse_cache = data.browseCache;
+      if (data.credentialHint !== undefined) values.credential_hint = data.credentialHint;
 
       if (Object.keys(values).length > 0) {
         values.updated_at = new Date().toISOString();
@@ -143,6 +258,12 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
         if (orphanedIds.length > 0) {
           await db.deleteFrom("file_access").where("indexed_file_id", "in", orphanedIds).execute();
+          // Remove entity_mentions pointing to files we're about to archive — covers the
+          // cross-source case where an entity sourced elsewhere was mentioned in this
+          // connector's files. Without this, surviving entities show stale mentions to
+          // archived files. Mentions for entities we delete in deleteEntitiesForFiles are
+          // already handled by FK CASCADE on entity delete.
+          await db.deleteFrom("entity_mentions").where("indexed_file_id", "in", orphanedIds).execute();
           await db
             .updateTable("indexed_files")
             .set({ is_archived: 1, access_scope_id: null })
@@ -544,6 +665,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       category?: string;
       status?: string;
       access?: string;
+      viewer: FileViewer;
     }) {
       let query = db
         .selectFrom("indexed_files")
@@ -592,12 +714,22 @@ export function createConnectorRepository(db: Kysely<DB>) {
       } else if (opts.access === "unrestricted") {
         query = query.where("indexed_files.access_scope_id", "is", null);
       }
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
+      }
 
-      return query.orderBy("indexed_files.synced_at", "desc").limit(opts.limit).offset(opts.offset).execute();
+      return query
+        .orderBy(
+          sql`coalesce(indexed_files.source_updated_at, indexed_files.source_created_at, indexed_files.synced_at) desc`,
+        )
+        .limit(opts.limit)
+        .offset(opts.offset)
+        .execute();
     },
 
-    /** Count non-archived files with optional filters. */
-    async countAllFiles(filters?: {
+    /** Count non-archived files with optional filters. RBAC-gated for non-admins. */
+    async countAllFiles(opts: {
+      viewer: FileViewer;
       connectorType?: string;
       category?: string;
       status?: string;
@@ -608,47 +740,80 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
 
-      if (filters?.connectorType) {
-        query = query.where("indexed_files.source", "=", filters.connectorType);
+      if (opts.connectorType) {
+        query = query.where("indexed_files.source", "=", opts.connectorType);
       }
-      if (filters?.category) {
-        query = query.where("indexed_files.content_category", "=", filters.category);
+      if (opts.category) {
+        query = query.where("indexed_files.content_category", "=", opts.category);
       }
-      if (filters?.status === "enriched") {
+      if (opts.status === "enriched") {
         query = query.where("indexed_files.summary", "is not", null);
-      } else if (filters?.status === "pending") {
+      } else if (opts.status === "pending") {
         query = query.where((eb) =>
           eb.or([
             eb("indexed_files.embedding_status", "in", ["pending", "failed"]),
             eb("indexed_files.summary_status", "in", ["pending", "failed"]),
           ]),
         );
-      } else if (filters?.status === "raw") {
+      } else if (opts.status === "raw") {
         query = query
           .where("indexed_files.summary", "is", null)
           .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
           .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
       }
-      if (filters?.access === "restricted") {
+      if (opts.access === "restricted") {
         query = query.where("indexed_files.access_scope_id", "is not", null);
-      } else if (filters?.access === "unrestricted") {
+      } else if (opts.access === "unrestricted") {
         query = query.where("indexed_files.access_scope_id", "is", null);
+      }
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
       }
 
       const result = await query.executeTakeFirstOrThrow();
       return Number(result.count);
     },
 
-    /** Count files per connector (via junction table). */
-    async countFilesByConnector(connectorConfigId: string) {
-      const result = await db
+    /**
+     * Count visible files grouped by source. RBAC-gated for non-admins.
+     *
+     * Drives the source-filter chip on the Files page. Connector rows are filtered
+     * by ownership for per-user types (Fireflies etc.), so summing `fileCount`
+     * across visible rows under-counts for a viewer who has file-access via
+     * meetings someone else's connector synced. Aggregating directly from
+     * indexed_files with the same predicate the list uses keeps chip + list
+     * counts in agreement for every viewer.
+     */
+    async countFilesBySource(viewer: FileViewer): Promise<Array<{ source: string; count: number }>> {
+      let query = db
+        .selectFrom("indexed_files")
+        .select(["indexed_files.source", sql<number>`count(*)`.as("count")])
+        .where("indexed_files.is_archived", "=", 0)
+        .groupBy("indexed_files.source");
+      if (!viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(viewer));
+      }
+      const rows = await query.execute();
+      return rows.map((r) => ({ source: r.source, count: Number(r.count) }));
+    },
+
+    /**
+     * Count files for a connector (via junction table). RBAC-gated for non-admins.
+     * Drives the source-filter chip count on the Files page — must agree with the
+     * row count returned by listAllFiles for the same viewer.
+     */
+    async countFilesByConnector(connectorConfigId: string, viewer: FileViewer) {
+      let query = db
         .selectFrom("connector_files")
         .innerJoin("indexed_files", "indexed_files.id", "connector_files.indexed_file_id")
         .select(sql`count(*)`.as("count"))
         .where("connector_files.connector_config_id", "=", connectorConfigId)
-        .where("indexed_files.is_archived", "=", 0)
-        .executeTakeFirstOrThrow();
+        .where("indexed_files.is_archived", "=", 0);
+      if (!viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(viewer));
+      }
 
+      const result = await query.executeTakeFirstOrThrow();
       return Number(result.count);
     },
   };
