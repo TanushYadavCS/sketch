@@ -33,14 +33,14 @@ describe("runMigrations — full sequence", () => {
     await expect(runMigrations(db)).resolves.not.toThrow();
   });
 
-  it("records all 41 migration entries in the kysely_migration table", async () => {
+  it("records all 42 migration entries in the kysely_migration table", async () => {
     await runMigrations(db);
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(41);
+    expect(rows.rows).toHaveLength(42);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -78,6 +78,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[38]).toBe("039-drop-outreach-messages");
     expect(names[39]).toBe("040-user-auth-role");
     expect(names[40]).toBe("041-per-user-fireflies");
+    expect(names[41]).toBe("042-entity-mentions-composite-index");
   });
 
   it("creates the users table", async () => {
@@ -183,8 +184,8 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    // Still exactly 41, not 82
-    expect(rows.rows).toHaveLength(41);
+    // Still exactly 42, not 84
+    expect(rows.rows).toHaveLength(42);
   });
 });
 
@@ -206,7 +207,7 @@ describe("runMigrations — incremental upgrade", () => {
 
     await db.insertInto("users").values({ id: "existing-user", name: "Alice" }).execute();
 
-    // Running again should be a no-op (all 41 already applied)
+    // Running again should be a no-op (all 42 already applied)
     await runMigrations(db);
 
     const users = await db.selectFrom("users").selectAll().execute();
@@ -216,6 +217,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(41);
+    expect(rows.rows).toHaveLength(42);
   });
 });

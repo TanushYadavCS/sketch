@@ -45,6 +45,7 @@ import * as m038 from "./migrations/038-sync-interval";
 import * as m039 from "./migrations/039-drop-outreach-messages";
 import * as m040 from "./migrations/040-user-auth-role";
 import * as m041 from "./migrations/041-per-user-fireflies";
+import * as m042 from "./migrations/042-entity-mentions-composite-index";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -94,6 +95,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "039-drop-outreach-messages": m039,
           "040-user-auth-role": m040,
           "041-per-user-fireflies": m041,
+          "042-entity-mentions-composite-index": m042,
         };
       },
     },

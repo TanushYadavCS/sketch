@@ -430,6 +430,65 @@ function sanitizeFtsQuery(input: string): string {
   return words.join(" OR ");
 }
 
+// ── Kind taxonomy ─────────────────────────────────────────────────────────
+
+/**
+ * One rule in a kind's filter set: an `indexed_files.source IN (...)` group
+ * optionally narrowed by `indexed_files.file_type IN (...)`. Multiple rules
+ * for the same kind are OR-ed together so a kind can span sources with
+ * different file_type vocabularies (e.g. "doc" = Drive documents OR Notion
+ * pages OR ClickUp Docs OR Linear projects).
+ */
+export type KindRule = { sources?: string[]; fileTypes?: string[] };
+
+/**
+ * Static map of semantic content kind → SQL-filter rules. Values are code
+ * constants and never user-driven; any future dynamic source must enforce a
+ * static allowlist before reaching the SQL builder. ContentCategory is too
+ * coarse (only "document" | "structured") and source-only mapping silently
+ * sweeps in tasks under `kind: "doc"` — so we discriminate on file_type too.
+ */
+export const KIND_TO_RULES: Record<string, KindRule[]> = {
+  meeting: [{ sources: ["fireflies"] }],
+  doc: [
+    { sources: ["google_drive"], fileTypes: ["document", "presentation"] },
+    { sources: ["notion"], fileTypes: ["page"] },
+    { sources: ["clickup"], fileTypes: ["doc"] },
+    { sources: ["linear"], fileTypes: ["project"] },
+  ],
+  task: [
+    { sources: ["clickup"], fileTypes: ["task", "subtask"] },
+    { sources: ["linear"], fileTypes: ["issue"] },
+  ],
+  message: [{ sources: ["conversation"] }],
+};
+
+/** Compile kind rules to a raw SQL fragment for the FTS / hybrid pipelines. */
+function kindFilterSql(rules: KindRule[]) {
+  if (rules.length === 0) return sql``;
+  const parts = rules.map((r) => {
+    const conds: ReturnType<typeof sql>[] = [];
+    if (r.sources?.length) {
+      conds.push(
+        sql`indexed_files.source IN (${sql.join(
+          r.sources.map((s) => sql`${s}`),
+          sql`, `,
+        )})`,
+      );
+    }
+    if (r.fileTypes?.length) {
+      conds.push(
+        sql`indexed_files.file_type IN (${sql.join(
+          r.fileTypes.map((t) => sql`${t}`),
+          sql`, `,
+        )})`,
+      );
+    }
+    return sql`(${sql.join(conds, sql` AND `)})`;
+  });
+  return sql`AND (${sql.join(parts, sql` OR `)})`;
+}
+
 // ── Hybrid Search ─────────────────────────────────────────────────────────
 
 export interface HybridSearchOptions extends SearchOptions {
@@ -446,6 +505,10 @@ export interface HybridSearchOptions extends SearchOptions {
   fileIds?: string[];
   /** File IDs linked to entities matching the query — used for entity boost in ranking. */
   entityFileIds?: Set<string>;
+  /** Multi-source filter (OR-of-sources). Takes precedence over `source` when both set. */
+  sources?: string[];
+  /** Compiled kind rules — see KIND_TO_RULES. Caller (Search tool) translates `kind` → rules. */
+  kindRules?: KindRule[];
 }
 
 export interface HybridSearchResult {
@@ -459,6 +522,8 @@ export interface HybridSearchResult {
   providerUrl: string | null;
   sourcePath: string | null;
   sourceUpdatedAt: string | null;
+  /** Source-side creation date — used by recency tie-break when sourceUpdatedAt ties. */
+  sourceCreatedAt: string | null;
   /** Text snippet from the best matching chunk (null for images). */
   snippet: string | null;
   /** Vector similarity score 0-1 (null if no vector match). */
@@ -492,11 +557,21 @@ export async function hybridSearch(
   const ftsResults = new Map<string, { rank: number; snippet: string | null }>();
   const vecResults = new Map<string, { rank: number; similarity: number; snippet: string | null }>();
 
-  // ── 0. Build file ID filter (entity-scoped search) ──────────
+  // ── 0. Build filter fragments ────────────────────────────────
   const fileIdFilter =
     opts?.fileIds && opts.fileIds.length > 0
       ? sql`AND indexed_files.id IN (${sql.join(
           opts.fileIds.map((id) => sql`${id}`),
+          sql`,`,
+        )})`
+      : sql``;
+  // Push `kind` and `sources` into FTS so candidates outside the requested
+  // kind don't crowd out matches; we'd otherwise lose them past `limit * 3`.
+  const kindFilter = opts?.kindRules?.length ? kindFilterSql(opts.kindRules) : sql``;
+  const sourcesFilter =
+    opts?.sources && opts.sources.length > 0
+      ? sql`AND indexed_files.source IN (${sql.join(
+          opts.sources.map((s) => sql`${s}`),
           sql`,`,
         )})`
       : sql``;
@@ -511,6 +586,8 @@ export async function hybridSearch(
         WHERE indexed_files.search_vector @@ plainto_tsquery('english', ${query})
         AND indexed_files.is_archived = 0
         ${fileIdFilter}
+        ${kindFilter}
+        ${sourcesFilter}
         ORDER BY rank DESC
         LIMIT ${limit * 3}
       `.execute(db);
@@ -534,6 +611,8 @@ export async function hybridSearch(
         WHERE indexed_files_fts MATCH ${ftsQuery}
         AND indexed_files.is_archived = 0
         ${fileIdFilter}
+        ${kindFilter}
+        ${sourcesFilter}
         ORDER BY rank
         LIMIT ${limit * 3}
       `.execute(db);
@@ -711,6 +790,23 @@ export async function hybridSearch(
   if (opts?.source) {
     metaQuery = metaQuery.where("source", "=", opts.source);
   }
+  if (opts?.sources && opts.sources.length > 0) {
+    metaQuery = metaQuery.where("source", "in", opts.sources);
+  }
+  if (opts?.kindRules?.length) {
+    const rules = opts.kindRules;
+    metaQuery = metaQuery.where((eb) =>
+      eb.or(
+        rules.map((r) => {
+          const conds = [];
+          if (r.sources?.length) conds.push(eb("indexed_files.source", "in", r.sources));
+          if (r.fileTypes?.length) conds.push(eb("indexed_files.file_type", "in", r.fileTypes));
+          if (conds.length === 0) return eb.val(true);
+          return conds.length === 1 ? conds[0] : eb.and(conds);
+        }),
+      ),
+    );
+  }
   if (opts?.category) {
     metaQuery = metaQuery.where("content_category", "=", opts.category);
   }
@@ -814,6 +910,7 @@ export async function hybridSearch(
         providerUrl: f.provider_url,
         sourcePath: f.source_path,
         sourceUpdatedAt: f.source_updated_at,
+        sourceCreatedAt: f.source_created_at,
         snippet: scoreData?.snippet ?? null,
         similarity: scoreData?.similarity ?? null,
         score: scoreData?.score ?? 0,
@@ -880,25 +977,257 @@ export async function browseFiles(
 }
 
 /**
+ * Resolve a list of entity ids to the file ids that mention them.
+ *
+ * Mode:
+ *  - "or"  → union: any file mentioning any of the entities
+ *  - "and" → intersection: file must mention every entity
+ *
+ * For small `entityIds.length` (≤3) AND mode runs N small queries and intersects
+ * Sets in app code — the planner consistently picks index scans for these and
+ * the round-trip count is negligible. For larger N a single `GROUP BY ... HAVING
+ * COUNT(DISTINCT entity_id)` query takes over (covered by the composite index
+ * added in migration 042).
+ */
+export async function resolveEntityFileIds(db: Kysely<DB>, entityIds: string[], mode: "and" | "or"): Promise<string[]> {
+  if (entityIds.length === 0) return [];
+
+  if (mode === "or" || entityIds.length === 1) {
+    const rows = await db
+      .selectFrom("entity_mentions")
+      .select("indexed_file_id")
+      .distinct()
+      .where("entity_id", "in", entityIds)
+      .execute();
+    return rows.map((r) => r.indexed_file_id);
+  }
+
+  if (entityIds.length <= 3) {
+    const sets = await Promise.all(
+      entityIds.map(
+        async (id) =>
+          new Set(
+            (
+              await db.selectFrom("entity_mentions").select("indexed_file_id").where("entity_id", "=", id).execute()
+            ).map((r) => r.indexed_file_id),
+          ),
+      ),
+    );
+    let out = sets[0];
+    for (let i = 1; i < sets.length; i++) out = new Set([...out].filter((x) => sets[i].has(x)));
+    return [...out];
+  }
+
+  const rows = await db
+    .selectFrom("entity_mentions")
+    .select(["indexed_file_id", db.fn.count<number>("entity_id").distinct().as("n")])
+    .where("entity_id", "in", entityIds)
+    .groupBy("indexed_file_id")
+    .having((eb) => eb(eb.fn.count("entity_id").distinct(), "=", entityIds.length))
+    .execute();
+  return rows.map((r) => r.indexed_file_id);
+}
+
+/**
+ * Coerce a date-like value (ISO string from SQLite, Date object from
+ * node-postgres) to milliseconds since epoch. Returns null for null /
+ * undefined / unparseable input so the caller can sort them last.
+ */
+function toMs(v: string | Date | null | undefined): number | null {
+  if (v == null) return null;
+  const ms = v instanceof Date ? v.getTime() : new Date(v).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Deterministic recency-DESC comparator: source_updated_at, then
+ * source_created_at, then id. Null/undefined timestamps sort last.
+ */
+function byRecencyDesc(a: HybridSearchResult, b: HybridSearchResult): number {
+  const at = toMs(a.sourceUpdatedAt) ?? toMs(a.sourceCreatedAt) ?? Number.NEGATIVE_INFINITY;
+  const bt = toMs(b.sourceUpdatedAt) ?? toMs(b.sourceCreatedAt) ?? Number.NEGATIVE_INFINITY;
+  if (at !== bt) return bt - at;
+  return b.id.localeCompare(a.id);
+}
+
+/**
+ * Empty-query path: structural filters + RBAC + recency, no FTS / vector.
+ *
+ * Time filter mirrors hybridSearch (matches file dates OR a document_timeframes
+ * overlap) so an `after`/`before` clause behaves the same way regardless of
+ * whether the caller provided a query.
+ */
+async function browseLatest(
+  db: Kysely<DB>,
+  opts: {
+    kindRules?: KindRule[];
+    sources?: string[];
+    fileIds?: string[];
+    userEmails?: string[];
+    after?: string;
+    before?: string;
+    limit: number;
+  },
+): Promise<HybridSearchResult[]> {
+  // Caller is responsible for the empty-fileIds short-circuit; selectFrom().where("id", "in", [])
+  // emits invalid `IN ()` SQL on SQLite.
+  let q = db
+    .selectFrom("indexed_files")
+    .select([
+      "id",
+      "file_name",
+      "provider_url",
+      "provider_file_id",
+      "content_category",
+      "source",
+      "source_path",
+      "source_updated_at",
+      "source_created_at",
+      "summary",
+    ])
+    .where("is_archived", "=", 0);
+
+  if (opts.kindRules?.length) {
+    const rules = opts.kindRules;
+    q = q.where((eb) =>
+      eb.or(
+        rules.map((r) => {
+          const conds = [];
+          if (r.sources?.length) conds.push(eb("indexed_files.source", "in", r.sources));
+          if (r.fileTypes?.length) conds.push(eb("indexed_files.file_type", "in", r.fileTypes));
+          if (conds.length === 0) return eb.val(true);
+          return conds.length === 1 ? conds[0] : eb.and(conds);
+        }),
+      ),
+    );
+  }
+  if (opts.sources?.length) q = q.where("source", "in", opts.sources);
+  if (opts.fileIds?.length) q = q.where("id", "in", opts.fileIds);
+
+  if (opts.after || opts.before) {
+    const after = opts.after;
+    const before = opts.before;
+    q = q.where((eb) => {
+      const fileDateExpr = eb.fn.coalesce("source_created_at", "source_updated_at");
+      const conds = [];
+      if (after) conds.push(eb(fileDateExpr, ">=", after));
+      if (before) conds.push(eb(fileDateExpr, "<=", before));
+      const fileDateMatches = conds.length === 1 ? conds[0] : eb.and(conds);
+      const tfMatches = eb.exists(
+        eb
+          .selectFrom("document_timeframes")
+          .select("indexed_file_id")
+          .whereRef("document_timeframes.indexed_file_id", "=", "indexed_files.id")
+          .$if(!!after, (qb) => qb.where("end_date", ">=", after as string))
+          .$if(!!before, (qb) => qb.where("start_date", "<=", before as string)),
+      );
+      return eb.or([fileDateMatches, tfMatches]);
+    });
+  }
+
+  q = q
+    .orderBy(sql`COALESCE(source_updated_at, source_created_at)`, "desc")
+    .orderBy("source_created_at", "desc")
+    .orderBy("id", "desc")
+    .limit(opts.limit * 3);
+
+  const rows = await q.execute();
+
+  const allowedIds =
+    (opts.userEmails ?? []).length > 0
+      ? await filterAccessibleFileIds(
+          db,
+          rows.map((r) => r.id),
+          opts.userEmails ?? [],
+        )
+      : new Set(rows.map((r) => r.id));
+  const visible = rows.filter((r) => allowedIds.has(r.id));
+
+  return visible.slice(0, opts.limit).map((f) => ({
+    id: f.id,
+    fileName: f.file_name,
+    providerUrl: f.provider_url,
+    providerFileId: f.provider_file_id,
+    source: f.source,
+    sourcePath: f.source_path,
+    contentCategory: f.content_category,
+    summary: f.summary,
+    sourceUpdatedAt: f.source_updated_at,
+    sourceCreatedAt: f.source_created_at,
+    score: 0,
+    similarity: null,
+    snippet: null,
+  }));
+}
+
+/**
  * High-level search: embeds the query (best-effort) then runs hybridSearch.
  * Shared by the API endpoint and the agent Search tool.
  *
- * When entityId is provided, search is hard-filtered to files linked to that entity
- * via entity_mentions (entity-scoped search).
+ * Routing:
+ *   - empty query + at least one structural filter → browseLatest
+ *   - non-empty query → hybridSearch
+ *
+ * sortBy: "recency" overfetches `max(limit*5, 50)` candidates from the hybrid
+ * pipeline, then sorts the result set in JS so the truly-newest file isn't
+ * dropped by RRF before the recency stage sees it.
  */
 export async function search(
   db: Kysely<DB>,
   query: string,
   opts?: {
     source?: string;
+    sources?: string[];
+    kindRules?: KindRule[];
     category?: string;
     limit?: number;
     after?: string;
     before?: string;
     userEmails?: string[];
     entityId?: string;
+    entityIds?: string[];
+    entityIdsMode?: "and" | "or";
+    sortBy?: "relevance" | "recency";
+    /** Suppress search()'s own auto-entity-boost (caller will manage entityFileIds itself). */
+    skipAutoEntityBoost?: boolean;
   },
 ): Promise<HybridSearchResult[]> {
+  const limit = opts?.limit ?? 10;
+  const isRecency = opts?.sortBy === "recency";
+  const trimmedQuery = query.trim();
+
+  // Resolve entityId / entityIds → fileIds for scoped search.
+  // Single `entityId` folds into the `entityIds` path (n=1, mode collapses).
+  const allEntityIds =
+    opts?.entityIds && opts.entityIds.length > 0 ? opts.entityIds : opts?.entityId ? [opts.entityId] : [];
+  let fileIds: string[] | undefined;
+  if (allEntityIds.length > 0) {
+    fileIds = await resolveEntityFileIds(db, allEntityIds, opts?.entityIdsMode ?? "and");
+    // Empty-set short-circuit: avoid `IN ()` (invalid on SQLite) and skip the work.
+    if (fileIds.length === 0) return [];
+  }
+
+  // Empty-query path: skip FTS/vector entirely. Require at least one structural filter.
+  if (trimmedQuery === "") {
+    const hasFilter =
+      !!opts?.kindRules?.length ||
+      !!opts?.sources?.length ||
+      !!opts?.source ||
+      (fileIds !== undefined && fileIds.length > 0) ||
+      !!opts?.after ||
+      !!opts?.before;
+    if (!hasFilter) return [];
+    return browseLatest(db, {
+      kindRules: opts?.kindRules,
+      sources: opts?.sources ?? (opts?.source ? [opts.source] : undefined),
+      fileIds,
+      userEmails: opts?.userEmails,
+      after: opts?.after,
+      before: opts?.before,
+      limit,
+    });
+  }
+
   let queryEmbedding: number[] | undefined;
   try {
     const settings = await db
@@ -908,30 +1237,19 @@ export async function search(
       .executeTakeFirst();
     if (settings?.gemini_api_key && settings.enrichment_enabled !== 0) {
       const embedQuery = createQueryEmbedder({ provider: "gemini", apiKey: settings.gemini_api_key });
-      queryEmbedding = await embedQuery(query);
+      queryEmbedding = await embedQuery(trimmedQuery);
     }
   } catch {
     // Vector search is best-effort — fall back to FTS5 only
   }
 
-  // Resolve entityId to file IDs for scoped search
-  let fileIds: string[] | undefined;
-  if (opts?.entityId) {
-    const mentions = await db
-      .selectFrom("entity_mentions")
-      .select("indexed_file_id")
-      .where("entity_id", "=", opts.entityId)
-      .execute();
-    fileIds = mentions.map((m) => m.indexed_file_id);
-    if (fileIds.length === 0) return [];
-  }
-
-  // Entity boost: find entities matching query text, collect their linked file IDs
+  // Auto-entity-discovery boost. Suppressed when the caller already pinned
+  // entityIds (would double-count) or asked to skip it.
   let entityFileIds: Set<string> | undefined;
-  if (!opts?.entityId) {
+  if (allEntityIds.length === 0 && !opts?.skipAutoEntityBoost) {
     try {
       const entityRepo = createEntityRepository(db);
-      const matchingEntities = await entityRepo.searchEntities(query, { limit: 10 });
+      const matchingEntities = await entityRepo.searchEntities(trimmedQuery, { limit: 10 });
       if (matchingEntities.length > 0) {
         const entityIds = matchingEntities.map((e) => e.id);
         const mentions = await db
@@ -948,14 +1266,26 @@ export async function search(
     }
   }
 
-  return hybridSearch(db, query, {
+  // Recency: overfetch from the hybrid pipeline so the truly newest file isn't
+  // dropped past `limit` by RRF, then sort in JS and trim.
+  const fetchLimit = isRecency ? Math.max(limit * 5, 50) : limit;
+
+  const results = await hybridSearch(db, trimmedQuery, {
     source: opts?.source,
+    sources: opts?.sources,
+    kindRules: opts?.kindRules,
     category: opts?.category,
-    limit: opts?.limit ?? 10,
+    limit: fetchLimit,
     queryEmbedding,
     userEmails: opts?.userEmails,
     fileIds,
     entityFileIds,
     timeFilter: opts?.after || opts?.before ? { after: opts?.after, before: opts?.before } : undefined,
   });
+
+  if (isRecency) {
+    results.sort(byRecencyDesc);
+    return results.slice(0, limit);
+  }
+  return results;
 }
