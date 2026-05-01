@@ -5,6 +5,7 @@
 
 import type { SkillCategory } from "@/lib/skills-data";
 import type {
+  AgentEnvironmentVariableRecord,
   FileMetadata,
   IntegrationApp,
   IntegrationConnection,
@@ -883,6 +884,32 @@ export const api = {
       return request<void>(`/api/mcp-servers/${providerId}/connections/${connectionId}`, {
         method: "DELETE",
       });
+    },
+  },
+  agentEnvironmentVariables: {
+    async list() {
+      const res = await request<{ variables: AgentEnvironmentVariableRecord[] }>("/api/agent-environment-variables");
+      return res.variables;
+    },
+    async create(data: { name: string; value: string; isSecret: boolean }) {
+      const res = await request<{ variable: AgentEnvironmentVariableRecord }>("/api/agent-environment-variables", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+      return res.variable;
+    },
+    async update(id: string, data: { value: string }) {
+      const res = await request<{ variable: AgentEnvironmentVariableRecord }>(
+        `/api/agent-environment-variables/${id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        },
+      );
+      return res.variable;
+    },
+    remove(id: string) {
+      return request<{ success: true }>(`/api/agent-environment-variables/${id}`, { method: "DELETE" });
     },
   },
   entities: {

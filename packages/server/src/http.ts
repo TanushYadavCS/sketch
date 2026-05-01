@@ -10,6 +10,7 @@ import { getCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { agentEnvironmentRoutes } from "./api/agent-environment";
 import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
@@ -32,6 +33,7 @@ import { userRoutes } from "./api/users";
 import { whatsappRoutes } from "./api/whatsapp";
 import { createWorkspaceApi } from "./api/workspace";
 import type { Config } from "./config";
+import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
 import { createConnectorRepository } from "./db/repositories/connectors";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
@@ -63,6 +65,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const users = createUserRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db);
+  const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
 
@@ -174,6 +177,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger));
   app.route("/api/skills", skillsRoutes(config));
   app.route("/api/users", userRoutes(users, { settings, db, logger, config }));
+  app.route("/api/agent-environment-variables", agentEnvironmentRoutes(agentEnvVars));
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {

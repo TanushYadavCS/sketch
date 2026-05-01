@@ -203,6 +203,16 @@ export interface MagicLinkTokensTable {
   created_at: Generated<string>;
 }
 
+export interface AgentEnvironmentVariablesTable {
+  id: string;
+  user_id: string;
+  name: string;
+  value: string;
+  is_secret: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface McpServersTable {
   id: string;
   type: string | null;
@@ -380,6 +390,7 @@ export interface DB {
   file_access: FileAccessTable;
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
+  agent_environment_variables: AgentEnvironmentVariablesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   scheduled_tasks: ScheduledTasksTable;
