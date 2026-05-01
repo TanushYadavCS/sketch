@@ -210,6 +210,25 @@ function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
   return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
 }
 
+/**
+ * Resolve the timezone for a scheduled task, in priority order:
+ *   1. explicit `params.timezone`
+ *   2. ambient `creatorTimezone` from the message context
+ *   3. UTC fallback
+ *
+ * Empty / whitespace-only strings are treated as missing — nullish coalescing
+ * alone would let `""` through and overwrite the creator's tz with an invalid
+ * value (croner rejects it on cron, and non-cron tasks would silently land
+ * with a blank timezone in the DB).
+ */
+function resolveScheduleTimezone(paramTz: string | undefined, ctxTz: string | null | undefined): string {
+  const fromParam = paramTz?.trim();
+  if (fromParam && fromParam.length > 0) return fromParam;
+  const fromCtx = ctxTz?.trim();
+  if (fromCtx && fromCtx.length > 0) return fromCtx;
+  return "UTC";
+}
+
 export async function handleManageScheduledTasks(
   params: ManageScheduledTasksParams,
   deps: ManageScheduledTasksDeps,
@@ -332,16 +351,7 @@ export async function handleManageScheduledTasks(
         }
       }
 
-      // Normalize empty / whitespace-only strings to undefined before the fallback —
-      // nullish coalescing alone would treat "" as a real value and overwrite the
-      // creator's tz with an invalid one (croner then rejects it on cron, and non-cron
-      // tasks would silently get an empty timezone in the DB).
-      const trimmedParamTz = params.timezone?.trim();
-      const trimmedCtxTz = ctx.creatorTimezone?.trim();
-      const resolvedTimezone =
-        (trimmedParamTz && trimmedParamTz.length > 0 ? trimmedParamTz : undefined) ??
-        (trimmedCtxTz && trimmedCtxTz.length > 0 ? trimmedCtxTz : undefined) ??
-        "UTC";
+      const resolvedTimezone = resolveScheduleTimezone(params.timezone, ctx.creatorTimezone);
 
       if (params.schedule_type === "cron") {
         try {
