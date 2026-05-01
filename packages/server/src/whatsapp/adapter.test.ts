@@ -618,6 +618,83 @@ describe("whatsapp/adapter", () => {
       ]);
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
     });
+
+    it("hydrates users.timezone from the phone number's country code on first message (+91 → Asia/Kolkata)", async () => {
+      const existing = makeUser({ id: "u-india", whatsapp_number: "+919876543210", timezone: null });
+      const deps = makeDeps();
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(existing);
+      vi.mocked(deps.repos.users.update).mockImplementation(async (_id, data) => makeUser({ ...existing, ...data }));
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "919876543210@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: { key: { remoteJid: "919876543210@s.whatsapp.net", id: "m1", fromMe: false } },
+        phoneNumber: "+919876543210",
+      });
+      await flush();
+
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u-india", { timezone: "Asia/Kolkata" });
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("Asia/Kolkata");
+    });
+
+    it("uses the documented +1 default (America/New_York) when hydrating from a US/CA number", async () => {
+      const existing = makeUser({ id: "u-na", whatsapp_number: "+14155551234", timezone: null });
+      const deps = makeDeps();
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(existing);
+      vi.mocked(deps.repos.users.update).mockImplementation(async (_id, data) => makeUser({ ...existing, ...data }));
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "14155551234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: { key: { remoteJid: "14155551234@s.whatsapp.net", id: "m1", fromMe: false } },
+        phoneNumber: "+14155551234",
+      });
+      await flush();
+
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u-na", { timezone: "America/New_York" });
+    });
+
+    it("does not overwrite an existing users.timezone on subsequent messages", async () => {
+      const existing = makeUser({
+        id: "u-existing",
+        whatsapp_number: "+14155551234",
+        timezone: "America/Los_Angeles",
+      });
+      const deps = makeDeps();
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(existing);
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "14155551234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: { key: { remoteJid: "14155551234@s.whatsapp.net", id: "m1", fromMe: false } },
+        phoneNumber: "+14155551234",
+      });
+      await flush();
+
+      const updateCalls = vi.mocked(deps.repos.users.update).mock.calls;
+      expect(updateCalls.find(([, data]) => "timezone" in (data ?? {}))).toBeUndefined();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("America/Los_Angeles");
+    });
   });
 
   describe("group handler", () => {
