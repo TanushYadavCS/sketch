@@ -503,6 +503,71 @@ describe("slack/adapter", () => {
 
       expect(deps.inboxMessagesRepo?.markConsumed).not.toHaveBeenCalled();
     });
+
+    it("hydrates users.timezone from Slack profile on first message", async () => {
+      const baseDeps = makeDeps();
+      const existing = makeUser({ id: "u1", slack_user_id: "S1", timezone: null });
+      const deps = makeDeps({
+        repos: {
+          ...baseDeps.repos,
+          users: {
+            findBySlackId: vi.fn().mockResolvedValue(existing),
+            findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
+            findByEmail: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn().mockImplementation(async (_id, data) => makeUser({ ...existing, ...data })),
+          } as unknown as SlackAdapterDeps["repos"]["users"],
+        },
+      });
+      mockBotInstance.getUserInfo = vi.fn().mockResolvedValue({
+        name: "alice",
+        realName: "Alice",
+        email: "alice@test.com",
+        tz: "Asia/Kolkata",
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { timezone: "Asia/Kolkata" });
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("Asia/Kolkata");
+    });
+
+    it("does not overwrite an existing users.timezone on subsequent messages", async () => {
+      const baseDeps = makeDeps();
+      const existing = makeUser({ id: "u1", slack_user_id: "S1", timezone: "America/New_York" });
+      const deps = makeDeps({
+        repos: {
+          ...baseDeps.repos,
+          users: {
+            findBySlackId: vi.fn().mockResolvedValue(existing),
+            findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
+            findByEmail: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["users"],
+        },
+      });
+      mockBotInstance.getUserInfo = vi.fn().mockResolvedValue({
+        name: "alice",
+        realName: "Alice",
+        email: "alice@test.com",
+        tz: "Asia/Kolkata",
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      const updateCalls = vi.mocked(deps.repos.users.update).mock.calls;
+      expect(updateCalls.find(([, data]) => "timezone" in (data ?? {}))).toBeUndefined();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("America/New_York");
+    });
   });
 
   describe("channel mention handler", () => {

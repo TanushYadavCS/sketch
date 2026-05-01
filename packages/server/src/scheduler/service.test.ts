@@ -926,4 +926,46 @@ describe("addTask() with once schedule type", () => {
     const dbRow = await repo.getById(task.id);
     expect(dbRow?.schedule_type).toBe("once");
   });
+
+  it("interprets a naive ISO local schedule_value in the task's timezone (Asia/Kolkata)", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    // Naive local time, no Z, no offset. 5 PM IST should resolve to 11:30 UTC.
+    await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_USER1",
+      prompt: "Tomorrow at 5pm IST",
+      scheduleType: "once",
+      scheduleValue: "2099-05-02T17:00:00",
+      timezone: "Asia/Kolkata",
+      createdBy: "U_USER1",
+    });
+
+    const pattern = mockCronInstances[mockCronInstances.length - 1].pattern;
+    expect(pattern).toBeInstanceOf(Date);
+    expect((pattern as Date).toISOString()).toBe("2099-05-02T11:30:00.000Z");
+  });
+
+  it("preserves the absolute instant when schedule_value carries a Z suffix", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    // Z suffix means absolute UTC — task tz must not shift it.
+    await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_USER1",
+      prompt: "Absolute UTC instant",
+      scheduleType: "once",
+      scheduleValue: "2099-05-02T17:00:00Z",
+      timezone: "Asia/Kolkata",
+      createdBy: "U_USER1",
+    });
+
+    const pattern = mockCronInstances[mockCronInstances.length - 1].pattern;
+    expect(pattern).toBeInstanceOf(Date);
+    expect((pattern as Date).toISOString()).toBe("2099-05-02T17:00:00.000Z");
+  });
 });
