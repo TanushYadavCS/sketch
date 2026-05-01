@@ -331,7 +331,16 @@ export async function handleManageScheduledTasks(
         }
       }
 
-      const resolvedTimezone = params.timezone ?? ctx.creatorTimezone ?? "UTC";
+      // Normalize empty / whitespace-only strings to undefined before the fallback —
+      // nullish coalescing alone would treat "" as a real value and overwrite the
+      // creator's tz with an invalid one (croner then rejects it on cron, and non-cron
+      // tasks would silently get an empty timezone in the DB).
+      const trimmedParamTz = params.timezone?.trim();
+      const trimmedCtxTz = ctx.creatorTimezone?.trim();
+      const resolvedTimezone =
+        (trimmedParamTz && trimmedParamTz.length > 0 ? trimmedParamTz : undefined) ??
+        (trimmedCtxTz && trimmedCtxTz.length > 0 ? trimmedCtxTz : undefined) ??
+        "UTC";
 
       if (params.schedule_type === "cron") {
         try {
