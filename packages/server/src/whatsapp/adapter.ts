@@ -551,6 +551,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             contextType: "group" as const,
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
+            creatorTimezone: user?.timezone ?? null,
           },
           scheduler,
           stepContentRepo,

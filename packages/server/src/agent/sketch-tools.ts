@@ -27,6 +27,7 @@ import type { createAutomationStepContentRepository } from "../db/repositories/a
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
+import { parseOnceSchedule } from "../scheduler/parse-once";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
@@ -137,7 +138,7 @@ const manageScheduledTasksSchema = {
     .describe(
       `For cron: standard 5-field expression (minute hour day-of-month month day-of-week). Always use 5-field, never 6-field. Examples: '*/2 * * * *' (every 2 min), '0 9 * * 1-5' (weekdays 9am), '0 */6 * * *' (every 6 hours).
 For interval: number of seconds as a plain string, minimum 60. Examples: '120' (every 2 min), '3600' (every hour). Do not use duration strings like '2m' or '1h'.
-For once: ISO 8601 datetime string (e.g. '2026-03-14T15:00:00'). The task runs once at this time then auto-completes.`,
+For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:00') is interpreted in the resolved timezone (the user's tz unless 'timezone' is set explicitly). To pin an absolute instant regardless of timezone, include a Z suffix or numeric offset (e.g. '2026-03-14T15:00:00Z' or '2026-03-14T15:00:00+05:30'). The task runs once at this time then auto-completes.`,
     ),
   timezone: z
     .string()
@@ -353,7 +354,7 @@ export async function handleManageScheduledTasks(
       }
 
       if (params.schedule_type === "once" && params.schedule_value) {
-        const runAt = new Date(params.schedule_value);
+        const runAt = parseOnceSchedule(params.schedule_value, resolvedTimezone);
         if (Number.isNaN(runAt.getTime())) {
           return text(
             "Error: once schedule_value must be a valid ISO 8601 datetime string (e.g. '2026-03-14T15:00:00').",

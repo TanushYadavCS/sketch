@@ -34,6 +34,7 @@ import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { executeAutomation } from "../workflows/runtime";
+import { parseOnceSchedule } from "./parse-once";
 import type { ScheduledTask } from "./types";
 
 export interface TaskSchedulerDeps {
@@ -96,7 +97,7 @@ export class TaskScheduler {
     }
 
     if (task.schedule_type === "once") {
-      const runAt = new Date(task.schedule_value);
+      const runAt = parseOnceSchedule(task.schedule_value, task.timezone || "UTC");
       if (runAt.getTime() <= Date.now()) {
         await this.repo.updateStatus(task.id, "completed");
         await this.repo.update(task.id, { next_run_at: null });
