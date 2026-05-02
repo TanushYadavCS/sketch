@@ -27,7 +27,7 @@ import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import { createCanUseTool } from "./permissions";
 import { buildSystemContext } from "./prompt";
-import { getSessionId, saveSessionId } from "./sessions";
+import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
 
 export interface ToolCallRecord {
@@ -149,6 +149,7 @@ export interface RunAgentParams {
     groupDescription?: string;
   };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
+  agentEnv?: Record<string, string>;
 }
 
 /**
@@ -214,6 +215,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const attachments = params.attachments ?? [];
   const hasImages = attachments.some((a) => isImageAttachment(a));
+  let usedExistingSession = existingSessionId !== undefined;
 
   let prompt: string | AsyncIterable<SDKUserMessage>;
 
@@ -312,15 +314,19 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     }
   };
 
-  try {
+  const executeSdkRun = async (resumeSessionId: string | undefined) => {
     const run = query({
       prompt,
       options: {
         maxTurns: params.maxTurns ?? 100,
         ...(params.model ? { model: params.model } : {}),
         cwd: workspaceDir,
-        resume: existingSessionId,
-        env: { ...process.env, ...integrationAccess.envVars },
+        resume: resumeSessionId,
+        env: {
+          ...process.env,
+          ...integrationAccess.envVars,
+          ...params.agentEnv,
+        },
         systemPrompt: systemAppend,
         tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
         permissionMode: "default" as const,
@@ -416,6 +422,39 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
         model = modelKeys.length > 0 ? modelKeys[0] : null;
       }
     }
+  };
+
+  try {
+    let resumeSessionId = existingSessionId;
+    let retriedFreshAfterResumeFailure = false;
+    while (true) {
+      try {
+        await executeSdkRun(resumeSessionId);
+        break;
+      } catch (err) {
+        if (
+          !resumeSessionId ||
+          retriedFreshAfterResumeFailure ||
+          toolCalls.length > 0 ||
+          progressEvents.length > 0 ||
+          currentTextSuffix.length > 0 ||
+          typeof prompt !== "string" ||
+          !isRecoverableResumeFailure(err)
+        ) {
+          throw err;
+        }
+
+        logger.warn(
+          { err, workspaceKey: params.workspaceKey, threadKey: params.threadTs },
+          "Agent resumed session failed before producing output; retrying with a fresh session",
+        );
+        await deleteSessionId(params.db, params.workspaceKey, params.threadTs);
+        resumeSessionId = undefined;
+        usedExistingSession = false;
+        sessionId = "";
+        retriedFreshAfterResumeFailure = true;
+      }
+    }
 
     if (sessionId && !isFresh) {
       await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
@@ -461,7 +500,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     webSearchRequests,
     webFetchRequests,
     model,
-    isResumedSession: existingSessionId !== undefined,
+    isResumedSession: usedExistingSession,
     totalAttachments: attachments.length,
     imageCount: images.length,
     nonImageCount: nonImages.length,
@@ -474,4 +513,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       finalText,
     },
   };
+}
+
+function isRecoverableResumeFailure(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("Claude Code process exited with code");
 }

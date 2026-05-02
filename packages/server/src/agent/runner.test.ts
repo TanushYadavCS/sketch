@@ -12,6 +12,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 vi.mock("./sessions", () => ({
+  deleteSessionId: vi.fn().mockResolvedValue(undefined),
   getSessionId: vi.fn().mockResolvedValue(undefined),
   saveSessionId: vi.fn().mockResolvedValue(undefined),
 }));
@@ -167,6 +168,72 @@ function makeRichResultMessage(overrides?: Record<string, unknown>) {
 }
 
 describe("runAgent", () => {
+  it("clears a stale resumed session and retries once fresh before producing output", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const sessions = await import("./sessions");
+    const capturedResume: Array<string | undefined> = [];
+    vi.mocked(sessions.getSessionId).mockResolvedValueOnce("sess-stale");
+    vi.mocked(query)
+      .mockImplementationOnce(((args: unknown) => {
+        const callArgs = args as { options: { resume?: string } };
+        capturedResume.push(callArgs.options.resume);
+        return (async function* () {
+          yield { type: "system", subtype: "init", session_id: "sess-stale" };
+          throw new Error("Claude Code process exited with code 1");
+        })();
+      }) as unknown as typeof query)
+      .mockImplementationOnce(((args: unknown) => {
+        const callArgs = args as { options: { resume?: string } };
+        capturedResume.push(callArgs.options.resume);
+        return (async function* () {
+          yield { type: "system", subtype: "init", session_id: "sess-fresh" };
+          yield {
+            type: "assistant",
+            message: { content: [{ type: "text", text: "Recovered" }] },
+          };
+          yield makeRichResultMessage({ session_id: "sess-fresh" });
+        })();
+      }) as unknown as typeof query);
+
+    const result = await runAgent(makeBaseParams());
+
+    expect(capturedResume).toEqual(["sess-stale", undefined]);
+    expect(sessions.deleteSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", undefined);
+    expect(sessions.saveSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", "sess-fresh", undefined);
+    expect(result.isResumedSession).toBe(false);
+    expect(result.trace.finalText).toBe("Recovered");
+  });
+
+  it("passes user env vars through the SDK process env", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    let capturedEnv: Record<string, string | undefined> = {};
+
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      const callArgs = args as {
+        options: {
+          env: Record<string, string | undefined>;
+        };
+      };
+      capturedEnv = callArgs.options.env;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-bash-env" };
+        yield { type: "result", session_id: "sess-bash-env", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    await runAgent(
+      makeBaseParams({
+        agentEnv: {
+          TEST_REGION: "us-east-1",
+          GH_TOKEN: "token'with-quote",
+        },
+      }),
+    );
+
+    expect(capturedEnv.TEST_REGION).toBe("us-east-1");
+    expect(capturedEnv.GH_TOKEN).toBe("token'with-quote");
+  });
+
   it("uses custom string systemPrompt (not preset) with no per-user content", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const capturedOptions: unknown[] = [];

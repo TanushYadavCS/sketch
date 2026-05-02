@@ -67,6 +67,7 @@ sketch/
 - pino for structured JSON logging — never log message content
 - zod + dotenv for config validation (`import "dotenv/config"`, .env at repo root)
 - Kysely migrations run at app startup (static imports, not FileMigrationProvider)
+- Database code must stay compatible with both SQLite and Postgres. When writing queries, repository methods, migrations, constraints, or database error handling, prefer portable Kysely patterns; if dialect-specific behavior is unavoidable, handle both dialects and add coverage for the difference.
 - No inline comments. Use docstrings to explain decisions when the code isn't self-evident.
 - Vitest for testing
 - Run `pnpm dev` from repo root — tsx watches `packages/server/src/index.ts`

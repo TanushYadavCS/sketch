@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Kysely } from "kysely";
+import { removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type AgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
@@ -14,6 +15,7 @@ import type { Config } from "./config";
 import { startSyncScheduler } from "./connectors/sync";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
+import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
 import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
@@ -94,6 +96,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
+  const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await runManagedSeed(config, settingsRepo, users);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
@@ -111,7 +114,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const trackedRunAgent = async (params: RunAgentParams): Promise<AgentResult> => {
     const runId = randomUUID();
     const span = tracer.startSpan("chat sketch");
-    const enrichedParams = { ...params };
+    const shouldInjectAgentEnv = params.contextType === "dm" && !!params.currentUserId;
+    const agentEnv = shouldInjectAgentEnv
+      ? removeReservedAgentEnv(await agentEnvironmentVariables.listForRuntime(params.currentUserId as string))
+      : undefined;
+    const enrichedParams = {
+      ...params,
+      ...(agentEnv && Object.keys(agentEnv).length > 0
+        ? {
+            agentEnv,
+          }
+        : {}),
+    };
     setAgentRunAttributes(span, enrichedParams, runId);
 
     try {

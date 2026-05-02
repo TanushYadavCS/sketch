@@ -13,13 +13,19 @@ import { AddMcpDialog } from "@/components/connections/add-mcp-dialog";
 import { AddProviderDialog, ProviderSelectorDialog } from "@/components/connections/add-provider-dialog";
 import { EditMcpDialog } from "@/components/connections/edit-mcp-dialog";
 import { EditProviderDialog } from "@/components/connections/edit-provider-dialog";
+import {
+  AddEnvironmentVariableDialog,
+  DeleteEnvironmentVariableDialog,
+  EditEnvironmentVariableDialog,
+  EnvironmentVariablesSection,
+} from "@/components/connections/environment-variables-section";
 import { IntegrationsSection } from "@/components/connections/integrations-section";
 import { McpServersSection } from "@/components/connections/mcp-servers-section";
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
 import { PlusIcon } from "@phosphor-icons/react";
-import type { McpServerRecord } from "@sketch/shared";
+import type { AgentEnvironmentVariableRecord, McpServerRecord } from "@sketch/shared";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
@@ -59,7 +65,7 @@ function ConnectionsCallback() {
 // Tab button
 // ---------------------------------------------------------------------------
 
-type IntegrationsTab = "applications" | "mcps";
+type IntegrationsTab = "applications" | "mcps" | "environment";
 
 // ---------------------------------------------------------------------------
 // Page
@@ -70,7 +76,8 @@ function ConnectionsPage() {
   const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
     if (typeof window === "undefined") return "applications";
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return tab === "mcps" ? "mcps" : "applications";
+    if (tab === "mcps" || tab === "environment") return tab;
+    return "applications";
   });
 
   const serversQuery = useQuery({
@@ -89,10 +96,20 @@ function ConnectionsPage() {
 
   const connections = connectionsQuery.data ?? [];
 
+  const envVarsQuery = useQuery({
+    queryKey: ["agent-environment-variables"],
+    queryFn: () => api.agentEnvironmentVariables.list(),
+    enabled: activeTab === "environment",
+  });
+  const envVars = envVarsQuery.data ?? [];
+
   const [showAddMcpDialog, setShowAddMcpDialog] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerRecord | null>(null);
   const [editingProvider, setEditingProvider] = useState<McpServerRecord | null>(null);
   const [removingServer, setRemovingServer] = useState<McpServerRecord | null>(null);
+  const [showAddEnvDialog, setShowAddEnvDialog] = useState(false);
+  const [editingEnvVar, setEditingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
+  const [deletingEnvVar, setDeletingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
   const [showAddIntegrationDialog, setShowAddIntegrationDialog] = useState(false);
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
@@ -100,6 +117,7 @@ function ConnectionsPage() {
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
     queryClient.invalidateQueries({ queryKey: ["connections"] });
+    queryClient.invalidateQueries({ queryKey: ["agent-environment-variables"] });
   }, [queryClient]);
 
   const isLoading = serversQuery.isLoading;
@@ -118,10 +136,15 @@ function ConnectionsPage() {
           onClick={() => setActiveTab("applications")}
         />
         <TabButton label="MCPs" isActive={activeTab === "mcps"} onClick={() => setActiveTab("mcps")} />
+        <TabButton
+          label="Environment"
+          isActive={activeTab === "environment"}
+          onClick={() => setActiveTab("environment")}
+        />
       </div>
 
       <div className="mt-5 space-y-8">
-        {isLoading ? (
+        {isLoading || (activeTab === "environment" && envVarsQuery.isLoading) ? (
           <LoadingSkeleton />
         ) : activeTab === "applications" ? (
           <>
@@ -155,7 +178,7 @@ function ConnectionsPage() {
               </>
             )}
           </>
-        ) : (
+        ) : activeTab === "mcps" ? (
           <McpServersSection
             servers={servers}
             onAdd={() => setShowAddMcpDialog(true)}
@@ -179,6 +202,13 @@ function ConnectionsPage() {
                 toast.error(err instanceof Error ? err.message : "Connection test failed");
               }
             }}
+          />
+        ) : (
+          <EnvironmentVariablesSection
+            variables={envVars}
+            onAdd={() => setShowAddEnvDialog(true)}
+            onEdit={setEditingEnvVar}
+            onDelete={setDeletingEnvVar}
           />
         )}
       </div>
@@ -211,6 +241,24 @@ function ConnectionsPage() {
       <RemoveMcpDialog
         server={removingServer}
         onOpenChange={(open) => !open && setRemovingServer(null)}
+        onSuccess={invalidateAll}
+      />
+
+      <AddEnvironmentVariableDialog
+        open={showAddEnvDialog}
+        onOpenChange={setShowAddEnvDialog}
+        onSuccess={invalidateAll}
+      />
+
+      <EditEnvironmentVariableDialog
+        variable={editingEnvVar}
+        onOpenChange={(open) => !open && setEditingEnvVar(null)}
+        onSuccess={invalidateAll}
+      />
+
+      <DeleteEnvironmentVariableDialog
+        variable={deletingEnvVar}
+        onOpenChange={(open) => !open && setDeletingEnvVar(null)}
         onSuccess={invalidateAll}
       />
 
