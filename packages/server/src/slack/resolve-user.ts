@@ -20,6 +20,7 @@ type UserRow = {
   email_verified_at: string | null;
   tool_progress: string | null;
   reasoning_text: number | null;
+  timezone: string | null;
 };
 
 export interface ResolveSlackUserDeps {
@@ -34,10 +35,12 @@ export interface ResolveSlackUserDeps {
     }): Promise<UserRow>;
     update(
       id: string,
-      data: { slackUserId?: string | null; email?: string | null; emailVerified?: boolean },
+      data: { slackUserId?: string | null; email?: string | null; emailVerified?: boolean; timezone?: string | null },
     ): Promise<UserRow>;
   };
-  getUserInfo(slackUserId: string): Promise<{ name: string; realName: string; email: string | null }>;
+  getUserInfo(
+    slackUserId: string,
+  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null }>;
   logger: Logger;
 }
 
@@ -62,8 +65,14 @@ export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUs
   let user = await users.findBySlackId(slackUserId);
   logger.debug({ slackUserId, found: !!user, userId: user?.id }, "resolveSlackUser: findBySlackId result");
 
+  let cachedUserInfo: Awaited<ReturnType<typeof getUserInfo>> | undefined;
+  const fetchUserInfo = async () => {
+    if (!cachedUserInfo) cachedUserInfo = await getUserInfo(slackUserId);
+    return cachedUserInfo;
+  };
+
   if (!user) {
-    const userInfo = await getUserInfo(slackUserId);
+    const userInfo = await fetchUserInfo();
     logger.debug(
       { slackUserId, email: userInfo.email, realName: userInfo.realName },
       "resolveSlackUser: Slack profile",
@@ -112,7 +121,7 @@ export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUs
       logger.info({ userId: user.id, name: user.name }, "New user created");
     }
   } else if (!user.email) {
-    const userInfo = await getUserInfo(slackUserId);
+    const userInfo = await fetchUserInfo();
     if (userInfo.email) {
       user = await users.update(user.id, { email: userInfo.email, emailVerified: true });
       logger.debug({ userId: user.id, email: userInfo.email }, "resolveSlackUser: backfilled email (auto-verified)");
@@ -120,5 +129,14 @@ export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUs
   } else {
     logger.debug({ userId: user.id, name: user.name }, "resolveSlackUser: existing user with email, no changes");
   }
+
+  if (!user.timezone) {
+    const userInfo = await fetchUserInfo();
+    if (userInfo.tz) {
+      user = await users.update(user.id, { timezone: userInfo.tz });
+      logger.debug({ userId: user.id, timezone: userInfo.tz }, "resolveSlackUser: hydrated timezone from Slack");
+    }
+  }
+
   return user;
 }

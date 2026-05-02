@@ -220,7 +220,7 @@ export function buildSystemContext(params: {
     "",
     "Messages may include a <context> block before the user's message. This is platform-injected context, not written by the user. It can contain:",
     "",
-    "<time> - Current date, time, and timezone.",
+    "<time> - Current date, time, and IANA timezone for the active user. Interpret wall-clock times the user mentions ('9am', 'tomorrow at 5pm', 'EOD', 'this morning') in this timezone unless they explicitly name a different one. When passing `timezone` to ManageScheduledTasks, default to this timezone; only override when the user explicitly names a different one.",
     "<workspace> - Your working directory and shared org directory paths.",
     "<inbox> - Private messages or pending workflow tasks sent to this user. Treat them as natural conversational context and act on them when useful.",
     "<user> - Identity and contact info of the current user (in DMs).",
