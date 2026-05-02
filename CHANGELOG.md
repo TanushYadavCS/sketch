@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.24.0] -- 2026-05-02
+
+- Agent environment: add a user-scoped Environment tab under Integrations for configuring variables available to Sketch agent Bash commands in DMs.
+- Runtime: inject saved variables into Claude Agent SDK runs through `options.env`, avoiding shell-profile assumptions and keeping values scoped to the invoking user.
+- Security/UI: encrypt values at rest, support secret versus copyable non-secret display, and block reserved runtime/provider keys across backend and frontend validation.
+
 ## [0.23.0] -- 2026-04-30
 
 - Connectors: add per-user versus org-wide authorization for integrations, including Fireflies per-user sync support and connector credential visibility controls.
