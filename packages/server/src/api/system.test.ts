@@ -46,6 +46,10 @@ function createTestSystemApp(
       slackUserId: string;
       message: string;
     }) => Promise<{ channelId: string; messageRef: string }>;
+    sendDm?: (params: { userId: string; platform: "slack" | "whatsapp"; message: string }) => Promise<{
+      channelId: string;
+      messageRef: string;
+    }>;
     whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;
     cancelWhatsAppPairing?: ReturnType<typeof vi.fn>;
@@ -369,6 +373,30 @@ describe("PUT /api/system/identity", () => {
     expect(user?.email_verified_at).not.toBeNull();
   });
 
+  it("creates admin user row with WhatsApp number", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/identity", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        adminEmail: "wa-admin@acme.com",
+        name: "WhatsApp Admin",
+        whatsappNumber: "+14155552671",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const user = await userRepo.findByEmail("wa-admin@acme.com");
+    expect(user?.auth_role).toBe("admin");
+    expect(user?.whatsapp_number).toBe("+14155552671");
+  });
+
   it("updates existing user row with name and verified email when user already exists", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
@@ -398,6 +426,71 @@ describe("PUT /api/system/identity", () => {
     expect(user?.role).toBeNull();
     expect(user?.name).toBe("New Name");
     expect(user?.email_verified_at).not.toBeNull();
+  });
+
+  it("updates existing admin user row with WhatsApp number", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      name: "Admin",
+      email: "admin-wa-update@acme.com",
+      emailVerified: true,
+      authRole: "admin",
+    });
+
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/identity", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        adminEmail: "admin-wa-update@acme.com",
+        name: "Admin Updated",
+        whatsappNumber: "+919876543210",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const user = await userRepo.findById(existing.id);
+    expect(user?.name).toBe("Admin Updated");
+    expect(user?.auth_role).toBe("admin");
+    expect(user?.whatsapp_number).toBe("+919876543210");
+  });
+
+  it("returns 409 when admin WhatsApp number belongs to another user", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await userRepo.create({
+      name: "Existing Member",
+      whatsappNumber: "+919876543210",
+      authRole: "member",
+    });
+
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/identity", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        adminEmail: "admin-conflict@acme.com",
+        name: "Admin Conflict",
+        orgName: "Acme Conflict",
+        whatsappNumber: "+919876543210",
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: { code: "CONFLICT", message: "WhatsApp number is already linked to another user" },
+    });
+    expect(await settingsRepo.get()).toBeNull();
+    expect(await userRepo.findByEmail("admin-conflict@acme.com")).toBeUndefined();
   });
 
   it("validates adminEmail as a valid email", async () => {
@@ -655,6 +748,104 @@ describe("PUT /api/system/users", () => {
     expect(syncedAdmin?.password_hash).toBeNull();
   });
 
+  it("bulk upserts users by WhatsApp number and optional email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      email: "alice@acme.com",
+      name: "Alice Old",
+      emailVerified: true,
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [
+          { email: "alice@acme.com", name: "Alice WhatsApp", whatsappNumber: "+14155552671" },
+          { name: "Bob WhatsApp", whatsappNumber: "+919876543210" },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, created: 1, updated: 1 });
+
+    const alice = await userRepo.findById(existing.id);
+    expect(alice?.name).toBe("Alice WhatsApp");
+    expect(alice?.whatsapp_number).toBe("+14155552671");
+
+    const bob = await userRepo.findByWhatsappNumber("+919876543210");
+    expect(bob?.name).toBe("Bob WhatsApp");
+    expect(bob?.auth_role).toBe("member");
+  });
+
+  it("bulk upserts Slack and WhatsApp identities from one row", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [
+          {
+            email: "alice@acme.com",
+            name: "Alice Cross Channel",
+            slackUserId: "U111",
+            whatsappNumber: "+14155552671",
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, created: 1, updated: 0 });
+
+    const alice = await userRepo.findByEmail("alice@acme.com");
+    expect(alice?.name).toBe("Alice Cross Channel");
+    expect(alice?.slack_user_id).toBe("U111");
+    expect(alice?.whatsapp_number).toBe("+14155552671");
+    expect(alice?.auth_role).toBe("member");
+  });
+
+  it("preserves admin auth_role when WhatsApp sync matches the admin by email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin Old",
+      emailVerified: true,
+      authRole: "admin",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ email: "admin@acme.com", name: "Admin WhatsApp", whatsappNumber: "+14155550000" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const syncedAdmin = await userRepo.findById(admin.id);
+    expect(syncedAdmin?.name).toBe("Admin WhatsApp");
+    expect(syncedAdmin?.whatsapp_number).toBe("+14155550000");
+    expect(syncedAdmin?.auth_role).toBe("admin");
+  });
+
   it("returns 409 when an email is already linked to a different Slack user", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
@@ -674,6 +865,33 @@ describe("PUT /api/system/users", () => {
       },
       body: JSON.stringify({
         users: [{ email: "alice@acme.com", name: "Alice", slackUserId: "U999" }],
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.code).toBe("CONFLICT");
+  });
+
+  it("returns 409 when an email is already linked to a different WhatsApp number", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await userRepo.create({
+      email: "alice@acme.com",
+      name: "Alice",
+      whatsappNumber: "+14155550001",
+      emailVerified: true,
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ email: "alice@acme.com", name: "Alice", whatsappNumber: "+14155550002" }],
       }),
     });
 
@@ -1272,6 +1490,194 @@ describe("POST /api/system/onboarding-introductions", () => {
     expect(await res.json()).toEqual({ ok: true, status: "started" });
     const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
     expect(workflow).toBeDefined();
+  });
+
+  it("direct-sends WhatsApp introductions without creating inbox workflow rows", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const inboxMessagesRepo = createInboxMessagesRepository(db);
+    const sendDm = vi.fn().mockResolvedValue({ channelId: "wa@s.whatsapp.net", messageRef: "" });
+    await settingsRepo.create({ botName: "Sketch" });
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      whatsappNumber: "+14155552671",
+      emailVerified: true,
+      authRole: "admin",
+    });
+    const teammate = await userRepo.create({
+      name: "Teammate",
+      whatsappNumber: "+919876543210",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      inboxMessagesRepo,
+      sendDm,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        adminEmail: "admin@acme.com",
+        channel: "whatsapp",
+        whatsappNumbers: ["+14155552671", "+919876543210"],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: "sent", sent: 2, failed: 0 });
+    expect(sendDm).toHaveBeenCalledWith({
+      userId: admin.id,
+      platform: "whatsapp",
+      message:
+        "Hi, I'm Sketch, your AI coworker in Sketch. You can message me here when you need help with your workspace.",
+    });
+    expect(sendDm).toHaveBeenCalledWith({
+      userId: teammate.id,
+      platform: "whatsapp",
+      message:
+        "Hi, I'm Sketch, your AI coworker in Sketch. You can message me here when you need help with your workspace.",
+    });
+    const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
+    expect(workflow).toBeUndefined();
+  });
+
+  it("surfaces partial WhatsApp introduction delivery failures", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const sendDm = vi
+      .fn()
+      .mockResolvedValueOnce({ channelId: "admin@s.whatsapp.net", messageRef: "" })
+      .mockRejectedValueOnce(new Error("send failed"));
+    await settingsRepo.create({ botName: "Sketch" });
+    await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      whatsappNumber: "+14155552671",
+      emailVerified: true,
+      authRole: "admin",
+    });
+    await userRepo.create({
+      name: "Teammate",
+      whatsappNumber: "+919876543210",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      sendDm,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        adminEmail: "admin@acme.com",
+        channel: "whatsapp",
+        whatsappNumbers: ["+14155552671", "+919876543210"],
+      }),
+    });
+
+    expect(res.status).toBe(207);
+    expect(await res.json()).toMatchObject({ ok: false, status: "partial_failure", sent: 1, failed: 1 });
+  });
+
+  it("reports missing WhatsApp introduction recipients as failures", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const sendDm = vi.fn().mockResolvedValue({ channelId: "admin@s.whatsapp.net", messageRef: "" });
+    await settingsRepo.create({ botName: "Sketch" });
+    const admin = await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      whatsappNumber: "+14155552671",
+      emailVerified: true,
+      authRole: "admin",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      sendDm,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        adminEmail: "admin@acme.com",
+        channel: "whatsapp",
+        whatsappNumbers: ["+14155552671", "+919876543210"],
+      }),
+    });
+
+    expect(res.status).toBe(207);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      status: "partial_failure",
+      sent: 1,
+      failed: 1,
+      deliveries: [
+        {
+          whatsappNumber: "+919876543210",
+          ok: false,
+          error: "WhatsApp user not found",
+        },
+        {
+          userId: admin.id,
+          ok: true,
+        },
+      ],
+    });
+    expect(sendDm).toHaveBeenCalledTimes(1);
+    expect(sendDm).toHaveBeenCalledWith({
+      userId: admin.id,
+      platform: "whatsapp",
+      message:
+        "Hi, I'm Sketch, your AI coworker in Sketch. You can message me here when you need help with your workspace.",
+    });
+  });
+
+  it("requires admin WhatsApp number before WhatsApp introductions", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const sendDm = vi.fn();
+    await settingsRepo.create({ botName: "Sketch" });
+    await userRepo.create({
+      email: "admin@acme.com",
+      name: "Admin",
+      emailVerified: true,
+      authRole: "admin",
+    });
+    await userRepo.create({
+      name: "Teammate",
+      whatsappNumber: "+919876543210",
+    });
+
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      sendDm,
+    });
+
+    const res = await app.request("/api/system/onboarding-introductions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        adminEmail: "admin@acme.com",
+        channel: "whatsapp",
+        whatsappNumbers: ["+919876543210"],
+      }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: { code: "CONFLICT", message: "Admin WhatsApp number is required for WhatsApp introductions" },
+    });
+    expect(sendDm).not.toHaveBeenCalled();
   });
 
   it("uses the requested admin email instead of the first admin", async () => {

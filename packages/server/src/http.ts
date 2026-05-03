@@ -57,6 +57,10 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
+  sendDm?: (params: { userId: string; platform: "slack" | "whatsapp"; message: string }) => Promise<{
+    channelId: string;
+    messageRef: string;
+  }>;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -242,6 +246,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
               return { channelId, messageRef };
             }
           : undefined,
+        sendDm: deps?.sendDm,
         whatsappStatus: whatsapp
           ? () => ({
               connected: whatsapp.isConnected,

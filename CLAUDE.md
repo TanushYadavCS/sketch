@@ -64,6 +64,7 @@ sketch/
 - Biome for linting and formatting (2-space indent, 120 line width)
 - Strict TypeScript (`strict: true`)
 - Conventional commits: `feat:`, `fix:`, `chore:`
+- Branch names must use work-type prefixes such as `feat/`, `fix/`, or `chore/`; use `feat/` for feature work.
 - pino for structured JSON logging — never log message content
 - zod + dotenv for config validation (`import "dotenv/config"`, .env at repo root)
 - Kysely migrations run at app startup (static imports, not FileMigrationProvider)

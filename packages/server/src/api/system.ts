@@ -1,3 +1,4 @@
+import { whatsappNumberSchema } from "@sketch/shared";
 /**
  * System API routes — internal management endpoints authenticated by bearer token.
  * Used by managed deployments to update configuration (e.g. Slack tokens) remotely.
@@ -9,6 +10,7 @@ import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import { upsertSlackIdentity } from "../slack/upsert-identity";
+import { upsertWhatsAppIdentity } from "../whatsapp/upsert-identity";
 
 type InboxMessagesRepo = ReturnType<typeof createInboxMessagesRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -30,6 +32,11 @@ interface SystemDeps {
     slackUserId: string;
     message: string;
   }) => Promise<{ channelId: string; messageRef: string }>;
+  sendDm?: (params: {
+    userId: string;
+    platform: "slack" | "whatsapp";
+    message: string;
+  }) => Promise<{ channelId: string; messageRef: string }>;
   whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   startWhatsAppPairing?: Function;
@@ -48,6 +55,7 @@ const identitySchema = z.object({
   orgName: z.string().optional(),
   botName: z.string().optional(),
   name: z.string().optional(),
+  whatsappNumber: whatsappNumberSchema.optional(),
 });
 
 const llmSchema = z.discriminatedUnion("provider", [
@@ -77,11 +85,19 @@ const systemUserSchema = z.object({
 
 const systemBulkUsersSchema = z.object({
   users: z.array(
-    z.object({
-      email: z.string().email(),
-      name: z.string().trim().min(1),
-      slackUserId: z.string().trim().min(1),
-    }),
+    z
+      .object({
+        email: z.string().email().optional(),
+        name: z.string().trim().min(1),
+        slackUserId: z.string().trim().min(1).optional(),
+        whatsappNumber: whatsappNumberSchema.optional(),
+      })
+      .refine((row) => row.slackUserId || row.whatsappNumber, {
+        message: "slackUserId or whatsappNumber is required",
+      })
+      .refine((row) => !row.slackUserId || row.email, {
+        message: "email is required for Slack users",
+      }),
   ),
 });
 
@@ -96,6 +112,8 @@ const onboardingWorkflowMetadataSchema = z.object({
 
 const onboardingIntroductionsSchema = z.object({
   adminEmail: z.string().email().optional(),
+  channel: z.enum(["slack", "whatsapp"]).optional(),
+  whatsappNumbers: z.array(whatsappNumberSchema).optional(),
 });
 
 function buildOpeningIntroMessage(botName: string): string {
@@ -130,16 +148,10 @@ function parseWorkflowMetadata(value: string | null): { openingMessageSent?: boo
   }
 }
 
-class SystemUserSyncConflictError extends Error {
-  constructor(
-    readonly conflict: {
-      email: string;
-      existingSlackUserId: string;
-      incomingSlackUserId: string;
-    },
-  ) {
-    super(`User ${conflict.email} is already linked to Slack user ${conflict.existingSlackUserId}`);
-  }
+class SystemUserSyncConflictError extends Error {}
+
+function buildWhatsAppIntroMessage(botName: string): string {
+  return `Hi, I'm ${botName}, your AI coworker in Sketch. You can message me here when you need help with your workspace.`;
 }
 
 async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
@@ -211,8 +223,24 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
     }
 
-    const { adminEmail, adminPasswordHash, orgName, botName } = parsed.data;
+    const { adminEmail, adminPasswordHash, orgName, botName, whatsappNumber } = parsed.data;
     const normalizedAdminEmail = adminEmail.trim().toLowerCase();
+
+    const existingUser = deps.userRepo ? await deps.userRepo.findByEmail(normalizedAdminEmail) : undefined;
+    if (deps.userRepo && whatsappNumber !== undefined) {
+      const existingByWhatsapp = await deps.userRepo.findByWhatsappNumber(whatsappNumber);
+      if (existingByWhatsapp && existingByWhatsapp.id !== existingUser?.id) {
+        return c.json(
+          {
+            error: {
+              code: "CONFLICT",
+              message: "WhatsApp number is already linked to another user",
+            },
+          },
+          409,
+        );
+      }
+    }
 
     const existing = await settings.get();
     if (existing) {
@@ -229,13 +257,13 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
 
     if (deps.userRepo) {
       const displayName = parsed.data.name || normalizedAdminEmail.split("@")[0];
-      const existingUser = await deps.userRepo.findByEmail(normalizedAdminEmail);
       if (existingUser) {
         await deps.userRepo.update(existingUser.id, {
           name: displayName,
           email: normalizedAdminEmail,
           emailVerified: true,
           ...(adminPasswordHash !== undefined ? { passwordHash: adminPasswordHash } : {}),
+          ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
           authRole: "admin",
         });
       } else {
@@ -244,6 +272,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
           email: normalizedAdminEmail,
           emailVerified: true,
           passwordHash: adminPasswordHash ?? null,
+          ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
           authRole: "admin",
         });
       }
@@ -353,18 +382,39 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         let updated = 0;
 
         for (const user of parsed.data.users) {
-          const upsertResult = await upsertSlackIdentity(users, {
-            name: user.name,
-            email: user.email,
-            slackUserId: user.slackUserId,
-          });
+          let rowCreated = false;
+          let rowUpdated = false;
 
-          if (upsertResult.status === "created") created += 1;
-          if (upsertResult.status === "updated") updated += 1;
-
-          if (upsertResult.status === "conflict") {
-            throw new SystemUserSyncConflictError(upsertResult.conflict);
+          if (user.slackUserId) {
+            const slackResult = await upsertSlackIdentity(users, {
+              name: user.name,
+              email: user.email as string,
+              slackUserId: user.slackUserId,
+            });
+            if (slackResult.status === "conflict") {
+              throw new SystemUserSyncConflictError(
+                `User ${slackResult.conflict.email} is already linked to another Slack user`,
+              );
+            }
+            if (slackResult.status === "created") rowCreated = true;
+            if (slackResult.status === "updated") rowUpdated = true;
           }
+
+          if (user.whatsappNumber) {
+            const whatsappResult = await upsertWhatsAppIdentity(users, {
+              name: user.name,
+              email: user.email,
+              whatsappNumber: user.whatsappNumber,
+            });
+            if (whatsappResult.status === "conflict") {
+              throw new SystemUserSyncConflictError("User is already linked to a different WhatsApp identity");
+            }
+            if (whatsappResult.status === "created") rowCreated = true;
+            if (whatsappResult.status === "updated") rowUpdated = true;
+          }
+
+          if (rowCreated) created += 1;
+          else if (rowUpdated) updated += 1;
         }
 
         return { created, updated };
@@ -440,7 +490,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
   });
 
   routes.post("/onboarding-introductions", async (c) => {
-    if (!deps.userRepo || !deps.inboxMessagesRepo || !deps.sendSlackDmToSlackUser) {
+    if (!deps.userRepo) {
       return c.json({ error: { code: "NOT_FOUND", message: "Onboarding introductions not available" } }, 404);
     }
 
@@ -458,6 +508,90 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
     if (adminEmail && admin.auth_role !== "admin") {
       return c.json({ error: { code: "BAD_REQUEST", message: "User is not an admin" } }, 400);
+    }
+
+    if (parsed.data.channel === "whatsapp") {
+      if (!deps.sendDm) {
+        return c.json({ error: { code: "NOT_FOUND", message: "WhatsApp introductions not available" } }, 404);
+      }
+      if (!admin.whatsapp_number) {
+        return c.json(
+          {
+            error: {
+              code: "CONFLICT",
+              message: "Admin WhatsApp number is required for WhatsApp introductions",
+            },
+          },
+          409,
+        );
+      }
+
+      const requestedNumbers = parsed.data.whatsappNumbers ?? [];
+      const targetUsers = new Map<string, { id: string; whatsapp_number: string | null }>();
+      const missingNumbers: string[] = [];
+      targetUsers.set(admin.id, admin);
+      for (const whatsappNumber of requestedNumbers) {
+        const user = await deps.userRepo.findByWhatsappNumber(whatsappNumber);
+        if (user?.whatsapp_number) {
+          targetUsers.set(user.id, user);
+        } else {
+          missingNumbers.push(whatsappNumber);
+        }
+      }
+
+      if (targetUsers.size === 0) {
+        return c.json({ error: { code: "BAD_REQUEST", message: "No WhatsApp users found for introductions" } }, 400);
+      }
+
+      const message = buildWhatsAppIntroMessage(settingsRow?.bot_name ?? "Sketch");
+      const deliveries: Array<{
+        userId?: string;
+        whatsappNumber?: string;
+        ok: boolean;
+        channelId?: string;
+        messageRef?: string;
+        error?: string;
+      }> = [];
+      for (const whatsappNumber of missingNumbers) {
+        deliveries.push({
+          whatsappNumber,
+          ok: false,
+          error: "WhatsApp user not found",
+        });
+      }
+      for (const user of targetUsers.values()) {
+        try {
+          const delivery = await deps.sendDm({ userId: user.id, platform: "whatsapp", message });
+          deliveries.push({
+            userId: user.id,
+            ok: true,
+            channelId: delivery.channelId,
+            messageRef: delivery.messageRef,
+          });
+        } catch (error) {
+          deliveries.push({
+            userId: user.id,
+            ok: false,
+            error: error instanceof Error ? error.message : "Delivery failed",
+          });
+        }
+      }
+
+      const failed = deliveries.filter((delivery) => !delivery.ok);
+      return c.json(
+        {
+          ok: failed.length === 0,
+          status: failed.length === 0 ? "sent" : "partial_failure",
+          sent: deliveries.length - failed.length,
+          failed: failed.length,
+          deliveries,
+        },
+        failed.length === 0 ? 200 : 207,
+      );
+    }
+
+    if (!deps.inboxMessagesRepo || !deps.sendSlackDmToSlackUser) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Slack introductions not available" } }, 404);
     }
     if (!admin.slack_user_id) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Admin user has no Slack identity" } }, 400);

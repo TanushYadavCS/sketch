@@ -323,6 +323,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     onLlmSettingsUpdated: async () => {
       await applyLlmEnvFromDb();
     },
+    sendDm: sendDirectMessage,
     onSmtpUpdated: async () => {
       logger.info("SMTP configuration updated");
     },
