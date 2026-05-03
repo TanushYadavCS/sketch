@@ -63,25 +63,31 @@ const FRIENDLY_MESSAGES: Record<string, string[]> = {
   ],
 };
 
+function stripMcpPrefix(toolName: string): string {
+  return toolName.replace(/^mcp__.+?__/, "");
+}
+
 function buildTechnicalLine(toolName: string, input: Record<string, unknown>): string {
-  const emoji = TOOL_EMOJI[toolName] ?? FALLBACK_EMOJI;
-  const argKey = PRIMARY_ARG[toolName];
+  const display = stripMcpPrefix(toolName);
+  const emoji = TOOL_EMOJI[display] ?? FALLBACK_EMOJI;
+  const argKey = PRIMARY_ARG[display];
 
   if (argKey) {
     const rawValue = input[argKey];
     if (rawValue != null) {
-      const display = typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
-      const clipped = display.length > MAX_ARG_LENGTH ? `${display.slice(0, MAX_ARG_LENGTH)}...` : display;
-      return `${emoji} ${toolName}: "${clipped}"`;
+      const raw = typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
+      const clipped = raw.length > MAX_ARG_LENGTH ? `${raw.slice(0, MAX_ARG_LENGTH)}...` : raw;
+      return `${emoji} ${display}: "${clipped}"`;
     }
   }
 
-  return `${emoji} ${toolName}...`;
+  return `${emoji} ${display}...`;
 }
 
 function buildVerboseLine(toolName: string, input: Record<string, unknown>): string {
-  const emoji = TOOL_EMOJI[toolName] ?? FALLBACK_EMOJI;
-  return Object.keys(input).length > 0 ? `${emoji} ${toolName}: ${JSON.stringify(input)}` : `${emoji} ${toolName}`;
+  const display = stripMcpPrefix(toolName);
+  const emoji = TOOL_EMOJI[display] ?? FALLBACK_EMOJI;
+  return Object.keys(input).length > 0 ? `${emoji} ${display}: ${JSON.stringify(input)}` : `${emoji} ${display}`;
 }
 
 function dedup(lines: string[]): string[] {
@@ -121,7 +127,7 @@ function dedup(lines: string[]): string[] {
 }
 
 function getFriendlyPool(toolName: string): string[] {
-  return FRIENDLY_MESSAGES[toolName] ?? FRIENDLY_MESSAGES.Fallback;
+  return FRIENDLY_MESSAGES[stripMcpPrefix(toolName)] ?? FRIENDLY_MESSAGES.Fallback;
 }
 
 function pickFriendlyLine(toolName: string, random: () => number): string {

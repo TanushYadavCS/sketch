@@ -24,6 +24,19 @@ export const NEW_SESSION_CONFIRMATIONS = [
 export const TOOL_PROGRESS_OPTIONS = ["off", "friendly", "concise", "technical", "verbose"] as const;
 export const REASONING_TEXT_OPTIONS = ["on", "off"] as const;
 
+export const TOOL_PROGRESS_LABELS: Record<ToolProgressCommand, string> = {
+  off: "Off",
+  friendly: "Friendly",
+  concise: "Concise",
+  technical: "Technical",
+  verbose: "Verbose",
+};
+
+export const REASONING_TEXT_LABELS: Record<ReasoningTextCommand, string> = {
+  on: "On",
+  off: "Off",
+};
+
 export interface ProgressSettingsSummary {
   toolProgress: ToolProgressCommand;
   reasoningText: boolean;

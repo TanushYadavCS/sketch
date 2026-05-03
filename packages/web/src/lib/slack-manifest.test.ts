@@ -68,6 +68,13 @@ describe("generateSlackManifest", () => {
     expect(scopes).toContain("users:read");
     expect(scopes).toContain("files:read");
     expect(scopes).toContain("files:write");
+    expect(scopes).toContain("assistant:write");
+  });
+
+  it("does not include scopes without handlers", () => {
+    const manifest = generateSlackManifest();
+    const parsed = JSON.parse(manifest);
+    expect(parsed.oauth_config.scopes.bot).not.toContain("commands");
   });
 
   it("includes all required bot events", () => {
@@ -76,10 +83,23 @@ describe("generateSlackManifest", () => {
     const events = parsed.settings.event_subscriptions.bot_events;
 
     expect(events).toContain("app_mention");
+    expect(events).toContain("app_home_opened");
+    expect(events).toContain("assistant_thread_started");
+    expect(events).toContain("assistant_thread_context_changed");
     expect(events).toContain("message.channels");
     expect(events).toContain("message.groups");
     expect(events).toContain("message.im");
     expect(events).toContain("message.mpim");
+  });
+
+  it("enables App Home tab and Assistant view", () => {
+    const manifest = generateSlackManifest();
+    const parsed = JSON.parse(manifest);
+
+    expect(parsed.features.app_home.home_tab_enabled).toBe(true);
+    expect(parsed.features.app_home.messages_tab_enabled).toBe(true);
+    expect(parsed.features.app_home.messages_tab_read_only_enabled).toBe(false);
+    expect(typeof parsed.features.assistant_view.assistant_description).toBe("string");
   });
 
   it("sets correct settings", () => {

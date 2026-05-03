@@ -8,10 +8,12 @@ import type { Kysely } from "kysely";
 import { type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId, getSessionId } from "../agent/sessions";
-import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
+import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import {
+  REASONING_TEXT_OPTIONS,
   type ReasoningTextCommand,
+  TOOL_PROGRESS_OPTIONS,
   type ToolProgressCommand,
   getNewSessionConfirmation,
   getReasoningTextConfirmation,
@@ -31,6 +33,7 @@ import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
 import type { Logger } from "../logger";
 import {
+  type ProgressDisplaySettings,
   getUnknownReasoningTextMessage,
   getUnknownToolProgressMessage,
   isReasoningTextCommand,
@@ -41,8 +44,8 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile } from "./bot";
+import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
-import { createSlackProgressTransport } from "./progress-transport";
 import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import type { BufferedMessage, ThreadBuffer } from "./thread-buffer";
 import type { UserCache } from "./user-cache";
@@ -118,18 +121,74 @@ async function downloadSlackFiles(
   return attachments;
 }
 
-async function flushSlackProgressTransport(
-  progressTransport: { flush(): Promise<void> } | null,
-  logger: Logger,
-  context: { userId?: string; channelId?: string; threadTs?: string },
-) {
-  if (!progressTransport) return;
+async function downloadMessageAttachments(params: {
+  files: SlackFile[] | undefined;
+  workspaceDir: string;
+  botToken: string | null | undefined;
+  maxBytes: number;
+  logger: Logger;
+}): Promise<Attachment[]> {
+  const { files, workspaceDir, botToken, maxBytes, logger } = params;
+  if (!files?.length) return [];
 
-  try {
-    await progressTransport.flush();
-  } catch (err) {
-    logger.warn({ err, ...context }, "Failed to flush Slack progress updates");
-  }
+  logger.debug(
+    {
+      fileCount: files.length,
+      files: files.map((f) => ({
+        name: f.name,
+        mime: f.mimetype,
+        size: f.size,
+        url: f.urlPrivate?.slice(0, 80),
+      })),
+    },
+    "Files received from Slack",
+  );
+
+  const attachments = await downloadSlackFiles(files, botToken, join(workspaceDir, "attachments"), maxBytes, logger);
+
+  logger.debug(
+    {
+      attachmentCount: attachments.length,
+      attachments: attachments.map((a) => ({ name: a.originalName, mime: a.mimeType, size: a.sizeBytes })),
+    },
+    "Files downloaded",
+  );
+
+  return attachments;
+}
+
+const SHIMMER_HEARTBEAT_MS = 45_000;
+
+function createShimmer(
+  slackBot: SlackBot,
+  channelId: string,
+  threadTs: string,
+  progressSettings: ProgressDisplaySettings,
+) {
+  const renderer = createProgressRenderer(progressSettings);
+  let currentLine = "💭 Thinking…";
+  let chain: Promise<unknown> = slackBot.setAssistantStatus(channelId, threadTs, currentLine);
+  const setLine = (status: string) => {
+    currentLine = status;
+    chain = chain.catch(() => undefined).then(() => slackBot.setAssistantStatus(channelId, threadTs, status));
+    return chain;
+  };
+  const heartbeat = setInterval(() => {
+    if (currentLine) void setLine(currentLine);
+  }, SHIMMER_HEARTBEAT_MS);
+  const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
+    const previousLast = renderer.getLines().at(-1);
+    renderer.renderEvent(event);
+    const last = renderer.getLines().at(-1);
+    if (last && last !== previousLast) void setLine(last);
+  };
+  const clear = async () => {
+    clearInterval(heartbeat);
+    currentLine = "";
+    await chain.catch(() => undefined);
+    await slackBot.setAssistantStatus(channelId, threadTs, "");
+  };
+  return { onProgressEvent, clear };
 }
 
 export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: string }, deps: SlackAdapterDeps) {
@@ -200,8 +259,61 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     return { ids: rows.map((row) => row.id), messages };
   };
 
+  const publishHomeForUser = async (slackUserId: string): Promise<void> => {
+    let user: Awaited<ReturnType<typeof resolveUser>>;
+    try {
+      user = await resolveUser(slackUserId);
+    } catch (err) {
+      logger.warn({ err, slackUserId }, "Home tab: failed to resolve user");
+      return;
+    }
+    const settingsRow = await repos.settings.get();
+    const progress = resolveProgressDisplaySettings(user);
+    const view = buildHomeView({
+      realName: user.name,
+      email: user.email ?? null,
+      workspaceName: settingsRow?.org_name ?? null,
+      toolProgress: progress.toolProgress,
+      reasoningText: progress.reasoningText,
+    });
+    await slackBot.publishHomeView(slackUserId, view);
+  };
+
+  slackBot.onAppHomeOpened(async (event) => {
+    await publishHomeForUser(event.slackUserId);
+  });
+
+  slackBot.onHomeAction(async (event) => {
+    let user: Awaited<ReturnType<typeof resolveUser>>;
+    try {
+      user = await resolveUser(event.slackUserId);
+    } catch (err) {
+      logger.warn({ err, slackUserId: event.slackUserId, actionId: event.actionId }, "Home action: resolve failed");
+      return;
+    }
+
+    if (event.actionId === HOME_ACTION_TOOL_PROGRESS) {
+      const value = event.value;
+      if (TOOL_PROGRESS_OPTIONS.includes(value as ToolProgressCommand)) {
+        await repos.users.update(user.id, { toolProgress: value });
+      }
+    } else if (event.actionId === HOME_ACTION_REASONING_TEXT) {
+      const value = event.value;
+      if (REASONING_TEXT_OPTIONS.includes(value as ReasoningTextCommand)) {
+        await repos.users.update(user.id, { reasoningText: value === "on" });
+      }
+    }
+
+    await publishHomeForUser(event.slackUserId);
+  });
+
   // DM handler
   slackBot.onMessage(async (message) => {
+    const replyToUser = (text: string): Promise<unknown> =>
+      message.threadTs
+        ? slackBot.postThreadReply(message.channelId, message.threadTs, text)
+        : slackBot.postMessage(message.channelId, text);
+
     let user: Awaited<ReturnType<typeof resolveUser>>;
     try {
       user = await resolveUser(message.userId);
@@ -216,8 +328,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           },
           "Skipping DM because Slack identity conflicts with an existing user",
         );
-        await slackBot.postMessage(
-          message.channelId,
+        await replyToUser(
           "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
         );
         return;
@@ -232,38 +343,35 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       const command = parseSketchCommand(message.text);
       if (command === "new_session") {
         await deleteSessionId(db, user.id);
-        await slackBot.postMessage(message.channelId, getNewSessionConfirmation());
+        await replyToUser(getNewSessionConfirmation());
         return;
       }
 
       if (!command && isToolProgressCommand(message.text)) {
-        await slackBot.postMessage(message.channelId, getUnknownToolProgressMessage(message.text));
+        await replyToUser(getUnknownToolProgressMessage(message.text));
         return;
       }
 
       if (!command && isReasoningTextCommand(message.text)) {
-        await slackBot.postMessage(message.channelId, getUnknownReasoningTextMessage(message.text));
+        await replyToUser(getUnknownReasoningTextMessage(message.text));
         return;
       }
 
       const currentProgressSettings = resolveProgressDisplaySettings(user);
       if (command === "tool_progress_query") {
-        await slackBot.postMessage(message.channelId, getToolProgressCurrent(currentProgressSettings));
+        await replyToUser(getToolProgressCurrent(currentProgressSettings));
         return;
       }
 
       if (command === "reasoning_text_query") {
-        await slackBot.postMessage(message.channelId, getReasoningTextCurrent(currentProgressSettings));
+        await replyToUser(getReasoningTextCurrent(currentProgressSettings));
         return;
       }
 
       const requestedToolProgress = resolveCommandToolProgress(command);
       if (requestedToolProgress) {
         await repos.users.update(user.id, { toolProgress: requestedToolProgress });
-        await slackBot.postMessage(
-          message.channelId,
-          getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText),
-        );
+        await replyToUser(getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText));
         return;
       }
 
@@ -271,76 +379,52 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       if (requestedReasoningText) {
         const enabled = requestedReasoningText === "on";
         await repos.users.update(user.id, { reasoningText: enabled });
-        await slackBot.postMessage(message.channelId, getReasoningTextConfirmation(enabled));
+        await replyToUser(getReasoningTextConfirmation(enabled));
         return;
       }
 
       const workspaceDir = await ensureWorkspace(config, user.id);
       const settingsRow = await repos.settings.get();
 
-      // Download any attached files
-      let attachments: Attachment[] = [];
-      if (message.files?.length) {
-        logger.debug(
-          {
-            fileCount: message.files.length,
-            files: message.files.map((f) => ({
-              name: f.name,
-              mime: f.mimetype,
-              size: f.size,
-              url: f.urlPrivate?.slice(0, 80),
-            })),
-          },
-          "Files received from Slack",
-        );
-        const attachDir = join(workspaceDir, "attachments");
-        const maxBytes = maxFileBytes;
-        attachments = await downloadSlackFiles(
-          message.files,
-          settingsRow?.slack_bot_token,
-          attachDir,
-          maxBytes,
-          logger,
-        );
-        logger.debug(
-          {
-            attachmentCount: attachments.length,
-            attachments: attachments.map((a) => ({ name: a.originalName, mime: a.mimeType, size: a.sizeBytes })),
-          },
-          "Files downloaded",
-        );
-      }
-
-      await slackBot.addReaction(message.channelId, message.ts, "eyes");
-      const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId);
-      const progressSettings = resolveProgressDisplaySettings(user);
-      const progressRenderer = createProgressRenderer(progressSettings);
-      const progressStrategy = getProgressTransportStrategy(progressSettings);
-      const progressTransport =
-        progressStrategy === "none"
-          ? null
-          : createSlackProgressTransport(slackBot, message.channelId, progressStrategy);
-      const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
-        if (!progressTransport) return;
-        progressRenderer.renderEvent(event);
-        await progressTransport.syncLines(progressRenderer.getLines());
-      };
-
-      const integrationMcpServers = await buildMcpServers(user.email);
-      const pendingInbox = await loadPendingInboxMessages(user.id);
-
-      const userMessage = buildSketchContext({
-        messages: [],
-        currentUserName: user.name,
-        currentMessage: message.text || "See attached files.",
-        currentUserEmail: user.email,
+      const attachments = await downloadMessageAttachments({
+        files: message.files,
         workspaceDir,
-        orgDir: config.CLAUDE_CONFIG_DIR,
-        isSharedContext: false,
-        inboxMessages: pendingInbox.messages,
+        botToken: settingsRow?.slack_bot_token,
+        maxBytes: maxFileBytes,
+        logger,
       });
 
+      const assistantThreadTs = message.threadTs;
+      const shimmerThreadTs = message.threadTs ?? message.ts;
+
+      const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, assistantThreadTs);
+      let clearAssistantStatus: (() => Promise<void>) | null = null;
+      let pendingInbox: Awaited<ReturnType<typeof loadPendingInboxMessages>> | null = null;
+
       try {
+        const shimmer = createShimmer(
+          slackBot,
+          message.channelId,
+          shimmerThreadTs,
+          resolveProgressDisplaySettings(user),
+        );
+        clearAssistantStatus = shimmer.clear;
+        const { onProgressEvent } = shimmer;
+
+        const integrationMcpServers = await buildMcpServers(user.email);
+        pendingInbox = await loadPendingInboxMessages(user.id);
+
+        const userMessage = buildSketchContext({
+          messages: [],
+          currentUserName: user.name,
+          currentMessage: message.text || "See attached files.",
+          currentUserEmail: user.email,
+          workspaceDir,
+          orgDir: config.CLAUDE_CONFIG_DIR,
+          isSharedContext: false,
+          inboxMessages: pendingInbox.messages,
+        });
+
         const result = await runAgent({
           db,
           workspaceKey: user.id,
@@ -352,6 +436,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           logger,
           platform: "slack",
           onProgressEvent,
+          ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
           orgName: settingsRow?.org_name,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
@@ -375,32 +460,29 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           sendDm,
         });
 
-        await flushSlackProgressTransport(progressTransport, logger, { userId: user.id, channelId: message.channelId });
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }
 
         for (const filePath of result.pendingUploads) {
           try {
-            await slackBot.uploadFile(message.channelId, filePath);
+            await slackBot.uploadFile(message.channelId, filePath, assistantThreadTs);
           } catch (err) {
             logger.warn({ err, filePath }, "Failed to upload file to Slack");
           }
         }
 
-        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
-        await slackBot.addReaction(message.channelId, message.ts, "white_check_mark");
-        if (pendingInbox.ids.length > 0 && inboxMessagesRepo) {
+        await clearAssistantStatus();
+        if (pendingInbox && pendingInbox.ids.length > 0 && inboxMessagesRepo) {
           await inboxMessagesRepo.markConsumed(pendingInbox.ids);
         }
         if (!result.trace.finalText) {
-          await slackBot.postMessage(message.channelId, "_No response_");
+          await replyToUser("_No response_");
         }
       } catch (err) {
         logger.error({ err, userId: user.id }, "Agent run failed");
-        await flushSlackProgressTransport(progressTransport, logger, { userId: user.id, channelId: message.channelId });
-        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
-        await slackBot.postMessage(message.channelId, "_Something went wrong, try again_");
+        await clearAssistantStatus?.();
+        await replyToUser("_Something went wrong, try again_");
       }
     });
   });
@@ -450,7 +532,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
 
       let user: Awaited<ReturnType<typeof resolveUser>> | undefined;
-      let progressTransport: ReturnType<typeof createSlackProgressTransport> | null = null;
+      let clearAssistantStatus: (() => Promise<void>) | null = null;
 
       try {
         user = await resolveUser(message.userId);
@@ -520,38 +602,13 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
         slackDeps.threadBuffer.register(message.channelId, threadTs);
 
-        // Download any attached files
-        let attachments: Attachment[] = [];
-        if (message.files?.length) {
-          logger.debug(
-            {
-              fileCount: message.files.length,
-              files: message.files.map((f) => ({
-                name: f.name,
-                mime: f.mimetype,
-                size: f.size,
-                url: f.urlPrivate?.slice(0, 80),
-              })),
-            },
-            "Files received from Slack",
-          );
-          const attachDir = join(workspaceDir, "attachments");
-          const maxBytes = maxFileBytes;
-          attachments = await downloadSlackFiles(
-            message.files,
-            settingsRow?.slack_bot_token,
-            attachDir,
-            maxBytes,
-            logger,
-          );
-          logger.debug(
-            {
-              attachmentCount: attachments.length,
-              attachments: attachments.map((a) => ({ name: a.originalName, mime: a.mimeType, size: a.sizeBytes })),
-            },
-            "Files downloaded",
-          );
-        }
+        const attachments = await downloadMessageAttachments({
+          files: message.files,
+          workspaceDir,
+          botToken: settingsRow?.slack_bot_token,
+          maxBytes: maxFileBytes,
+          logger,
+        });
 
         const channelWorkspaceKey = `channel-${message.channelId}`;
         const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
@@ -603,20 +660,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           });
         }
 
-        await slackBot.addReaction(message.channelId, message.ts, "eyes");
         const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, threadTs);
-        const progressSettings = resolveProgressDisplaySettings(channel);
-        const progressRenderer = createProgressRenderer(progressSettings);
-        const progressStrategy = getProgressTransportStrategy(progressSettings);
-        progressTransport =
-          progressStrategy === "none"
-            ? null
-            : createSlackProgressTransport(slackBot, message.channelId, progressStrategy, threadTs);
-        const onProgressEvent: RunAgentParams["onProgressEvent"] = async (event) => {
-          if (!progressTransport) return;
-          progressRenderer.renderEvent(event);
-          await progressTransport.syncLines(progressRenderer.getLines());
-        };
+        const shimmer = createShimmer(slackBot, message.channelId, threadTs, resolveProgressDisplaySettings(channel));
+        clearAssistantStatus = shimmer.clear;
+        const onProgressEvent = shimmer.onProgressEvent;
 
         const integrationMcpServers = await buildMcpServers(user.email);
 
@@ -656,11 +703,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           sendDm,
         });
 
-        await flushSlackProgressTransport(progressTransport, logger, {
-          userId: user.id,
-          channelId: message.channelId,
-          threadTs,
-        });
         if (result.trace.finalText) {
           await onFinalMessage(result.trace.finalText);
         }
@@ -673,8 +715,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           }
         }
 
-        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
-        await slackBot.addReaction(message.channelId, message.ts, "white_check_mark");
+        await clearAssistantStatus?.();
         if (!result.trace.finalText) {
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
@@ -698,12 +739,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           return;
         }
         logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
-        await flushSlackProgressTransport(progressTransport, logger, {
-          userId: user?.id,
-          channelId: message.channelId,
-          threadTs,
-        });
-        await slackBot.removeReaction(message.channelId, message.ts, "eyes");
+        await clearAssistantStatus?.();
         await slackBot.postThreadReply(message.channelId, threadTs, "_Something went wrong, try again_");
       }
     });

@@ -5,7 +5,7 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createTestLogger } from "../test-utils";
-import { SlackBot } from "./bot";
+import { SlackBot, parseSlackHttpBody } from "./bot";
 
 const TEST_SIGNING_SECRET = "test-signing-secret-abc123";
 
@@ -74,6 +74,39 @@ describe("SlackBot constructor validation", () => {
   });
 });
 
+describe("parseSlackHttpBody", () => {
+  it("parses application/json bodies as JSON", () => {
+    const body = JSON.stringify({ type: "event_callback", event_id: "Ev123" });
+    expect(parseSlackHttpBody(body, "application/json")).toEqual({ type: "event_callback", event_id: "Ev123" });
+  });
+
+  it("parses application/x-www-form-urlencoded bodies by extracting and JSON-parsing the payload field", () => {
+    const interactive = {
+      type: "block_actions",
+      actions: [{ action_id: "home:set_tool_progress", value: "friendly" }],
+    };
+    const body = `payload=${encodeURIComponent(JSON.stringify(interactive))}`;
+    expect(parseSlackHttpBody(body, "application/x-www-form-urlencoded")).toEqual(interactive);
+  });
+
+  it("respects a charset parameter on the form-encoded content-type header", () => {
+    const interactive = { type: "block_actions" };
+    const body = `payload=${encodeURIComponent(JSON.stringify(interactive))}`;
+    expect(parseSlackHttpBody(body, "application/x-www-form-urlencoded; charset=utf-8")).toEqual(interactive);
+  });
+
+  it("throws when a form-encoded body is missing the payload field", () => {
+    expect(() => parseSlackHttpBody("not_payload=oops", "application/x-www-form-urlencoded")).toThrow(
+      /missing 'payload' field/,
+    );
+  });
+
+  it("falls back to JSON.parse when no content-type header is provided", () => {
+    const body = JSON.stringify({ type: "event_callback" });
+    expect(parseSlackHttpBody(body, undefined)).toEqual({ type: "event_callback" });
+  });
+});
+
 describe("SlackBot.processHttpRequest", () => {
   const logger = createTestLogger();
 
@@ -118,6 +151,25 @@ describe("SlackBot.processHttpRequest", () => {
         event: { type: "message", channel: "C123", user: "U123", text: "hello", ts: "1234567890.123456" },
       });
       const headers = makeHeaders(body);
+      await expect(bot.processHttpRequest(body, headers)).resolves.not.toThrow();
+    });
+  });
+
+  describe("interactive payloads", () => {
+    it("accepts a form-encoded block_actions payload from a Home tab dropdown", async () => {
+      const bot = makeBot();
+      const interactive = {
+        type: "block_actions",
+        user: { id: "U123" },
+        actions: [{ action_id: "home:set_tool_progress", selected_option: { value: "friendly" } }],
+      };
+      const body = `payload=${encodeURIComponent(JSON.stringify(interactive))}`;
+      const ts = Math.floor(Date.now() / 1000);
+      const headers = {
+        "x-slack-signature": signSlackRequest(TEST_SIGNING_SECRET, body, ts),
+        "x-slack-request-timestamp": String(ts),
+        "content-type": "application/x-www-form-urlencoded",
+      };
       await expect(bot.processHttpRequest(body, headers)).resolves.not.toThrow();
     });
   });

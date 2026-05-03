@@ -1,5 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { SlackBot } from "./bot";
+import { SlackBot, clipForSlackLoading } from "./bot";
+
+describe("clipForSlackLoading", () => {
+  it("returns text unchanged when within the 50-code-point limit", () => {
+    const input = '📖 Read: "a.ts"';
+    expect(clipForSlackLoading(input)).toBe(input);
+  });
+
+  it("returns text unchanged at exactly 50 code points", () => {
+    const input = "a".repeat(50);
+    expect(clipForSlackLoading(input)).toBe(input);
+  });
+
+  it("clips to 50 code points with a trailing ellipsis when over the limit", () => {
+    const input = `📖 Read: "${"x".repeat(60)}"`;
+    const result = clipForSlackLoading(input);
+    expect(Array.from(result)).toHaveLength(50);
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("counts emojis as single code points so the clip is grapheme-safe", () => {
+    const input = `${"📖".repeat(60)}`;
+    const result = clipForSlackLoading(input);
+    expect(Array.from(result)).toHaveLength(50);
+    expect(result.endsWith("…")).toBe(true);
+  });
+});
 
 describe("SlackBot.stripBotMention", () => {
   const botId = "U123BOT";
