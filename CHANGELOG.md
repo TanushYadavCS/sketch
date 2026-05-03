@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.26.0] -- 2026-05-03
+
+- Slack: add App Home support with an Assistant pane DM entry point and update the Slack app manifest for the new home tab surface.
+- Managed onboarding: reject WhatsApp QR pairing when the scanned number matches the admin WhatsApp number, disconnect the invalid pairing, and prevent late Baileys auth writes from leaving stale credentials behind.
+- Managed onboarding: let WhatsApp introduction messages use the onboarding org name instead of hardcoding "Sketch" as the workspace name.
+
 ## [0.25.1] -- 2026-05-03
 
 - Runtime: upgrade Claude Agent SDK to the stable `0.2.118` line, picking up the Claude Code `2.1.118` stable runtime for managed agent runs.
