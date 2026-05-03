@@ -1,6 +1,6 @@
 {
   "name": "@sketch/server",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.26.4",
-    "@anthropic-ai/claude-agent-sdk": "^0.2.45",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.118",
     "@anthropic-ai/sdk": "^0.78.0",
     "@google/genai": "^1.47.0",
     "@hapi/boom": "^10.0.1",

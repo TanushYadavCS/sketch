@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [0.25.1] -- 2026-05-03
+
+- Runtime: upgrade Claude Agent SDK to the stable `0.2.118` line, picking up the Claude Code `2.1.118` stable runtime for managed agent runs.
+- Reliability: refresh the agent runtime after investigating managed-tenant Claude Code subprocess `SIGKILL` failures under the older `2.1.45` runtime.
+
 ## [0.25.0] -- 2026-05-03
 
 - Managed onboarding: extend `/api/system/users` so the platform can create WhatsApp onboarding teammates and preserve Slack + WhatsApp identities on the same user row.
