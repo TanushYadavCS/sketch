@@ -42,6 +42,7 @@ interface SystemDeps {
   startWhatsAppPairing?: Function;
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   cancelWhatsAppPairing?: Function;
+  disconnectWhatsApp?: () => Promise<void>;
 }
 
 const tokenSchema = z.object({
@@ -113,7 +114,12 @@ const onboardingWorkflowMetadataSchema = z.object({
 const onboardingIntroductionsSchema = z.object({
   adminEmail: z.string().email().optional(),
   channel: z.enum(["slack", "whatsapp"]).optional(),
+  orgName: z.string().trim().min(1).optional(),
   whatsappNumbers: z.array(whatsappNumberSchema).optional(),
+});
+
+const whatsappPairingValidationSchema = z.object({
+  adminWhatsappNumber: whatsappNumberSchema,
 });
 
 function buildOpeningIntroMessage(botName: string): string {
@@ -150,8 +156,13 @@ function parseWorkflowMetadata(value: string | null): { openingMessageSent?: boo
 
 class SystemUserSyncConflictError extends Error {}
 
-function buildWhatsAppIntroMessage(botName: string): string {
-  return `Hi, I'm ${botName}, your AI coworker in Sketch. You can message me here when you need help with your workspace.`;
+function buildWhatsAppIntroMessage(botName: string, orgName: string | null | undefined): string {
+  const orgLabel = orgName?.trim() || "your workspace";
+  return `Hi, I'm ${botName}, your AI coworker in ${orgLabel}. You can message me here when you need help with your workspace.`;
+}
+
+function normalizeWhatsappNumberForComparison(value: string): string {
+  return value.replace(/[^\d+]/g, "");
 }
 
 async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
@@ -443,6 +454,47 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     return c.json(status);
   });
 
+  routes.post("/whatsapp/validate-pairing", async (c) => {
+    if (!deps.whatsappStatus || !deps.disconnectWhatsApp) {
+      return c.json({ error: { code: "NOT_FOUND", message: "WhatsApp pairing validation not available" } }, 404);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = whatsappPairingValidationSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
+    }
+
+    const status = deps.whatsappStatus();
+    if (!status.connected || !status.phoneNumber) {
+      return c.json({ error: { code: "NOT_CONNECTED", message: "WhatsApp is not connected" } }, 409);
+    }
+
+    const pairedNumber = whatsappNumberSchema.safeParse(status.phoneNumber);
+    if (!pairedNumber.success) {
+      return c.json({ error: { code: "BAD_GATEWAY", message: "Paired WhatsApp number is invalid" } }, 502);
+    }
+
+    if (
+      normalizeWhatsappNumberForComparison(pairedNumber.data) ===
+      normalizeWhatsappNumberForComparison(parsed.data.adminWhatsappNumber)
+    ) {
+      await deps.disconnectWhatsApp?.();
+      return c.json(
+        {
+          error: {
+            code: "SAME_AS_ADMIN_WHATSAPP",
+            message: "Use a different WhatsApp number for Sketch. The admin number cannot scan this QR.",
+            phoneNumber: pairedNumber.data,
+          },
+        },
+        409,
+      );
+    }
+
+    return c.json({ ok: true, connected: true, phoneNumber: pairedNumber.data });
+  });
+
   routes.get("/whatsapp/pair", async (c) => {
     if (!deps.startWhatsAppPairing) {
       return c.json({ error: { code: "NOT_FOUND", message: "WhatsApp pairing not available" } }, 404);
@@ -543,7 +595,10 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         return c.json({ error: { code: "BAD_REQUEST", message: "No WhatsApp users found for introductions" } }, 400);
       }
 
-      const message = buildWhatsAppIntroMessage(settingsRow?.bot_name ?? "Sketch");
+      const message = buildWhatsAppIntroMessage(
+        settingsRow?.bot_name ?? "Sketch",
+        parsed.data.orgName ?? settingsRow?.org_name,
+      );
       const deliveries: Array<{
         userId?: string;
         whatsappNumber?: string;

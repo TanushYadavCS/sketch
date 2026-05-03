@@ -53,6 +53,7 @@ function createTestSystemApp(
     whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;
     cancelWhatsAppPairing?: ReturnType<typeof vi.fn>;
+    disconnectWhatsApp?: () => Promise<void>;
   },
 ) {
   const app = new Hono();
@@ -1317,6 +1318,97 @@ describe("GET /api/system/whatsapp", () => {
   });
 });
 
+describe("POST /api/system/whatsapp/validate-pairing", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedAdmin(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("returns 401 without Authorization header", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/whatsapp/validate-pairing", {
+      method: "POST",
+      body: JSON.stringify({ adminWhatsappNumber: "+919876543210" }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("returns paired number when it differs from the admin number", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const disconnectWhatsApp = vi.fn();
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      whatsappStatus: () => ({ connected: true, phoneNumber: "+14155552671", pairingInProgress: false }),
+      disconnectWhatsApp,
+    });
+
+    const res = await app.request("/api/system/whatsapp/validate-pairing", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ adminWhatsappNumber: "+919876543210" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, connected: true, phoneNumber: "+14155552671" });
+    expect(disconnectWhatsApp).not.toHaveBeenCalled();
+  });
+
+  it("disconnects and rejects when paired number matches the admin number", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const disconnectWhatsApp = vi.fn().mockResolvedValue(undefined);
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      whatsappStatus: () => ({ connected: true, phoneNumber: "+919876543210", pairingInProgress: false }),
+      disconnectWhatsApp,
+    });
+
+    const res = await app.request("/api/system/whatsapp/validate-pairing", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ adminWhatsappNumber: "+91 98765 43210" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "SAME_AS_ADMIN_WHATSAPP",
+        message: "Use a different WhatsApp number for Sketch. The admin number cannot scan this QR.",
+        phoneNumber: "+919876543210",
+      },
+    });
+    expect(disconnectWhatsApp).toHaveBeenCalledOnce();
+  });
+
+  it("returns 409 when WhatsApp is not connected", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const disconnectWhatsApp = vi.fn();
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      whatsappStatus: () => ({ connected: false, phoneNumber: null, pairingInProgress: false }),
+      disconnectWhatsApp,
+    });
+
+    const res = await app.request("/api/system/whatsapp/validate-pairing", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ adminWhatsappNumber: "+919876543210" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: { code: "NOT_CONNECTED", message: "WhatsApp is not connected" } });
+    expect(disconnectWhatsApp).not.toHaveBeenCalled();
+  });
+});
+
 describe("GET /api/system/whatsapp/pair", () => {
   let db: Kysely<DB>;
 
@@ -1523,6 +1615,7 @@ describe("POST /api/system/onboarding-introductions", () => {
       body: JSON.stringify({
         adminEmail: "admin@acme.com",
         channel: "whatsapp",
+        orgName: "Acme",
         whatsappNumbers: ["+14155552671", "+919876543210"],
       }),
     });
@@ -1533,13 +1626,13 @@ describe("POST /api/system/onboarding-introductions", () => {
       userId: admin.id,
       platform: "whatsapp",
       message:
-        "Hi, I'm Sketch, your AI coworker in Sketch. You can message me here when you need help with your workspace.",
+        "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
     });
     expect(sendDm).toHaveBeenCalledWith({
       userId: teammate.id,
       platform: "whatsapp",
       message:
-        "Hi, I'm Sketch, your AI coworker in Sketch. You can message me here when you need help with your workspace.",
+        "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
     });
     const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
     expect(workflow).toBeUndefined();
@@ -1637,7 +1730,7 @@ describe("POST /api/system/onboarding-introductions", () => {
       userId: admin.id,
       platform: "whatsapp",
       message:
-        "Hi, I'm Sketch, your AI coworker in Sketch. You can message me here when you need help with your workspace.",
+        "Hi, I'm Sketch, your AI coworker in your workspace. You can message me here when you need help with your workspace.",
     });
   });
 

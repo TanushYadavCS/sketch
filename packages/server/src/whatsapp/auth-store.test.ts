@@ -94,4 +94,17 @@ describe("createDbAuthState", () => {
     const result = await state2.keys.get("pre-key", ["1"]);
     expect(result["1"]).toBeUndefined();
   });
+
+  it("ignores late writes after clearCreds", async () => {
+    const { state, saveCreds, clearCreds } = await createDbAuthState(db);
+    await clearCreds();
+
+    await saveCreds();
+    await state.keys.set({ session: { "1": { data: "late-write" } as never } });
+
+    const credsRows = await db.selectFrom("whatsapp_creds").selectAll().execute();
+    const keyRows = await db.selectFrom("whatsapp_keys").selectAll().execute();
+    expect(credsRows).toEqual([]);
+    expect(keyRows).toEqual([]);
+  });
 });

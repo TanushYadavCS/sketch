@@ -293,6 +293,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
               whatsapp.cancelPairing();
             }
           : undefined,
+        disconnectWhatsApp: whatsapp ? () => whatsapp.disconnect() : undefined,
       }),
     );
   }

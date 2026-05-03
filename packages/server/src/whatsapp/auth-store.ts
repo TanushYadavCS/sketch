@@ -25,10 +25,12 @@ export async function createDbAuthState(
   saveCreds: () => Promise<void>;
   clearCreds: () => Promise<void>;
 }> {
+  let cleared = false;
   const row = await db.selectFrom("whatsapp_creds").selectAll().where("id", "=", "default").executeTakeFirst();
   const creds: AuthenticationCreds = row ? JSON.parse(row.creds, BufferJSON.reviver) : initAuthCreds();
 
   const saveCreds = async () => {
+    if (cleared) return;
     const json = JSON.stringify(creds, BufferJSON.replacer);
     const existing = await db.selectFrom("whatsapp_creds").select("id").where("id", "=", "default").executeTakeFirst();
     if (existing) {
@@ -39,6 +41,7 @@ export async function createDbAuthState(
   };
 
   const clearCreds = async () => {
+    cleared = true;
     await db.deleteFrom("whatsapp_creds").execute();
     await db.deleteFrom("whatsapp_keys").execute();
   };
@@ -60,6 +63,7 @@ export async function createDbAuthState(
         return result;
       },
       async set(data: Record<string, Record<string, unknown>>) {
+        if (cleared) return;
         for (const [type, entries] of Object.entries(data)) {
           for (const [id, value] of Object.entries(entries)) {
             if (value === null || value === undefined) {
