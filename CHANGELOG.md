@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.25.0] -- 2026-05-03
+
+- Managed onboarding: extend `/api/system/users` so the platform can create WhatsApp onboarding teammates and preserve Slack + WhatsApp identities on the same user row.
+- Managed onboarding: add `channel: "whatsapp"` support to `/api/system/onboarding-introductions`, sending direct intro messages without the Slack inbox approval flow.
+- Reliability: report unresolved WhatsApp intro recipients as delivery failures instead of silently dropping requested numbers.
+
 ## [0.24.0] -- 2026-05-02
 
 - Agent environment: add a user-scoped Environment tab under Integrations for configuring variables available to Sketch agent Bash commands in DMs.
