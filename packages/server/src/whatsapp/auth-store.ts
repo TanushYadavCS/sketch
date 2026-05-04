@@ -33,6 +33,7 @@ export async function createDbAuthState(
     if (cleared) return;
     const json = JSON.stringify(creds, BufferJSON.replacer);
     const existing = await db.selectFrom("whatsapp_creds").select("id").where("id", "=", "default").executeTakeFirst();
+    if (cleared) return;
     if (existing) {
       await db.updateTable("whatsapp_creds").set({ creds: json }).where("id", "=", "default").execute();
     } else {
@@ -66,6 +67,7 @@ export async function createDbAuthState(
         if (cleared) return;
         for (const [type, entries] of Object.entries(data)) {
           for (const [id, value] of Object.entries(entries)) {
+            if (cleared) return;
             if (value === null || value === undefined) {
               await db.deleteFrom("whatsapp_keys").where("type", "=", type).where("key_id", "=", id).execute();
             } else {
@@ -76,6 +78,7 @@ export async function createDbAuthState(
                 .where("type", "=", type)
                 .where("key_id", "=", id)
                 .executeTakeFirst();
+              if (cleared) return;
               if (existing) {
                 await db
                   .updateTable("whatsapp_keys")

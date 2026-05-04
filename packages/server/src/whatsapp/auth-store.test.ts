@@ -6,6 +6,76 @@ import { createDbAuthState } from "./auth-store";
 
 let db: Kysely<DB>;
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function withDelayedAuthLookup(
+  sourceDb: Kysely<DB>,
+  options: {
+    table: "whatsapp_creds" | "whatsapp_keys";
+    selectedColumn: string;
+    started: { resolve: () => void };
+    release: Promise<void>;
+  },
+): Kysely<DB> {
+  type BuilderMethod = (...args: unknown[]) => unknown;
+
+  const wrapBuilder = (builder: object, selectedTargetColumn: boolean): object =>
+    new Proxy(builder, {
+      get(target, prop, receiver) {
+        if (prop === "select") {
+          return (...args: unknown[]) => {
+            const columns = args.flat();
+            const select = Reflect.get(target, "select") as BuilderMethod;
+            const next = select.apply(target, args);
+            if (!next || typeof next !== "object") return next;
+            return wrapBuilder(next, selectedTargetColumn || columns.includes(options.selectedColumn));
+          };
+        }
+
+        if (prop === "executeTakeFirst" && selectedTargetColumn) {
+          return async (...args: unknown[]) => {
+            options.started.resolve();
+            await options.release;
+            const executeTakeFirst = Reflect.get(target, "executeTakeFirst") as BuilderMethod;
+            return executeTakeFirst.apply(target, args);
+          };
+        }
+
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+
+        return (...args: unknown[]) => {
+          const next = value.apply(target, args);
+          if (next && typeof next === "object") {
+            return wrapBuilder(next, selectedTargetColumn);
+          }
+          return next;
+        };
+      },
+    });
+
+  return new Proxy(sourceDb, {
+    get(target, prop, receiver) {
+      if (prop !== "selectFrom") {
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+
+      return (table: string) => {
+        const builder = (target as { selectFrom: (tableName: string) => object }).selectFrom(table);
+        if (table !== options.table) return builder;
+        return wrapBuilder(builder, false);
+      };
+    },
+  }) as Kysely<DB>;
+}
+
 beforeEach(async () => {
   db = await createTestDb();
 });
@@ -105,6 +175,48 @@ describe("createDbAuthState", () => {
     const credsRows = await db.selectFrom("whatsapp_creds").selectAll().execute();
     const keyRows = await db.selectFrom("whatsapp_keys").selectAll().execute();
     expect(credsRows).toEqual([]);
+    expect(keyRows).toEqual([]);
+  });
+
+  it("ignores in-flight saveCreds writes that resume after clearCreds", async () => {
+    const lookupStarted = deferred();
+    const releaseLookup = deferred();
+    const delayedDb = withDelayedAuthLookup(db, {
+      table: "whatsapp_creds",
+      selectedColumn: "id",
+      started: lookupStarted,
+      release: releaseLookup.promise,
+    });
+    const { saveCreds, clearCreds } = await createDbAuthState(delayedDb);
+
+    const pendingSave = saveCreds();
+    await lookupStarted.promise;
+    await clearCreds();
+    releaseLookup.resolve();
+    await pendingSave;
+
+    const credsRows = await db.selectFrom("whatsapp_creds").selectAll().execute();
+    expect(credsRows).toEqual([]);
+  });
+
+  it("ignores in-flight key writes that resume after clearCreds", async () => {
+    const lookupStarted = deferred();
+    const releaseLookup = deferred();
+    const delayedDb = withDelayedAuthLookup(db, {
+      table: "whatsapp_keys",
+      selectedColumn: "key_id",
+      started: lookupStarted,
+      release: releaseLookup.promise,
+    });
+    const { state, clearCreds } = await createDbAuthState(delayedDb);
+
+    const pendingSet = state.keys.set({ session: { "1": { data: "late-write" } as never } });
+    await lookupStarted.promise;
+    await clearCreds();
+    releaseLookup.resolve();
+    await pendingSet;
+
+    const keyRows = await db.selectFrom("whatsapp_keys").selectAll().execute();
     expect(keyRows).toEqual([]);
   });
 });
