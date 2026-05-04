@@ -7,6 +7,7 @@
  */
 import { ConnectorLogo } from "@/components/connector-logos";
 import { AgentToolsField } from "@/components/team/agent-tools-field";
+import { SlackChannelsField } from "@/components/team/slack-channels-field";
 import type { ProviderIdentity, User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { getIntegration } from "@/lib/integrations";
@@ -68,6 +69,7 @@ export function EditMemberDialog({
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
   const [allowedTools, setAllowedTools] = useState<string[]>([]);
+  const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
   const [error, setError] = useState("");
 
   const isAgent = user?.type === "agent";
@@ -81,6 +83,7 @@ export function EditMemberDialog({
       setDescription(user.description ?? "");
       setReportsTo(user.reports_to ?? "none");
       setAllowedTools(user.allowed_tools ?? []);
+      setSlackChannelIds(user.slack_channel_ids ?? []);
       setError("");
     }
   }, [user]);
@@ -93,7 +96,7 @@ export function EditMemberDialog({
         reportsTo: reportsTo === "none" ? null : reportsTo || null,
         description: description.trim() || null,
         ...(isAgent
-          ? { allowedTools }
+          ? { allowedTools, slackChannelIds }
           : {
               email: email.trim() || null,
               whatsappNumber: phone.trim() || null,
@@ -138,6 +141,13 @@ export function EditMemberDialog({
       allowedTools.some((t) => !originalAllowedTools.includes(t)) ||
       originalAllowedTools.some((t) => !allowedTools.includes(t)));
 
+  const originalSlackChannelIds = user?.slack_channel_ids ?? [];
+  const slackChannelIdsDirty =
+    isAgent &&
+    (slackChannelIds.length !== originalSlackChannelIds.length ||
+      slackChannelIds.some((id) => !originalSlackChannelIds.includes(id)) ||
+      originalSlackChannelIds.some((id) => !slackChannelIds.includes(id)));
+
   const isDirty =
     user &&
     (name.trim() !== user.name ||
@@ -145,6 +155,7 @@ export function EditMemberDialog({
       currentReportsTo !== originalReportsTo ||
       (description.trim() || null) !== (user.description ?? null) ||
       allowedToolsDirty ||
+      slackChannelIdsDirty ||
       (!isAgent &&
         ((email.trim() || null) !== (user.email ?? null) ||
           (phone.trim() || null) !== (user.whatsapp_number ?? null))));
@@ -228,7 +239,17 @@ export function EditMemberDialog({
           )}
 
           {isAgent && (
-            <AgentToolsField value={allowedTools} onChange={setAllowedTools} disabled={updateMutation.isPending} />
+            <>
+              <AgentToolsField value={allowedTools} onChange={setAllowedTools} disabled={updateMutation.isPending} />
+              <SlackChannelsField
+                value={slackChannelIds}
+                onChange={setSlackChannelIds}
+                users={users}
+                selfId={user?.id}
+                selfName={name.trim() || user?.name || "this agent"}
+                disabled={updateMutation.isPending}
+              />
+            </>
           )}
 
           <div className="space-y-1.5">

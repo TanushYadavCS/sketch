@@ -47,6 +47,7 @@ export interface User {
   role: string | null;
   reports_to: string | null;
   allowed_tools: string[] | null;
+  slack_channel_ids: string[];
   created_at: string;
 }
 
@@ -132,6 +133,13 @@ export interface ChannelStatus {
   phoneNumber?: string | null;
   fromAddress?: string | null;
   outboundOnly?: boolean;
+}
+
+export interface SlackChannelInfo {
+  id: string;
+  name: string;
+  type: string;
+  isMember: boolean;
 }
 
 export interface SetupStatus {
@@ -374,6 +382,9 @@ export const api = {
   channels: {
     status() {
       return request<{ channels: ChannelStatus[] }>("/api/channels/status");
+    },
+    listSlack() {
+      return request<{ channels: SlackChannelInfo[] }>("/api/channels/slack");
     },
     disconnectSlack() {
       return request<{ success: boolean }>("/api/channels/slack", { method: "DELETE" });
@@ -721,6 +732,7 @@ export const api = {
       role?: string | null;
       reportsTo?: string | null;
       allowedTools?: string[] | null;
+      slackChannelIds?: string[] | null;
     }) {
       return request<{ user: User; verificationSent?: boolean }>("/api/users", {
         method: "POST",
@@ -737,6 +749,7 @@ export const api = {
         role?: string | null;
         reportsTo?: string | null;
         allowedTools?: string[] | null;
+        slackChannelIds?: string[] | null;
       },
     ) {
       return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}`, {

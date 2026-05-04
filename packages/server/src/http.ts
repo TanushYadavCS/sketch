@@ -201,7 +201,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger));
   app.route("/api/skills", skillsRoutes(config));
-  app.route("/api/users", userRoutes(users, { settings, db, logger, config }));
+  app.route("/api/users", userRoutes(users, { settings, db, logger, config, channels, getSlack: deps?.getSlack }));
   app.route("/api/agent-environment-variables", agentEnvironmentRoutes(agentEnvVars));
   app.route("/api/agent-sessions", agentSessionRoutes());
   app.route(

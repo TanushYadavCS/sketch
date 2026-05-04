@@ -26,6 +26,7 @@ export interface ChannelsTable {
   type: string;
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
+  agent_user_id: string | null;
   created_at: Generated<string>;
 }
 

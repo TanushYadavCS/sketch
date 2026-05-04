@@ -167,3 +167,19 @@ export function isKnownAgentToolName(name: string): boolean {
  * an instruction set is a prompt, not a tagline.
  */
 export const AGENT_INSTRUCTIONS_MAX_LENGTH = 5000;
+
+/**
+ * Parse the JSON-encoded allowed_tools column from the users table. Returns
+ * null when the column is empty or malformed; otherwise an array of tool
+ * names (entries that are not strings are dropped).
+ */
+export function parseAllowedTools(value: string | null): string[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((entry): entry is string => typeof entry === "string");
+  } catch {
+    return null;
+  }
+}

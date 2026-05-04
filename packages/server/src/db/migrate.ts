@@ -48,6 +48,7 @@ import * as m041 from "./migrations/041-per-user-fireflies";
 import * as m042 from "./migrations/042-agent-environment-variables";
 import * as m043 from "./migrations/043-sketch-api-key";
 import * as m044 from "./migrations/044-agent-tool-allowlist";
+import * as m045 from "./migrations/045-channel-agent-binding";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -100,6 +101,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "042-agent-environment-variables": m042,
           "043-sketch-api-key": m043,
           "044-agent-tool-allowlist": m044,
+          "045-channel-agent-binding": m045,
         };
       },
     },

@@ -4,12 +4,13 @@
  * createConfiguredSlackBot() and passes the result to the startup manager.
  */
 import { join } from "node:path";
+import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId, getSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
-import { ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
+import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import {
   REASONING_TEXT_OPTIONS,
   type ReasoningTextCommand,
@@ -548,6 +549,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           logger.info({ channelId: channel.id, name: channel.name }, "New channel created");
         }
 
+        const boundAgent = channel.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
+        if (channel.agent_user_id && !boundAgent) {
+          logger.warn(
+            { channelId: channel.id, agentUserId: channel.agent_user_id },
+            "Channel binding references missing agent; running with default behaviour",
+          );
+        }
+
         const command = parseSketchCommand(message.text);
         if (command === "new_session") {
           await deleteSessionId(db, `channel-${message.channelId}`, threadTs);
@@ -596,7 +605,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           return;
         }
 
-        const workspaceDir = await ensureChannelWorkspace(config, message.channelId);
+        const workspaceDir = boundAgent
+          ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${message.channelId}`)
+          : await ensureChannelWorkspace(config, message.channelId);
         const settingsRow = await repos.settings.get();
         const hadRegisteredThread = slackDeps.threadBuffer.hasThread(message.channelId, threadTs);
 
@@ -610,7 +621,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           logger,
         });
 
-        const channelWorkspaceKey = `channel-${message.channelId}`;
+        const channelWorkspaceKey = boundAgent
+          ? `agent-${boundAgent.id}/channel-${message.channelId}`
+          : `channel-${message.channelId}`;
         const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
         const rawText = message.text || "See attached files.";
         let userMessage: string;
@@ -667,6 +680,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
         const integrationMcpServers = await buildMcpServers(user.email);
 
+        const agentInstructions = boundAgent?.description ?? null;
+        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
+
         const result = await runAgent({
           db,
           workspaceKey: channelWorkspaceKey,
@@ -701,6 +717,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           inboxMessagesRepo,
           userRepo: repos.users,
           sendDm,
+          agentInstructions,
+          agentAllowedTools,
         });
 
         if (result.trace.finalText) {

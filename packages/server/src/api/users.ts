@@ -3,23 +3,32 @@
  * Primary use case: admin adds WhatsApp users so they can message the bot.
  * Slack users are auto-created on first DM and appear here as read-only.
  */
-import { AGENT_INSTRUCTIONS_MAX_LENGTH, emailSchema, isKnownAgentToolName, whatsappNumberSchema } from "@sketch/shared";
+import {
+  AGENT_INSTRUCTIONS_MAX_LENGTH,
+  emailSchema,
+  isKnownAgentToolName,
+  parseAllowedTools,
+  whatsappNumberSchema,
+} from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { countRecentTokens, createVerificationToken } from "../auth/email-verify";
 import type { Config } from "../config";
+import type { createChannelRepository } from "../db/repositories/channels";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createEmailTransport, sendVerificationEmail } from "../email";
+import type { SlackBot } from "../slack/bot";
 
 import { getSmtpConfig, resolveBaseUrl } from "./shared";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
+type ChannelRepo = ReturnType<typeof createChannelRepository>;
 type UserRow = Awaited<ReturnType<UserRepo["findById"]>>;
 
 interface UserRoutesDeps {
@@ -27,9 +36,12 @@ interface UserRoutesDeps {
   db: Kysely<DB>;
   logger: Logger;
   config: Config;
+  channels?: ChannelRepo;
+  getSlack?: () => SlackBot | null;
 }
 
 const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
+const slackChannelIdsSchema = z.array(z.string().min(1)).optional();
 
 const createUserSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -40,6 +52,7 @@ const createUserSchema = z.object({
   role: z.string().max(100).nullable().optional(),
   reportsTo: z.string().nullable().optional(),
   allowedTools: allowedToolsSchema,
+  slackChannelIds: slackChannelIdsSchema,
 });
 
 const updateUserSchema = z.object({
@@ -50,22 +63,47 @@ const updateUserSchema = z.object({
   role: z.string().max(100).nullable().optional(),
   reportsTo: z.string().nullable().optional(),
   allowedTools: allowedToolsSchema,
+  slackChannelIds: slackChannelIdsSchema,
 });
 
-function parseAllowedTools(value: string | null): string[] | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    return parsed.filter((entry): entry is string => typeof entry === "string");
-  } catch {
-    return null;
-  }
+function serializeUser(user: NonNullable<UserRow>, slackChannelIds: string[] = []) {
+  const { password_hash: _passwordHash, allowed_tools, ...safeUser } = user;
+  return {
+    ...safeUser,
+    allowed_tools: parseAllowedTools(allowed_tools),
+    slack_channel_ids: slackChannelIds,
+  };
 }
 
-function serializeUser(user: NonNullable<UserRow>) {
-  const { password_hash: _passwordHash, allowed_tools, ...safeUser } = user;
-  return { ...safeUser, allowed_tools: parseAllowedTools(allowed_tools) };
+async function ensureSlackChannelsExist(
+  channels: ChannelRepo,
+  getSlack: (() => SlackBot | null) | undefined,
+  slackChannelIds: string[],
+  logger: Logger,
+): Promise<{ ok: true } | { ok: false; missing: string[] }> {
+  const missing: string[] = [];
+  for (const slackChannelId of slackChannelIds) {
+    const existing = await channels.findBySlackChannelId(slackChannelId);
+    if (existing) continue;
+    const slackBot = getSlack?.();
+    if (!slackBot) {
+      missing.push(slackChannelId);
+      continue;
+    }
+    try {
+      const info = await slackBot.getChannelInfo(slackChannelId);
+      await channels.upsertBySlackChannelId({
+        slackChannelId,
+        name: info.name,
+        type: info.type,
+      });
+    } catch (err) {
+      logger.warn({ err, slackChannelId }, "Failed to look up Slack channel info while binding agent");
+      missing.push(slackChannelId);
+    }
+  }
+  if (missing.length > 0) return { ok: false, missing };
+  return { ok: true };
 }
 
 function serializeApiUser(user: NonNullable<UserRow>) {
@@ -111,7 +149,14 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (c.get("sub") === "sketch-api-key") {
       return c.json({ users: list.map(serializeApiUser) });
     }
-    return c.json({ users: list.map(serializeUser) });
+    const bindings = deps.channels ? await deps.channels.listAllSlackChannelBindings() : [];
+    const byAgent = new Map<string, string[]>();
+    for (const b of bindings) {
+      const arr = byAgent.get(b.agentUserId) ?? [];
+      arr.push(b.slackChannelId);
+      byAgent.set(b.agentUserId, arr);
+    }
+    return c.json({ users: list.map((u) => serializeUser(u, byAgent.get(u.id) ?? [])) });
   });
 
   routes.post("/", async (c) => {
@@ -137,6 +182,17 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (parsed.data.allowedTools !== undefined && userType !== "agent") {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "allowedTools can only be set on agents" } }, 400);
     }
+    if (parsed.data.slackChannelIds !== undefined && userType !== "agent") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "slackChannelIds can only be set on agents" } }, 400);
+    }
+    if (parsed.data.slackChannelIds !== undefined && !deps.channels) {
+      return c.json(
+        {
+          error: { code: "VALIDATION_ERROR", message: "Slack channel bindings are not available in this environment" },
+        },
+        400,
+      );
+    }
 
     try {
       const user = await users.create({
@@ -150,6 +206,29 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         allowedTools: parsed.data.allowedTools ?? undefined,
       });
 
+      let boundSlackChannelIds: string[] = [];
+      if (parsed.data.slackChannelIds && deps.channels) {
+        const ensured = await ensureSlackChannelsExist(
+          deps.channels,
+          deps.getSlack,
+          parsed.data.slackChannelIds,
+          deps.logger,
+        );
+        if (!ensured.ok) {
+          return c.json(
+            {
+              error: {
+                code: "VALIDATION_ERROR",
+                message: `Could not resolve Slack channel(s): ${ensured.missing.join(", ")}`,
+              },
+            },
+            400,
+          );
+        }
+        await deps.channels.setAgentForSlackChannelIds(user.id, parsed.data.slackChannelIds);
+        boundSlackChannelIds = parsed.data.slackChannelIds;
+      }
+
       // Agents do not have email auth flows — skip verification
       let verificationSent = false;
       if (user.email && user.type !== "agent") {
@@ -158,7 +237,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user: serializeUser(user), verificationSent }, 201);
+      return c.json({ user: serializeUser(user, boundSlackChannelIds), verificationSent }, 201);
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(
@@ -202,6 +281,17 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (parsed.data.allowedTools !== undefined && existing.type !== "agent") {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "allowedTools can only be set on agents" } }, 400);
     }
+    if (parsed.data.slackChannelIds !== undefined && existing.type !== "agent") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "slackChannelIds can only be set on agents" } }, 400);
+    }
+    if (parsed.data.slackChannelIds !== undefined && !deps.channels) {
+      return c.json(
+        {
+          error: { code: "VALIDATION_ERROR", message: "Slack channel bindings are not available in this environment" },
+        },
+        400,
+      );
+    }
 
     try {
       const emailValue = (parsed.data as { email?: string | null }).email;
@@ -217,6 +307,29 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         allowedTools: parsed.data.allowedTools,
       });
 
+      if (parsed.data.slackChannelIds !== undefined && deps.channels) {
+        const ensured = await ensureSlackChannelsExist(
+          deps.channels,
+          deps.getSlack,
+          parsed.data.slackChannelIds,
+          deps.logger,
+        );
+        if (!ensured.ok) {
+          return c.json(
+            {
+              error: {
+                code: "VALIDATION_ERROR",
+                message: `Could not resolve Slack channel(s): ${ensured.missing.join(", ")}`,
+              },
+            },
+            400,
+          );
+        }
+        await deps.channels.setAgentForSlackChannelIds(user.id, parsed.data.slackChannelIds);
+      }
+
+      const boundSlackChannelIds = deps.channels ? await deps.channels.listSlackChannelIdsByAgent(user.id) : [];
+
       // Send verification email when email changes to a non-null value
       let verificationSent = false;
       if (emailChanged && user.email) {
@@ -225,7 +338,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user: serializeUser(user), verificationSent });
+      return c.json({ user: serializeUser(user, boundSlackChannelIds), verificationSent });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(

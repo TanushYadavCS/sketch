@@ -37,6 +37,7 @@ function makeChannel(overrides: Record<string, unknown> = {}) {
     type: "channel",
     tool_progress: null,
     reasoning_text: null,
+    agent_user_id: null,
     created_at: "2025-01-01",
     ...overrides,
   };
@@ -193,6 +194,9 @@ vi.mock("../agent/workspace", () => ({
   ensureWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/u1"),
   ensureChannelWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/channel-C1"),
   ensureGroupWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/wa-group-g1"),
+  ensureAgentSubWorkspace: vi
+    .fn()
+    .mockImplementation(async (_config, agentId, subKey) => `/tmp/test-data/workspaces/agent-${agentId}/${subKey}`),
 }));
 
 // Stub session to avoid filesystem access
@@ -720,6 +724,61 @@ describe("slack/adapter", () => {
 
       expect(mockBotInstance.setAssistantStatus).toHaveBeenCalledWith("C1", "1", "💭 Thinking…");
       expect(mockBotInstance.setAssistantStatus).toHaveBeenLastCalledWith("C1", "1", "");
+    });
+
+    it("applies bound agent overlay when channel.agent_user_id is set", async () => {
+      const baseDeps = makeDeps();
+      const agentUser = makeUser({
+        id: "agent-1",
+        name: "Marketing Maven",
+        type: "agent",
+        description: "You are the marketing maven. Always cite source URLs.",
+        allowed_tools: JSON.stringify(["Read", "WebSearch", "mcp__sketch__Search"]),
+      });
+      const deps = makeDeps({
+        repos: {
+          ...baseDeps.repos,
+          users: {
+            findBySlackId: vi.fn().mockResolvedValue(makeUser()),
+            findById: vi.fn().mockImplementation(async (id) => (id === "agent-1" ? agentUser : makeUser({ id }))),
+            findByEmail: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["users"],
+          channels: {
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ agent_user_id: "agent-1" })),
+            findById: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["channels"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(deps.runAgent).toHaveBeenCalledOnce();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.workspaceKey).toBe("agent-agent-1/channel-C1");
+      expect(agentCall.agentInstructions).toBe("You are the marketing maven. Always cite source URLs.");
+      expect(agentCall.agentAllowedTools).toEqual(["Read", "WebSearch", "mcp__sketch__Search"]);
+    });
+
+    it("falls back to default workspace and no overlay when channel has no bound agent", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.repos.channels.findBySlackChannelId).mockResolvedValue(makeChannel());
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.workspaceKey).toBe("channel-C1");
+      expect(agentCall.agentInstructions).toBeNull();
+      expect(agentCall.agentAllowedTools).toBeNull();
     });
   });
 

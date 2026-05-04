@@ -1,4 +1,5 @@
 import { AgentToolsField } from "@/components/team/agent-tools-field";
+import { SlackChannelsField } from "@/components/team/slack-channels-field";
 import type { User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { SpinnerGapIcon } from "@phosphor-icons/react";
@@ -59,6 +60,7 @@ export function AddMemberDialog({
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
   const [allowedTools, setAllowedTools] = useState<string[]>(() => AGENT_TOOL_CATALOG.map((t) => t.name));
+  const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
   const [error, setError] = useState("");
 
   const createMutation = useMutation({
@@ -76,6 +78,7 @@ export function AddMemberDialog({
             }
           : {
               allowedTools,
+              slackChannelIds,
             }),
       }),
     onSuccess: (data) => {
@@ -105,6 +108,7 @@ export function AddMemberDialog({
     setDescription("");
     setReportsTo("none");
     setAllowedTools(AGENT_TOOL_CATALOG.map((t) => t.name));
+    setSlackChannelIds([]);
     setError("");
     onOpenChange(false);
   };
@@ -212,7 +216,16 @@ export function AddMemberDialog({
           )}
 
           {memberType === "agent" && (
-            <AgentToolsField value={allowedTools} onChange={setAllowedTools} disabled={createMutation.isPending} />
+            <>
+              <AgentToolsField value={allowedTools} onChange={setAllowedTools} disabled={createMutation.isPending} />
+              <SlackChannelsField
+                value={slackChannelIds}
+                onChange={setSlackChannelIds}
+                users={users}
+                selfName={name.trim() || "this agent"}
+                disabled={createMutation.isPending}
+              />
+            </>
           )}
 
           <div className="space-y-1.5">
