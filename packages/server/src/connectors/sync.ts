@@ -48,6 +48,17 @@ function extractErrorMessage(err: unknown): string {
   return err.message;
 }
 
+const MAX_ERROR_MESSAGE_LENGTH = 500;
+
+/**
+ * Cap the persisted error so an upstream HTML error page (e.g. Cloudflare 504)
+ * can't blow up the connectors UI when it renders config.error_message.
+ */
+function truncateErrorMessage(message: string): string {
+  const collapsed = message.replace(/\s+/g, " ").trim();
+  return collapsed.length > MAX_ERROR_MESSAGE_LENGTH ? `${collapsed.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : collapsed;
+}
+
 export { getConnector } from "./registry";
 
 function parseCredentials(encrypted: string): ConnectorCredentials {
@@ -427,7 +438,7 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 
     await repo.updateConfig(config.id, {
       syncStatus: "error",
-      errorMessage: message,
+      errorMessage: truncateErrorMessage(message),
     });
 
     throw err;

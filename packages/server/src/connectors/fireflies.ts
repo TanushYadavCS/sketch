@@ -74,6 +74,15 @@ function getApiKey(credentials: ConnectorCredentials): string {
   throw new Error("Fireflies connector requires api_key credentials");
 }
 
+function summarizeErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("<") || /<html[\s>]/i.test(trimmed)) {
+    const titleMatch = trimmed.match(/<title>([^<]+)<\/title>/i);
+    return titleMatch ? `upstream returned HTML — ${titleMatch[1].trim()}` : "upstream returned HTML error page";
+  }
+  return trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed;
+}
+
 function makeFirefliesRequest(getLastRequestTime: () => number, setLastRequestTime: (t: number) => void) {
   return async function firefliesRequest<T>(
     query: string,
@@ -135,7 +144,8 @@ function makeFirefliesRequest(getLastRequestTime: () => number, setLastRequestTi
         return firefliesRequest(query, variables, apiKey, logger, attempt + 1);
       }
 
-      throw new Error(`Fireflies API failed (${response.status}): ${body}`);
+      logger.debug({ status: response.status, body }, "Fireflies API non-OK response");
+      throw new Error(`Fireflies API failed (${response.status}): ${summarizeErrorBody(body)}`);
     }
 
     const result = (await response.json()) as { data: T; errors?: Array<{ message: string }> };
