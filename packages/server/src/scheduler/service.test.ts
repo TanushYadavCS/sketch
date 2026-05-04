@@ -608,6 +608,32 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
+  it("Slack channel + chat + threadTs + output target: sendMessage posts a top-level message", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "channel",
+      delivery_target: "C_CHANNEL1",
+      output_target: "C_OUTPUT",
+      session_mode: "chat",
+      thread_ts: "1234567890.000100",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    await lastExecuteAutomationParams?.sendMessage?.("Output channel update");
+
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
+      "C_OUTPUT",
+      "Output channel update",
+    );
+  });
+
   it("WhatsApp: sendMessage calls sendText", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);

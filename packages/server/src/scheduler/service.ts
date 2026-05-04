@@ -161,7 +161,12 @@ export class TaskScheduler {
       // Determine output target: use output_target if set (for workflows), else delivery_target
       const outputTarget = task.output_target ?? task.delivery_target;
 
-      if (task.context_type === "channel" && task.session_mode !== "fresh" && task.thread_ts) {
+      if (
+        task.context_type === "channel" &&
+        task.session_mode !== "fresh" &&
+        task.thread_ts &&
+        outputTarget === task.delivery_target
+      ) {
         const threadTs = task.thread_ts;
         onMessage = async (text) => {
           await slack.postThreadReply(outputTarget, threadTs, text);

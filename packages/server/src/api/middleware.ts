@@ -62,12 +62,16 @@ function canUseSketchApiKey(path: string, method: string): boolean {
   if (method === "GET" && path === "/api/channels/whatsapp/groups") return true;
   if (method === "POST" && path === "/api/agent-runs") return true;
   if (method === "GET" && path.startsWith("/api/agent-sessions/") && path.endsWith("/messages")) return true;
+  if (method === "GET" && (path === "/api/workflows" || path.startsWith("/api/workflows/"))) return true;
+  if (method === "POST" && path.startsWith("/api/workflows/") && path.endsWith("/runs")) return true;
   return false;
 }
 
 function requiresSketchApiKey(path: string, method: string): boolean {
   if (method === "POST" && path === "/api/agent-runs") return true;
   if (method === "GET" && path.startsWith("/api/agent-sessions/") && path.endsWith("/messages")) return true;
+  if (method === "GET" && (path === "/api/workflows" || path.startsWith("/api/workflows/"))) return true;
+  if (method === "POST" && path.startsWith("/api/workflows/") && path.endsWith("/runs")) return true;
   return false;
 }
 

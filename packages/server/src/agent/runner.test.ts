@@ -261,6 +261,27 @@ describe("runAgent", () => {
     expect(capturedEnv.GH_TOKEN).toBe("token'with-quote");
   });
 
+  it("does not fail the run when session id notification delivery fails", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const logger = makeMockLogger();
+    const onSessionId = vi.fn().mockRejectedValue(new Error("stream closed"));
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-test" };
+        yield { type: "result", session_id: "sess-test", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    const result = await runAgent(makeBaseParams({ logger, onSessionId }));
+
+    expect(result.sessionId).toBe("sess-test");
+    expect(onSessionId).toHaveBeenCalledWith("sess-test");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      "Failed to deliver session id notification",
+    );
+  });
+
   it("uses custom string systemPrompt (not preset) with no per-user content", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const capturedOptions: unknown[] = [];

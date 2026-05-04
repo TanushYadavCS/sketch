@@ -39,10 +39,46 @@ export interface ExecuteAutomationParams {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   sendMessage?: (text: string) => Promise<void>;
+  onEvent?: (event: AutomationExecutionEvent) => Promise<void>;
 }
 
-export async function executeAutomation(params: ExecuteAutomationParams): Promise<{ runId: string; status: string }> {
-  const { task, triggerData, logger, runsRepo, stepContentRepo, sendMessage } = params;
+export type AutomationExecutionEvent =
+  | { type: "run.started"; runId: string; workflowId: string }
+  | { type: "step.started"; runId: string; workflowId: string; stepId: string; stepType: string; label: string }
+  | {
+      type: "step.completed";
+      runId: string;
+      workflowId: string;
+      stepId: string;
+      status: "completed";
+      durationMs: number;
+      outputSummary: string | null;
+    }
+  | {
+      type: "step.failed";
+      runId: string;
+      workflowId: string;
+      stepId: string;
+      status: "failed";
+      durationMs: number;
+      error: { message: string };
+    }
+  | {
+      type: "completed";
+      runId: string;
+      workflowId: string;
+      status: "completed" | "failed";
+      finalOutput: unknown;
+      stepOutputs: Record<string, StepOutput>;
+    };
+
+export async function executeAutomation(params: ExecuteAutomationParams): Promise<{
+  runId: string;
+  status: string;
+  finalOutput: unknown;
+  stepOutputs: Record<string, StepOutput>;
+}> {
+  const { task, triggerData, logger, runsRepo, stepContentRepo, sendMessage, onEvent } = params;
 
   // 1. Verify creator exists
   const creatorId = task.created_by;
@@ -61,7 +97,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
       if (sendMessage) {
         await sendMessage(`Automation '${task.title ?? task.prompt}' failed: Creator no longer exists`);
       }
-      return { runId, status: "failed" };
+      return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
     }
     creatorEmail = creator.email;
   }
@@ -85,6 +121,17 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   const runId = await runsRepo.create({ taskId: task.id, triggerData });
   const workspaceDir = resolveWorkspaceDir(params.config.DATA_DIR, task);
   await mkdir(workspaceDir, { recursive: true });
+  const emitEvent = async (event: AutomationExecutionEvent) => {
+    try {
+      await onEvent?.(event);
+    } catch (err) {
+      logger.warn(
+        { err, taskId: task.id, runId, eventType: event.type },
+        "Automation: execution event delivery failed",
+      );
+    }
+  };
+  await emitEvent({ type: "run.started", runId, workflowId: task.id });
 
   logger.info(
     {
@@ -111,6 +158,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
       { taskId: task.id, runId, stepId: step.id, stepType: step.type, stepLabel: step.label },
       "Automation: step starting",
     );
+    await emitEvent({
+      type: "step.started",
+      runId,
+      workflowId: task.id,
+      stepId: step.id,
+      stepType: step.type,
+      label: step.label,
+    });
 
     try {
       let output: unknown;
@@ -166,6 +221,15 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
       logger.info({ taskId: task.id, runId, stepId: step.id, durationMs }, "Automation: step completed");
 
       await runsRepo.update(runId, { stepOutputs });
+      await emitEvent({
+        type: "step.completed",
+        runId,
+        workflowId: task.id,
+        stepId: step.id,
+        status: "completed",
+        durationMs,
+        outputSummary: output != null ? JSON.stringify(output).slice(0, 200) : null,
+      });
     } catch (err) {
       const durationMs = Date.now() - startTime;
       const error = err instanceof Error ? err : new Error(String(err));
@@ -200,6 +264,15 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         { err, taskId: task.id, runId, stepId: step.id, stepLabel: step.label, durationMs },
         "Automation: step failed",
       );
+      await emitEvent({
+        type: "step.failed",
+        runId,
+        workflowId: task.id,
+        stepId: step.id,
+        status: "failed",
+        durationMs,
+        error: { message: error.message },
+      });
 
       // Send failure notification
       if (sendMessage) {
@@ -210,6 +283,10 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   }
 
   // 6. On success: deliver final output + write context file
+  const executionSteps = steps.filter((s) => s.type !== "trigger");
+  const lastStep = executionSteps[executionSteps.length - 1];
+  const finalOutput = lastStep ? (stepOutputs[lastStep.id]?.output ?? null) : null;
+
   if (!failed) {
     await runsRepo.update(runId, {
       status: "completed",
@@ -221,15 +298,21 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
     // Deliver final step's output
     if (sendMessage) {
-      const executionSteps = steps.filter((s) => s.type !== "trigger");
-      const lastStep = executionSteps[executionSteps.length - 1];
-      const lastOutput = lastStep ? stepOutputs[lastStep.id]?.output : null;
-      if (lastOutput != null) {
-        const message = typeof lastOutput === "string" ? lastOutput : JSON.stringify(lastOutput, null, 2);
+      if (finalOutput != null) {
+        const message = typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput, null, 2);
         await sendMessage(message);
       }
     }
   }
+
+  await emitEvent({
+    type: "completed",
+    runId,
+    workflowId: task.id,
+    status: failed ? "failed" : "completed",
+    finalOutput,
+    stepOutputs,
+  });
 
   // 7. Write context file
   await writeAutomationContext({
@@ -250,7 +333,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     logger,
   });
 
-  return { runId, status: failed ? "failed" : "completed" };
+  return { runId, status: failed ? "failed" : "completed", finalOutput, stepOutputs };
 }
 
 function resolveWorkspaceDir(dataDir: string, task: ScheduledTaskRow): string {
@@ -328,7 +411,7 @@ main().then(output => {
   try {
     return await new Promise<unknown>((resolve, reject) => {
       const timeoutMs = (step.timeout ?? 1800) * 1000;
-      const child = spawn("node", [tempFile], {
+      const child = spawn(process.execPath, [tempFile], {
         timeout: timeoutMs,
         env: {
           PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",

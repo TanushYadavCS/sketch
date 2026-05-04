@@ -167,4 +167,40 @@ describe("executeAutomation agent steps", () => {
     expect(runAgent).not.toHaveBeenCalled();
     expect(params.sendMessage).toHaveBeenCalledWith("light result");
   });
+
+  it("keeps running when execution event delivery fails", async () => {
+    const onEvent = vi.fn().mockRejectedValue(new Error("stream closed"));
+    const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const params = makeParams({
+      logger,
+      onEvent,
+      task: makeTask({
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+          {
+            id: "step1",
+            type: "agent",
+            label: "Summarize Linear issues",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentMode: "light",
+          },
+        ]),
+      }),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toBe("light result");
+    expect(params._runsRepo.update).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({ status: "completed", stepOutputs: expect.any(Object) }),
+    );
+    expect(params.sendMessage).toHaveBeenCalledWith("light result");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "run.started" }),
+      "Automation: execution event delivery failed",
+    );
+  });
 });

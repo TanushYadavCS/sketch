@@ -333,7 +333,11 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     const notifySessionId = async (nextSessionId: string) => {
       if (!nextSessionId || nextSessionId === notifiedSessionId) return;
       notifiedSessionId = nextSessionId;
-      await params.onSessionId?.(nextSessionId);
+      try {
+        await params.onSessionId?.(nextSessionId);
+      } catch (err) {
+        logger.warn({ err }, "Failed to deliver session id notification");
+      }
     };
 
     const run = query({

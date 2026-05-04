@@ -33,6 +33,7 @@ import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
 import { whatsappRoutes } from "./api/whatsapp";
+import { workflowRoutes } from "./api/workflows";
 import { createWorkspaceApi } from "./api/workspace";
 import type { Config } from "./config";
 import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
@@ -203,6 +204,22 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/users", userRoutes(users, { settings, db, logger, config }));
   app.route("/api/agent-environment-variables", agentEnvironmentRoutes(agentEnvVars));
   app.route("/api/agent-sessions", agentSessionRoutes());
+  app.route(
+    "/api/workflows",
+    workflowRoutes({
+      db,
+      config,
+      logger,
+      users,
+      getSlack: deps?.getSlack,
+      whatsapp: deps?.whatsapp,
+      runAgent: deps?.runAgent,
+      buildMcpServers: deps?.buildMcpServers,
+      findIntegrationProvider: deps?.findIntegrationProvider,
+      inboxMessagesRepo: inboxMessages,
+      sendDm: deps?.sendDm,
+    }),
+  );
   if (deps?.runAgent) {
     app.route(
       "/api/agent-runs",
