@@ -8,6 +8,7 @@
 import { ConnectorLogo } from "@/components/connector-logos";
 import { AgentToolsField } from "@/components/team/agent-tools-field";
 import { SlackChannelsField } from "@/components/team/slack-channels-field";
+import { WhatsappFallbackField } from "@/components/team/whatsapp-fallback-field";
 import { WhatsAppGroupsField } from "@/components/team/whatsapp-groups-field";
 import type { ProviderIdentity, User } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -72,6 +73,7 @@ export function EditMemberDialog({
   const [allowedTools, setAllowedTools] = useState<string[]>([]);
   const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
   const [whatsappGroupJids, setWhatsappGroupJids] = useState<string[]>([]);
+  const [isWhatsappFallback, setIsWhatsappFallback] = useState(false);
   const [error, setError] = useState("");
 
   const isAgent = user?.type === "agent";
@@ -87,6 +89,7 @@ export function EditMemberDialog({
       setAllowedTools(user.allowed_tools ?? []);
       setSlackChannelIds(user.slack_channel_ids ?? []);
       setWhatsappGroupJids(user.whatsapp_group_jids ?? []);
+      setIsWhatsappFallback(user.is_whatsapp_fallback ?? false);
       setError("");
     }
   }, [user]);
@@ -99,7 +102,7 @@ export function EditMemberDialog({
         reportsTo: reportsTo === "none" ? null : reportsTo || null,
         description: description.trim() || null,
         ...(isAgent
-          ? { allowedTools, slackChannelIds, whatsappGroupJids }
+          ? { allowedTools, slackChannelIds, whatsappGroupJids, isWhatsappFallback }
           : {
               email: email.trim() || null,
               whatsappNumber: phone.trim() || null,
@@ -158,6 +161,8 @@ export function EditMemberDialog({
       whatsappGroupJids.some((jid) => !originalWhatsAppGroupJids.includes(jid)) ||
       originalWhatsAppGroupJids.some((jid) => !whatsappGroupJids.includes(jid)));
 
+  const isWhatsappFallbackDirty = isAgent && isWhatsappFallback !== (user?.is_whatsapp_fallback ?? false);
+
   const isDirty =
     user &&
     (name.trim() !== user.name ||
@@ -167,6 +172,7 @@ export function EditMemberDialog({
       allowedToolsDirty ||
       slackChannelIdsDirty ||
       whatsappGroupJidsDirty ||
+      isWhatsappFallbackDirty ||
       (!isAgent &&
         ((email.trim() || null) !== (user.email ?? null) ||
           (phone.trim() || null) !== (user.whatsapp_number ?? null))));
@@ -266,6 +272,13 @@ export function EditMemberDialog({
                 users={users}
                 selfId={user?.id}
                 selfName={name.trim() || user?.name || "this agent"}
+                disabled={updateMutation.isPending}
+              />
+              <WhatsappFallbackField
+                value={isWhatsappFallback}
+                onChange={setIsWhatsappFallback}
+                users={users}
+                selfId={user?.id}
                 disabled={updateMutation.isPending}
               />
             </>

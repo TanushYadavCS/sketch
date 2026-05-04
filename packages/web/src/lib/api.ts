@@ -49,6 +49,7 @@ export interface User {
   allowed_tools: string[] | null;
   slack_channel_ids: string[];
   whatsapp_group_jids: string[];
+  is_whatsapp_fallback: boolean;
   created_at: string;
 }
 
@@ -746,6 +747,7 @@ export const api = {
       allowedTools?: string[] | null;
       slackChannelIds?: string[] | null;
       whatsappGroupJids?: string[] | null;
+      isWhatsappFallback?: boolean;
     }) {
       return request<{ user: User; verificationSent?: boolean }>("/api/users", {
         method: "POST",
@@ -764,6 +766,7 @@ export const api = {
         allowedTools?: string[] | null;
         slackChannelIds?: string[] | null;
         whatsappGroupJids?: string[] | null;
+        isWhatsappFallback?: boolean;
       },
     ) {
       return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}`, {
@@ -779,6 +782,17 @@ export const api = {
     remove(id: string) {
       return request<{ success: boolean }>(`/api/users/${id}`, {
         method: "DELETE",
+      });
+    },
+    listExternal() {
+      return request<{ users: Array<{ id: string; name: string; type: string; created_at: string }> }>(
+        "/api/users/external",
+      );
+    },
+    promote(id: string, data: { name: string; email?: string | null; role?: string | null }) {
+      return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}/promote`, {
+        method: "POST",
+        body: JSON.stringify(data),
       });
     },
   },

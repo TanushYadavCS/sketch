@@ -80,6 +80,7 @@ export interface SettingsTable {
   sync_interval_minutes: Generated<number>;
   org_context: string | null;
   sketch_api_key: string | null;
+  whatsapp_fallback_agent_id: string | null;
   onboarding_completed_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;

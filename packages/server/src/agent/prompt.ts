@@ -42,7 +42,7 @@ export interface SketchContextParams {
   currentUserEmail?: string | null;
   currentUserPhone?: string | null;
   workspaceDir: string;
-  orgDir: string;
+  orgDir?: string;
   timezone?: string | null;
   threadTag?: "thread" | "channel_history";
   taskPrompt?: string;
@@ -356,7 +356,8 @@ export function buildSketchContext(params: SketchContextParams): string {
   const timeContent = `${dateFormatter.format(now)} ${tzShort} (${tz})`;
   sectionParts.push(`<time>${timeContent}</time>`);
 
-  sectionParts.push(`<workspace>\n${params.workspaceDir}\norg: ${params.orgDir}\n</workspace>`);
+  const orgLine = params.orgDir ? `\norg: ${params.orgDir}` : "";
+  sectionParts.push(`<workspace>\n${params.workspaceDir}${orgLine}\n</workspace>`);
 
   if (inboxMessages && inboxMessages.length > 0) {
     const lines: string[] = [];

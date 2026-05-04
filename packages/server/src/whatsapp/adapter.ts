@@ -170,21 +170,48 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     if (message.type === "dm") {
       // --- DM handler ---
       const replyJid = toPhoneJid(message.phoneNumber);
-      const user = await repos.users.findByWhatsappNumber(message.phoneNumber);
+      let user = await repos.users.findByWhatsappNumber(message.phoneNumber);
       if (!user) {
-        await whatsapp.sendText(
-          replyJid,
-          "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
+        const settingsRow = await repos.settings.get();
+        const fallbackAgentId = settingsRow?.whatsapp_fallback_agent_id ?? null;
+        if (!fallbackAgentId) {
+          await whatsapp.sendText(
+            replyJid,
+            "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
+          );
+          return;
+        }
+        const fallbackAgent = await repos.users.findById(fallbackAgentId);
+        if (!fallbackAgent || fallbackAgent.type !== "agent") {
+          logger.warn(
+            { fallbackAgentId },
+            "WhatsApp fallback agent is missing or not an agent; dropping unknown-sender DM",
+          );
+          return;
+        }
+        user = await repos.users.create({
+          name: "External user",
+          type: "external",
+          whatsappNumber: message.phoneNumber,
+        });
+        logger.info(
+          { externalUserId: user.id, fallbackAgentId },
+          "Auto-created external user for unknown WhatsApp sender",
         );
-        return;
       }
 
       const userQueue = queue.getQueue(user.id);
 
       userQueue.enqueue(async () => {
         const command = parseSketchCommand(message.text);
+        const settingsRowEarly = await repos.settings.get();
+        const fallbackAgentEarly =
+          user.type === "external" && settingsRowEarly?.whatsapp_fallback_agent_id
+            ? await repos.users.findById(settingsRowEarly.whatsapp_fallback_agent_id)
+            : null;
+        const dmWorkspaceKeyEarly = fallbackAgentEarly ? `agent-${fallbackAgentEarly.id}/${user.id}` : user.id;
         if (command === "new_session") {
-          await deleteSessionId(db, user.id);
+          await deleteSessionId(db, dmWorkspaceKeyEarly);
           await whatsapp.sendText(replyJid, getNewSessionConfirmation());
           return;
         }
@@ -228,8 +255,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           return;
         }
 
-        const workspaceDir = await ensureWorkspace(config, user.id);
-        const settingsRow = await repos.settings.get();
+        const settingsRow = settingsRowEarly;
+        const fallbackAgent = fallbackAgentEarly;
+        const workspaceDir = fallbackAgent
+          ? await ensureAgentSubWorkspace(config, fallbackAgent.id, user.id)
+          : await ensureWorkspace(config, user.id);
+        const dmWorkspaceKey = dmWorkspaceKeyEarly;
         const deliveryJid = toPhoneJid(user.whatsapp_number ?? message.phoneNumber);
         const reactionJid = (message.rawMessage as WAMessage).key?.remoteJid ?? message.jid;
 
@@ -279,7 +310,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             currentUserEmail: user.email,
             currentUserPhone: user.whatsapp_number ?? message.phoneNumber,
             workspaceDir,
-            orgDir: config.CLAUDE_CONFIG_DIR,
+            orgDir: fallbackAgent ? undefined : config.CLAUDE_CONFIG_DIR,
             isSharedContext: false,
             inboxMessages: pendingInbox.messages,
           });
@@ -291,12 +322,17 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             createdBy: user.id,
           };
 
+          const agentInstructions = fallbackAgent?.description ?? null;
+          const agentAllowedTools = fallbackAgent ? parseAllowedTools(fallbackAgent.allowed_tools) : null;
+
           const result = await runAgent({
             db,
-            workspaceKey: user.id,
+            workspaceKey: dmWorkspaceKey,
             userMessage,
             workspaceDir,
-            claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+            // Skip ~/.claude org context for fallback runs so external users
+            // do not see the organisation's preset.
+            claudeConfigDir: fallbackAgent ? undefined : config.CLAUDE_CONFIG_DIR,
             userName: user.name,
             userEmail: user.email,
             userPhone: user.whatsapp_number ?? message.phoneNumber,
@@ -319,6 +355,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             userRepo: repos.users,
             currentUserId: user.id,
             sendDm,
+            agentInstructions,
+            agentAllowedTools,
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });

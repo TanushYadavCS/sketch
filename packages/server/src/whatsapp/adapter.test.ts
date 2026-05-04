@@ -98,6 +98,7 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
         findByWhatsappNumber: vi.fn().mockResolvedValue(makeUser()),
         findById: vi.fn().mockImplementation(async (id) => makeUser({ id })),
         update: vi.fn().mockImplementation(async (id, data) => makeUser({ id, ...data })),
+        create: vi.fn().mockImplementation(async (data) => makeUser({ id: "new-u", ...data })),
       } as unknown as WhatsAppAdapterDeps["repos"]["users"],
       settings: {
         get: vi.fn().mockResolvedValue({
@@ -184,6 +185,93 @@ describe("whatsapp/adapter", () => {
         "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
       );
       expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("routes unknown senders to the fallback agent when configured", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(undefined);
+      vi.mocked(deps.repos.settings.get).mockResolvedValue({
+        org_name: "TestOrg",
+        bot_name: "TestBot",
+        whatsapp_fallback_agent_id: "agent-1",
+      } as never);
+      const fallbackAgent = makeUser({
+        id: "agent-1",
+        name: "Support Agent",
+        type: "agent",
+        description: "You are the support agent. Be concise.",
+        allowed_tools: JSON.stringify(["Read"]),
+      });
+      vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>
+        id === "agent-1" ? fallbackAgent : makeUser({ id }),
+      );
+      const externalUser = makeUser({
+        id: "ext-1",
+        name: "External user",
+        type: "external",
+        whatsapp_number: "+1234567890",
+        email: null,
+      });
+      vi.mocked(deps.repos.users.create).mockResolvedValue(externalUser);
+
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hi there",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Stranger",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(deps.repos.users.create).toHaveBeenCalledWith({
+        name: "External user",
+        type: "external",
+        whatsappNumber: "+1234567890",
+      });
+      expect(deps.runAgent).toHaveBeenCalledOnce();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.workspaceKey).toBe("agent-agent-1/ext-1");
+      expect(agentCall.agentInstructions).toBe("You are the support agent. Be concise.");
+      expect(agentCall.agentAllowedTools).toEqual(["Read"]);
+      expect(agentCall.claudeConfigDir).toBeUndefined();
+    });
+
+    it("drops unknown senders when no fallback agent is configured", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(undefined);
+      vi.mocked(deps.repos.settings.get).mockResolvedValue({
+        org_name: "TestOrg",
+        bot_name: "TestBot",
+        whatsapp_fallback_agent_id: null,
+      } as never);
+
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hi",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Stranger",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(deps.repos.users.create).not.toHaveBeenCalled();
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "1234567890@s.whatsapp.net",
+        "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
+      );
     });
 
     it("runs agent for authorized DM users", async () => {

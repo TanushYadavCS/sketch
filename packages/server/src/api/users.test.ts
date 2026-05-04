@@ -458,4 +458,115 @@ describe("Users API — agent fields", () => {
       expect(after?.agent_user_id).toBeNull();
     });
   });
+
+  describe("WhatsApp fallback agent + external users", () => {
+    async function createAgent(name: string) {
+      const res = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name, type: "agent", allowedTools: ["Read"] }),
+      });
+      expect(res.status).toBe(201);
+      return (await res.json()).user;
+    }
+
+    it("setting isWhatsappFallback on agent B clears it from agent A", async () => {
+      const a = await createAgent("Agent A");
+      const setA = await app.request(`/api/users/${a.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ isWhatsappFallback: true }),
+      });
+      expect(setA.status).toBe(200);
+      expect((await setA.json()).user.is_whatsapp_fallback).toBe(true);
+
+      const b = await createAgent("Agent B");
+      const setB = await app.request(`/api/users/${b.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ isWhatsappFallback: true }),
+      });
+      expect(setB.status).toBe(200);
+
+      const list = await (await app.request("/api/users", { headers: { Cookie: cookie } })).json();
+      expect(list.users.find((u: { id: string }) => u.id === a.id).is_whatsapp_fallback).toBe(false);
+      expect(list.users.find((u: { id: string }) => u.id === b.id).is_whatsapp_fallback).toBe(true);
+    });
+
+    it("rejects isWhatsappFallback on a non-agent user", async () => {
+      const res = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name: "Real Person",
+          type: "human",
+          email: "rp4@test.com",
+          isWhatsappFallback: true,
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.message).toContain("isWhatsappFallback");
+    });
+
+    it("hides type='external' users from /api/users and surfaces them via /api/users/external", async () => {
+      const users = createUserRepository(db);
+      const ext = await users.create({
+        name: "External user",
+        type: "external",
+        whatsappNumber: "+1555000000",
+      });
+
+      const main = await (await app.request("/api/users", { headers: { Cookie: cookie } })).json();
+      expect(main.users.find((u: { id: string }) => u.id === ext.id)).toBeUndefined();
+
+      const externals = await (await app.request("/api/users/external", { headers: { Cookie: cookie } })).json();
+      expect(externals.users.find((u: { id: string }) => u.id === ext.id)).toBeDefined();
+    });
+
+    it("returns 409 with promotionCandidate when adding a human with an external's WhatsApp number", async () => {
+      const users = createUserRepository(db);
+      const ext = await users.create({
+        name: "External user",
+        type: "external",
+        whatsappNumber: "+1555111111",
+      });
+
+      const res = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name: "Now Joining",
+          type: "human",
+          email: "nj@test.com",
+          whatsappNumber: "+1555111111",
+        }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error.code).toBe("EXTERNAL_USER_EXISTS");
+      expect(body.promotionCandidate.id).toBe(ext.id);
+    });
+
+    it("promotes an external user to type=human and preserves the id", async () => {
+      const users = createUserRepository(db);
+      const ext = await users.create({
+        name: "External user",
+        type: "external",
+        whatsappNumber: "+1555222222",
+      });
+
+      const res = await app.request(`/api/users/${ext.id}/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "Now Joining", email: "nj2@test.com" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.user.id).toBe(ext.id);
+      expect(body.user.type).toBe("human");
+      expect(body.user.name).toBe("Now Joining");
+      expect(body.user.email).toBe("nj2@test.com");
+    });
+  });
 });

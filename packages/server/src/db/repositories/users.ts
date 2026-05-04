@@ -7,6 +7,7 @@ type UserRow = Selectable<UsersTable>;
 
 export interface UserRepository {
   list(): Promise<UserRow[]>;
+  listExternal(): Promise<UserRow[]>;
   findBySlackId(slackUserId: string): Promise<UserRow | undefined>;
   findByWhatsappNumber(whatsappNumber: string): Promise<UserRow | undefined>;
   findByEmail(email: string): Promise<UserRow | undefined>;
@@ -72,7 +73,11 @@ function excludeUserIdSql(excludeUserId?: string) {
 export function createUserRepository(db: UserDb): UserRepository {
   return {
     async list() {
-      return db.selectFrom("users").selectAll().orderBy("created_at", "desc").execute();
+      return db.selectFrom("users").selectAll().where("type", "!=", "external").orderBy("created_at", "desc").execute();
+    },
+
+    async listExternal() {
+      return db.selectFrom("users").selectAll().where("type", "=", "external").orderBy("created_at", "desc").execute();
     },
 
     async findBySlackId(slackUserId: string) {

@@ -102,7 +102,7 @@ export interface RunAgentParams {
   workspaceKey: string;
   userMessage: string;
   workspaceDir: string;
-  claudeConfigDir: string;
+  claudeConfigDir?: string;
   userName: string;
   userEmail?: string | null;
   userPhone?: string | null;
@@ -314,7 +314,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   // credential env vars stay inside the trusted broker and are injected only
   // into the real CLI child process.
   let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
-  if (params.findIntegrationProvider) {
+  if (params.findIntegrationProvider && params.claudeConfigDir) {
     integrationAccess = await startIntegrationAccess({
       userEmail: params.userEmail ?? null,
       claudeConfigDir: params.claudeConfigDir,
@@ -370,6 +370,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
         resume: resumeSessionId,
         env: {
           ...process.env,
+          // When the caller intentionally skips the org config dir (e.g. the
+          // WhatsApp fallback agent for external users), point the SDK at the
+          // workspace itself so it does not pick up the org's CLAUDE.md.
+          ...(params.claudeConfigDir === undefined ? { CLAUDE_CONFIG_DIR: workspaceDir } : {}),
           ...integrationAccess.envVars,
           ...params.agentEnv,
         },

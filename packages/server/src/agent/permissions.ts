@@ -30,10 +30,10 @@ function isInsideDir(filePath: string, dir: string): boolean {
 export function createCanUseTool(
   absWorkspace: string,
   logger: Logger,
-  claudeDir: string,
+  claudeDir: string | undefined,
   agentAllowedTools?: string[] | null,
 ) {
-  const absClaudeDir = resolve(claudeDir);
+  const absClaudeDir = claudeDir ? resolve(claudeDir) : null;
   const agentAllowlist = agentAllowedTools && agentAllowedTools.length > 0 ? new Set(agentAllowedTools) : null;
 
   return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
@@ -52,7 +52,7 @@ export function createCanUseTool(
       const rawPath = (input.file_path as string) || (input.path as string) || absWorkspace;
       const filePath = resolve(rawPath);
       if (!isInsideDir(filePath, absWorkspace)) {
-        if (isInsideDir(filePath, absClaudeDir)) {
+        if (absClaudeDir && isInsideDir(filePath, absClaudeDir)) {
           return { behavior: "allow", updatedInput: input };
         }
         logger.warn({ toolName, filePath, absWorkspace }, "Blocked file access outside workspace");
@@ -67,7 +67,7 @@ export function createCanUseTool(
     if (toolName === "Bash") {
       const command = (input.command as string) || "";
       const hasAbsolutePath = /(?:^|\s)\/(?!dev\/null|tmp\/)/.test(command);
-      if (hasAbsolutePath && !command.includes(absWorkspace) && !command.includes(absClaudeDir)) {
+      if (hasAbsolutePath && !command.includes(absWorkspace) && !(absClaudeDir && command.includes(absClaudeDir))) {
         logger.warn({ toolName, command, absWorkspace }, "Blocked bash command referencing outside paths");
         return {
           behavior: "deny",

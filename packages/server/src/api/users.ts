@@ -58,6 +58,7 @@ const createUserSchema = z.object({
   allowedTools: allowedToolsSchema,
   slackChannelIds: slackChannelIdsSchema,
   whatsappGroupJids: whatsappGroupJidsSchema,
+  isWhatsappFallback: z.boolean().optional(),
 });
 
 const updateUserSchema = z.object({
@@ -70,15 +71,22 @@ const updateUserSchema = z.object({
   allowedTools: allowedToolsSchema,
   slackChannelIds: slackChannelIdsSchema,
   whatsappGroupJids: whatsappGroupJidsSchema,
+  isWhatsappFallback: z.boolean().optional(),
 });
 
-function serializeUser(user: NonNullable<UserRow>, slackChannelIds: string[] = [], whatsappGroupJids: string[] = []) {
+function serializeUser(
+  user: NonNullable<UserRow>,
+  slackChannelIds: string[] = [],
+  whatsappGroupJids: string[] = [],
+  isWhatsappFallback = false,
+) {
   const { password_hash: _passwordHash, allowed_tools, ...safeUser } = user;
   return {
     ...safeUser,
     allowed_tools: parseAllowedTools(allowed_tools),
     slack_channel_ids: slackChannelIds,
     whatsapp_group_jids: whatsappGroupJids,
+    is_whatsapp_fallback: isWhatsappFallback,
   };
 }
 
@@ -179,8 +187,24 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       arr.push(b.jid);
       waByAgent.set(b.agentUserId, arr);
     }
+    const settingsRow = await deps.settings.get();
+    const fallbackAgentId = settingsRow?.whatsapp_fallback_agent_id ?? null;
     return c.json({
-      users: list.map((u) => serializeUser(u, slackByAgent.get(u.id) ?? [], waByAgent.get(u.id) ?? [])),
+      users: list.map((u) =>
+        serializeUser(u, slackByAgent.get(u.id) ?? [], waByAgent.get(u.id) ?? [], u.id === fallbackAgentId),
+      ),
+    });
+  });
+
+  routes.get("/external", async (c) => {
+    const list = await users.listExternal();
+    return c.json({
+      users: list.map((u) => ({
+        id: u.id,
+        name: u.name,
+        type: u.type,
+        created_at: u.created_at,
+      })),
     });
   });
 
@@ -204,6 +228,23 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
 
     const userType = parsed.data.type ?? "human";
+
+    if (userType === "human" && parsed.data.whatsappNumber) {
+      const existing = await users.findByWhatsappNumber(parsed.data.whatsappNumber);
+      if (existing && existing.type === "external") {
+        return c.json(
+          {
+            error: {
+              code: "EXTERNAL_USER_EXISTS",
+              message: "This WhatsApp number is already linked to an external user.",
+            },
+            promotionCandidate: { id: existing.id, type: existing.type, whatsapp_number: existing.whatsapp_number },
+          },
+          409,
+        );
+      }
+    }
+
     if (parsed.data.allowedTools !== undefined && userType !== "agent") {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "allowedTools can only be set on agents" } }, 400);
     }
@@ -221,6 +262,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (parsed.data.whatsappGroupJids !== undefined && userType !== "agent") {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: "whatsappGroupJids can only be set on agents" } },
+        400,
+      );
+    }
+    if (parsed.data.isWhatsappFallback !== undefined && userType !== "agent") {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: "isWhatsappFallback can only be set on agents" } },
         400,
       );
     }
@@ -291,6 +338,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         boundWhatsAppGroupJids = parsed.data.whatsappGroupJids;
       }
 
+      let isWhatsappFallback = false;
+      if (parsed.data.isWhatsappFallback === true && user.type === "agent") {
+        await deps.settings.update({ whatsappFallbackAgentId: user.id });
+        isWhatsappFallback = true;
+      }
+
       // Agents do not have email auth flows — skip verification
       let verificationSent = false;
       if (user.email && user.type !== "agent") {
@@ -299,7 +352,13 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids), verificationSent }, 201);
+      return c.json(
+        {
+          user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids, isWhatsappFallback),
+          verificationSent,
+        },
+        201,
+      );
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(
@@ -357,6 +416,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (parsed.data.whatsappGroupJids !== undefined && existing.type !== "agent") {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: "whatsappGroupJids can only be set on agents" } },
+        400,
+      );
+    }
+    if (parsed.data.isWhatsappFallback !== undefined && existing.type !== "agent") {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: "isWhatsappFallback can only be set on agents" } },
         400,
       );
     }
@@ -425,8 +490,20 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         await deps.whatsappGroups.setAgentForJids(user.id, parsed.data.whatsappGroupJids);
       }
 
+      if (parsed.data.isWhatsappFallback !== undefined && existing.type === "agent") {
+        const settingsRow = await deps.settings.get();
+        const currentFallback = settingsRow?.whatsapp_fallback_agent_id ?? null;
+        if (parsed.data.isWhatsappFallback === true) {
+          await deps.settings.update({ whatsappFallbackAgentId: user.id });
+        } else if (parsed.data.isWhatsappFallback === false && currentFallback === user.id) {
+          await deps.settings.update({ whatsappFallbackAgentId: null });
+        }
+      }
+
       const boundSlackChannelIds = deps.channels ? await deps.channels.listSlackChannelIdsByAgent(user.id) : [];
       const boundWhatsAppGroupJids = deps.whatsappGroups ? await deps.whatsappGroups.listJidsByAgent(user.id) : [];
+      const settingsRowAfter = await deps.settings.get();
+      const isWhatsappFallback = settingsRowAfter?.whatsapp_fallback_agent_id === user.id;
 
       // Send verification email when email changes to a non-null value
       let verificationSent = false;
@@ -436,7 +513,10 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids), verificationSent });
+      return c.json({
+        user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids, isWhatsappFallback),
+        verificationSent,
+      });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(
@@ -446,6 +526,54 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       }
       throw err;
     }
+  });
+
+  routes.post("/:id/promote", async (c) => {
+    const id = c.req.param("id");
+    const existing = await users.findById(id);
+    if (!existing) {
+      return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
+    }
+    if (existing.type !== "external") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Only external users can be promoted" } }, 400);
+    }
+
+    const body = await c.req.json();
+    const promoteSchema = z.object({
+      name: z.string().min(1),
+      email: emailSchema.nullable().optional(),
+      role: z.string().max(100).nullable().optional(),
+    });
+    const parsed = promoteSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    await deps.db
+      .updateTable("users")
+      .set({
+        type: "human",
+        name: parsed.data.name,
+        email: parsed.data.email ?? null,
+        role: parsed.data.role ?? null,
+      })
+      .where("id", "=", id)
+      .execute();
+
+    const promoted = await users.findById(id);
+    if (!promoted) {
+      return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
+    }
+
+    let verificationSent = false;
+    if (promoted.email) {
+      const baseUrl = resolveBaseUrl(c, deps.config);
+      const result = await sendOrLogVerification(deps, promoted.id, promoted.email, baseUrl);
+      verificationSent = result.sent;
+    }
+
+    return c.json({ user: serializeUser(promoted), verificationSent });
   });
 
   // Resend verification email

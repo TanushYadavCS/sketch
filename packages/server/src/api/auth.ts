@@ -89,6 +89,13 @@ export function authRoutes(
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid credentials" } }, 401);
     }
 
+    // Agents and external users do not have dashboard access. Mirror the
+    // generic "Invalid credentials" response so we do not leak the existence
+    // of a non-human row with the same email.
+    if (user.type === "agent" || user.type === "external") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid credentials" } }, 401);
+    }
+
     let row = await settings.get();
     if (!row) {
       await settings.create();
@@ -238,6 +245,9 @@ export function authRoutes(
     const user = await deps.userRepo.findById(userId);
     if (!user) {
       return c.redirect("/login?error=expired_link");
+    }
+    if (user.type === "agent" || user.type === "external") {
+      return c.redirect("/login?error=invalid_link");
     }
 
     await createSession(c, user.id, toAuthRole(user.auth_role), settingsRow.jwt_secret);
