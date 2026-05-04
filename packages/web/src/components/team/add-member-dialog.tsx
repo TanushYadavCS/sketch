@@ -1,7 +1,8 @@
+import { AgentToolsField } from "@/components/team/agent-tools-field";
 import type { User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { SpinnerGapIcon } from "@phosphor-icons/react";
-import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
+import { AGENT_INSTRUCTIONS_MAX_LENGTH, AGENT_TOOL_CATALOG, emailSchema, whatsappNumberSchema } from "@sketch/shared";
 /**
  * AddMemberDialog — create a new human member or AI agent.
  * Human members require a name + email; agents require only a name.
@@ -57,6 +58,7 @@ export function AddMemberDialog({
   const [phone, setPhone] = useState("");
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
+  const [allowedTools, setAllowedTools] = useState<string[]>(() => AGENT_TOOL_CATALOG.map((t) => t.name));
   const [error, setError] = useState("");
 
   const createMutation = useMutation({
@@ -72,7 +74,9 @@ export function AddMemberDialog({
               email: email.trim() || null,
               whatsappNumber: phone.trim() || null,
             }
-          : {}),
+          : {
+              allowedTools,
+            }),
       }),
     onSuccess: (data) => {
       if (data.verificationSent) {
@@ -100,6 +104,7 @@ export function AddMemberDialog({
     setPhone("");
     setDescription("");
     setReportsTo("none");
+    setAllowedTools(AGENT_TOOL_CATALOG.map((t) => t.name));
     setError("");
     onOpenChange(false);
   };
@@ -175,17 +180,40 @@ export function AddMemberDialog({
             />
           </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="add-description">Description</Label>
-            <Textarea
-              id="add-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="What does this person do? e.g. Marketing Lead, handles competitive analysis"
-              disabled={createMutation.isPending}
-              rows={2}
-            />
-          </div>
+          {memberType === "agent" ? (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="add-description">Instructions</Label>
+                <span className="text-xs text-muted-foreground">
+                  {description.length}/{AGENT_INSTRUCTIONS_MAX_LENGTH}
+                </span>
+              </div>
+              <Textarea
+                id="add-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value.slice(0, AGENT_INSTRUCTIONS_MAX_LENGTH))}
+                placeholder="Describe how this agent should behave. e.g. You are the marketing maven. Always cite source URLs and write in first person."
+                disabled={createMutation.isPending}
+                rows={8}
+              />
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="add-description">Description</Label>
+              <Textarea
+                id="add-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What does this person do? e.g. Marketing Lead, handles competitive analysis"
+                disabled={createMutation.isPending}
+                rows={2}
+              />
+            </div>
+          )}
+
+          {memberType === "agent" && (
+            <AgentToolsField value={allowedTools} onChange={setAllowedTools} disabled={createMutation.isPending} />
+          )}
 
           <div className="space-y-1.5">
             <Label htmlFor="add-reports-to">Reports to</Label>

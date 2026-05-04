@@ -3,7 +3,7 @@
  * Primary use case: admin adds WhatsApp users so they can message the bot.
  * Slack users are auto-created on first DM and appear here as read-only.
  */
-import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
+import { AGENT_INSTRUCTIONS_MAX_LENGTH, emailSchema, isKnownAgentToolName, whatsappNumberSchema } from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
@@ -29,28 +29,43 @@ interface UserRoutesDeps {
   config: Config;
 }
 
+const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
+
 const createUserSchema = z.object({
   name: z.string().min(1, "Name is required"),
   email: emailSchema.nullable().optional(),
   whatsappNumber: whatsappNumberSchema.nullable().optional(),
-  description: z.string().max(500).nullable().optional(),
+  description: z.string().max(AGENT_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
   type: z.enum(["human", "agent"]).optional(),
   role: z.string().max(100).nullable().optional(),
   reportsTo: z.string().nullable().optional(),
+  allowedTools: allowedToolsSchema,
 });
 
 const updateUserSchema = z.object({
   name: z.string().min(1, "Name is required").optional(),
   email: emailSchema.nullable().optional(),
   whatsappNumber: whatsappNumberSchema.nullable().optional(),
-  description: z.string().max(500).nullable().optional(),
+  description: z.string().max(AGENT_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
   role: z.string().max(100).nullable().optional(),
   reportsTo: z.string().nullable().optional(),
+  allowedTools: allowedToolsSchema,
 });
 
+function parseAllowedTools(value: string | null): string[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((entry): entry is string => typeof entry === "string");
+  } catch {
+    return null;
+  }
+}
+
 function serializeUser(user: NonNullable<UserRow>) {
-  const { password_hash: _passwordHash, ...safeUser } = user;
-  return safeUser;
+  const { password_hash: _passwordHash, allowed_tools, ...safeUser } = user;
+  return { ...safeUser, allowed_tools: parseAllowedTools(allowed_tools) };
 }
 
 function serializeApiUser(user: NonNullable<UserRow>) {
@@ -118,15 +133,21 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       }
     }
 
+    const userType = parsed.data.type ?? "human";
+    if (parsed.data.allowedTools !== undefined && userType !== "agent") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "allowedTools can only be set on agents" } }, 400);
+    }
+
     try {
       const user = await users.create({
         name: parsed.data.name,
         email: parsed.data.email ?? undefined,
         whatsappNumber: parsed.data.whatsappNumber ?? undefined,
         description: parsed.data.description ?? undefined,
-        type: parsed.data.type ?? "human",
+        type: userType,
         role: parsed.data.role ?? undefined,
         reportsTo: reportsTo ?? undefined,
+        allowedTools: parsed.data.allowedTools ?? undefined,
       });
 
       // Agents do not have email auth flows — skip verification
@@ -178,6 +199,10 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       }
     }
 
+    if (parsed.data.allowedTools !== undefined && existing.type !== "agent") {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "allowedTools can only be set on agents" } }, 400);
+    }
+
     try {
       const emailValue = (parsed.data as { email?: string | null }).email;
       const emailChanged = emailValue !== undefined && emailValue !== (existing.email ?? null);
@@ -189,6 +214,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         description: parsed.data.description,
         role: parsed.data.role,
         reportsTo: reportsToValue,
+        allowedTools: parsed.data.allowedTools,
       });
 
       // Send verification email when email changes to a non-null value

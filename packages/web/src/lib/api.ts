@@ -46,6 +46,7 @@ export interface User {
   type: string;
   role: string | null;
   reports_to: string | null;
+  allowed_tools: string[] | null;
   created_at: string;
 }
 
@@ -719,6 +720,7 @@ export const api = {
       type?: string;
       role?: string | null;
       reportsTo?: string | null;
+      allowedTools?: string[] | null;
     }) {
       return request<{ user: User; verificationSent?: boolean }>("/api/users", {
         method: "POST",
@@ -734,6 +736,7 @@ export const api = {
         description?: string | null;
         role?: string | null;
         reportsTo?: string | null;
+        allowedTools?: string[] | null;
       },
     ) {
       return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}`, {

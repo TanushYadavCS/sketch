@@ -2,6 +2,32 @@ import { describe, expect, it } from "vitest";
 import { buildSketchContext, buildSystemContext, formatTimeAgo } from "./prompt";
 
 describe("buildSystemContext", () => {
+  describe("agent instructions overlay", () => {
+    it("does not add an Agent Instructions section when not provided", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).not.toContain("## Agent Instructions");
+    });
+
+    it("does not add an Agent Instructions section for whitespace-only instructions", () => {
+      const result = buildSystemContext({ platform: "slack", agentInstructions: "   \n  " });
+      expect(result).not.toContain("## Agent Instructions");
+    });
+
+    it("appends agent instructions after platform formatting when provided", () => {
+      const result = buildSystemContext({
+        platform: "slack",
+        agentInstructions: "You are the marketing maven. Always cite source URLs.",
+      });
+      expect(result).toContain("## Agent Instructions");
+      expect(result).toContain("You are the marketing maven. Always cite source URLs.");
+
+      const platformIdx = result.indexOf("## Platform");
+      const agentIdx = result.indexOf("## Agent Instructions");
+      expect(platformIdx).toBeGreaterThan(-1);
+      expect(agentIdx).toBeGreaterThan(platformIdx);
+    });
+  });
+
   describe("identity variants", () => {
     it("uses botName + orgName identity line when both provided", () => {
       const result = buildSystemContext({

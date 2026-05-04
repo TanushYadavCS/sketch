@@ -219,4 +219,51 @@ describe("createCanUseTool", () => {
       expect(result.behavior).toBe("allow");
     });
   });
+
+  describe("agent allowlist", () => {
+    it("allows tools that are in the agent's allowlist", async () => {
+      const logger = createTestLogger();
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["Read", "Bash"]);
+
+      const readResult = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
+      expect(readResult.behavior).toBe("allow");
+
+      const bashResult = await agentTool("Bash", { command: "ls" });
+      expect(bashResult.behavior).toBe("allow");
+    });
+
+    it("denies built-in tools that are not in the agent's allowlist", async () => {
+      const logger = createTestLogger();
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["Read"]);
+
+      const result = await agentTool("Bash", { command: "ls" });
+      expectDeny(result);
+      expect(result.message).toContain("not in this agent's allowlist");
+    });
+
+    it("denies MCP tools that are not in the agent's allowlist", async () => {
+      const logger = createTestLogger();
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["Read"]);
+
+      const result = await agentTool("mcp__sketch__SendFileToChat", { file_path: `${WORKSPACE}/x` });
+      expectDeny(result);
+      expect(result.message).toContain("not in this agent's allowlist");
+    });
+
+    it("allows MCP tools that are in the agent's allowlist", async () => {
+      const logger = createTestLogger();
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["mcp__sketch__SendFileToChat"]);
+
+      const result = await agentTool("mcp__sketch__SendFileToChat", { file_path: `${WORKSPACE}/x` });
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("treats an empty allowlist as 'no agent restriction' (preserves default permitting behaviour)", async () => {
+      const logger = createTestLogger();
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, []);
+
+      const result = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
+      expect(result.behavior).toBe("allow");
+    });
+  });
 });

@@ -162,6 +162,7 @@ export function buildSystemContext(params: {
   orgName?: string | null;
   botName?: string | null;
   indexedSources?: Array<{ source: string; fileCount: number }>;
+  agentInstructions?: string | null;
 }): string {
   const sections: string[] = [];
 
@@ -292,6 +293,18 @@ export function buildSystemContext(params: {
 
   if (params.platform === "whatsapp") {
     sections.push("", "## Platform", "", ...buildPlatformFormattingLines("whatsapp"));
+  }
+
+  const agentInstructions = params.agentInstructions?.trim();
+  if (agentInstructions) {
+    sections.push(
+      "",
+      "## Agent Instructions",
+      "",
+      "These instructions are specific to this agent and take precedence over generic guidance above when they conflict.",
+      "",
+      agentInstructions,
+    );
   }
 
   return sections.join("\n");

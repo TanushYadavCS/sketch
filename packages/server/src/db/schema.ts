@@ -15,6 +15,7 @@ export interface UsersTable {
   reports_to: string | null;
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
+  allowed_tools: string | null;
   created_at: Generated<string>;
 }
 

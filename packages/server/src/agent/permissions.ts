@@ -27,14 +27,25 @@ function isInsideDir(filePath: string, dir: string): boolean {
   return filePath === dir || filePath.startsWith(`${dir}/`);
 }
 
-export function createCanUseTool(absWorkspace: string, logger: Logger, claudeDir: string) {
+export function createCanUseTool(
+  absWorkspace: string,
+  logger: Logger,
+  claudeDir: string,
+  agentAllowedTools?: string[] | null,
+) {
   const absClaudeDir = resolve(claudeDir);
+  const agentAllowlist = agentAllowedTools && agentAllowedTools.length > 0 ? new Set(agentAllowedTools) : null;
 
   return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
     logger.debug({ toolName }, "canUseTool called");
 
     if (!PERMITTED_TOOLS.includes(toolName) && !toolName.startsWith("mcp__")) {
       return { behavior: "deny", message: `Tool ${toolName} is not allowed` };
+    }
+
+    if (agentAllowlist && !agentAllowlist.has(toolName)) {
+      logger.warn({ toolName }, "Blocked tool call outside agent allowlist");
+      return { behavior: "deny", message: `Tool ${toolName} is not in this agent's allowlist` };
     }
 
     if (FILE_TOOLS.includes(toolName)) {

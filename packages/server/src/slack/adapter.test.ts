@@ -24,6 +24,7 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     reports_to: null,
     tool_progress: null,
     reasoning_text: null,
+    allowed_tools: null,
     ...overrides,
   };
 }
