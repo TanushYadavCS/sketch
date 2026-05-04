@@ -108,8 +108,11 @@ export interface RunAgentParams {
   logger: Logger;
   platform: "slack" | "whatsapp";
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
+  onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
+  resumeSessionId?: string;
+  abortController?: AbortController;
   orgName?: string | null;
   botName?: string | null;
   integrationMcpServers?: Record<string, McpServerConfig>;
@@ -123,6 +126,7 @@ export interface RunAgentParams {
    * When omitted, behaves exactly as before (always get + save).
    */
   sessionMode?: "fresh" | "persistent" | "chat";
+  persistSession?: boolean;
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
@@ -180,7 +184,17 @@ export function extractAssistantText(message: unknown): string | null {
 export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
   const isFresh = params.sessionMode === "fresh";
-  const existingSessionId = isFresh ? undefined : await getSessionId(params.db, params.workspaceKey, params.threadTs);
+  const shouldPersistSession = params.persistSession ?? !isFresh;
+  let shouldDeleteStoredSessionOnResumeFailure = false;
+  let existingSessionId: string | undefined;
+  if (!isFresh) {
+    if (params.resumeSessionId) {
+      existingSessionId = params.resumeSessionId;
+    } else {
+      existingSessionId = await getSessionId(params.db, params.workspaceKey, params.threadTs);
+      shouldDeleteStoredSessionOnResumeFailure = existingSessionId !== undefined;
+    }
+  }
   const absWorkspace = resolve(workspaceDir);
 
   const indexedSources = await listIndexedSourcesForPrompt(params.db).catch((err) => {
@@ -212,6 +226,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const toolCalls: ToolCallRecord[] = [];
   const progressEvents: ProgressEvent[] = [];
   const currentTextSuffix: string[] = [];
+  let notifiedSessionId = "";
 
   const attachments = params.attachments ?? [];
   const hasImages = attachments.some((a) => isImageAttachment(a));
@@ -315,6 +330,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   };
 
   const executeSdkRun = async (resumeSessionId: string | undefined) => {
+    const notifySessionId = async (nextSessionId: string) => {
+      if (!nextSessionId || nextSessionId === notifiedSessionId) return;
+      notifiedSessionId = nextSessionId;
+      await params.onSessionId?.(nextSessionId);
+    };
+
     const run = query({
       prompt,
       options: {
@@ -328,6 +349,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
           ...params.agentEnv,
         },
         systemPrompt: systemAppend,
+        abortController: params.abortController,
         tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
         permissionMode: "default" as const,
         allowDangerouslySkipPermissions: false,
@@ -349,6 +371,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
       if (message.type === "system" && message.subtype === "init") {
         sessionId = message.session_id;
+        await notifySessionId(sessionId);
       }
 
       if (message.type === "assistant") {
@@ -403,6 +426,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
       if (message.type === "result") {
         sessionId = message.session_id;
+        await notifySessionId(sessionId);
         costUsd = message.total_cost_usd;
         const resultMsg = message as Record<string, unknown>;
         durationMs = (resultMsg.duration_ms as number) ?? 0;
@@ -448,7 +472,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
           { err, workspaceKey: params.workspaceKey, threadKey: params.threadTs },
           "Agent resumed session failed before producing output; retrying with a fresh session",
         );
-        await deleteSessionId(params.db, params.workspaceKey, params.threadTs);
+        if (shouldDeleteStoredSessionOnResumeFailure) {
+          await deleteSessionId(params.db, params.workspaceKey, params.threadTs);
+          shouldDeleteStoredSessionOnResumeFailure = false;
+        }
         resumeSessionId = undefined;
         usedExistingSession = false;
         sessionId = "";
@@ -456,7 +483,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       }
     }
 
-    if (sessionId && !isFresh) {
+    if (sessionId && shouldPersistSession) {
       await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
     }
   } finally {

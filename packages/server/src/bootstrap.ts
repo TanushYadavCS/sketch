@@ -309,6 +309,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsapp,
     getSlack: () => slack,
     scheduler,
+    runAgent: trackedRunAgent,
+    buildMcpServers,
+    findIntegrationProvider: async () => {
+      const row = await mcpServersRepo.findIntegrationProvider();
+      if (!row || row.type == null) return null;
+      return { type: row.type, credentials: row.credentials };
+    },
+    stepContentRepo,
+    automationRunsRepo,
+    queueManager,
     onSlackTokensUpdated: async (tokens) => {
       await startSlackBotIfConfigured(tokens);
     },

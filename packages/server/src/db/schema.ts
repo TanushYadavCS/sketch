@@ -76,6 +76,7 @@ export interface SettingsTable {
   enrichment_enabled: Generated<number>;
   sync_interval_minutes: Generated<number>;
   org_context: string | null;
+  sketch_api_key: string | null;
   onboarding_completed_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;

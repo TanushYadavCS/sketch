@@ -1,15 +1,18 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import { createEmailTransport, verifyEmailTransport } from "../email";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
+type WhatsAppGroupsRepo = ReturnType<typeof createWhatsAppGroupRepository>;
 
 interface ChannelDeps {
   whatsapp?: WhatsAppBot;
   getSlack?: () => SlackBot | null;
+  whatsappGroups?: WhatsAppGroupsRepo;
   onSlackDisconnect?: () => Promise<void>;
   settings: SettingsRepo;
   onSmtpUpdated?: () => Promise<void>;
@@ -59,6 +62,23 @@ export function channelRoutes(deps: ChannelDeps) {
     ];
 
     return c.json({ channels });
+  });
+
+  routes.get("/slack", async (c) => {
+    const slackBot = deps.getSlack?.() ?? null;
+    if (!slackBot) {
+      return c.json({ error: { code: "NOT_CONNECTED", message: "Slack is not connected" } }, 400);
+    }
+
+    return c.json({ channels: await slackBot.listChannels() });
+  });
+
+  routes.get("/whatsapp/groups", async (c) => {
+    if (!deps.whatsappGroups) {
+      return c.json({ groups: [] });
+    }
+
+    return c.json({ groups: await deps.whatsappGroups.list() });
   });
 
   routes.delete("/slack", async (c) => {

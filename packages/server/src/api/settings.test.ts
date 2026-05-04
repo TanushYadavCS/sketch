@@ -41,6 +41,24 @@ async function loginAdmin(app: ReturnType<typeof createApp>) {
   return res.headers.get("set-cookie") ?? "";
 }
 
+async function loginMember(app: ReturnType<typeof createApp>, db: Kysely<DB>) {
+  const users = createUserRepository(db);
+  const hash = await hashPassword("memberpassword123");
+  await users.create({
+    name: "member",
+    email: "member@test.com",
+    emailVerified: true,
+    passwordHash: hash,
+    authRole: "member",
+  });
+  const res = await app.request("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "member@test.com", password: "memberpassword123" }),
+  });
+  return res.headers.get("set-cookie") ?? "";
+}
+
 describe("Settings API — security", () => {
   let db: Kysely<DB>;
 
@@ -91,6 +109,79 @@ describe("Settings API — security", () => {
       const body = await res.json();
       expect(body.geminiApiKey).toBeUndefined();
       expect(body.geminiApiKeyConfigured).toBe(false);
+    });
+  });
+
+  describe("/api/settings/api-key", () => {
+    it("generates, returns, and revokes the Sketch API key", async () => {
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const emptyRes = await app.request("/api/settings/api-key", { headers: { Cookie: adminCookie } });
+      expect(emptyRes.status).toBe(200);
+      await expect(emptyRes.json()).resolves.toEqual({ configured: false, apiKey: null });
+
+      const createRes = await app.request("/api/settings/api-key", {
+        method: "POST",
+        headers: { Cookie: adminCookie },
+      });
+      expect(createRes.status).toBe(200);
+      const created = (await createRes.json()) as { configured: boolean; apiKey: string };
+      expect(created.configured).toBe(true);
+      expect(created.apiKey).toMatch(/^sk_live_/);
+
+      const getRes = await app.request("/api/settings/api-key", { headers: { Cookie: adminCookie } });
+      expect(getRes.status).toBe(200);
+      await expect(getRes.json()).resolves.toEqual({ configured: true, apiKey: created.apiKey });
+
+      const deleteRes = await app.request("/api/settings/api-key", {
+        method: "DELETE",
+        headers: { Cookie: adminCookie },
+      });
+      expect(deleteRes.status).toBe(200);
+      await expect(deleteRes.json()).resolves.toEqual({ success: true });
+
+      const afterDeleteRes = await app.request("/api/settings/api-key", { headers: { Cookie: adminCookie } });
+      await expect(afterDeleteRes.json()).resolves.toEqual({ configured: false, apiKey: null });
+    });
+
+    it("requires an admin session", async () => {
+      const app = createApp(db, config, { logger });
+      const memberCookie = await loginMember(app, db);
+
+      const res = await app.request("/api/settings/api-key", { headers: { Cookie: memberCookie } });
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error.code).toBe("FORBIDDEN");
+    });
+
+    it("encrypts the Sketch API key when ENCRYPTION_KEY is set", async () => {
+      const encryptedConfig = createTestConfig({
+        ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      });
+      const encryptedSettings = createSettingsRepository(db, encryptedConfig.ENCRYPTION_KEY);
+      await db.updateTable("settings").set({ jwt_secret: null }).where("id", "=", "default").execute();
+      await encryptedSettings.update({ jwtSecret: "jwt-secret-for-encrypted-settings" });
+      const app = createApp(db, encryptedConfig, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const res = await app.request("/api/settings/api-key", {
+        method: "POST",
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { apiKey: string };
+
+      const raw = await db
+        .selectFrom("settings")
+        .select("sketch_api_key")
+        .where("id", "=", "default")
+        .executeTakeFirst();
+      expect(raw?.sketch_api_key).not.toBe(body.apiKey);
+      expect(raw?.sketch_api_key?.startsWith("enc:")).toBe(true);
+
+      const decrypted = await encryptedSettings.get();
+      expect(decrypted?.sketch_api_key).toBe(body.apiKey);
     });
   });
 });

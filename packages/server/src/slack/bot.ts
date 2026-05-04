@@ -444,6 +444,30 @@ export class SlackBot {
     };
   }
 
+  async listChannels(): Promise<Array<{ id: string; name: string; type: string; isMember: boolean }>> {
+    const channels: Array<{ id: string; name: string; type: string; isMember: boolean }> = [];
+    let cursor: string | undefined;
+    do {
+      const result = await this.app.client.conversations.list({
+        exclude_archived: true,
+        limit: 200,
+        types: "public_channel,private_channel",
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const channel of result.channels ?? []) {
+        if (!channel.id) continue;
+        channels.push({
+          id: channel.id,
+          name: channel.name ?? "unknown",
+          type: channel.is_private ? "private_channel" : "public_channel",
+          isMember: channel.is_member === true,
+        });
+      }
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return channels;
+  }
+
   async getChannelHistory(channelId: string, limit = 5): Promise<Array<{ userId: string; text: string; ts: string }>> {
     const result = await this.app.client.conversations.history({ channel: channelId, limit });
     return (result.messages ?? [])

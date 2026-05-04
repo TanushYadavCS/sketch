@@ -53,6 +53,18 @@ function serializeUser(user: NonNullable<UserRow>) {
   return safeUser;
 }
 
+function serializeApiUser(user: NonNullable<UserRow>) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    hasSlackIdentity: !!user.slack_user_id,
+    hasWhatsappIdentity: !!user.whatsapp_number,
+    type: user.type,
+    role: user.role,
+  };
+}
+
 async function sendOrLogVerification(
   deps: UserRoutesDeps,
   userId: string,
@@ -81,6 +93,9 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
 
   routes.get("/", async (c) => {
     const list = await users.list();
+    if (c.get("sub") === "sketch-api-key") {
+      return c.json({ users: list.map(serializeApiUser) });
+    }
     return c.json({ users: list.map(serializeUser) });
   });
 

@@ -416,6 +416,15 @@ export const api = {
     identity() {
       return request<{ orgName: string | null; botName: string }>("/api/settings/identity");
     },
+    apiKey() {
+      return request<{ configured: boolean; apiKey: string | null }>("/api/settings/api-key");
+    },
+    generateApiKey() {
+      return request<{ configured: true; apiKey: string }>("/api/settings/api-key", { method: "POST" });
+    },
+    revokeApiKey() {
+      return request<{ success: true }>("/api/settings/api-key", { method: "DELETE" });
+    },
     searchConfig() {
       return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number; syncIntervalMinutes: number }>(
         "/api/settings/search",

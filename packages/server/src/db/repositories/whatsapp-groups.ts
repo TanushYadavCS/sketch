@@ -10,6 +10,10 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       return db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", jid).executeTakeFirst();
     },
 
+    async list(): Promise<WhatsAppGroupRow[]> {
+      return db.selectFrom("whatsapp_groups").selectAll().orderBy("updated_at", "desc").execute();
+    },
+
     async upsert(group: NewWhatsAppGroup): Promise<WhatsAppGroupRow> {
       await db
         .insertInto("whatsapp_groups")

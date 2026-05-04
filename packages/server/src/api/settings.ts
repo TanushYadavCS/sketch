@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { randomBytes } from "node:crypto";
+import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
@@ -14,6 +15,17 @@ const searchConfigSchema = z.object({
 });
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
+
+function generateSketchApiKey(): string {
+  return `sk_live_${randomBytes(32).toString("base64url")}`;
+}
+
+function requireAdmin(c: Context) {
+  if (c.get("role") !== "admin") {
+    return { error: { code: "FORBIDDEN", message: "Admin access required" } };
+  }
+  return null;
+}
 
 export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?: Logger) {
   const routes = new Hono();
@@ -83,6 +95,37 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
     });
 
     return c.json({ success: true, message: "Enrichment started" });
+  });
+
+  routes.get("/api-key", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const row = await settings.get();
+    return c.json({
+      configured: !!row?.sketch_api_key,
+      apiKey: row?.sketch_api_key ?? null,
+    });
+  });
+
+  routes.post("/api-key", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    if (!(await settings.get())) {
+      await settings.create();
+    }
+    const apiKey = generateSketchApiKey();
+    await settings.update({ sketchApiKey: apiKey });
+    return c.json({ configured: true, apiKey });
+  });
+
+  routes.delete("/api-key", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    await settings.update({ sketchApiKey: null });
+    return c.json({ success: true });
   });
 
   return routes;

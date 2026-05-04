@@ -45,6 +45,7 @@ export interface AuthMiddlewareOpts {
   managedAuthSecret?: string;
   managedUrl?: string;
   findUserByEmail?: (email: string) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
+  verifySketchApiKey?: (token: string) => Promise<boolean>;
   hasLocalAdmin?: () => Promise<boolean>;
   resolveLocalSessionUser?: (
     sub: string,
@@ -53,6 +54,21 @@ export interface AuthMiddlewareOpts {
 
 function toAuthRole(value: string | null | undefined): "admin" | "member" {
   return value === "admin" ? "admin" : "member";
+}
+
+function canUseSketchApiKey(path: string, method: string): boolean {
+  if (method === "GET" && path === "/api/users") return true;
+  if (method === "GET" && path === "/api/channels/slack") return true;
+  if (method === "GET" && path === "/api/channels/whatsapp/groups") return true;
+  if (method === "POST" && path === "/api/agent-runs") return true;
+  if (method === "GET" && path.startsWith("/api/agent-sessions/") && path.endsWith("/messages")) return true;
+  return false;
+}
+
+function requiresSketchApiKey(path: string, method: string): boolean {
+  if (method === "POST" && path === "/api/agent-runs") return true;
+  if (method === "GET" && path.startsWith("/api/agent-sessions/") && path.endsWith("/messages")) return true;
+  return false;
 }
 
 export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewareOpts) {
@@ -111,6 +127,21 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     // Public paths pass through.
     if (isPublicPath) {
       return next();
+    }
+
+    const authHeader = c.req.header("Authorization");
+    const apiKeyRoute = canUseSketchApiKey(path, c.req.method);
+    if (authHeader?.startsWith("Bearer ") && opts?.verifySketchApiKey && apiKeyRoute) {
+      const token = authHeader.slice("Bearer ".length);
+      if (await opts.verifySketchApiKey(token)) {
+        c.set("role", "admin");
+        c.set("sub", "sketch-api-key");
+        c.set("email", null);
+        return next();
+      }
+    }
+    if (requiresSketchApiKey(path, c.req.method)) {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Valid Sketch API key required" } }, 401);
     }
 
     // Managed SSO: check platform cookie first when configured.

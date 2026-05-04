@@ -168,6 +168,33 @@ function makeRichResultMessage(overrides?: Record<string, unknown>) {
 }
 
 describe("runAgent", () => {
+  it("resumes an explicit session without saving it when persistSession is false", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const sessions = await import("./sessions");
+    let capturedResume: string | undefined;
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      const callArgs = args as { options: { resume?: string } };
+      capturedResume = callArgs.options.resume;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "external-session-1" };
+        yield makeRichResultMessage({ session_id: "external-session-1" });
+      })();
+    }) as unknown as typeof query);
+
+    const result = await runAgent(
+      makeBaseParams({
+        resumeSessionId: "external-session-1",
+        persistSession: false,
+      }),
+    );
+
+    expect(capturedResume).toBe("external-session-1");
+    expect(sessions.getSessionId).not.toHaveBeenCalled();
+    expect(sessions.saveSessionId).not.toHaveBeenCalled();
+    expect(result.sessionId).toBe("external-session-1");
+    expect(result.isResumedSession).toBe(true);
+  });
+
   it("clears a stale resumed session and retries once fresh before producing output", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const sessions = await import("./sessions");

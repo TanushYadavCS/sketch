@@ -11,6 +11,8 @@ import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { agentEnvironmentRoutes } from "./api/agent-environment";
+import { agentRunRoutes } from "./api/agent-runs";
+import { agentSessionRoutes } from "./api/agent-sessions";
 import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
@@ -34,16 +36,22 @@ import { whatsappRoutes } from "./api/whatsapp";
 import { createWorkspaceApi } from "./api/workspace";
 import type { Config } from "./config";
 import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
+import { createChannelRepository } from "./db/repositories/channels";
 import { createConnectorRepository } from "./db/repositories/connectors";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
 
+import type { AgentResult, McpServerConfig, RunAgentParams } from "./agent/runner";
 import { getSmtpConfig } from "./api/shared";
+import type { createAutomationRunsRepository } from "./db/repositories/automation-runs";
+import type { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createUserRepository } from "./db/repositories/users";
+import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
+import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
 import type { WhatsAppBot } from "./whatsapp/bot";
@@ -57,7 +65,13 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
-  sendDm?: (params: { userId: string; platform: "slack" | "whatsapp"; message: string }) => Promise<{
+  runAgent?: (params: RunAgentParams) => Promise<AgentResult>;
+  buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
+  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
+  queueManager?: QueueManager;
+  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
@@ -67,6 +81,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const app = new Hono();
   const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const users = createUserRepository(db);
+  const channels = createChannelRepository(db);
+  const whatsappGroups = createWhatsAppGroupRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db);
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
@@ -119,6 +135,10 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
             return { id: user.id, authRole: user.auth_role, email: user.email };
           }
         : undefined,
+      verifySketchApiKey: async (token) => {
+        const row = await settings.get();
+        return !!row?.sketch_api_key && row.sketch_api_key === token;
+      },
     }),
   );
 
@@ -182,6 +202,32 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/skills", skillsRoutes(config));
   app.route("/api/users", userRoutes(users, { settings, db, logger, config }));
   app.route("/api/agent-environment-variables", agentEnvironmentRoutes(agentEnvVars));
+  app.route("/api/agent-sessions", agentSessionRoutes());
+  if (deps?.runAgent) {
+    app.route(
+      "/api/agent-runs",
+      agentRunRoutes({
+        db,
+        config,
+        logger,
+        users,
+        channels,
+        settings,
+        whatsappGroups,
+        inboxMessagesRepo: inboxMessages,
+        getSlack: deps.getSlack,
+        whatsapp: deps.whatsapp,
+        runAgent: deps.runAgent,
+        buildMcpServers: deps.buildMcpServers,
+        findIntegrationProvider: deps.findIntegrationProvider,
+        scheduler: deps.scheduler as TaskScheduler | undefined,
+        stepContentRepo: deps.stepContentRepo,
+        automationRunsRepo: deps.automationRunsRepo,
+        queueManager: deps.queueManager,
+        sendDm: deps.sendDm,
+      }),
+    );
+  }
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
@@ -192,6 +238,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     channelRoutes({
       whatsapp: deps?.whatsapp,
       getSlack: deps?.getSlack,
+      whatsappGroups,
       onSlackDisconnect: deps?.onSlackDisconnect,
       settings,
       onSmtpUpdated: deps?.onSmtpUpdated,

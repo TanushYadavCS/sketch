@@ -12,6 +12,7 @@ import {
   ChatCircleIcon,
   DesktopIcon,
   FolderSimpleIcon,
+  GearIcon,
   LinkSimpleIcon,
   MoonIcon,
   SignOutIcon,
@@ -52,6 +53,7 @@ interface NavItem {
   icon: React.ReactNode;
   href: string;
   disabled?: boolean;
+  adminOnly?: boolean;
 }
 
 const allPrimaryNav: NavItem[] = [
@@ -62,6 +64,7 @@ const allPrimaryNav: NavItem[] = [
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
   { label: "Integrations", icon: <LinkSimpleIcon size={18} />, href: "/integrations" },
   { label: "Usage", icon: <ChartBarIcon size={18} />, href: "/usage" },
+  { label: "Settings", icon: <GearIcon size={18} />, href: "/settings", adminOnly: true },
 ];
 
 function formatRole(role?: "admin" | "member"): string | null {
@@ -94,7 +97,7 @@ export function AppSidebar({
     queryFn: () => api.setup.status(),
   });
 
-  const primaryNav = allPrimaryNav;
+  const primaryNav = allPrimaryNav.filter((item) => !item.adminOnly || role === "admin");
   const roleLabel = formatRole(role);
 
   const logoutMutation = useMutation({

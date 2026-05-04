@@ -78,6 +78,18 @@ describe("AppSidebar", () => {
     });
   });
 
+  it("shows Settings link for admins", () => {
+    renderSidebar("admin");
+
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("hides Settings link for members", () => {
+    renderSidebar("member");
+
+    expect(screen.queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
+  });
+
   it("shows the signed-in user's auth role in the footer", () => {
     renderSidebar("admin");
 
