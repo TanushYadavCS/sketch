@@ -1,5 +1,6 @@
 import { AgentToolsField } from "@/components/team/agent-tools-field";
 import { SlackChannelsField } from "@/components/team/slack-channels-field";
+import { WhatsAppGroupsField } from "@/components/team/whatsapp-groups-field";
 import type { User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { SpinnerGapIcon } from "@phosphor-icons/react";
@@ -61,6 +62,7 @@ export function AddMemberDialog({
   const [reportsTo, setReportsTo] = useState("none");
   const [allowedTools, setAllowedTools] = useState<string[]>(() => AGENT_TOOL_CATALOG.map((t) => t.name));
   const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
+  const [whatsappGroupJids, setWhatsappGroupJids] = useState<string[]>([]);
   const [error, setError] = useState("");
 
   const createMutation = useMutation({
@@ -79,6 +81,7 @@ export function AddMemberDialog({
           : {
               allowedTools,
               slackChannelIds,
+              whatsappGroupJids,
             }),
       }),
     onSuccess: (data) => {
@@ -109,6 +112,7 @@ export function AddMemberDialog({
     setReportsTo("none");
     setAllowedTools(AGENT_TOOL_CATALOG.map((t) => t.name));
     setSlackChannelIds([]);
+    setWhatsappGroupJids([]);
     setError("");
     onOpenChange(false);
   };
@@ -221,6 +225,13 @@ export function AddMemberDialog({
               <SlackChannelsField
                 value={slackChannelIds}
                 onChange={setSlackChannelIds}
+                users={users}
+                selfName={name.trim() || "this agent"}
+                disabled={createMutation.isPending}
+              />
+              <WhatsAppGroupsField
+                value={whatsappGroupJids}
+                onChange={setWhatsappGroupJids}
                 users={users}
                 selfName={name.trim() || "this agent"}
                 disabled={createMutation.isPending}

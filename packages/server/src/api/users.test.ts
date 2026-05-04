@@ -12,6 +12,7 @@ import { hashPassword } from "../auth/password";
 import { createChannelRepository } from "../db/repositories/channels";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
+import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
@@ -315,6 +316,145 @@ describe("Users API — agent fields", () => {
       // intent expressed by the schema.
       await db.updateTable("channels").set({ agent_user_id: null }).where("agent_user_id", "=", agent.id).execute();
       const after = await channels.findBySlackChannelId("C-MARKETING");
+      expect(after?.agent_user_id).toBeNull();
+    });
+  });
+
+  describe("WhatsApp group bindings", () => {
+    beforeEach(async () => {
+      const groups = createWhatsAppGroupRepository(db);
+      await groups.upsert({
+        jid: "group-marketing@g.us",
+        name: "Marketing Crew",
+        updated_at: new Date().toISOString(),
+      });
+      await groups.upsert({ jid: "group-sales@g.us", name: "Sales Crew", updated_at: new Date().toISOString() });
+    });
+
+    it("creates an agent and binds it to existing WhatsApp groups", async () => {
+      const res = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name: "Marketing Maven",
+          type: "agent",
+          allowedTools: ["Read"],
+          whatsappGroupJids: ["group-marketing@g.us"],
+        }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.user.whatsapp_group_jids).toEqual(["group-marketing@g.us"]);
+
+      const list = await app.request("/api/users", { headers: { Cookie: cookie } });
+      const listBody = await list.json();
+      const agent = listBody.users.find((u: { id: string }) => u.id === body.user.id);
+      expect(agent.whatsapp_group_jids).toEqual(["group-marketing@g.us"]);
+    });
+
+    it("reassigns a group from one agent to another via PATCH", async () => {
+      const a = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "Agent A", type: "agent", whatsappGroupJids: ["group-marketing@g.us"] }),
+      });
+      const agentA = (await a.json()).user;
+
+      const b = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "Agent B", type: "agent" }),
+      });
+      const agentB = (await b.json()).user;
+
+      const moved = await app.request(`/api/users/${agentB.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ whatsappGroupJids: ["group-marketing@g.us"] }),
+      });
+      expect(moved.status).toBe(200);
+      expect((await moved.json()).user.whatsapp_group_jids).toEqual(["group-marketing@g.us"]);
+
+      const list = await (await app.request("/api/users", { headers: { Cookie: cookie } })).json();
+      expect(list.users.find((u: { id: string }) => u.id === agentA.id).whatsapp_group_jids).toEqual([]);
+      expect(list.users.find((u: { id: string }) => u.id === agentB.id).whatsapp_group_jids).toEqual([
+        "group-marketing@g.us",
+      ]);
+    });
+
+    it("clears a binding when whatsappGroupJids is set to []", async () => {
+      const create = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name: "Agent A",
+          type: "agent",
+          whatsappGroupJids: ["group-marketing@g.us", "group-sales@g.us"],
+        }),
+      });
+      const agent = (await create.json()).user;
+
+      const cleared = await app.request(`/api/users/${agent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ whatsappGroupJids: [] }),
+      });
+      expect(cleared.status).toBe(200);
+      expect((await cleared.json()).user.whatsapp_group_jids).toEqual([]);
+    });
+
+    it("rejects whatsappGroupJids for non-agent users", async () => {
+      const res = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name: "Real Person",
+          type: "human",
+          email: "rp3@test.com",
+          whatsappGroupJids: ["group-marketing@g.us"],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.message).toContain("whatsappGroupJids");
+    });
+
+    it("returns 400 when binding to a WhatsApp group that the bot has not seen", async () => {
+      const res = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name: "Agent",
+          type: "agent",
+          whatsappGroupJids: ["group-unknown@g.us"],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.message).toContain("group-unknown@g.us");
+    });
+
+    it("clears bindings when the bound agent is deleted (FK SET NULL)", async () => {
+      const create = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "Throwaway", type: "agent", whatsappGroupJids: ["group-marketing@g.us"] }),
+      });
+      const agent = (await create.json()).user;
+
+      const groups = createWhatsAppGroupRepository(db);
+      const before = await groups.getByJid("group-marketing@g.us");
+      expect(before?.agent_user_id).toBe(agent.id);
+
+      await db.deleteFrom("users").where("id", "=", agent.id).execute();
+      // SQLite createTestDb does not enable PRAGMA foreign_keys; simulate cascade
+      // explicitly to confirm the schema-level intent.
+      await db
+        .updateTable("whatsapp_groups")
+        .set({ agent_user_id: null })
+        .where("agent_user_id", "=", agent.id)
+        .execute();
+      const after = await groups.getByJid("group-marketing@g.us");
       expect(after?.agent_user_id).toBeNull();
     });
   });

@@ -48,6 +48,7 @@ export interface User {
   reports_to: string | null;
   allowed_tools: string[] | null;
   slack_channel_ids: string[];
+  whatsapp_group_jids: string[];
   created_at: string;
 }
 
@@ -140,6 +141,14 @@ export interface SlackChannelInfo {
   name: string;
   type: string;
   isMember: boolean;
+}
+
+export interface WhatsAppGroupInfo {
+  jid: string;
+  name: string;
+  description: string | null;
+  agent_user_id: string | null;
+  updated_at: string;
 }
 
 export interface SetupStatus {
@@ -385,6 +394,9 @@ export const api = {
     },
     listSlack() {
       return request<{ channels: SlackChannelInfo[] }>("/api/channels/slack");
+    },
+    listWhatsAppGroups() {
+      return request<{ groups: WhatsAppGroupInfo[] }>("/api/channels/whatsapp/groups");
     },
     disconnectSlack() {
       return request<{ success: boolean }>("/api/channels/slack", { method: "DELETE" });
@@ -733,6 +745,7 @@ export const api = {
       reportsTo?: string | null;
       allowedTools?: string[] | null;
       slackChannelIds?: string[] | null;
+      whatsappGroupJids?: string[] | null;
     }) {
       return request<{ user: User; verificationSent?: boolean }>("/api/users", {
         method: "POST",
@@ -750,6 +763,7 @@ export const api = {
         reportsTo?: string | null;
         allowedTools?: string[] | null;
         slackChannelIds?: string[] | null;
+        whatsappGroupJids?: string[] | null;
       },
     ) {
       return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}`, {

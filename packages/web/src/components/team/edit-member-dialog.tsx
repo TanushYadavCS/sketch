@@ -8,6 +8,7 @@
 import { ConnectorLogo } from "@/components/connector-logos";
 import { AgentToolsField } from "@/components/team/agent-tools-field";
 import { SlackChannelsField } from "@/components/team/slack-channels-field";
+import { WhatsAppGroupsField } from "@/components/team/whatsapp-groups-field";
 import type { ProviderIdentity, User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { getIntegration } from "@/lib/integrations";
@@ -70,6 +71,7 @@ export function EditMemberDialog({
   const [reportsTo, setReportsTo] = useState("none");
   const [allowedTools, setAllowedTools] = useState<string[]>([]);
   const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
+  const [whatsappGroupJids, setWhatsappGroupJids] = useState<string[]>([]);
   const [error, setError] = useState("");
 
   const isAgent = user?.type === "agent";
@@ -84,6 +86,7 @@ export function EditMemberDialog({
       setReportsTo(user.reports_to ?? "none");
       setAllowedTools(user.allowed_tools ?? []);
       setSlackChannelIds(user.slack_channel_ids ?? []);
+      setWhatsappGroupJids(user.whatsapp_group_jids ?? []);
       setError("");
     }
   }, [user]);
@@ -96,7 +99,7 @@ export function EditMemberDialog({
         reportsTo: reportsTo === "none" ? null : reportsTo || null,
         description: description.trim() || null,
         ...(isAgent
-          ? { allowedTools, slackChannelIds }
+          ? { allowedTools, slackChannelIds, whatsappGroupJids }
           : {
               email: email.trim() || null,
               whatsappNumber: phone.trim() || null,
@@ -148,6 +151,13 @@ export function EditMemberDialog({
       slackChannelIds.some((id) => !originalSlackChannelIds.includes(id)) ||
       originalSlackChannelIds.some((id) => !slackChannelIds.includes(id)));
 
+  const originalWhatsAppGroupJids = user?.whatsapp_group_jids ?? [];
+  const whatsappGroupJidsDirty =
+    isAgent &&
+    (whatsappGroupJids.length !== originalWhatsAppGroupJids.length ||
+      whatsappGroupJids.some((jid) => !originalWhatsAppGroupJids.includes(jid)) ||
+      originalWhatsAppGroupJids.some((jid) => !whatsappGroupJids.includes(jid)));
+
   const isDirty =
     user &&
     (name.trim() !== user.name ||
@@ -156,6 +166,7 @@ export function EditMemberDialog({
       (description.trim() || null) !== (user.description ?? null) ||
       allowedToolsDirty ||
       slackChannelIdsDirty ||
+      whatsappGroupJidsDirty ||
       (!isAgent &&
         ((email.trim() || null) !== (user.email ?? null) ||
           (phone.trim() || null) !== (user.whatsapp_number ?? null))));
@@ -244,6 +255,14 @@ export function EditMemberDialog({
               <SlackChannelsField
                 value={slackChannelIds}
                 onChange={setSlackChannelIds}
+                users={users}
+                selfId={user?.id}
+                selfName={name.trim() || user?.name || "this agent"}
+                disabled={updateMutation.isPending}
+              />
+              <WhatsAppGroupsField
+                value={whatsappGroupJids}
+                onChange={setWhatsappGroupJids}
                 users={users}
                 selfId={user?.id}
                 selfName={name.trim() || user?.name || "this agent"}

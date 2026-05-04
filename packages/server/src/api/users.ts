@@ -20,6 +20,7 @@ import type { createChannelRepository } from "../db/repositories/channels";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
+import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createEmailTransport, sendVerificationEmail } from "../email";
 import type { SlackBot } from "../slack/bot";
@@ -29,6 +30,7 @@ import { getSmtpConfig, resolveBaseUrl } from "./shared";
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type ChannelRepo = ReturnType<typeof createChannelRepository>;
+type WhatsAppGroupRepo = ReturnType<typeof createWhatsAppGroupRepository>;
 type UserRow = Awaited<ReturnType<UserRepo["findById"]>>;
 
 interface UserRoutesDeps {
@@ -37,11 +39,13 @@ interface UserRoutesDeps {
   logger: Logger;
   config: Config;
   channels?: ChannelRepo;
+  whatsappGroups?: WhatsAppGroupRepo;
   getSlack?: () => SlackBot | null;
 }
 
 const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
 const slackChannelIdsSchema = z.array(z.string().min(1)).optional();
+const whatsappGroupJidsSchema = z.array(z.string().min(1)).optional();
 
 const createUserSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -53,6 +57,7 @@ const createUserSchema = z.object({
   reportsTo: z.string().nullable().optional(),
   allowedTools: allowedToolsSchema,
   slackChannelIds: slackChannelIdsSchema,
+  whatsappGroupJids: whatsappGroupJidsSchema,
 });
 
 const updateUserSchema = z.object({
@@ -64,15 +69,26 @@ const updateUserSchema = z.object({
   reportsTo: z.string().nullable().optional(),
   allowedTools: allowedToolsSchema,
   slackChannelIds: slackChannelIdsSchema,
+  whatsappGroupJids: whatsappGroupJidsSchema,
 });
 
-function serializeUser(user: NonNullable<UserRow>, slackChannelIds: string[] = []) {
+function serializeUser(user: NonNullable<UserRow>, slackChannelIds: string[] = [], whatsappGroupJids: string[] = []) {
   const { password_hash: _passwordHash, allowed_tools, ...safeUser } = user;
   return {
     ...safeUser,
     allowed_tools: parseAllowedTools(allowed_tools),
     slack_channel_ids: slackChannelIds,
+    whatsapp_group_jids: whatsappGroupJids,
   };
+}
+
+async function findMissingWhatsAppGroups(repo: WhatsAppGroupRepo, jids: string[]): Promise<string[]> {
+  const missing: string[] = [];
+  for (const jid of jids) {
+    const existing = await repo.getByJid(jid);
+    if (!existing) missing.push(jid);
+  }
+  return missing;
 }
 
 async function ensureSlackChannelsExist(
@@ -149,14 +165,23 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (c.get("sub") === "sketch-api-key") {
       return c.json({ users: list.map(serializeApiUser) });
     }
-    const bindings = deps.channels ? await deps.channels.listAllSlackChannelBindings() : [];
-    const byAgent = new Map<string, string[]>();
-    for (const b of bindings) {
-      const arr = byAgent.get(b.agentUserId) ?? [];
+    const slackBindings = deps.channels ? await deps.channels.listAllSlackChannelBindings() : [];
+    const slackByAgent = new Map<string, string[]>();
+    for (const b of slackBindings) {
+      const arr = slackByAgent.get(b.agentUserId) ?? [];
       arr.push(b.slackChannelId);
-      byAgent.set(b.agentUserId, arr);
+      slackByAgent.set(b.agentUserId, arr);
     }
-    return c.json({ users: list.map((u) => serializeUser(u, byAgent.get(u.id) ?? [])) });
+    const waBindings = deps.whatsappGroups ? await deps.whatsappGroups.listAllAgentBindings() : [];
+    const waByAgent = new Map<string, string[]>();
+    for (const b of waBindings) {
+      const arr = waByAgent.get(b.agentUserId) ?? [];
+      arr.push(b.jid);
+      waByAgent.set(b.agentUserId, arr);
+    }
+    return c.json({
+      users: list.map((u) => serializeUser(u, slackByAgent.get(u.id) ?? [], waByAgent.get(u.id) ?? [])),
+    });
   });
 
   routes.post("/", async (c) => {
@@ -192,6 +217,37 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         },
         400,
       );
+    }
+    if (parsed.data.whatsappGroupJids !== undefined && userType !== "agent") {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: "whatsappGroupJids can only be set on agents" } },
+        400,
+      );
+    }
+    if (parsed.data.whatsappGroupJids !== undefined && !deps.whatsappGroups) {
+      return c.json(
+        {
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "WhatsApp group bindings are not available in this environment",
+          },
+        },
+        400,
+      );
+    }
+    if (parsed.data.whatsappGroupJids !== undefined && deps.whatsappGroups) {
+      const missing = await findMissingWhatsAppGroups(deps.whatsappGroups, parsed.data.whatsappGroupJids);
+      if (missing.length > 0) {
+        return c.json(
+          {
+            error: {
+              code: "VALIDATION_ERROR",
+              message: `Could not resolve WhatsApp group(s): ${missing.join(", ")}`,
+            },
+          },
+          400,
+        );
+      }
     }
 
     try {
@@ -229,6 +285,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         boundSlackChannelIds = parsed.data.slackChannelIds;
       }
 
+      let boundWhatsAppGroupJids: string[] = [];
+      if (parsed.data.whatsappGroupJids && deps.whatsappGroups) {
+        await deps.whatsappGroups.setAgentForJids(user.id, parsed.data.whatsappGroupJids);
+        boundWhatsAppGroupJids = parsed.data.whatsappGroupJids;
+      }
+
       // Agents do not have email auth flows — skip verification
       let verificationSent = false;
       if (user.email && user.type !== "agent") {
@@ -237,7 +299,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user: serializeUser(user, boundSlackChannelIds), verificationSent }, 201);
+      return c.json({ user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids), verificationSent }, 201);
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(
@@ -292,6 +354,37 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         400,
       );
     }
+    if (parsed.data.whatsappGroupJids !== undefined && existing.type !== "agent") {
+      return c.json(
+        { error: { code: "VALIDATION_ERROR", message: "whatsappGroupJids can only be set on agents" } },
+        400,
+      );
+    }
+    if (parsed.data.whatsappGroupJids !== undefined && !deps.whatsappGroups) {
+      return c.json(
+        {
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "WhatsApp group bindings are not available in this environment",
+          },
+        },
+        400,
+      );
+    }
+    if (parsed.data.whatsappGroupJids !== undefined && deps.whatsappGroups) {
+      const missing = await findMissingWhatsAppGroups(deps.whatsappGroups, parsed.data.whatsappGroupJids);
+      if (missing.length > 0) {
+        return c.json(
+          {
+            error: {
+              code: "VALIDATION_ERROR",
+              message: `Could not resolve WhatsApp group(s): ${missing.join(", ")}`,
+            },
+          },
+          400,
+        );
+      }
+    }
 
     try {
       const emailValue = (parsed.data as { email?: string | null }).email;
@@ -328,7 +421,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         await deps.channels.setAgentForSlackChannelIds(user.id, parsed.data.slackChannelIds);
       }
 
+      if (parsed.data.whatsappGroupJids !== undefined && deps.whatsappGroups) {
+        await deps.whatsappGroups.setAgentForJids(user.id, parsed.data.whatsappGroupJids);
+      }
+
       const boundSlackChannelIds = deps.channels ? await deps.channels.listSlackChannelIdsByAgent(user.id) : [];
+      const boundWhatsAppGroupJids = deps.whatsappGroups ? await deps.whatsappGroups.listJidsByAgent(user.id) : [];
 
       // Send verification email when email changes to a non-null value
       let verificationSent = false;
@@ -338,7 +436,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         verificationSent = result.sent;
       }
 
-      return c.json({ user: serializeUser(user, boundSlackChannelIds), verificationSent });
+      return c.json({ user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids), verificationSent });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
         return c.json(

@@ -3,6 +3,7 @@
  * Extracted from index.ts for testability.
  */
 import { basename, join } from "node:path";
+import { parseAllowedTools } from "@sketch/shared";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import type { BufferedMessage, InboxMessageContext } from "../agent/prompt";
@@ -10,7 +11,7 @@ import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
-import { ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
+import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import {
   type ReasoningTextCommand,
   type ToolProgressCommand,
@@ -48,6 +49,7 @@ import { createWhatsAppProgressTransport } from "./progress-transport";
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
+type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -59,7 +61,6 @@ function parseInboxMetadata(value: string | null): Record<string, unknown> | nul
     return null;
   }
 }
-type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 
 export interface WhatsAppAdapterDeps {
   db: Kysely<DB>;
@@ -376,20 +377,35 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
     groupQueue.enqueue(async () => {
       const command = parseSketchCommand(message.text);
+      const existingGroupForBinding = await repos.whatsappGroups.getByJid(groupJid);
+      const boundAgent = existingGroupForBinding?.agent_user_id
+        ? await repos.users.findById(existingGroupForBinding.agent_user_id)
+        : null;
+      if (existingGroupForBinding?.agent_user_id && !boundAgent) {
+        logger.warn(
+          { groupJid, agentUserId: existingGroupForBinding.agent_user_id },
+          "Group binding references missing agent; running with default behaviour",
+        );
+      }
+      const groupWorkspaceKey = boundAgent
+        ? `agent-${boundAgent.id}/whatsappgroup-${groupJid}`
+        : `wa-group-${groupJid}`;
       if (command === "new_session") {
-        await deleteSessionId(db, `wa-group-${groupJid}`);
+        await deleteSessionId(db, groupWorkspaceKey);
         groupBuffer.clear(groupJid);
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
         await onFinalMessage(getNewSessionConfirmation());
         return;
       }
 
-      const workspaceDir = await ensureGroupWorkspace(config, groupJid);
+      const workspaceDir = boundAgent
+        ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
+        : await ensureGroupWorkspace(config, groupJid);
       const settingsRow = await repos.settings.get();
       const groupMeta = await whatsapp.getGroupMetadata(groupJid);
       const groupName = groupMeta?.subject ?? "Unknown Group";
       const groupDescription = groupMeta?.desc ?? undefined;
-      const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
+      const existingGroup = existingGroupForBinding;
 
       if (!command && isToolProgressCommand(message.text)) {
         await whatsapp.sendText(groupJid, getUnknownToolProgressMessage(message.text), {
@@ -515,9 +531,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
+        const agentInstructions = boundAgent?.description ?? null;
+        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
+
         const result = await runAgent({
           db,
-          workspaceKey: `wa-group-${groupJid}`,
+          workspaceKey: groupWorkspaceKey,
           userMessage,
           workspaceDir,
           claudeConfigDir: config.CLAUDE_CONFIG_DIR,
@@ -548,6 +567,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           inboxMessagesRepo,
           userRepo: repos.users,
           sendDm,
+          agentInstructions,
+          agentAllowedTools,
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });

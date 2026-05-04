@@ -48,6 +48,7 @@ export interface WhatsAppGroupsTable {
   description: string | null;
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
+  agent_user_id: string | null;
   updated_at: Generated<string>;
 }
 

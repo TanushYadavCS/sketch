@@ -137,6 +137,9 @@ vi.mock("../agent/workspace", () => ({
   ensureWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/u1"),
   ensureChannelWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/channel-C1"),
   ensureGroupWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/wa-group-g1"),
+  ensureAgentSubWorkspace: vi
+    .fn()
+    .mockImplementation(async (_config, agentId, subKey) => `/tmp/test-data/workspaces/agent-${agentId}/${subKey}`),
 }));
 
 // Stub file download
@@ -1123,6 +1126,77 @@ describe("whatsapp/adapter", () => {
       expect(deps.runAgent).toHaveBeenCalledOnce();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("<sender>FallbackName</sender>");
+    });
+
+    it("applies bound agent overlay when whatsapp_groups.agent_user_id is set", async () => {
+      const deps = makeDeps();
+      const agentUser = makeUser({
+        id: "agent-1",
+        name: "Marketing Maven",
+        type: "agent",
+        description: "You are the marketing maven. Always cite source URLs.",
+        allowed_tools: JSON.stringify(["Read", "WebSearch", "mcp__sketch__Search"]),
+      });
+      vi.mocked(deps.repos.whatsappGroups.getByJid).mockResolvedValue({
+        jid: "group@g.us",
+        name: "Marketing Crew",
+        description: null,
+        tool_progress: null,
+        reasoning_text: null,
+        agent_user_id: "agent-1",
+        updated_at: "2025-01-01T00:00:00Z",
+      });
+      vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>
+        id === "agent-1" ? agentUser : makeUser({ id }),
+      );
+
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: true,
+        senderJid: "1234@s.whatsapp.net",
+        senderPhone: "+1234567890",
+      });
+      await flush();
+
+      expect(deps.runAgent).toHaveBeenCalledOnce();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.workspaceKey).toBe("agent-agent-1/whatsappgroup-group@g.us");
+      expect(agentCall.agentInstructions).toBe("You are the marketing maven. Always cite source URLs.");
+      expect(agentCall.agentAllowedTools).toEqual(["Read", "WebSearch", "mcp__sketch__Search"]);
+    });
+
+    it("falls back to default workspace and no overlay when group has no bound agent", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: true,
+        senderJid: "1234@s.whatsapp.net",
+        senderPhone: "+1234567890",
+      });
+      await flush();
+
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.workspaceKey).toBe("wa-group-group@g.us");
+      expect(agentCall.agentInstructions).toBeNull();
+      expect(agentCall.agentAllowedTools).toBeNull();
     });
   });
 });
