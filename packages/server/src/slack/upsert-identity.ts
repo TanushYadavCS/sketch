@@ -8,6 +8,7 @@ type UserRow = {
   email_verified_at: string | null;
   tool_progress: string | null;
   reasoning_text: number | null;
+  timezone: string | null;
 };
 
 type UpsertUsersDeps = {

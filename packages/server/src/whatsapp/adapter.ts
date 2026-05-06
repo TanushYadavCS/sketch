@@ -45,6 +45,7 @@ import type { WhatsAppBot } from "./bot";
 import type { GroupBuffer } from "./group-buffer";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { createWhatsAppProgressTransport } from "./progress-transport";
+import { phoneToTimezone } from "./timezone";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
@@ -170,13 +171,21 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     if (message.type === "dm") {
       // --- DM handler ---
       const replyJid = toPhoneJid(message.phoneNumber);
-      const user = await repos.users.findByWhatsappNumber(message.phoneNumber);
+      let user = await repos.users.findByWhatsappNumber(message.phoneNumber);
       if (!user) {
         await whatsapp.sendText(
           replyJid,
           "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
         );
         return;
+      }
+
+      if (!user.timezone) {
+        const derivedTz = phoneToTimezone(user.whatsapp_number ?? message.phoneNumber);
+        if (derivedTz) {
+          user = await repos.users.update(user.id, { timezone: derivedTz });
+          logger.debug({ userId: user.id, timezone: derivedTz }, "wa adapter: hydrated timezone from phone number");
+        }
       }
 
       const userQueue = queue.getQueue(user.id);
@@ -280,6 +289,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             currentUserPhone: user.whatsapp_number ?? message.phoneNumber,
             workspaceDir,
             orgDir: config.CLAUDE_CONFIG_DIR,
+            timezone: user.timezone,
             isSharedContext: false,
             inboxMessages: pendingInbox.messages,
           });
@@ -289,6 +299,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             contextType: "dm" as const,
             deliveryTarget: deliveryJid,
             createdBy: user.id,
+            creatorTimezone: user.timezone,
           };
 
           const result = await runAgent({
@@ -495,6 +506,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           currentUserPhone: user?.whatsapp_number ?? null,
           workspaceDir,
           orgDir: config.CLAUDE_CONFIG_DIR,
+          timezone: user?.timezone ?? null,
           isSharedContext: true,
           threadTag: "thread",
           groupContext: { groupName, groupDescription },
@@ -540,6 +552,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             contextType: "group" as const,
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
+            creatorTimezone: user?.timezone ?? null,
           },
           scheduler,
           stepContentRepo,

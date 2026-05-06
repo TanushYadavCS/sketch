@@ -200,6 +200,64 @@ describe("handleManageScheduledTasks — add", () => {
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
 
+  it("uses creator's timezone when params.timezone is omitted", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "Asia/Kolkata" }));
+  });
+
+  it("falls back to creator's timezone when params.timezone is an empty string", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", timezone: "" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "Asia/Kolkata" }));
+  });
+
+  it("falls back to UTC when both params.timezone and creatorTimezone are blank", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", timezone: "   " },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "UTC" }));
+  });
+
+  it("explicit params.timezone wins over creatorTimezone", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "add",
+        prompt: "Do it",
+        schedule_type: "cron",
+        schedule_value: "0 9 * * 1",
+        timezone: "America/Los_Angeles",
+      },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "America/Los_Angeles" }));
+  });
+
   it("rejects 'chat' session_mode for top-level channel (no threadTs)", async () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(

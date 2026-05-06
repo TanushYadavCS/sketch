@@ -28,6 +28,7 @@ import { createEntityRepository } from "../db/repositories/entities";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
+import { parseOnceSchedule } from "../scheduler/parse-once";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
@@ -43,6 +44,7 @@ interface SearchableUserRepo {
   findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
   searchByNamePrefix?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
   searchByNameSubstring?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+  update?: (id: string, data: { timezone?: string | null }) => Promise<SelectableUser>;
 }
 
 export class UploadCollector {
@@ -137,9 +139,14 @@ const manageScheduledTasksSchema = {
     .describe(
       `For cron: standard 5-field expression (minute hour day-of-month month day-of-week). Always use 5-field, never 6-field. Examples: '*/2 * * * *' (every 2 min), '0 9 * * 1-5' (weekdays 9am), '0 */6 * * *' (every 6 hours).
 For interval: number of seconds as a plain string, minimum 60. Examples: '120' (every 2 min), '3600' (every hour). Do not use duration strings like '2m' or '1h'.
-For once: ISO 8601 datetime string (e.g. '2026-03-14T15:00:00'). The task runs once at this time then auto-completes.`,
+For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:00') is interpreted in the resolved timezone (the user's tz unless 'timezone' is set explicitly). To pin an absolute instant regardless of timezone, include a Z suffix or numeric offset (e.g. '2026-03-14T15:00:00Z' or '2026-03-14T15:00:00+05:30'). The task runs once at this time then auto-completes.`,
     ),
-  timezone: z.string().optional().describe("IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Defaults to UTC."),
+  timezone: z
+    .string()
+    .optional()
+    .describe(
+      "IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Leave empty in the common case — the user's timezone (shown in <time>) is used automatically. Only set this when the user explicitly names a different timezone for the task.",
+    ),
   session_mode: z
     .enum(["fresh", "persistent", "chat"])
     .optional()
@@ -202,6 +209,25 @@ export interface ManageScheduledTasksDeps {
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
   return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
+}
+
+/**
+ * Resolve the timezone for a scheduled task, in priority order:
+ *   1. explicit `params.timezone`
+ *   2. ambient `creatorTimezone` from the message context
+ *   3. UTC fallback
+ *
+ * Empty / whitespace-only strings are treated as missing — nullish coalescing
+ * alone would let `""` through and overwrite the creator's tz with an invalid
+ * value (croner rejects it on cron, and non-cron tasks would silently land
+ * with a blank timezone in the DB).
+ */
+function resolveScheduleTimezone(paramTz: string | undefined, ctxTz: string | null | undefined): string {
+  const fromParam = paramTz?.trim();
+  if (fromParam && fromParam.length > 0) return fromParam;
+  const fromCtx = ctxTz?.trim();
+  if (fromCtx && fromCtx.length > 0) return fromCtx;
+  return "UTC";
 }
 
 export async function handleManageScheduledTasks(
@@ -330,10 +356,12 @@ export async function handleManageScheduledTasks(
         }
       }
 
+      const resolvedTimezone = resolveScheduleTimezone(params.timezone, ctx.creatorTimezone);
+
       if (params.schedule_type === "cron") {
         try {
           const { Cron } = await import("croner");
-          new Cron(params.schedule_value as string, { timezone: params.timezone ?? "UTC" });
+          new Cron(params.schedule_value as string, { timezone: resolvedTimezone });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return text(`Error: invalid cron expression '${params.schedule_value}': ${msg}`);
@@ -341,7 +369,7 @@ export async function handleManageScheduledTasks(
       }
 
       if (params.schedule_type === "once" && params.schedule_value) {
-        const runAt = new Date(params.schedule_value);
+        const runAt = parseOnceSchedule(params.schedule_value, resolvedTimezone);
         if (Number.isNaN(runAt.getTime())) {
           return text(
             "Error: once schedule_value must be a valid ISO 8601 datetime string (e.g. '2026-03-14T15:00:00').",
@@ -394,7 +422,7 @@ export async function handleManageScheduledTasks(
         prompt: title,
         scheduleType,
         scheduleValue,
-        timezone: params.timezone,
+        timezone: resolvedTimezone,
         sessionMode,
         createdBy: ctx.createdBy,
         title: params.title,
@@ -598,6 +626,45 @@ export async function handleManageScheduledTasks(
 }
 
 type ToolResult = { content: { type: "text"; text: string }[] };
+
+/**
+ * Validates a candidate IANA timezone by attempting to construct an Intl
+ * formatter with it. Avoids pulling in a hardcoded list — the runtime's
+ * tz database is the authoritative source.
+ */
+function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function handleSetUserTimezone(
+  params: { timezone: string },
+  deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.userRepo || !deps.userRepo.update || !deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Timezone update is not available in this context." }] };
+  }
+  const tz = params.timezone.trim();
+  if (!tz) {
+    return { content: [{ type: "text" as const, text: "Error: timezone is required." }] };
+  }
+  if (!isValidTimezone(tz)) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Error: '${tz}' is not a valid IANA timezone. Examples: 'Asia/Kolkata', 'America/New_York', 'Europe/London'.`,
+        },
+      ],
+    };
+  }
+  await deps.userRepo.update(deps.currentUserId, { timezone: tz });
+  return { content: [{ type: "text" as const, text: `Timezone set to ${tz}.` }] };
+}
 
 export async function handleGetTeamDirectory(
   deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
@@ -980,6 +1047,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       "Discover team members and their roles. Returns all team members except yourself.",
       {},
       async () => handleGetTeamDirectory(deps),
+    ),
+
+    tool(
+      "SetUserTimezone",
+      "Update the current user's timezone. Use IANA names (e.g. 'Asia/Kolkata', 'America/New_York', 'Europe/London'). Call this when the user explicitly asks to change their timezone — the system already auto-resolves a default from Slack profile / WhatsApp country code.",
+      {
+        timezone: z.string().describe("IANA timezone name, e.g. 'Asia/Kolkata' or 'America/New_York'."),
+      },
+      async (params) => handleSetUserTimezone(params, deps),
     ),
 
     tool(

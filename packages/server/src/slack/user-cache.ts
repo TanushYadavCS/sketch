@@ -10,6 +10,7 @@ export interface CachedUser {
   name: string;
   realName: string;
   email: string | null;
+  tz: string | null;
 }
 
 export class UserCache {
