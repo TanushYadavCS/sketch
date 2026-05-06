@@ -49,6 +49,12 @@ export function parseOnceSchedule(value: string, timeZone: string): Date {
   // parts and subtracts; if the source instant had ms, the difference would
   // include `-ms`, and applying it would re-add ms a second time.
   const utcGuessNoMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
-  const offsetMinutes = getTzOffsetMinutes(new Date(utcGuessNoMs), timeZone);
-  return new Date(utcGuessNoMs - offsetMinutes * 60_000 + msPadded);
+  // Two-pass DST handling: the first offset computed from the wall-clock-as-UTC
+  // guess can land on the wrong side of a DST transition. Recompute the offset
+  // at the candidate instant so the final UTC renders as the requested wall
+  // time in the target zone, both for spring-forward (was running an hour late)
+  // and fall-back (was running an hour early) days.
+  const offsetMinutes1 = getTzOffsetMinutes(new Date(utcGuessNoMs), timeZone);
+  const offsetMinutes2 = getTzOffsetMinutes(new Date(utcGuessNoMs - offsetMinutes1 * 60_000), timeZone);
+  return new Date(utcGuessNoMs - offsetMinutes2 * 60_000 + msPadded);
 }

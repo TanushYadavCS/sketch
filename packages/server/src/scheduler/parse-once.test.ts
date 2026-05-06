@@ -49,4 +49,18 @@ describe("parseOnceSchedule", () => {
     const result = parseOnceSchedule("not-a-date", "Asia/Kolkata");
     expect(Number.isNaN(result.getTime())).toBe(true);
   });
+
+  // DST in America/New_York for 2026: spring-forward 2026-03-08 02:00 EST → 03:00 EDT,
+  // fall-back 2026-11-01 02:00 EDT → 01:00 EST.
+  it("handles spring-forward day: a valid post-transition local time resolves to EDT, not EST", () => {
+    // 03:30 EDT on 2026-03-08 = 07:30 UTC. The pre-fix one-pass code returned 08:30Z.
+    const result = parseOnceSchedule("2026-03-08T03:30:00", "America/New_York");
+    expect(result.toISOString()).toBe("2026-03-08T07:30:00.000Z");
+  });
+
+  it("handles fall-back day: a post-transition local time resolves to EST, not EDT", () => {
+    // 03:00 EST on 2026-11-01 = 08:00 UTC. The pre-fix one-pass code returned 07:00Z.
+    const result = parseOnceSchedule("2026-11-01T03:00:00", "America/New_York");
+    expect(result.toISOString()).toBe("2026-11-01T08:00:00.000Z");
+  });
 });
