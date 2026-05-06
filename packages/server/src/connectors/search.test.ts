@@ -9,10 +9,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
+  KIND_TO_RULES,
   browseFiles,
   filterAccessibleFileIds,
   getFileContent,
   listIndexedSourcesForPrompt,
+  search,
   searchFiles,
 } from "./search";
 
@@ -312,6 +314,75 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
   it("empty fileIds returns empty set", async () => {
     const accessible = await filterAccessibleFileIds(db, [], ["alice@example.com"]);
     expect(accessible.size).toBe(0);
+  });
+});
+
+describe("search — recency browse applies RBAC before limit", () => {
+  let db: Kysely<DB>;
+
+  async function insertMeeting(id: string, sourceUpdatedAt: string, opts: { fileAccessEmails?: string[] } = {}) {
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "connector-meetings",
+        provider_file_id: id,
+        file_name: `${id}.txt`,
+        file_type: "transcript",
+        content_category: "document",
+        source: "fireflies",
+        source_path: `/meetings/${id}`,
+        provider_url: null,
+        content: null,
+        summary: null,
+        context_note: null,
+        access_scope_id: null,
+        source_updated_at: sourceUpdatedAt,
+        synced_at: sourceUpdatedAt,
+      })
+      .execute();
+
+    for (const email of opts.fileAccessEmails ?? []) {
+      await db.insertInto("file_access").values({ indexed_file_id: id, email }).execute();
+    }
+  }
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-meetings",
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("returns an older accessible meeting when newer candidates are inaccessible", async () => {
+    await insertMeeting("restricted-1", "2026-04-30T10:00:00.000Z", { fileAccessEmails: ["other@example.com"] });
+    await insertMeeting("restricted-2", "2026-04-30T09:00:00.000Z", { fileAccessEmails: ["other@example.com"] });
+    await insertMeeting("restricted-3", "2026-04-30T08:00:00.000Z", { fileAccessEmails: ["other@example.com"] });
+    await insertMeeting("accessible", "2026-04-30T07:00:00.000Z");
+
+    const results = await search(db, "", {
+      kindRules: KIND_TO_RULES.meeting,
+      sortBy: "recency",
+      limit: 1,
+      userEmails: ["alice@example.com"],
+    });
+
+    expect(results.map((r) => r.id)).toEqual(["accessible"]);
   });
 });
 
