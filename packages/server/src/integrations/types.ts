@@ -9,12 +9,51 @@ import { z } from "zod";
 
 export type { IntegrationApp, IntegrationConnection, PageInfo };
 
+export interface BrokerSpec {
+  /** Absolute path to the real CLI binary the broker will spawn. */
+  cliPath: string;
+  /** Env vars injected into the spawned CLI (creds — never visible to the agent). */
+  credentialEnv: Record<string, string>;
+  /** Name of the env var the agent sees pointing at the launcher (e.g. "CANVAS_CLI"). */
+  launcherEnvName: string;
+}
+
 export interface IntegrationProvider {
+  /** Stable provider type identifier (e.g. "canvas"). */
+  readonly type: string;
   listApps(query?: string, limit?: number, after?: string): Promise<{ apps: IntegrationApp[]; pageInfo: PageInfo }>;
   initiateConnection(userEmail: string, appId: string, callbackUrl: string): Promise<{ redirectUrl: string }>;
   listConnections(userEmail: string): Promise<IntegrationConnection[]>;
   removeConnection(userEmail: string, connectionId: string): Promise<void>;
+  /**
+   * Static capability check: does this provider type expose a brokered CLI?
+   * Independent of runtime params — used to validate at automation creation time
+   * before claudeConfigDir/userEmail are resolved. HTTP-only providers return false.
+   */
+  isBrokerCapable(): boolean;
+  /**
+   * Returns a broker spec when this provider exposes a brokered CLI to the agent,
+   * or null for HTTP-only providers (no CLI surface).
+   */
+  getBrokerSpec(params: { userEmail: string | null; claudeConfigDir: string }): BrokerSpec | null;
 }
+
+/**
+ * Three-state outcome of resolving the active integration provider:
+ * - `absent`: no row, or row without a `type`. The org has not configured any integration.
+ * - `ok`: row exists and the runtime adapter constructed successfully.
+ * - `load_failed`: row exists but the factory threw — credentials malformed,
+ *   schema mismatch, etc. The integration is misconfigured, not absent.
+ *
+ * Hot-path callers that only need the happy provider treat both `absent` and
+ * `load_failed` as `null` (see `loadIntegrationProvider` in bootstrap). Callers
+ * that should distinguish the misconfigured case (status endpoints, agent
+ * prompt blocks) consume the union directly.
+ */
+export type IntegrationStatus =
+  | { kind: "absent" }
+  | { kind: "ok"; provider: IntegrationProvider }
+  | { kind: "load_failed"; reason: string; type: string };
 
 export const canvasCredentialsSchema = z.object({
   apiKey: z.string().min(1),

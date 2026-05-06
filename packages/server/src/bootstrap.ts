@@ -27,7 +27,8 @@ import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import type { DB } from "./db/schema";
 import { createApp } from "./http";
-import { buildMcpConfig } from "./integrations/factory";
+import { buildMcpConfig, createProvider } from "./integrations/factory";
+import type { IntegrationProvider, IntegrationStatus } from "./integrations/types";
 import { createLogger } from "./logger";
 import { runManagedSeed } from "./managed-seed";
 import { QueueManager } from "./queue";
@@ -213,6 +214,53 @@ export async function createServer(config: Config, options?: CreateServerOptions
     throw new Error(`Unsupported platform: ${platform}`);
   };
 
+  /**
+   * Resolves the full status of the active integration provider, including the
+   * load-failure branch. Wraps the row-level finder
+   * `mcpServersRepo.findIntegrationProvider()` (which keeps that name because
+   * it really is a row finder) with the runtime factory and discriminates the
+   * three outcomes — `absent`, `ok`, `load_failed` — instead of collapsing the
+   * last two into `null`.
+   *
+   * Legacy rows may have a null api_url; the broker path doesn't need it, and
+   * HTTP-only consumers gate on api_url separately. We pass an empty string so
+   * an accidental HTTP call fails loudly rather than silently treating
+   * skill-mode rows as unconfigured.
+   */
+  const getIntegrationStatus = async (): Promise<IntegrationStatus> => {
+    const row = await mcpServersRepo.findIntegrationProvider();
+    if (!row || row.type == null) return { kind: "absent" };
+    try {
+      return {
+        kind: "ok",
+        provider: createProvider(row.type, row.api_url ?? "", row.credentials, row.id),
+      };
+    } catch (err) {
+      logger.error(
+        { err, serverId: row.id, type: row.type, event: "integration_provider_load_failed" },
+        "Failed to instantiate integration provider",
+      );
+      return {
+        kind: "load_failed",
+        reason: err instanceof Error ? err.message : "unknown error",
+        type: row.type,
+      };
+    }
+  };
+
+  /**
+   * Hot-path adapter: returns the live provider or `null`. Callers on the
+   * Slack/WhatsApp message path use this so a misconfigured integration does
+   * not take down general chat — `load_failed` collapses to `null` here, the
+   * same as `absent`. New callers that need to surface the broken state
+   * (status endpoints, agent prompt blocks) consume `getIntegrationStatus`
+   * directly.
+   */
+  const loadIntegrationProvider = async (): Promise<IntegrationProvider | null> => {
+    const status = await getIntegrationStatus();
+    return status.kind === "ok" ? status.provider : null;
+  };
+
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly
   const scheduler = new TaskScheduler({
     db,
@@ -224,11 +272,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     settingsRepo,
     runAgent: trackedRunAgent,
     buildMcpServers,
-    findIntegrationProvider: async () => {
-      const row = await mcpServersRepo.findIntegrationProvider();
-      if (!row || row.type == null) return null;
-      return { type: row.type, credentials: row.credentials };
-    },
+    loadIntegrationProvider,
     automationRunsRepo,
     stepContentRepo,
     userRepo: users,
@@ -249,11 +293,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     slack: { threadBuffer, userCache },
     runAgent: trackedRunAgent,
     buildMcpServers,
-    findIntegrationProvider: async () => {
-      const row = await mcpServersRepo.findIntegrationProvider();
-      if (!row || row.type == null) return null;
-      return { type: row.type, credentials: row.credentials };
-    },
+    loadIntegrationProvider,
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -292,11 +332,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     groupBuffer,
     runAgent: trackedRunAgent,
     buildMcpServers,
-    findIntegrationProvider: async () => {
-      const row = await mcpServersRepo.findIntegrationProvider();
-      if (!row || row.type == null) return null;
-      return { type: row.type, credentials: row.credentials };
-    },
+    loadIntegrationProvider,
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -311,11 +347,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     scheduler,
     runAgent: trackedRunAgent,
     buildMcpServers,
-    findIntegrationProvider: async () => {
-      const row = await mcpServersRepo.findIntegrationProvider();
-      if (!row || row.type == null) return null;
-      return { type: row.type, credentials: row.credentials };
-    },
+    loadIntegrationProvider,
     stepContentRepo,
     automationRunsRepo,
     queueManager,

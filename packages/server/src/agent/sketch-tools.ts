@@ -27,6 +27,7 @@ import type { createAutomationStepContentRepository } from "../db/repositories/a
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
+import type { IntegrationProvider } from "../integrations/types";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
@@ -62,7 +63,7 @@ export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
   workspaceDir: string;
   db?: Kysely<DB>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
@@ -194,7 +195,7 @@ export interface ManageScheduledTasksDeps {
   taskContext: TaskContext;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   config?: { BASE_URL?: string; PORT: number };
 }
@@ -211,6 +212,22 @@ export async function handleManageScheduledTasks(
   const ctx = deps.taskContext;
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
+
+  const BROKER_REQUIRED_MSG =
+    "Error: Action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.";
+
+  /** Returns an error response if any action step is present but no broker-capable
+   *  provider is configured. Returns null when validation passes (no action steps,
+   *  or a broker-capable provider exists). */
+  const ensureBrokerForActionSteps = async (
+    candidateSteps: WorkflowStepInput[] | undefined,
+  ): Promise<ReturnType<typeof text> | null> => {
+    if (!candidateSteps?.some((s) => s.type === "action")) return null;
+    if (!deps.loadIntegrationProvider) return text(BROKER_REQUIRED_MSG);
+    const provider = await deps.loadIntegrationProvider();
+    if (!provider || !provider.isBrokerCapable()) return text(BROKER_REQUIRED_MSG);
+    return null;
+  };
 
   // Ownership guard: creator-only for actions that mutate or inspect a specific task.
   // Unified 404 phrasing ("task not found") for both missing and not-yours — avoids
@@ -243,20 +260,8 @@ export async function handleManageScheduledTasks(
           return text("Error: schedule_type and schedule_value are required for add action.");
         }
 
-        // Validate action steps require an integration provider
-        if (params.steps.some((s) => s.type === "action")) {
-          if (!deps.findIntegrationProvider) {
-            return text(
-              "Error: Action steps require an integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.",
-            );
-          }
-          const provider = await deps.findIntegrationProvider();
-          if (!provider) {
-            return text(
-              "Error: Action steps require an integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.",
-            );
-          }
-        }
+        const brokerError = await ensureBrokerForActionSteps(params.steps);
+        if (brokerError) return brokerError;
       } else if (params.prompt) {
         // Sugar: expand simple prompt into a single-step workflow
         if (!params.schedule_type || !params.schedule_value) {
@@ -455,6 +460,9 @@ export async function handleManageScheduledTasks(
 
       // Handle steps update
       if (params.steps) {
+        const brokerError = await ensureBrokerForActionSteps(params.steps);
+        if (brokerError) return brokerError;
+
         if (!deps.stepContentRepo && params.steps.some((s) => s.agentPrompt || s.script)) {
           return text(
             "Error: step content storage is not available in this context. Multi-step automations with prompts or scripts cannot be updated.",
@@ -920,13 +928,13 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       "Check if an integration provider is configured. Credentials and user scoping are injected automatically into integration CLI wrappers at runtime — never set API keys or email addresses manually.",
       {},
       async () => {
-        if (!deps.findIntegrationProvider) {
+        if (!deps.loadIntegrationProvider) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ configured: false }) }],
           };
         }
 
-        const provider = await deps.findIntegrationProvider();
+        const provider = await deps.loadIntegrationProvider();
         if (!provider) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ configured: false }) }],
@@ -960,7 +968,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           taskContext: deps.taskContext,
           stepContentRepo: deps.stepContentRepo,
           automationRunsRepo: deps.automationRunsRepo,
-          findIntegrationProvider: deps.findIntegrationProvider,
+          loadIntegrationProvider: deps.loadIntegrationProvider,
           queueManager: deps.queueManager,
           config: deps.toolConfig,
         });

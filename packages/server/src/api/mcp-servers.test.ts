@@ -416,6 +416,89 @@ describe("MCP Servers API", () => {
     });
   });
 
+  // --- GET /api/mcp-servers/:id/health ---
+
+  describe("GET /api/mcp-servers/:id/health", () => {
+    it("returns absent for unknown id", async () => {
+      await seedAdmin(db);
+      const app = createApp(db, config);
+      const cookie = await loginAdmin(app);
+
+      const res = await app.request("/api/mcp-servers/missing-id/health", { headers: { Cookie: cookie } });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ status: "absent" });
+    });
+
+    it("returns not_provider for plain MCP rows (type is null)", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        displayName: "Plain",
+        url: "https://plain.com/mcp",
+        credentials: JSON.stringify({}),
+      });
+
+      const app = createApp(db, config);
+      const cookie = await loginAdmin(app);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/health`, { headers: { Cookie: cookie } });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ status: "not_provider" });
+    });
+
+    it("returns ok when the provider factory succeeds", async () => {
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue({
+        type: "canvas",
+      } as never);
+
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-real" }),
+        type: "canvas",
+      });
+
+      const app = createApp(db, config);
+      const cookie = await loginAdmin(app);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/health`, { headers: { Cookie: cookie } });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ status: "ok", type: "canvas" });
+    });
+
+    it("returns load_failed with the error message when the factory throws", async () => {
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockImplementation(() => {
+        throw new Error("apiKey: Required");
+      });
+
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({}),
+        type: "canvas",
+      });
+
+      const app = createApp(db, config);
+      const cookie = await loginAdmin(app);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/health`, { headers: { Cookie: cookie } });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ status: "load_failed", type: "canvas", reason: "apiKey: Required" });
+    });
+  });
+
   // --- GET /api/mcp-servers/:id/apps ---
 
   describe("GET /api/mcp-servers/:id/apps", () => {
@@ -464,6 +547,7 @@ describe("MCP Servers API", () => {
       });
 
       const mockProvider = {
+        type: "canvas",
         listApps: vi.fn().mockResolvedValue({
           apps: [{ id: "app-1", name: "Slack", description: "Slack app", icon: null, category: "communication" }],
           pageInfo: { endCursor: "cursor-1", hasMore: true },
@@ -471,6 +555,8 @@ describe("MCP Servers API", () => {
         initiateConnection: vi.fn(),
         listConnections: vi.fn(),
         removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
       };
 
       const { createProvider } = await import("../integrations/factory");
@@ -533,10 +619,13 @@ describe("MCP Servers API", () => {
       });
 
       const mockProvider = {
+        type: "canvas",
         listApps: vi.fn(),
         initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/connect" }),
         listConnections: vi.fn(),
         removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
       };
 
       const { createProvider } = await import("../integrations/factory");
@@ -610,6 +699,7 @@ describe("MCP Servers API", () => {
       });
 
       const mockProvider = {
+        type: "canvas",
         listApps: vi.fn(),
         initiateConnection: vi.fn(),
         listConnections: vi.fn().mockResolvedValue([
@@ -623,6 +713,8 @@ describe("MCP Servers API", () => {
           },
         ]),
         removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
       };
 
       const { createProvider } = await import("../integrations/factory");
@@ -669,10 +761,13 @@ describe("MCP Servers API", () => {
       });
 
       const mockProvider = {
+        type: "canvas",
         listApps: vi.fn(),
         initiateConnection: vi.fn(),
         listConnections: vi.fn(),
         removeConnection: vi.fn().mockResolvedValue(undefined),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
       };
 
       const { createProvider } = await import("../integrations/factory");

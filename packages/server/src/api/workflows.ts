@@ -10,6 +10,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import { type ScheduledTaskRow, createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
@@ -32,7 +33,7 @@ interface WorkflowRouteDeps {
   whatsapp?: WhatsAppBot;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
 }
@@ -176,7 +177,7 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
   const tasks = createScheduledTaskRepository(deps.db);
   const runsRepo = createAutomationRunsRepository(deps.db);
   const stepContentRepo = createAutomationStepContentRepository(deps.db);
-  const findIntegrationProvider = deps.findIntegrationProvider ?? (async () => null);
+  const loadIntegrationProvider = deps.loadIntegrationProvider ?? (async () => null);
 
   routes.get("/", async (c) => {
     const rows = await tasks.listActive();
@@ -235,7 +236,7 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
           config: deps.config,
           runsRepo,
           stepContentRepo,
-          findIntegrationProvider,
+          loadIntegrationProvider,
           userRepo: deps.users,
           runAgent: deps.runAgent,
           buildMcpServers: deps.buildMcpServers,

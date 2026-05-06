@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestLogger } from "../test-utils";
+import { CanvasProvider } from "./canvas";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "./wrapper";
 
 function makeCanvasCliSource(): string {
@@ -97,10 +98,7 @@ describe("startIntegrationAccess", () => {
       userEmail: "agent@example.com",
       claudeConfigDir: claudeDir,
       workspaceDir,
-      findIntegrationProvider: async () => ({
-        type: "canvas",
-        credentials: JSON.stringify({ apiKey: "secret-api-key-123" }),
-      }),
+      loadIntegrationProvider: async () => new CanvasProvider("https://canvas.example.com", "secret-api-key-123", "p1"),
       logger: createTestLogger(),
     });
 
@@ -202,5 +200,52 @@ describe("startIntegrationAccess", () => {
 
     expect(existsSync(launcherPath)).toBe(false);
     expect(existsSync(runtimeDir)).toBe(false);
+  });
+
+  it("returns EMPTY_ACCESS when the provider exposes no broker spec", async () => {
+    const access = await startIntegrationAccess({
+      userEmail: "agent@example.com",
+      claudeConfigDir: "/tmp/no-such-dir",
+      workspaceDir: "/tmp/no-such-workspace",
+      loadIntegrationProvider: async () => ({
+        type: "fake",
+        listApps: async () => ({ apps: [], pageInfo: { endCursor: null, hasMore: false } }),
+        initiateConnection: async () => ({ redirectUrl: "" }),
+        listConnections: async () => [],
+        removeConnection: async () => {},
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      }),
+      logger: createTestLogger(),
+    });
+
+    expect(access.envVars).toEqual({});
+    expect(access.runtimePaths).toEqual([]);
+    await cleanupIntegrationAccess(access);
+  });
+});
+
+describe("CanvasProvider.getBrokerSpec", () => {
+  it("returns full broker spec when apiKey and userEmail are set", () => {
+    const provider = new CanvasProvider("https://canvas.example.com", "key-1", "p1");
+    const spec = provider.getBrokerSpec({ userEmail: "u@example.com", claudeConfigDir: "/etc/claude" });
+    expect(spec.cliPath).toBe("/etc/claude/skills/canvas/canvas-cli.js");
+    expect(spec.launcherEnvName).toBe("CANVAS_CLI");
+    expect(spec.credentialEnv).toEqual({
+      CANVAS_API_KEY_MCP: "key-1",
+      CANVAS_USER_EMAIL: "u@example.com",
+    });
+  });
+
+  it("omits CANVAS_USER_EMAIL when userEmail is null", () => {
+    const provider = new CanvasProvider("https://canvas.example.com", "key-1", "p1");
+    const spec = provider.getBrokerSpec({ userEmail: null, claudeConfigDir: "/etc/claude" });
+    expect(spec.credentialEnv).toEqual({ CANVAS_API_KEY_MCP: "key-1" });
+  });
+
+  it("omits CANVAS_API_KEY_MCP when apiKey is empty", () => {
+    const provider = new CanvasProvider("https://canvas.example.com", "", "p1");
+    const spec = provider.getBrokerSpec({ userEmail: "u@example.com", claudeConfigDir: "/etc/claude" });
+    expect(spec.credentialEnv).toEqual({ CANVAS_USER_EMAIL: "u@example.com" });
   });
 });

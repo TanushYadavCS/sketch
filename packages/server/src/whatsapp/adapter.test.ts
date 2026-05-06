@@ -120,7 +120,7 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
       ...makeAgentResult(),
     }),
     buildMcpServers: vi.fn().mockResolvedValue({}),
-    findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    loadIntegrationProvider: vi.fn().mockResolvedValue(null),
     inboxMessagesRepo: {
       listPendingForRecipient: vi.fn().mockResolvedValue([]),
       markConsumed: vi.fn().mockResolvedValue(undefined),

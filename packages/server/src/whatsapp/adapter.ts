@@ -30,6 +30,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
   getUnknownReasoningTextMessage,
@@ -74,7 +75,7 @@ export interface WhatsAppAdapterDeps {
   groupBuffer: GroupBuffer;
   runAgent: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -109,7 +110,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     groupBuffer,
     runAgent,
     buildMcpServers,
-    findIntegrationProvider,
+    loadIntegrationProvider,
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -306,7 +307,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
-            findIntegrationProvider,
+            loadIntegrationProvider,
             contextType: "dm",
             taskContext: waTaskContext,
             scheduler,
@@ -531,7 +532,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
-          findIntegrationProvider,
+          loadIntegrationProvider,
           contextType: "channel_mention",
           currentUserId: user?.id ?? null,
           taskContext: {

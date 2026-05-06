@@ -17,6 +17,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
+import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
   cleanupIntegrationAccess,
@@ -116,7 +117,7 @@ export interface RunAgentParams {
   orgName?: string | null;
   botName?: string | null;
   integrationMcpServers?: Record<string, McpServerConfig>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   model?: string;
   maxTurns?: number;
   /**
@@ -267,7 +268,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     uploadCollector,
     workspaceDir: absWorkspace,
     db: params.db,
-    findIntegrationProvider: params.findIntegrationProvider,
+    loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
     stepContentRepo: params.stepContentRepo,
@@ -293,21 +294,18 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   // credential env vars stay inside the trusted broker and are injected only
   // into the real CLI child process.
   let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
-  if (params.findIntegrationProvider) {
+  if (params.loadIntegrationProvider) {
     integrationAccess = await startIntegrationAccess({
       userEmail: params.userEmail ?? null,
       claudeConfigDir: params.claudeConfigDir,
       workspaceDir,
-      findIntegrationProvider: params.findIntegrationProvider,
+      loadIntegrationProvider: params.loadIntegrationProvider,
       logger,
     });
     logger.info(
       {
         integrationEnvKeys: Object.keys(integrationAccess.envVars),
         runtimePaths: integrationAccess.runtimePaths,
-        hasCanvasCli: !!integrationAccess.envVars.CANVAS_CLI,
-        hasCanvasApiKey: !!integrationAccess.envVars.CANVAS_API_KEY_MCP,
-        hasCanvasUserEmail: !!integrationAccess.envVars.CANVAS_USER_EMAIL,
       },
       "Integration access resolved",
     );

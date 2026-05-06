@@ -1,10 +1,10 @@
 /**
  * Per-run integration CLI access broker.
  *
- * The agent still invokes a CLI through Bash via $CANVAS_CLI, but that path now
- * points to a harmless launcher. The launcher forwards argv/stdin over a local
- * Unix socket to a broker owned by the trusted server process. The broker then
- * spawns the real CLI with credential env vars.
+ * The agent invokes a CLI through Bash via a provider-supplied env var, but
+ * that path now points to a harmless launcher. The launcher
+ * forwards argv/stdin over a local Unix socket to a broker owned by the trusted
+ * server process. The broker then spawns the real CLI with credential env vars.
  *
  * This preserves the Bash UX while removing the secret-bearing wrapper file.
  */
@@ -15,11 +15,7 @@ import { type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "../logger";
-
-interface SkillModeProvider {
-  type: string;
-  credentials: string;
-}
+import type { IntegrationProvider } from "./types";
 
 export interface IntegrationAccessResult {
   envVars: Record<string, string>;
@@ -36,6 +32,12 @@ interface BrokerMessage {
   message?: string;
 }
 
+const EMPTY_ACCESS: IntegrationAccessResult = {
+  envVars: {},
+  runtimePaths: [],
+  cleanup: async () => {},
+};
+
 /**
  * Start per-run brokered access for skill-mode integration CLIs.
  * The agent receives only harmless launcher env vars; credentials stay in the
@@ -45,26 +47,16 @@ export async function startIntegrationAccess(params: {
   userEmail: string | null;
   claudeConfigDir: string;
   workspaceDir: string;
-  findIntegrationProvider: () => Promise<SkillModeProvider | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   logger: Logger;
 }): Promise<IntegrationAccessResult> {
   const { userEmail, logger, claudeConfigDir, workspaceDir } = params;
-  const envVars: Record<string, string> = {};
 
-  const provider = await params.findIntegrationProvider();
-  if (!provider) {
-    return { envVars, runtimePaths: [], cleanup: async () => {} };
-  }
+  const provider = await params.loadIntegrationProvider();
+  if (!provider) return EMPTY_ACCESS;
 
-  if (provider.type !== "canvas") {
-    return { envVars, runtimePaths: [], cleanup: async () => {} };
-  }
-
-  const creds = JSON.parse(provider.credentials) as Record<string, string>;
-  const cliPath = join(claudeConfigDir, "skills", "canvas", "canvas-cli.js");
-  const credentialEnv: Record<string, string> = {};
-  if (creds.apiKey) credentialEnv.CANVAS_API_KEY_MCP = creds.apiKey;
-  if (userEmail) credentialEnv.CANVAS_USER_EMAIL = userEmail;
+  const spec = provider.getBrokerSpec({ userEmail, claudeConfigDir });
+  if (!spec) return EMPTY_ACCESS;
 
   const runtimeDir = await mkdtemp(join(tmpdir(), "sk-int-"));
   await chmod(runtimeDir, 0o700);
@@ -72,18 +64,18 @@ export async function startIntegrationAccess(params: {
   const socketPath = join(runtimeDir, "s.sock");
   const token = randomBytes(24).toString("hex");
   const clientPath = join(runtimeDir, "launcher-client.cjs");
-  const launcherPath = join(runtimeDir, "canvas-cli.sh");
+  const launcherPath = join(runtimeDir, "cli.sh");
   let closeBroker: (() => Promise<void>) | null = null;
 
   try {
     await writeFile(clientPath, buildLauncherClientSource(), { mode: 0o600 });
     await writeFile(launcherPath, buildLauncherShellSource(clientPath), { mode: 0o700 });
 
-    closeBroker = await startCanvasBroker({
+    closeBroker = await startBroker({
       socketPath,
       token,
-      cliPath,
-      credentialEnv,
+      cliPath: spec.cliPath,
+      credentialEnv: spec.credentialEnv,
       workspaceDir,
       logger,
     });
@@ -99,9 +91,11 @@ export async function startIntegrationAccess(params: {
     throw err;
   }
 
-  envVars.CANVAS_CLI = launcherPath;
-  envVars.SKETCH_INT_SOCKET = socketPath;
-  envVars.SKETCH_INT_TOKEN = token;
+  const envVars: Record<string, string> = {
+    [spec.launcherEnvName]: launcherPath,
+    SKETCH_INT_SOCKET: socketPath,
+    SKETCH_INT_TOKEN: token,
+  };
 
   logger.debug({ runtimeDir, launcherPath, socketPath }, "Integration access: started brokered launcher");
 
@@ -205,7 +199,7 @@ socket.on('close', () => {
 `;
 }
 
-async function startCanvasBroker(params: {
+async function startBroker(params: {
   socketPath: string;
   token: string;
   cliPath: string;

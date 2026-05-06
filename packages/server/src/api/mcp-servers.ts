@@ -301,6 +301,30 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     return c.json(result);
   });
 
+  /**
+   * Reports whether the integration provider for `:id` is currently constructible.
+   * Always 200 so the frontend can poll without console-spamming. The `status`
+   * field carries the state. `reason` echoes the factory's `err.message`; the
+   * provider factories (`createProvider` + `canvasCredentialsSchema`) never include
+   * raw credential values in their throws — see the safety note in the plan.
+   */
+  routes.get("/:id/health", async (c) => {
+    const id = c.req.param("id");
+    const row = await mcpServers.getById(id);
+    if (!row) return c.json({ status: "absent" });
+    if (!row.type) return c.json({ status: "not_provider" });
+    try {
+      createProvider(row.type, row.api_url ?? "", row.credentials, row.id);
+      return c.json({ status: "ok", type: row.type });
+    } catch (err) {
+      return c.json({
+        status: "load_failed",
+        type: row.type,
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+    }
+  });
+
   // --- Integration sub-resources ---
 
   routes.get("/:id/apps", async (c) => {

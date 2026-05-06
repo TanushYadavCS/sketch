@@ -109,7 +109,7 @@ function buildDeps(
     },
     runAgent: mockRunAgent,
     buildMcpServers: vi.fn().mockResolvedValue({}),
-    findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    loadIntegrationProvider: vi.fn().mockResolvedValue(null),
     automationRunsRepo: {
       create: vi.fn().mockResolvedValue("run-1"),
       update: vi.fn().mockResolvedValue(undefined),

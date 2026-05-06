@@ -96,7 +96,7 @@ function makeParams(overrides: Record<string, unknown> = {}) {
     },
     runsRepo,
     stepContentRepo,
-    findIntegrationProvider: vi.fn().mockResolvedValue(null),
+    loadIntegrationProvider: vi.fn().mockResolvedValue(null),
     userRepo,
     sendMessage: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -202,5 +202,55 @@ describe("executeAutomation agent steps", () => {
       expect.objectContaining({ eventType: "run.started" }),
       "Automation: execution event delivery failed",
     );
+  });
+});
+
+describe("executeAutomation action steps", () => {
+  it("fails the action step with a clear error when the provider is not broker-capable", async () => {
+    const httpOnlyProvider = {
+      type: "fake",
+      listApps: async () => ({ apps: [], pageInfo: { endCursor: null, hasMore: false } }),
+      initiateConnection: async () => ({ redirectUrl: "" }),
+      listConnections: async () => [],
+      removeConnection: async () => {},
+      isBrokerCapable: () => false,
+      getBrokerSpec: () => null,
+    };
+
+    const params = makeParams({
+      task: makeTask({
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+          {
+            id: "act1",
+            type: "action",
+            label: "Run script",
+            icon: "code",
+            position: { x: 0, y: 100 },
+          },
+        ]),
+      }),
+      stepContentRepo: {
+        getByTask: vi.fn().mockResolvedValue([
+          {
+            task_id: "task-1",
+            step_id: "act1",
+            content_type: "script",
+            content: "return 1;",
+            apps: null,
+            updated_at: "2026-04-27T09:00:00.000Z",
+          },
+        ]),
+      },
+      loadIntegrationProvider: vi.fn().mockResolvedValue(httpOnlyProvider),
+    });
+
+    const result = await executeAutomation(params as never);
+    expect(result.status).toBe("failed");
+    const failureUpdate = (params._runsRepo.update as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[1]?.status === "failed",
+    );
+    expect(failureUpdate?.[1]?.errorMessage).toContain("broker-capable integration provider");
+    expect(params.sendMessage).toHaveBeenCalledWith(expect.stringContaining("broker-capable integration provider"));
   });
 });
