@@ -832,6 +832,45 @@ describe("slack/adapter", () => {
       expect(agentCall.agentAllowedTools).toEqual(["Read", "WebSearch", "mcp__sketch__Search"]);
     });
 
+    it("uses the bound agent's workspace key when /new is sent in a bound channel", async () => {
+      const baseDeps = makeDeps();
+      const agentUser = makeUser({ id: "agent-1", type: "agent" });
+      const deps = makeDeps({
+        repos: {
+          ...baseDeps.repos,
+          users: {
+            findBySlackId: vi.fn().mockResolvedValue(makeUser()),
+            findById: vi.fn().mockImplementation(async (id) => (id === "agent-1" ? agentUser : makeUser({ id }))),
+            findByEmail: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["users"],
+          channels: {
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ agent_user_id: "agent-1" })),
+            findById: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn(),
+          } as unknown as SlackAdapterDeps["repos"]["channels"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+      const sessions = await import("../agent/sessions");
+
+      await mention({
+        text: "/new",
+        userId: "S1",
+        channelId: "C1",
+        ts: "1",
+        threadTs: "0.9",
+        type: "channel_mention",
+      });
+      await flush();
+
+      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "agent-agent-1/channel-C1", "0.9");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("falls back to default workspace and no overlay when channel has no bound agent", async () => {
       const deps = makeDeps();
       vi.mocked(deps.repos.channels.findBySlackChannelId).mockResolvedValue(makeChannel());

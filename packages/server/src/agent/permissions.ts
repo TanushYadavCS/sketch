@@ -34,7 +34,13 @@ export function createCanUseTool(
   agentAllowedTools?: string[] | null,
 ) {
   const absClaudeDir = claudeDir ? resolve(claudeDir) : null;
-  const agentAllowlist = agentAllowedTools && agentAllowedTools.length > 0 ? new Set(agentAllowedTools) : null;
+  /**
+   * NULL/undefined = no allowlist (legacy or non-agent run). Empty array =
+   * deny every tool. Non-empty array = the canonical allowlist. Distinguishing
+   * NULL from `[]` matters: an admin who unselects all tools must not silently
+   * grant every MCP tool.
+   */
+  const agentAllowlist = agentAllowedTools ? new Set(agentAllowedTools) : null;
 
   return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
     logger.debug({ toolName }, "canUseTool called");

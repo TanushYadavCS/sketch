@@ -258,12 +258,26 @@ describe("createCanUseTool", () => {
       expect(result.behavior).toBe("allow");
     });
 
-    it("treats an empty allowlist as 'no agent restriction' (preserves default permitting behaviour)", async () => {
+    it("treats an empty allowlist as 'block every tool' (admin opted out of all capabilities)", async () => {
       const logger = createTestLogger();
       const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, []);
 
-      const result = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
-      expect(result.behavior).toBe("allow");
+      const builtIn = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
+      expect(builtIn.behavior).toBe("deny");
+
+      const mcp = await agentTool("mcp__sketch__SendMessageToUser", { message: "hi" });
+      expect(mcp.behavior).toBe("deny");
+    });
+
+    it("treats null/undefined allowlist as 'no agent restriction' (legacy or non-agent run)", async () => {
+      const logger = createTestLogger();
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, null);
+
+      const builtIn = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
+      expect(builtIn.behavior).toBe("allow");
+
+      const mcp = await agentTool("mcp__sketch__SendMessageToUser", { message: "hi" });
+      expect(mcp.behavior).toBe("allow");
     });
   });
 });

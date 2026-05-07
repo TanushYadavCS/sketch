@@ -560,9 +560,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           );
         }
 
+        /**
+         * Workspace key must include the agent prefix when the channel is
+         * bound to an agent — otherwise /new clears the wrong session and
+         * the next mention resumes stale context.
+         */
+        const channelWorkspaceKey = boundAgent
+          ? `agent-${boundAgent.id}/channel-${message.channelId}`
+          : `channel-${message.channelId}`;
+
         const command = parseSketchCommand(message.text);
         if (command === "new_session") {
-          await deleteSessionId(db, `channel-${message.channelId}`, threadTs);
+          await deleteSessionId(db, channelWorkspaceKey, threadTs);
           slackDeps.threadBuffer.reset(message.channelId, threadTs);
           await slackBot.postThreadReply(message.channelId, threadTs, getNewSessionConfirmation());
           return;
@@ -624,9 +633,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           logger,
         });
 
-        const channelWorkspaceKey = boundAgent
-          ? `agent-${boundAgent.id}/channel-${message.channelId}`
-          : `channel-${message.channelId}`;
         const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
         const rawText = message.text || "See attached files.";
         let userMessage: string;

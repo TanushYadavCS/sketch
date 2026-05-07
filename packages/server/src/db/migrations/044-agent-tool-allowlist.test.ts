@@ -1,9 +1,9 @@
 /**
  * Tests for the 044-agent-tool-allowlist migration.
  *
- * Confirms that the column is added and that existing type='agent' rows are
- * back-filled with the full built-in toolset, while non-agent rows are not
- * touched.
+ * Confirms that the column is added and that existing rows (agent or not)
+ * are left at NULL — backfilling with built-ins would silently strip MCP
+ * access from agents that previously had unrestricted tool use.
  */
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
@@ -46,7 +46,7 @@ describe("044-agent-tool-allowlist", () => {
     expect(names).toContain("allowed_tools");
   });
 
-  it("backfills existing agent rows with the full built-in toolset", async () => {
+  it("leaves existing agent and human rows at NULL", async () => {
     await sql`INSERT INTO users (id, name, type) VALUES ('a1', 'Marketing Maven', 'agent')`.execute(db);
     await sql`INSERT INTO users (id, name, type) VALUES ('a2', 'Sales Coach', 'agent')`.execute(db);
     await sql`INSERT INTO users (id, name, type) VALUES ('h1', 'Real Person', 'human')`.execute(db);
@@ -58,16 +58,9 @@ describe("044-agent-tool-allowlist", () => {
     `.execute(db);
 
     const byId = new Map(rows.rows.map((r) => [r.id, r]));
-    const a1 = byId.get("a1");
-    const a2 = byId.get("a2");
-    const h1 = byId.get("h1");
-
-    expect(a1?.allowed_tools).toBeTruthy();
-    expect(a2?.allowed_tools).toBeTruthy();
-    expect(h1?.allowed_tools).toBeNull();
-
-    const a1Tools = JSON.parse(a1?.allowed_tools ?? "[]") as string[];
-    expect(a1Tools).toEqual(["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]);
+    expect(byId.get("a1")?.allowed_tools).toBeNull();
+    expect(byId.get("a2")?.allowed_tools).toBeNull();
+    expect(byId.get("h1")?.allowed_tools).toBeNull();
   });
 
   it("is reversible via down()", async () => {

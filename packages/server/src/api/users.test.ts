@@ -294,6 +294,29 @@ describe("Users API — agent fields", () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error.message).toContain("C-DOES-NOT-EXIST");
+
+      const list = await (await app.request("/api/users", { headers: { Cookie: cookie } })).json();
+      expect(list.users.some((u: { name: string }) => u.name === "Agent")).toBe(false);
+    });
+
+    it("does not mutate the user when PATCH fails Slack channel resolution", async () => {
+      const created = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "Agent A", type: "agent", description: "before" }),
+      });
+      const agent = (await created.json()).user;
+
+      const res = await app.request(`/api/users/${agent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ description: "after", slackChannelIds: ["C-DOES-NOT-EXIST"] }),
+      });
+      expect(res.status).toBe(400);
+
+      const list = await (await app.request("/api/users", { headers: { Cookie: cookie } })).json();
+      const refetched = list.users.find((u: { id: string }) => u.id === agent.id);
+      expect(refetched.description).toBe("before");
     });
 
     it("clears bindings when the bound agent is deleted (FK SET NULL)", async () => {

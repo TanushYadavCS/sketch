@@ -1,21 +1,17 @@
 /**
  * Adds users.allowed_tools — JSON array of canonical tool names an agent is
  * permitted to invoke. Enforced at runtime in canUseTool when a run is
- * associated with an agent. NULL for non-agent rows.
+ * associated with an agent. NULL means no allowlist (legacy/unrestricted),
+ * empty array means deny every tool, non-empty array is the canonical set.
  *
- * Existing type='agent' rows are back-filled with the full built-in toolset
- * so allowlist enforcement does not strip capability from agents that were
- * created before this column existed.
+ * Existing rows are intentionally left at NULL: backfilling a built-in-only
+ * subset would silently strip MCP access from any pre-existing agent. Admins
+ * can opt into enforcement by editing the agent.
  */
-import { type Kysely, sql } from "kysely";
-
-const DEFAULT_AGENT_BUILT_IN_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"];
+import type { Kysely } from "kysely";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema.alterTable("users").addColumn("allowed_tools", "text").execute();
-
-  const defaults = JSON.stringify(DEFAULT_AGENT_BUILT_IN_TOOLS);
-  await sql`UPDATE users SET allowed_tools = ${defaults} WHERE type = 'agent'`.execute(db);
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {

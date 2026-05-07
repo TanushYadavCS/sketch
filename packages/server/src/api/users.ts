@@ -297,6 +297,32 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       }
     }
 
+    /**
+     * Resolve Slack channels before inserting the user row so a bad channel
+     * id can't orphan an agent. ensureSlackChannelsExist may upsert local
+     * channel rows by querying the Slack API; that is intentional and runs
+     * regardless of whether we eventually persist the user.
+     */
+    if (parsed.data.slackChannelIds && deps.channels) {
+      const ensured = await ensureSlackChannelsExist(
+        deps.channels,
+        deps.getSlack,
+        parsed.data.slackChannelIds,
+        deps.logger,
+      );
+      if (!ensured.ok) {
+        return c.json(
+          {
+            error: {
+              code: "VALIDATION_ERROR",
+              message: `Could not resolve Slack channel(s): ${ensured.missing.join(", ")}`,
+            },
+          },
+          400,
+        );
+      }
+    }
+
     try {
       const user = await users.create({
         name: parsed.data.name,
@@ -311,23 +337,6 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
 
       let boundSlackChannelIds: string[] = [];
       if (parsed.data.slackChannelIds && deps.channels) {
-        const ensured = await ensureSlackChannelsExist(
-          deps.channels,
-          deps.getSlack,
-          parsed.data.slackChannelIds,
-          deps.logger,
-        );
-        if (!ensured.ok) {
-          return c.json(
-            {
-              error: {
-                code: "VALIDATION_ERROR",
-                message: `Could not resolve Slack channel(s): ${ensured.missing.join(", ")}`,
-              },
-            },
-            400,
-          );
-        }
         await deps.channels.setAgentForSlackChannelIds(user.id, parsed.data.slackChannelIds);
         boundSlackChannelIds = parsed.data.slackChannelIds;
       }
@@ -451,6 +460,31 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       }
     }
 
+    /**
+     * Resolve Slack channels before mutating the user row so a bad channel
+     * id can't leave the request half-applied (e.g. name changed but
+     * channel binding skipped).
+     */
+    if (parsed.data.slackChannelIds !== undefined && deps.channels) {
+      const ensured = await ensureSlackChannelsExist(
+        deps.channels,
+        deps.getSlack,
+        parsed.data.slackChannelIds,
+        deps.logger,
+      );
+      if (!ensured.ok) {
+        return c.json(
+          {
+            error: {
+              code: "VALIDATION_ERROR",
+              message: `Could not resolve Slack channel(s): ${ensured.missing.join(", ")}`,
+            },
+          },
+          400,
+        );
+      }
+    }
+
     try {
       const emailValue = (parsed.data as { email?: string | null }).email;
       const emailChanged = emailValue !== undefined && emailValue !== (existing.email ?? null);
@@ -466,23 +500,6 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       });
 
       if (parsed.data.slackChannelIds !== undefined && deps.channels) {
-        const ensured = await ensureSlackChannelsExist(
-          deps.channels,
-          deps.getSlack,
-          parsed.data.slackChannelIds,
-          deps.logger,
-        );
-        if (!ensured.ok) {
-          return c.json(
-            {
-              error: {
-                code: "VALIDATION_ERROR",
-                message: `Could not resolve Slack channel(s): ${ensured.missing.join(", ")}`,
-              },
-            },
-            400,
-          );
-        }
         await deps.channels.setAgentForSlackChannelIds(user.id, parsed.data.slackChannelIds);
       }
 
