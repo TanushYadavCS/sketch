@@ -519,6 +519,15 @@ export async function handleManageScheduledTasks(
           );
         }
 
+        const triggerStep = params.steps.find((step) => step.type === "trigger");
+        if (triggerStep?.triggerConfig?.type === "canvas") {
+          updateFields.scheduleType = "external";
+          updateFields.scheduleValue = "canvas";
+          triggerStep.triggerConfig = {
+            ...triggerStep.triggerConfig,
+            status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
+          };
+        }
         const stepsForDb = stripContentFromSteps(params.steps);
         updateFields.steps = JSON.stringify(stepsForDb);
 
