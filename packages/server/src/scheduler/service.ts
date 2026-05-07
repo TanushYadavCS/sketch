@@ -97,6 +97,12 @@ export class TaskScheduler {
       this.cronInstances.delete(task.id);
     }
 
+    if (task.schedule_type === "external") {
+      await this.repo.update(task.id, { next_run_at: null });
+      this.deps.logger.debug({ taskId: task.id }, "TaskScheduler: external trigger task has no local schedule");
+      return;
+    }
+
     if (task.schedule_type === "once") {
       const runAt = parseOnceSchedule(task.schedule_value, task.timezone || "UTC");
       if (runAt.getTime() <= Date.now()) {
@@ -248,7 +254,7 @@ export class TaskScheduler {
     deliveryTarget: string;
     threadTs?: string | null;
     prompt: string;
-    scheduleType: "cron" | "interval" | "once";
+    scheduleType: "cron" | "interval" | "once" | "external";
     scheduleValue: string;
     timezone?: string;
     sessionMode?: "fresh" | "persistent" | "chat";
@@ -377,7 +383,7 @@ export class TaskScheduler {
       deliveryTarget: row.delivery_target,
       threadTs: row.thread_ts,
       prompt: row.prompt,
-      scheduleType: row.schedule_type as "cron" | "interval" | "once",
+      scheduleType: row.schedule_type as "cron" | "interval" | "once" | "external",
       scheduleValue: row.schedule_value,
       timezone: row.timezone,
       sessionMode: row.session_mode as "fresh" | "persistent" | "chat",

@@ -27,10 +27,19 @@ export interface WorkflowStep {
 
   /** Trigger step config. */
   triggerConfig?: {
-    type: "webhook" | "schedule";
+    type: "webhook" | "schedule" | "canvas";
     scheduleType?: "cron" | "interval" | "once";
     scheduleValue?: string;
     timezone?: string;
+    app?: string;
+    eventDescription?: string;
+    componentKey?: string;
+    configuredProps?: Record<string, unknown>;
+    status?: "pending_canvas_setup" | "active" | "error";
+    canvasWorkflowId?: string;
+    canvasTriggerNodeId?: string;
+    canvasActionNodeId?: string;
+    errorMessage?: string;
   };
 }
 

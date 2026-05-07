@@ -8,8 +8,10 @@ import { createScheduledTaskRepository } from "../db/repositories/scheduled-task
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
+import type { WorkflowStep } from "../workflows/types";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
+type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
 
 interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
@@ -25,7 +27,7 @@ interface ScheduledTaskListItem {
   deliveryTarget: string;
   threadTs: string | null;
   prompt: string;
-  scheduleType: "cron" | "interval" | "once";
+  scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
   sessionMode: "fresh" | "persistent" | "chat";
@@ -45,6 +47,7 @@ interface ScheduledTaskListItem {
   description: string | null;
   steps: string | null;
   stepCount: number;
+  triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
   lastRunStatus: string | null;
@@ -91,7 +94,23 @@ function formatIntervalLabel(rawSeconds: string): string {
   return `Every ${seconds} seconds`;
 }
 
-function formatScheduleLabel(row: ScheduledTaskRow): string {
+function formatCanvasTriggerLabel(triggerConfig: WorkflowTriggerConfig | null): string {
+  if (triggerConfig?.type !== "canvas") return "Canvas managed trigger";
+
+  const app = triggerConfig.app;
+  const event = triggerConfig.eventDescription;
+  if (app && event) return `Canvas managed: ${app} - ${event}`;
+  if (app) return `Canvas managed: ${app}`;
+  if (event) return `Canvas managed: ${event}`;
+  return "Canvas managed trigger";
+}
+
+function formatScheduleLabel(row: ScheduledTaskRow, triggerConfig: WorkflowTriggerConfig | null): string {
+  if (row.schedule_type === "external") {
+    if (row.schedule_value === "canvas") return formatCanvasTriggerLabel(triggerConfig);
+    return "External trigger";
+  }
+
   if (row.schedule_type === "interval") {
     return formatIntervalLabel(row.schedule_value);
   }
@@ -101,6 +120,18 @@ function formatScheduleLabel(row: ScheduledTaskRow): string {
   }
 
   return `Cron: ${row.schedule_value} (${row.timezone})`;
+}
+
+function parseTriggerConfig(stepsValue: string | null): WorkflowTriggerConfig | null {
+  if (!stepsValue) return null;
+  try {
+    const steps = JSON.parse(stepsValue) as WorkflowStep[];
+    if (!Array.isArray(steps)) return null;
+    const triggerStep = steps.find((step) => step?.type === "trigger" && step.triggerConfig);
+    return triggerStep?.triggerConfig ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function getTargetKindLabel(row: ScheduledTaskRow): ScheduledTaskListItem["targetKindLabel"] {
@@ -178,6 +209,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
         stepCount = JSON.parse(row.steps).length;
       } catch {}
     }
+    const triggerConfig = parseTriggerConfig(row.steps);
 
     const rd = runData.get(row.id);
 
@@ -188,7 +220,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       deliveryTarget: row.delivery_target,
       threadTs: row.thread_ts,
       prompt: row.prompt,
-      scheduleType: row.schedule_type as "cron" | "interval" | "once",
+      scheduleType: row.schedule_type as "cron" | "interval" | "once" | "external",
       scheduleValue: row.schedule_value,
       timezone: row.timezone,
       sessionMode: row.session_mode as "fresh" | "persistent" | "chat",
@@ -200,7 +232,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       targetLabel,
       targetKindLabel: getTargetKindLabel(row),
       creatorName,
-      scheduleLabel: formatScheduleLabel(row),
+      scheduleLabel: formatScheduleLabel(row, triggerConfig),
       canPause: row.status === "active",
       canResume: row.status === "paused",
       canDelete: true,
@@ -208,6 +240,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       description: row.description,
       steps: row.steps,
       stepCount,
+      triggerConfig,
       outputTarget: row.output_target,
       outputPlatform: row.output_platform,
       lastRunStatus: rd?.lastRunStatus ?? null,

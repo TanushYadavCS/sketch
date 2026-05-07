@@ -276,6 +276,29 @@ describe("addTask()", () => {
     const instance = mockCronInstances[mockCronInstances.length - 1];
     expect(instance.pattern).toBe("0 */6 * * *");
   });
+
+  it("stores external trigger tasks without creating a cron instance", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const task = await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_USER1",
+      prompt: "Run when Canvas fires",
+      scheduleType: "external",
+      scheduleValue: "canvas",
+      createdBy: "U_USER1",
+    });
+
+    expect(task.status).toBe("active");
+    expect(task.nextRunAt).toBeNull();
+    expect(cronCallCount).toBe(0);
+
+    const dbRow = await repo.getById(task.id);
+    expect(dbRow?.schedule_type).toBe("external");
+    expect(dbRow?.schedule_value).toBe("canvas");
+  });
 });
 
 describe("removeTask()", () => {

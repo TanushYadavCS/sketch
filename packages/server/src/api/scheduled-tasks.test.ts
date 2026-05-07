@@ -143,6 +143,81 @@ describe("Scheduled Tasks API", () => {
     expect(whatsappTask.canResume).toBe(true);
   });
 
+  it("returns Canvas-managed trigger metadata for external workflows", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
+
+    await tasks.add({
+      id: "task-canvas",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Handle ClickUp issues",
+      schedule_type: "external",
+      schedule_value: "canvas",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: member.id,
+      status: "active",
+      next_run_at: null,
+      steps: JSON.stringify([
+        {
+          id: "trigger",
+          type: "trigger",
+          label: "ClickUp issue created",
+          icon: "clickup",
+          position: { x: 0, y: 0 },
+          triggerConfig: {
+            type: "canvas",
+            app: "ClickUp",
+            eventDescription: "new issue created",
+            componentKey: "clickup.issue.created",
+            status: "pending_canvas_setup",
+          },
+        },
+        {
+          id: "agent1",
+          type: "agent",
+          label: "Handle issue",
+          icon: "sketch-ai",
+          position: { x: 0, y: 100 },
+        },
+      ]),
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.tasks[0]).toEqual(
+      expect.objectContaining({
+        id: "task-canvas",
+        scheduleType: "external",
+        scheduleValue: "canvas",
+        scheduleLabel: "Canvas managed: ClickUp - new issue created",
+        nextRunAt: null,
+        triggerConfig: expect.objectContaining({
+          type: "canvas",
+          status: "pending_canvas_setup",
+          componentKey: "clickup.issue.created",
+        }),
+      }),
+    );
+  });
+
   it("members see only their own tasks; admins see all", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

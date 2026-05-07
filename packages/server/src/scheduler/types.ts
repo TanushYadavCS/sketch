@@ -14,7 +14,7 @@ export interface ScheduledTask {
   deliveryTarget: string;
   threadTs: string | null;
   prompt: string;
-  scheduleType: "cron" | "interval" | "once";
+  scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
   sessionMode: "fresh" | "persistent" | "chat";

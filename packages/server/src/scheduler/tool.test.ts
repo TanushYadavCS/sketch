@@ -361,6 +361,57 @@ describe("handleManageScheduledTasks — add", () => {
     expect(agentStep.agentPrompt).toBeUndefined();
   });
 
+  it("creates Canvas-managed trigger workflows without requiring a local schedule", async () => {
+    const localRepo = makeMockStepContentRepo();
+    const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(makeTask({ id: "wf-canvas" })) });
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "New ClickUp issues",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "ClickUp issue created",
+            icon: "clickup",
+            position: { x: 0, y: 0 },
+            triggerConfig: {
+              type: "canvas",
+              app: "clickup",
+              eventDescription: "new issue created",
+              componentKey: "clickup.issue.created",
+            },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "Handle issue",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "Handle the incoming issue.",
+          },
+        ],
+      },
+      { scheduler, stepContentRepo: localRepo, taskContext: dmContext },
+    );
+
+    expect(result.content[0].text).toContain("Automation created:");
+    expect(scheduler.addTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scheduleType: "external",
+        scheduleValue: "canvas",
+      }),
+    );
+    const addTaskCall = (scheduler.addTask as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const stepsJson = JSON.parse(addTaskCall.steps);
+    expect(stepsJson[0].triggerConfig).toEqual(
+      expect.objectContaining({
+        type: "canvas",
+        status: "pending_canvas_setup",
+      }),
+    );
+  });
+
   it("fails loudly when multi-step workflow is created without stepContentRepo", async () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(

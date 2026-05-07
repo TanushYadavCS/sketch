@@ -56,7 +56,7 @@ export interface ScheduledTaskListItem {
   deliveryTarget: string;
   threadTs: string | null;
   prompt: string;
-  scheduleType: "cron" | "interval" | "once";
+  scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
   sessionMode: "fresh" | "persistent" | "chat";
@@ -76,10 +76,27 @@ export interface ScheduledTaskListItem {
   description: string | null;
   steps: string | null;
   stepCount: number;
+  triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
   lastRunStatus: string | null;
   runCount: number;
+}
+
+export interface WorkflowTriggerConfig {
+  type: "webhook" | "schedule" | "canvas";
+  scheduleType?: "cron" | "interval" | "once";
+  scheduleValue?: string;
+  timezone?: string;
+  app?: string;
+  eventDescription?: string;
+  componentKey?: string;
+  configuredProps?: Record<string, unknown>;
+  status?: "pending_canvas_setup" | "active" | "error";
+  canvasWorkflowId?: string;
+  canvasTriggerNodeId?: string;
+  canvasActionNodeId?: string;
+  errorMessage?: string;
 }
 
 export interface AutomationRunItem {
