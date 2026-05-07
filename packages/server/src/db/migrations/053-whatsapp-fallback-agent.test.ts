@@ -1,5 +1,5 @@
 /**
- * Tests for the 047-whatsapp-fallback-agent migration.
+ * Tests for the 053-whatsapp-fallback-agent migration.
  *
  * Confirms the settings.whatsapp_fallback_agent_id column is added and
  * existing rows default to NULL.
@@ -7,7 +7,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { down, up } from "./047-whatsapp-fallback-agent";
+import { down, up } from "./053-whatsapp-fallback-agent";
 
 function createBlankDb(): Kysely<unknown> {
   return new Kysely<unknown>({
@@ -39,7 +39,7 @@ afterEach(async () => {
   await db.destroy();
 });
 
-describe("047-whatsapp-fallback-agent", () => {
+describe("053-whatsapp-fallback-agent", () => {
   it("adds the whatsapp_fallback_agent_id column", async () => {
     await up(db);
 

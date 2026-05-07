@@ -5,7 +5,7 @@
  * under the agent's directory. NULL means the group runs with default
  * behaviour.
  *
- * Mirror of migration 045 for Slack channel binding. SQLite needs
+ * Mirror of migration 051 for Slack channel binding. SQLite needs
  * PRAGMA foreign_keys = ON for the SET NULL trigger to fire; the constraint
  * is preserved for Postgres and as schema documentation.
  */

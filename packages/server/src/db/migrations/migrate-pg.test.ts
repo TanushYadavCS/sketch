@@ -77,12 +77,12 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[40]).toBe("041-per-user-fireflies");
     expect(names[41]).toBe("042-agent-environment-variables");
     expect(names[42]).toBe("043-sketch-api-key");
-    expect(names[43]).toBe("044-agent-tool-allowlist");
-    expect(names[44]).toBe("045-channel-agent-binding");
-    expect(names[45]).toBe("046-whatsapp-group-agent-binding");
-    expect(names[46]).toBe("047-whatsapp-fallback-agent");
-    expect(names[47]).toBe("048-entity-mentions-composite-index");
-    expect(names[48]).toBe("049-users-timezone");
+    expect(names[43]).toBe("048-entity-mentions-composite-index");
+    expect(names[44]).toBe("049-users-timezone");
+    expect(names[45]).toBe("050-agent-tool-allowlist");
+    expect(names[46]).toBe("051-channel-agent-binding");
+    expect(names[47]).toBe("052-whatsapp-group-agent-binding");
+    expect(names[48]).toBe("053-whatsapp-fallback-agent");
   });
 
   it("running migrations twice is idempotent", async () => {

@@ -1,5 +1,5 @@
 /**
- * Tests for the 044-agent-tool-allowlist migration.
+ * Tests for the 050-agent-tool-allowlist migration.
  *
  * Confirms that the column is added and that existing rows (agent or not)
  * are left at NULL — backfilling with built-ins would silently strip MCP
@@ -8,7 +8,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { down, up } from "./044-agent-tool-allowlist";
+import { down, up } from "./050-agent-tool-allowlist";
 
 function createBlankDb(): Kysely<unknown> {
   return new Kysely<unknown>({
@@ -37,7 +37,7 @@ afterEach(async () => {
   await db.destroy();
 });
 
-describe("044-agent-tool-allowlist", () => {
+describe("050-agent-tool-allowlist", () => {
   it("adds the allowed_tools column", async () => {
     await up(db);
 

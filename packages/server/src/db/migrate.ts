@@ -47,12 +47,12 @@ import * as m040 from "./migrations/040-user-auth-role";
 import * as m041 from "./migrations/041-per-user-fireflies";
 import * as m042 from "./migrations/042-agent-environment-variables";
 import * as m043 from "./migrations/043-sketch-api-key";
-import * as m044 from "./migrations/044-agent-tool-allowlist";
-import * as m045 from "./migrations/045-channel-agent-binding";
-import * as m046 from "./migrations/046-whatsapp-group-agent-binding";
-import * as m047 from "./migrations/047-whatsapp-fallback-agent";
 import * as m048 from "./migrations/048-entity-mentions-composite-index";
 import * as m049 from "./migrations/049-users-timezone";
+import * as m050 from "./migrations/050-agent-tool-allowlist";
+import * as m051 from "./migrations/051-channel-agent-binding";
+import * as m052 from "./migrations/052-whatsapp-group-agent-binding";
+import * as m053 from "./migrations/053-whatsapp-fallback-agent";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -104,12 +104,12 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "041-per-user-fireflies": m041,
           "042-agent-environment-variables": m042,
           "043-sketch-api-key": m043,
-          "044-agent-tool-allowlist": m044,
-          "045-channel-agent-binding": m045,
-          "046-whatsapp-group-agent-binding": m046,
-          "047-whatsapp-fallback-agent": m047,
           "048-entity-mentions-composite-index": m048,
           "049-users-timezone": m049,
+          "050-agent-tool-allowlist": m050,
+          "051-channel-agent-binding": m051,
+          "052-whatsapp-group-agent-binding": m052,
+          "053-whatsapp-fallback-agent": m053,
         };
       },
     },
