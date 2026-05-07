@@ -6,6 +6,10 @@
  * the same import surface and are only used together with this dialog.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
+import { AgentToolsField } from "@/components/team/agent-tools-field";
+import { SlackChannelsField } from "@/components/team/slack-channels-field";
+import { WhatsappFallbackField } from "@/components/team/whatsapp-fallback-field";
+import { WhatsAppGroupsField } from "@/components/team/whatsapp-groups-field";
 import type { ProviderIdentity, User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { getIntegration } from "@/lib/integrations";
@@ -18,7 +22,7 @@ import {
   SpinnerGapIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { emailSchema, whatsappNumberSchema } from "@sketch/shared";
+import { AGENT_INSTRUCTIONS_MAX_LENGTH, emailSchema, whatsappNumberSchema } from "@sketch/shared";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -66,6 +70,10 @@ export function EditMemberDialog({
   const [phone, setPhone] = useState("");
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
+  const [allowedTools, setAllowedTools] = useState<string[]>([]);
+  const [slackChannelIds, setSlackChannelIds] = useState<string[]>([]);
+  const [whatsappGroupJids, setWhatsappGroupJids] = useState<string[]>([]);
+  const [isWhatsappFallback, setIsWhatsappFallback] = useState(false);
   const [error, setError] = useState("");
 
   const isAgent = user?.type === "agent";
@@ -78,6 +86,10 @@ export function EditMemberDialog({
       setPhone(user.whatsapp_number ?? "");
       setDescription(user.description ?? "");
       setReportsTo(user.reports_to ?? "none");
+      setAllowedTools(user.allowed_tools ?? []);
+      setSlackChannelIds(user.slack_channel_ids ?? []);
+      setWhatsappGroupJids(user.whatsapp_group_jids ?? []);
+      setIsWhatsappFallback(user.is_whatsapp_fallback ?? false);
       setError("");
     }
   }, [user]);
@@ -90,7 +102,7 @@ export function EditMemberDialog({
         reportsTo: reportsTo === "none" ? null : reportsTo || null,
         description: description.trim() || null,
         ...(isAgent
-          ? {}
+          ? { allowedTools, slackChannelIds, whatsappGroupJids, isWhatsappFallback }
           : {
               email: email.trim() || null,
               whatsappNumber: phone.trim() || null,
@@ -128,12 +140,39 @@ export function EditMemberDialog({
   const currentReportsTo = reportsTo === "none" ? null : reportsTo || null;
   const originalReportsTo = user?.reports_to ?? null;
 
+  const originalAllowedTools = user?.allowed_tools ?? [];
+  const allowedToolsDirty =
+    isAgent &&
+    (allowedTools.length !== originalAllowedTools.length ||
+      allowedTools.some((t) => !originalAllowedTools.includes(t)) ||
+      originalAllowedTools.some((t) => !allowedTools.includes(t)));
+
+  const originalSlackChannelIds = user?.slack_channel_ids ?? [];
+  const slackChannelIdsDirty =
+    isAgent &&
+    (slackChannelIds.length !== originalSlackChannelIds.length ||
+      slackChannelIds.some((id) => !originalSlackChannelIds.includes(id)) ||
+      originalSlackChannelIds.some((id) => !slackChannelIds.includes(id)));
+
+  const originalWhatsAppGroupJids = user?.whatsapp_group_jids ?? [];
+  const whatsappGroupJidsDirty =
+    isAgent &&
+    (whatsappGroupJids.length !== originalWhatsAppGroupJids.length ||
+      whatsappGroupJids.some((jid) => !originalWhatsAppGroupJids.includes(jid)) ||
+      originalWhatsAppGroupJids.some((jid) => !whatsappGroupJids.includes(jid)));
+
+  const isWhatsappFallbackDirty = isAgent && isWhatsappFallback !== (user?.is_whatsapp_fallback ?? false);
+
   const isDirty =
     user &&
     (name.trim() !== user.name ||
       (role.trim() || null) !== (user.role ?? null) ||
       currentReportsTo !== originalReportsTo ||
       (description.trim() || null) !== (user.description ?? null) ||
+      allowedToolsDirty ||
+      slackChannelIdsDirty ||
+      whatsappGroupJidsDirty ||
+      isWhatsappFallbackDirty ||
       (!isAgent &&
         ((email.trim() || null) !== (user.email ?? null) ||
           (phone.trim() || null) !== (user.whatsapp_number ?? null))));
@@ -185,17 +224,65 @@ export function EditMemberDialog({
             />
           </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="edit-description">Description</Label>
-            <Textarea
-              id="edit-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="What does this person do? e.g. Marketing Lead, handles competitive analysis"
-              disabled={updateMutation.isPending}
-              rows={2}
-            />
-          </div>
+          {isAgent ? (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="edit-description">Instructions</Label>
+                <span className="text-xs text-muted-foreground">
+                  {description.length}/{AGENT_INSTRUCTIONS_MAX_LENGTH}
+                </span>
+              </div>
+              <Textarea
+                id="edit-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value.slice(0, AGENT_INSTRUCTIONS_MAX_LENGTH))}
+                placeholder="Describe how this agent should behave."
+                disabled={updateMutation.isPending}
+                rows={8}
+              />
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-description">Description</Label>
+              <Textarea
+                id="edit-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What does this person do? e.g. Marketing Lead, handles competitive analysis"
+                disabled={updateMutation.isPending}
+                rows={2}
+              />
+            </div>
+          )}
+
+          {isAgent && (
+            <>
+              <AgentToolsField value={allowedTools} onChange={setAllowedTools} disabled={updateMutation.isPending} />
+              <SlackChannelsField
+                value={slackChannelIds}
+                onChange={setSlackChannelIds}
+                users={users}
+                selfId={user?.id}
+                selfName={name.trim() || user?.name || "this agent"}
+                disabled={updateMutation.isPending}
+              />
+              <WhatsAppGroupsField
+                value={whatsappGroupJids}
+                onChange={setWhatsappGroupJids}
+                users={users}
+                selfId={user?.id}
+                selfName={name.trim() || user?.name || "this agent"}
+                disabled={updateMutation.isPending}
+              />
+              <WhatsappFallbackField
+                value={isWhatsappFallback}
+                onChange={setIsWhatsappFallback}
+                users={users}
+                selfId={user?.id}
+                disabled={updateMutation.isPending}
+              />
+            </>
+          )}
 
           <div className="space-y-1.5">
             <Label htmlFor="edit-reports-to">Reports to</Label>

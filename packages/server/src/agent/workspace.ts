@@ -20,3 +20,15 @@ export async function ensureGroupWorkspace(config: Config, groupJid: string): Pr
   await mkdir(workspaceDir, { recursive: true });
   return workspaceDir;
 }
+
+/**
+ * Per-agent sub-workspace at data/workspaces/agent-{agentId}/{subKey}/.
+ * Used when a /team agent is bound to a Slack channel, WhatsApp group, or
+ * external WhatsApp DM sender — so different runs under the same agent share
+ * a parent directory while staying isolated by sub-key.
+ */
+export async function ensureAgentSubWorkspace(config: Config, agentId: string, subKey: string): Promise<string> {
+  const workspaceDir = join(config.DATA_DIR, "workspaces", `agent-${agentId}`, subKey);
+  await mkdir(workspaceDir, { recursive: true });
+  return workspaceDir;
+}

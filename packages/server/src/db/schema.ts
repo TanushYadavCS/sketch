@@ -15,6 +15,7 @@ export interface UsersTable {
   reports_to: string | null;
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
+  allowed_tools: string | null;
   timezone: string | null;
   created_at: Generated<string>;
 }
@@ -26,6 +27,7 @@ export interface ChannelsTable {
   type: string;
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
+  agent_user_id: string | null;
   created_at: Generated<string>;
 }
 
@@ -47,6 +49,7 @@ export interface WhatsAppGroupsTable {
   description: string | null;
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
+  agent_user_id: string | null;
   updated_at: Generated<string>;
 }
 
@@ -78,6 +81,7 @@ export interface SettingsTable {
   sync_interval_minutes: Generated<number>;
   org_context: string | null;
   sketch_api_key: string | null;
+  whatsapp_fallback_agent_id: string | null;
   onboarding_completed_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;

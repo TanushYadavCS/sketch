@@ -21,12 +21,15 @@ export interface VerifiedUser {
 export async function findVerifiedUserByEmail(db: Kysely<DB>, email: string): Promise<VerifiedUser | null> {
   const user = await db
     .selectFrom("users")
-    .select(["id", "name", "email", "slack_user_id", "whatsapp_number"])
+    .select(["id", "name", "email", "slack_user_id", "whatsapp_number", "type"])
     .where(sql`LOWER(email)`, "=", email.toLowerCase())
     .where("email_verified_at", "is not", null)
     .executeTakeFirst();
 
   if (!user?.email) return null;
+  // Agents and external users have no dashboard auth; magic links are
+  // human-only.
+  if (user.type === "agent" || user.type === "external") return null;
   return {
     id: user.id,
     name: user.name,

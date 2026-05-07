@@ -9,6 +9,7 @@
  */
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
+import { AGENT_BUILT_IN_TOOL_NAMES } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -102,7 +103,7 @@ export interface RunAgentParams {
   workspaceKey: string;
   userMessage: string;
   workspaceDir: string;
-  claudeConfigDir: string;
+  claudeConfigDir?: string;
   userName: string;
   userEmail?: string | null;
   userPhone?: string | null;
@@ -155,7 +156,22 @@ export interface RunAgentParams {
   };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   agentEnv?: Record<string, string>;
+  /**
+   * Free-form instruction set for an agent persona, appended to the system
+   * prompt. Set when the run is associated with a /team agent (channel-bound,
+   * group-bound, or fallback). Null/undefined for runs that are not under an
+   * agent persona.
+   */
+  agentInstructions?: string | null;
+  /**
+   * Canonical tool-name allowlist for an agent persona. When provided, only
+   * tools in this list are exposed to the SDK and permitted by canUseTool.
+   * Null/undefined preserves the runner's default toolset.
+   */
+  agentAllowedTools?: string[] | null;
 }
+
+const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
 
 /**
  * Extracts text content from an SDK assistant message. Returns null if the
@@ -208,7 +224,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     orgName: params.orgName,
     botName: params.botName,
     indexedSources,
+    agentInstructions: params.agentInstructions,
   });
+
+  const sdkBuiltInTools = params.agentAllowedTools
+    ? AGENT_BUILT_IN_TOOL_NAMES.filter((name) => params.agentAllowedTools?.includes(name))
+    : DEFAULT_RUN_TOOLS;
 
   let sessionId = "";
   let costUsd = 0;
@@ -282,7 +303,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     enqueueMessage: params.enqueueMessage,
   });
 
-  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir);
+  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);
   const canUseToolTimings: CanUseToolTiming[] = [];
   const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
     canUseToolTimings.push({ toolName, calledAt: Date.now() });
@@ -294,7 +315,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   // credential env vars stay inside the trusted broker and are injected only
   // into the real CLI child process.
   let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
-  if (params.loadIntegrationProvider) {
+  if (params.loadIntegrationProvider && params.claudeConfigDir) {
     integrationAccess = await startIntegrationAccess({
       userEmail: params.userEmail ?? null,
       claudeConfigDir: params.claudeConfigDir,
@@ -347,12 +368,16 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
         resume: resumeSessionId,
         env: {
           ...process.env,
+          // When the caller intentionally skips the org config dir (e.g. the
+          // WhatsApp fallback agent for external users), point the SDK at the
+          // workspace itself so it does not pick up the org's CLAUDE.md.
+          ...(params.claudeConfigDir === undefined ? { CLAUDE_CONFIG_DIR: workspaceDir } : {}),
           ...integrationAccess.envVars,
           ...params.agentEnv,
         },
         systemPrompt: systemAppend,
         abortController: params.abortController,
-        tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
+        tools: sdkBuiltInTools as string[],
         permissionMode: "default" as const,
         allowDangerouslySkipPermissions: false,
         settingSources: ["project", "user"],

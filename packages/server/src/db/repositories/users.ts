@@ -7,6 +7,7 @@ type UserRow = Selectable<UsersTable>;
 
 export interface UserRepository {
   list(): Promise<UserRow[]>;
+  listExternal(): Promise<UserRow[]>;
   findBySlackId(slackUserId: string): Promise<UserRow | undefined>;
   findByWhatsappNumber(whatsappNumber: string): Promise<UserRow | undefined>;
   findByEmail(email: string): Promise<UserRow | undefined>;
@@ -29,6 +30,7 @@ export interface UserRepository {
     type?: string;
     role?: string;
     reportsTo?: string;
+    allowedTools?: string[] | null;
   }): Promise<UserRow>;
   update(
     id: string,
@@ -45,6 +47,7 @@ export interface UserRepository {
       reportsTo?: string | null;
       toolProgress?: string | null;
       reasoningText?: boolean | null;
+      allowedTools?: string[] | null;
       timezone?: string | null;
     },
   ): Promise<UserRow>;
@@ -71,7 +74,11 @@ function excludeUserIdSql(excludeUserId?: string) {
 export function createUserRepository(db: UserDb): UserRepository {
   return {
     async list() {
-      return db.selectFrom("users").selectAll().orderBy("created_at", "desc").execute();
+      return db.selectFrom("users").selectAll().where("type", "!=", "external").orderBy("created_at", "desc").execute();
+    },
+
+    async listExternal() {
+      return db.selectFrom("users").selectAll().where("type", "=", "external").orderBy("created_at", "desc").execute();
     },
 
     async findBySlackId(slackUserId: string) {
@@ -191,6 +198,7 @@ export function createUserRepository(db: UserDb): UserRepository {
       type?: string;
       role?: string;
       reportsTo?: string;
+      allowedTools?: string[] | null;
     }) {
       const id = randomUUID();
       await db
@@ -208,6 +216,7 @@ export function createUserRepository(db: UserDb): UserRepository {
           type: data.type ?? "human",
           role: data.role ?? null,
           reports_to: data.reportsTo ?? null,
+          allowed_tools: data.allowedTools == null ? null : JSON.stringify(data.allowedTools),
         })
         .execute();
 
@@ -229,6 +238,7 @@ export function createUserRepository(db: UserDb): UserRepository {
         reportsTo?: string | null;
         toolProgress?: string | null;
         reasoningText?: boolean | null;
+        allowedTools?: string[] | null;
         timezone?: string | null;
       },
     ) {
@@ -259,6 +269,8 @@ export function createUserRepository(db: UserDb): UserRepository {
       if (data.toolProgress !== undefined) values.tool_progress = data.toolProgress;
       if (data.reasoningText !== undefined)
         values.reasoning_text = data.reasoningText == null ? null : data.reasoningText ? 1 : 0;
+      if (data.allowedTools !== undefined)
+        values.allowed_tools = data.allowedTools == null ? null : JSON.stringify(data.allowedTools);
       if (data.timezone !== undefined) values.timezone = data.timezone;
 
       if (Object.keys(values).length > 0) {

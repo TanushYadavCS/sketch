@@ -46,5 +46,37 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       }
       return db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", jid).executeTakeFirst();
     },
+
+    async listJidsByAgent(agentUserId: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("whatsapp_groups")
+        .select("jid")
+        .where("agent_user_id", "=", agentUserId)
+        .execute();
+      return rows.map((r) => r.jid);
+    },
+
+    async listAllAgentBindings(): Promise<Array<{ agentUserId: string; jid: string }>> {
+      const rows = await db
+        .selectFrom("whatsapp_groups")
+        .select(["agent_user_id", "jid"])
+        .where("agent_user_id", "is not", null)
+        .execute();
+      return rows
+        .filter((r): r is { agent_user_id: string; jid: string } => r.agent_user_id !== null)
+        .map((r) => ({ agentUserId: r.agent_user_id, jid: r.jid }));
+    },
+
+    async setAgentForJids(agentUserId: string, jids: string[]): Promise<void> {
+      await db.transaction().execute(async (trx) => {
+        await trx
+          .updateTable("whatsapp_groups")
+          .set({ agent_user_id: null })
+          .where("agent_user_id", "=", agentUserId)
+          .execute();
+        if (jids.length === 0) return;
+        await trx.updateTable("whatsapp_groups").set({ agent_user_id: agentUserId }).where("jid", "in", jids).execute();
+      });
+    },
   };
 }

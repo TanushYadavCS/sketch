@@ -78,6 +78,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         syncIntervalMinutes: number | null;
         orgContext: string | null;
         sketchApiKey: string | null;
+        whatsappFallbackAgentId: string | null;
       }>,
     ) {
       const updates: Record<string, string | number | null> = {};
@@ -108,6 +109,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       if (data.enrichmentEnabled !== undefined) updates.enrichment_enabled = data.enrichmentEnabled;
       if (data.syncIntervalMinutes !== undefined) updates.sync_interval_minutes = data.syncIntervalMinutes;
       if (data.sketchApiKey !== undefined) updates.sketch_api_key = data.sketchApiKey;
+      if (data.whatsappFallbackAgentId !== undefined) updates.whatsapp_fallback_agent_id = data.whatsappFallbackAgentId;
 
       if (Object.keys(updates).length === 0) return;
 

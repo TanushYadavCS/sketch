@@ -27,8 +27,20 @@ function isInsideDir(filePath: string, dir: string): boolean {
   return filePath === dir || filePath.startsWith(`${dir}/`);
 }
 
-export function createCanUseTool(absWorkspace: string, logger: Logger, claudeDir: string) {
-  const absClaudeDir = resolve(claudeDir);
+export function createCanUseTool(
+  absWorkspace: string,
+  logger: Logger,
+  claudeDir: string | undefined,
+  agentAllowedTools?: string[] | null,
+) {
+  const absClaudeDir = claudeDir ? resolve(claudeDir) : null;
+  /**
+   * NULL/undefined = no allowlist (legacy or non-agent run). Empty array =
+   * deny every tool. Non-empty array = the canonical allowlist. Distinguishing
+   * NULL from `[]` matters: an admin who unselects all tools must not silently
+   * grant every MCP tool.
+   */
+  const agentAllowlist = agentAllowedTools ? new Set(agentAllowedTools) : null;
 
   return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
     logger.debug({ toolName }, "canUseTool called");
@@ -37,11 +49,16 @@ export function createCanUseTool(absWorkspace: string, logger: Logger, claudeDir
       return { behavior: "deny", message: `Tool ${toolName} is not allowed` };
     }
 
+    if (agentAllowlist && !agentAllowlist.has(toolName)) {
+      logger.warn({ toolName }, "Blocked tool call outside agent allowlist");
+      return { behavior: "deny", message: `Tool ${toolName} is not in this agent's allowlist` };
+    }
+
     if (FILE_TOOLS.includes(toolName)) {
       const rawPath = (input.file_path as string) || (input.path as string) || absWorkspace;
       const filePath = resolve(rawPath);
       if (!isInsideDir(filePath, absWorkspace)) {
-        if (isInsideDir(filePath, absClaudeDir)) {
+        if (absClaudeDir && isInsideDir(filePath, absClaudeDir)) {
           return { behavior: "allow", updatedInput: input };
         }
         logger.warn({ toolName, filePath, absWorkspace }, "Blocked file access outside workspace");
@@ -56,7 +73,7 @@ export function createCanUseTool(absWorkspace: string, logger: Logger, claudeDir
     if (toolName === "Bash") {
       const command = (input.command as string) || "";
       const hasAbsolutePath = /(?:^|\s)\/(?!dev\/null|tmp\/)/.test(command);
-      if (hasAbsolutePath && !command.includes(absWorkspace) && !command.includes(absClaudeDir)) {
+      if (hasAbsolutePath && !command.includes(absWorkspace) && !(absClaudeDir && command.includes(absClaudeDir))) {
         logger.warn({ toolName, command, absWorkspace }, "Blocked bash command referencing outside paths");
         return {
           behavior: "deny",

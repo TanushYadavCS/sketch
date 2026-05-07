@@ -46,6 +46,10 @@ export interface User {
   type: string;
   role: string | null;
   reports_to: string | null;
+  allowed_tools: string[] | null;
+  slack_channel_ids: string[];
+  whatsapp_group_jids: string[];
+  is_whatsapp_fallback: boolean;
   created_at: string;
 }
 
@@ -131,6 +135,21 @@ export interface ChannelStatus {
   phoneNumber?: string | null;
   fromAddress?: string | null;
   outboundOnly?: boolean;
+}
+
+export interface SlackChannelInfo {
+  id: string;
+  name: string;
+  type: string;
+  isMember: boolean;
+}
+
+export interface WhatsAppGroupInfo {
+  jid: string;
+  name: string;
+  description: string | null;
+  agent_user_id: string | null;
+  updated_at: string;
 }
 
 export interface SetupStatus {
@@ -373,6 +392,12 @@ export const api = {
   channels: {
     status() {
       return request<{ channels: ChannelStatus[] }>("/api/channels/status");
+    },
+    listSlack() {
+      return request<{ channels: SlackChannelInfo[] }>("/api/channels/slack");
+    },
+    listWhatsAppGroups() {
+      return request<{ groups: WhatsAppGroupInfo[] }>("/api/channels/whatsapp/groups");
     },
     disconnectSlack() {
       return request<{ success: boolean }>("/api/channels/slack", { method: "DELETE" });
@@ -719,6 +744,10 @@ export const api = {
       type?: string;
       role?: string | null;
       reportsTo?: string | null;
+      allowedTools?: string[] | null;
+      slackChannelIds?: string[] | null;
+      whatsappGroupJids?: string[] | null;
+      isWhatsappFallback?: boolean;
     }) {
       return request<{ user: User; verificationSent?: boolean }>("/api/users", {
         method: "POST",
@@ -734,6 +763,10 @@ export const api = {
         description?: string | null;
         role?: string | null;
         reportsTo?: string | null;
+        allowedTools?: string[] | null;
+        slackChannelIds?: string[] | null;
+        whatsappGroupJids?: string[] | null;
+        isWhatsappFallback?: boolean;
       },
     ) {
       return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}`, {
@@ -749,6 +782,17 @@ export const api = {
     remove(id: string) {
       return request<{ success: boolean }>(`/api/users/${id}`, {
         method: "DELETE",
+      });
+    },
+    listExternal() {
+      return request<{ users: Array<{ id: string; name: string; type: string; created_at: string }> }>(
+        "/api/users/external",
+      );
+    },
+    promote(id: string, data: { name: string; email?: string | null; role?: string | null }) {
+      return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}/promote`, {
+        method: "POST",
+        body: JSON.stringify(data),
       });
     },
   },

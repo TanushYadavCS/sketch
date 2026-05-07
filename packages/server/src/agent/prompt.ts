@@ -42,7 +42,7 @@ export interface SketchContextParams {
   currentUserEmail?: string | null;
   currentUserPhone?: string | null;
   workspaceDir: string;
-  orgDir: string;
+  orgDir?: string;
   timezone?: string | null;
   threadTag?: "thread" | "channel_history";
   taskPrompt?: string;
@@ -162,6 +162,7 @@ export function buildSystemContext(params: {
   orgName?: string | null;
   botName?: string | null;
   indexedSources?: Array<{ source: string; fileCount: number }>;
+  agentInstructions?: string | null;
 }): string {
   const sections: string[] = [];
 
@@ -300,6 +301,18 @@ export function buildSystemContext(params: {
     sections.push("", "## Platform", "", ...buildPlatformFormattingLines("whatsapp"));
   }
 
+  const agentInstructions = params.agentInstructions?.trim();
+  if (agentInstructions) {
+    sections.push(
+      "",
+      "## Agent Instructions",
+      "",
+      "These instructions are specific to this agent and take precedence over generic guidance above when they conflict.",
+      "",
+      agentInstructions,
+    );
+  }
+
   return sections.join("\n");
 }
 
@@ -349,7 +362,8 @@ export function buildSketchContext(params: SketchContextParams): string {
   const timeContent = `${dateFormatter.format(now)} ${tzShort} (${tz})`;
   sectionParts.push(`<time>${timeContent}</time>`);
 
-  sectionParts.push(`<workspace>\n${params.workspaceDir}\norg: ${params.orgDir}\n</workspace>`);
+  const orgLine = params.orgDir ? `\norg: ${params.orgDir}` : "";
+  sectionParts.push(`<workspace>\n${params.workspaceDir}${orgLine}\n</workspace>`);
 
   if (inboxMessages && inboxMessages.length > 0) {
     const lines: string[] = [];
