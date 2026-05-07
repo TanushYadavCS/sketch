@@ -16,6 +16,7 @@ export interface UsersTable {
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
   allowed_tools: string | null;
+  timezone: string | null;
   created_at: Generated<string>;
 }
 

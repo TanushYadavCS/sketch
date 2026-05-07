@@ -31,6 +31,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
   getUnknownReasoningTextMessage,
@@ -45,6 +46,7 @@ import type { WhatsAppBot } from "./bot";
 import type { GroupBuffer } from "./group-buffer";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { createWhatsAppProgressTransport } from "./progress-transport";
+import { phoneToTimezone } from "./timezone";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
@@ -75,7 +77,7 @@ export interface WhatsAppAdapterDeps {
   groupBuffer: GroupBuffer;
   runAgent: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -110,7 +112,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     groupBuffer,
     runAgent,
     buildMcpServers,
-    findIntegrationProvider,
+    loadIntegrationProvider,
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -198,6 +200,14 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           { externalUserId: user.id, fallbackAgentId },
           "Auto-created external user for unknown WhatsApp sender",
         );
+      }
+
+      if (!user.timezone) {
+        const derivedTz = phoneToTimezone(user.whatsapp_number ?? message.phoneNumber);
+        if (derivedTz) {
+          user = await repos.users.update(user.id, { timezone: derivedTz });
+          logger.debug({ userId: user.id, timezone: derivedTz }, "wa adapter: hydrated timezone from phone number");
+        }
       }
 
       const userQueue = queue.getQueue(user.id);
@@ -311,6 +321,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             currentUserPhone: user.whatsapp_number ?? message.phoneNumber,
             workspaceDir,
             orgDir: fallbackAgent ? undefined : config.CLAUDE_CONFIG_DIR,
+            timezone: user.timezone,
             isSharedContext: false,
             inboxMessages: pendingInbox.messages,
           });
@@ -320,6 +331,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             contextType: "dm" as const,
             deliveryTarget: deliveryJid,
             createdBy: user.id,
+            creatorTimezone: user.timezone,
           };
 
           const agentInstructions = fallbackAgent?.description ?? null;
@@ -343,7 +355,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
-            findIntegrationProvider,
+            loadIntegrationProvider,
             contextType: "dm",
             taskContext: waTaskContext,
             scheduler,
@@ -548,6 +560,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           currentUserPhone: user?.whatsapp_number ?? null,
           workspaceDir,
           orgDir: config.CLAUDE_CONFIG_DIR,
+          timezone: user?.timezone ?? null,
           isSharedContext: true,
           threadTag: "thread",
           groupContext: { groupName, groupDescription },
@@ -588,7 +601,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
-          findIntegrationProvider,
+          loadIntegrationProvider,
           contextType: "channel_mention",
           currentUserId: user?.id ?? null,
           taskContext: {
@@ -596,6 +609,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             contextType: "group" as const,
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
+            creatorTimezone: user?.timezone ?? null,
           },
           scheduler,
           stepContentRepo,

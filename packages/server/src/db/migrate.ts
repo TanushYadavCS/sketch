@@ -51,6 +51,8 @@ import * as m044 from "./migrations/044-agent-tool-allowlist";
 import * as m045 from "./migrations/045-channel-agent-binding";
 import * as m046 from "./migrations/046-whatsapp-group-agent-binding";
 import * as m047 from "./migrations/047-whatsapp-fallback-agent";
+import * as m048 from "./migrations/048-entity-mentions-composite-index";
+import * as m049 from "./migrations/049-users-timezone";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -106,6 +108,8 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "045-channel-agent-binding": m045,
           "046-whatsapp-group-agent-binding": m046,
           "047-whatsapp-fallback-agent": m047,
+          "048-entity-mentions-composite-index": m048,
+          "049-users-timezone": m049,
         };
       },
     },

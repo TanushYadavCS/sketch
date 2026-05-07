@@ -21,12 +21,14 @@ import { resolve } from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely, Selectable } from "kysely";
 import { z } from "zod/v4";
-import { filterAccessibleFileIds, getFileContent, search } from "../connectors/search";
+import { KIND_TO_RULES, filterAccessibleFileIds, getFileContent, search } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
+import type { IntegrationProvider } from "../integrations/types";
+import { parseOnceSchedule } from "../scheduler/parse-once";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
@@ -42,6 +44,7 @@ interface SearchableUserRepo {
   findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
   searchByNamePrefix?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
   searchByNameSubstring?: (query: string, limit?: number, excludeUserId?: string) => Promise<SelectableUser[]>;
+  update?: (id: string, data: { timezone?: string | null }) => Promise<SelectableUser>;
 }
 
 export class UploadCollector {
@@ -62,7 +65,7 @@ export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
   workspaceDir: string;
   db?: Kysely<DB>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   taskContext?: TaskContext;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
@@ -136,9 +139,14 @@ const manageScheduledTasksSchema = {
     .describe(
       `For cron: standard 5-field expression (minute hour day-of-month month day-of-week). Always use 5-field, never 6-field. Examples: '*/2 * * * *' (every 2 min), '0 9 * * 1-5' (weekdays 9am), '0 */6 * * *' (every 6 hours).
 For interval: number of seconds as a plain string, minimum 60. Examples: '120' (every 2 min), '3600' (every hour). Do not use duration strings like '2m' or '1h'.
-For once: ISO 8601 datetime string (e.g. '2026-03-14T15:00:00'). The task runs once at this time then auto-completes.`,
+For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:00') is interpreted in the resolved timezone (the user's tz unless 'timezone' is set explicitly). To pin an absolute instant regardless of timezone, include a Z suffix or numeric offset (e.g. '2026-03-14T15:00:00Z' or '2026-03-14T15:00:00+05:30'). The task runs once at this time then auto-completes.`,
     ),
-  timezone: z.string().optional().describe("IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Defaults to UTC."),
+  timezone: z
+    .string()
+    .optional()
+    .describe(
+      "IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Leave empty in the common case — the user's timezone (shown in <time>) is used automatically. Only set this when the user explicitly names a different timezone for the task.",
+    ),
   session_mode: z
     .enum(["fresh", "persistent", "chat"])
     .optional()
@@ -194,13 +202,32 @@ export interface ManageScheduledTasksDeps {
   taskContext: TaskContext;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   config?: { BASE_URL?: string; PORT: number };
 }
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
   return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
+}
+
+/**
+ * Resolve the timezone for a scheduled task, in priority order:
+ *   1. explicit `params.timezone`
+ *   2. ambient `creatorTimezone` from the message context
+ *   3. UTC fallback
+ *
+ * Empty / whitespace-only strings are treated as missing — nullish coalescing
+ * alone would let `""` through and overwrite the creator's tz with an invalid
+ * value (croner rejects it on cron, and non-cron tasks would silently land
+ * with a blank timezone in the DB).
+ */
+function resolveScheduleTimezone(paramTz: string | undefined, ctxTz: string | null | undefined): string {
+  const fromParam = paramTz?.trim();
+  if (fromParam && fromParam.length > 0) return fromParam;
+  const fromCtx = ctxTz?.trim();
+  if (fromCtx && fromCtx.length > 0) return fromCtx;
+  return "UTC";
 }
 
 export async function handleManageScheduledTasks(
@@ -211,6 +238,22 @@ export async function handleManageScheduledTasks(
   const ctx = deps.taskContext;
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
+
+  const BROKER_REQUIRED_MSG =
+    "Error: Action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.";
+
+  /** Returns an error response if any action step is present but no broker-capable
+   *  provider is configured. Returns null when validation passes (no action steps,
+   *  or a broker-capable provider exists). */
+  const ensureBrokerForActionSteps = async (
+    candidateSteps: WorkflowStepInput[] | undefined,
+  ): Promise<ReturnType<typeof text> | null> => {
+    if (!candidateSteps?.some((s) => s.type === "action")) return null;
+    if (!deps.loadIntegrationProvider) return text(BROKER_REQUIRED_MSG);
+    const provider = await deps.loadIntegrationProvider();
+    if (!provider || !provider.isBrokerCapable()) return text(BROKER_REQUIRED_MSG);
+    return null;
+  };
 
   // Ownership guard: creator-only for actions that mutate or inspect a specific task.
   // Unified 404 phrasing ("task not found") for both missing and not-yours — avoids
@@ -243,20 +286,8 @@ export async function handleManageScheduledTasks(
           return text("Error: schedule_type and schedule_value are required for add action.");
         }
 
-        // Validate action steps require an integration provider
-        if (params.steps.some((s) => s.type === "action")) {
-          if (!deps.findIntegrationProvider) {
-            return text(
-              "Error: Action steps require an integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.",
-            );
-          }
-          const provider = await deps.findIntegrationProvider();
-          if (!provider) {
-            return text(
-              "Error: Action steps require an integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.",
-            );
-          }
-        }
+        const brokerError = await ensureBrokerForActionSteps(params.steps);
+        if (brokerError) return brokerError;
       } else if (params.prompt) {
         // Sugar: expand simple prompt into a single-step workflow
         if (!params.schedule_type || !params.schedule_value) {
@@ -325,10 +356,12 @@ export async function handleManageScheduledTasks(
         }
       }
 
+      const resolvedTimezone = resolveScheduleTimezone(params.timezone, ctx.creatorTimezone);
+
       if (params.schedule_type === "cron") {
         try {
           const { Cron } = await import("croner");
-          new Cron(params.schedule_value as string, { timezone: params.timezone ?? "UTC" });
+          new Cron(params.schedule_value as string, { timezone: resolvedTimezone });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return text(`Error: invalid cron expression '${params.schedule_value}': ${msg}`);
@@ -336,7 +369,7 @@ export async function handleManageScheduledTasks(
       }
 
       if (params.schedule_type === "once" && params.schedule_value) {
-        const runAt = new Date(params.schedule_value);
+        const runAt = parseOnceSchedule(params.schedule_value, resolvedTimezone);
         if (Number.isNaN(runAt.getTime())) {
           return text(
             "Error: once schedule_value must be a valid ISO 8601 datetime string (e.g. '2026-03-14T15:00:00').",
@@ -389,7 +422,7 @@ export async function handleManageScheduledTasks(
         prompt: title,
         scheduleType,
         scheduleValue,
-        timezone: params.timezone,
+        timezone: resolvedTimezone,
         sessionMode,
         createdBy: ctx.createdBy,
         title: params.title,
@@ -455,6 +488,9 @@ export async function handleManageScheduledTasks(
 
       // Handle steps update
       if (params.steps) {
+        const brokerError = await ensureBrokerForActionSteps(params.steps);
+        if (brokerError) return brokerError;
+
         if (!deps.stepContentRepo && params.steps.some((s) => s.agentPrompt || s.script)) {
           return text(
             "Error: step content storage is not available in this context. Multi-step automations with prompts or scripts cannot be updated.",
@@ -590,6 +626,45 @@ export async function handleManageScheduledTasks(
 }
 
 type ToolResult = { content: { type: "text"; text: string }[] };
+
+/**
+ * Validates a candidate IANA timezone by attempting to construct an Intl
+ * formatter with it. Avoids pulling in a hardcoded list — the runtime's
+ * tz database is the authoritative source.
+ */
+function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function handleSetUserTimezone(
+  params: { timezone: string },
+  deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
+): Promise<ToolResult> {
+  if (!deps.userRepo || !deps.userRepo.update || !deps.currentUserId) {
+    return { content: [{ type: "text" as const, text: "Timezone update is not available in this context." }] };
+  }
+  const tz = params.timezone.trim();
+  if (!tz) {
+    return { content: [{ type: "text" as const, text: "Error: timezone is required." }] };
+  }
+  if (!isValidTimezone(tz)) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Error: '${tz}' is not a valid IANA timezone. Examples: 'Asia/Kolkata', 'America/New_York', 'Europe/London'.`,
+        },
+      ],
+    };
+  }
+  await deps.userRepo.update(deps.currentUserId, { timezone: tz });
+  return { content: [{ type: "text" as const, text: `Timezone set to ${tz}.` }] };
+}
 
 export async function handleGetTeamDirectory(
   deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
@@ -920,13 +995,13 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       "Check if an integration provider is configured. Credentials and user scoping are injected automatically into integration CLI wrappers at runtime — never set API keys or email addresses manually.",
       {},
       async () => {
-        if (!deps.findIntegrationProvider) {
+        if (!deps.loadIntegrationProvider) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ configured: false }) }],
           };
         }
 
-        const provider = await deps.findIntegrationProvider();
+        const provider = await deps.loadIntegrationProvider();
         if (!provider) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ configured: false }) }],
@@ -960,7 +1035,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           taskContext: deps.taskContext,
           stepContentRepo: deps.stepContentRepo,
           automationRunsRepo: deps.automationRunsRepo,
-          findIntegrationProvider: deps.findIntegrationProvider,
+          loadIntegrationProvider: deps.loadIntegrationProvider,
           queueManager: deps.queueManager,
           config: deps.toolConfig,
         });
@@ -972,6 +1047,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       "Discover team members and their roles. Returns all team members except yourself.",
       {},
       async () => handleGetTeamDirectory(deps),
+    ),
+
+    tool(
+      "SetUserTimezone",
+      "Update the current user's timezone. Use IANA names (e.g. 'Asia/Kolkata', 'America/New_York', 'Europe/London'). Call this when the user explicitly asks to change their timezone — the system already auto-resolves a default from Slack profile / WhatsApp country code.",
+      {
+        timezone: z.string().describe("IANA timezone name, e.g. 'Asia/Kolkata' or 'America/New_York'."),
+      },
+      async (params) => handleSetUserTimezone(params, deps),
     ),
 
     tool(
@@ -1031,39 +1115,111 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       "Search",
       `Search across all indexed knowledge — docs, tasks, meetings, conversations, and workspace files. Uses hybrid search (keyword + semantic) for best results. Automatically surfaces matching entities for context.
 
-When results mention a specific entity (project, client, person), results linked to that entity are boosted to the top. For hard-scoped search within a single entity's files, pass the entityId from a previous Search result.
+When results mention a specific entity (project, client, person), results linked to that entity are boosted to the top. For hard-scoped search by entity, call SearchEntities first then pass the resolved IDs as \`entityIds\` (use \`entityIdsMode: "and"\` for "with X and Y", \`"or"\` for "from X or Y").
+
+Recency: pass \`sortBy: "recency"\` for "latest", "most recent", "last X" questions. \`query\` is optional when filters are present (e.g. \`{ kind: "meeting", sortBy: "recency" }\` for "fetch my latest meeting" — RBAC scopes to what the user can see).
 
 Use this to find information before asking others. Examples:
-- "What did we decide about the auth approach?"
-- "Epik demo playbook"
-- "API migration status"
-- "standup notes from last week"`,
+- "What did we decide about the auth approach?"  → Search({ query: "auth approach decision" })
+- "Epik demo playbook"  → Search({ query: "Epik demo playbook" })
+- "fetch my latest meeting"  → Search({ kind: "meeting", sortBy: "recency", limit: 3 })
+- "latest meeting with Oliver Wyman and Ohoud"  → SearchEntities then Search({ kind: "meeting", entityIds: [<a>, <b>], sortBy: "recency" })
+- "anything from Oliver or Ohoud lately"  → SearchEntities then Search({ entityIds: [<a>, <b>], entityIdsMode: "or", sortBy: "recency" })
+
+\`kind\` cannot be combined with \`source: "local"\` (local files have no kind taxonomy).`,
       {
-        query: z.string().describe("Natural language search query"),
-        entityId: z
-          .string()
+        query: z.string().optional().describe("Natural language search query. May be empty when filters are present."),
+        entityId: z.string().optional().describe("Back-compat single-entity hard filter. Prefer entityIds."),
+        entityIds: z
+          .array(z.string())
+          .optional()
+          .describe("Multi-entity filter. Pair with entityIdsMode. Use after SearchEntities."),
+        entityIdsMode: z
+          .enum(["and", "or"])
           .optional()
           .describe(
-            "Hard-filter search to files linked to this entity only. Use the entity ID from a previous Search result's matching entities.",
+            "'and' (default): only files mentioning ALL entities. 'or': files mentioning ANY of them. If 'and' returns nothing, retry with 'or' before declaring no results.",
+          ),
+        kind: z
+          .enum(["meeting", "doc", "task", "message"])
+          .optional()
+          .describe(
+            "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation.",
           ),
         source: z
           .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "local"])
           .optional()
           .describe("Filter to a specific source. Omit to search all."),
+        sortBy: z
+          .enum(["relevance", "recency"])
+          .optional()
+          .describe("Use 'recency' for 'latest', 'most recent', 'last X' questions. Default is 'relevance'."),
         after: z.string().optional().describe("Only results updated after this ISO date"),
         before: z.string().optional().describe("Only results updated before this ISO date"),
-        limit: z.number().optional().describe("Max results (default 10)"),
+        limit: z.number().optional().describe("Max results (default 10; default 3 when sortBy=recency)."),
       },
-      async ({ query: searchQuery, entityId, source, after, before, limit: resultLimit }) => {
+      async ({
+        query: searchQuery,
+        entityId,
+        entityIds,
+        entityIdsMode,
+        kind,
+        source,
+        sortBy,
+        after,
+        before,
+        limit: resultLimit,
+      }) => {
         if (!deps.db) {
           return { content: [{ type: "text" as const, text: "Search not available." }] };
         }
 
-        const lines: string[] = [];
+        // kind × source:"local" guard. local files have no kind taxonomy and the
+        // combination would silently return zero results otherwise.
+        if (kind && source === "local") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "kind cannot be combined with source: 'local' (local files have no kind taxonomy).",
+              },
+            ],
+          };
+        }
 
-        // Auto-search entities matching the query for context
+        const trimmedQuery = (searchQuery ?? "").trim();
+        const callerProvidedEntityIds = !!(entityId || (entityIds && entityIds.length > 0));
+        const hasFilter = !!kind || !!source || callerProvidedEntityIds || !!after || !!before;
+
+        // Empty-query guard: must have at least one structural filter.
+        if (!trimmedQuery && !hasFilter) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Need a query or at least one filter (kind, source, entityIds, after, before).",
+              },
+            ],
+          };
+        }
+
+        const lines: string[] = [];
         const entityRepo = createEntityRepository(deps.db);
-        const entityMatches = entityId ? [] : await entityRepo.searchEntities(searchQuery, { limit: 5 });
+
+        // Skip auto-entity-discovery when caller pinned entityIds OR the query is empty
+        // (LIKE '%%' would match every entity and explode the boost path).
+        const skipAutoEntityBoost = callerProvidedEntityIds || trimmedQuery === "";
+
+        // Build the "Matching entities" header, either from auto-discovery or
+        // from the caller-supplied ids (parity).
+        type EntityRow = Awaited<ReturnType<typeof entityRepo.searchEntities>>[number];
+        let entityMatches: EntityRow[] = [];
+        if (!skipAutoEntityBoost) {
+          entityMatches = await entityRepo.searchEntities(trimmedQuery, { limit: 5 });
+        } else if (callerProvidedEntityIds) {
+          const ids = entityIds && entityIds.length > 0 ? entityIds : entityId ? [entityId] : [];
+          entityMatches = await entityRepo.getEntities(ids);
+        }
         if (entityMatches.length > 0) {
           const entityParts = entityMatches.map((e) => {
             const aliases = e.aliases ? (JSON.parse(e.aliases) as string[]) : [];
@@ -1075,31 +1231,41 @@ Use this to find information before asking others. Examples:
           lines.push("");
         }
 
-        // Get entity-linked file IDs for auto-boost (when not hard-filtered)
+        // Auto-boost set: only used for the relevance-sort handler-level reorder.
+        // search() applies its own ENTITY_BOOST inside RRF; we mirror that here
+        // so the agent sees entity-linked files at the top of relevance results.
         let entityFileIds: Set<string> | undefined;
-        if (!entityId && entityMatches.length > 0) {
-          const entityIds = entityMatches.map((e) => e.id);
+        if (!skipAutoEntityBoost && entityMatches.length > 0) {
+          const matchIds = entityMatches.map((e) => e.id);
           const mentions = await deps.db
             .selectFrom("entity_mentions")
             .select("indexed_file_id")
-            .where("entity_id", "in", entityIds)
+            .where("entity_id", "in", matchIds)
             .execute();
           entityFileIds = new Set(mentions.map((m) => m.indexed_file_id));
         }
 
-        // Hybrid search for documents/content
+        const effectiveLimit = resultLimit ?? (sortBy === "recency" ? 3 : 10);
         const userEmails = await resolveUserEmails();
-        const results = await search(deps.db, searchQuery, {
+        const results = await search(deps.db, trimmedQuery, {
+          kindRules: kind ? KIND_TO_RULES[kind] : undefined,
           source,
-          limit: resultLimit ?? 10,
+          limit: effectiveLimit,
           after,
           before,
           entityId,
+          entityIds,
+          entityIdsMode,
+          sortBy,
           userEmails,
+          skipAutoEntityBoost,
         });
 
-        // Auto-boost: rank entity-linked files higher when not hard-filtered
-        if (entityFileIds && entityFileIds.size > 0) {
+        // Handler-level reorder: only when sorting by relevance and we have a
+        // boost set. Otherwise it would override recency order (or run against
+        // an empty set when caller pinned entityIds).
+        const effectiveSortBy = sortBy ?? "relevance";
+        if (effectiveSortBy === "relevance" && !callerProvidedEntityIds && entityFileIds && entityFileIds.size > 0) {
           results.sort((a, b) => {
             const aLinked = entityFileIds?.has(a.id) ? 1 : 0;
             const bLinked = entityFileIds?.has(b.id) ? 1 : 0;
@@ -1109,7 +1275,8 @@ Use this to find information before asking others. Examples:
         }
 
         if (results.length === 0 && entityMatches.length === 0) {
-          return { content: [{ type: "text" as const, text: `No results found for "${searchQuery}".` }] };
+          const label = trimmedQuery ? `"${trimmedQuery}"` : "the given filters";
+          return { content: [{ type: "text" as const, text: `No results found for ${label}.` }] };
         }
 
         for (const r of results) {

@@ -7,15 +7,39 @@
  * Constructor accepts apiUrl and apiKey directly (extracted from the mcp_servers row)
  * rather than a credentials object, since the unified table stores them separately.
  */
+import { join } from "node:path";
 import type { IntegrationApp, PageInfo } from "@sketch/shared";
-import type { IntegrationProvider } from "./types";
+import type { BrokerSpec, IntegrationProvider } from "./types";
 
 export class CanvasProvider implements IntegrationProvider {
+  readonly type = "canvas";
+
   constructor(
     private apiUrl: string,
     private apiKey: string,
     private providerId: string,
   ) {}
+
+  isBrokerCapable(): boolean {
+    return true;
+  }
+
+  getBrokerSpec({
+    userEmail,
+    claudeConfigDir,
+  }: {
+    userEmail: string | null;
+    claudeConfigDir: string;
+  }): BrokerSpec {
+    const credentialEnv: Record<string, string> = {};
+    if (this.apiKey) credentialEnv.CANVAS_API_KEY_MCP = this.apiKey;
+    if (userEmail) credentialEnv.CANVAS_USER_EMAIL = userEmail;
+    return {
+      cliPath: join(claudeConfigDir, "skills", "canvas", "canvas-cli.js"),
+      credentialEnv,
+      launcherEnvName: "CANVAS_CLI",
+    };
+  }
 
   private headers(userEmail?: string, includeContentType = true): Record<string, string> {
     const h: Record<string, string> = {

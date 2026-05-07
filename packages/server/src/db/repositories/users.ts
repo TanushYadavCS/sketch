@@ -48,6 +48,7 @@ export interface UserRepository {
       toolProgress?: string | null;
       reasoningText?: boolean | null;
       allowedTools?: string[] | null;
+      timezone?: string | null;
     },
   ): Promise<UserRow>;
   remove(id: string): Promise<unknown>;
@@ -238,6 +239,7 @@ export function createUserRepository(db: UserDb): UserRepository {
         toolProgress?: string | null;
         reasoningText?: boolean | null;
         allowedTools?: string[] | null;
+        timezone?: string | null;
       },
     ) {
       const values: Record<string, unknown> = {};
@@ -269,6 +271,7 @@ export function createUserRepository(db: UserDb): UserRepository {
         values.reasoning_text = data.reasoningText == null ? null : data.reasoningText ? 1 : 0;
       if (data.allowedTools !== undefined)
         values.allowed_tools = data.allowedTools == null ? null : JSON.stringify(data.allowedTools);
+      if (data.timezone !== undefined) values.timezone = data.timezone;
 
       if (Object.keys(values).length > 0) {
         await db.updateTable("users").set(values).where("id", "=", id).execute();

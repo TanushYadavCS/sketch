@@ -16,6 +16,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { extensionToMime } from "../files";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
@@ -69,7 +70,7 @@ interface AgentRunRouteDeps {
   whatsapp?: WhatsAppBot;
   runAgent: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -160,7 +161,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
         orgName: settingsRow?.org_name,
         botName: settingsRow?.bot_name,
         integrationMcpServers,
-        findIntegrationProvider: deps.findIntegrationProvider,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
         scheduler: deps.scheduler,
         stepContentRepo: deps.stepContentRepo,
         automationRunsRepo: deps.automationRunsRepo,

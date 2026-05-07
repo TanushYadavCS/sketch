@@ -423,12 +423,15 @@ export class SlackBot {
     }
   }
 
-  async getUserInfo(userId: string): Promise<{ name: string; realName: string; email: string | null }> {
+  async getUserInfo(
+    userId: string,
+  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null }> {
     const result = await this.app.client.users.info({ user: userId });
     return {
       name: result.user?.name ?? "unknown",
       realName: result.user?.real_name ?? result.user?.name ?? "unknown",
       email: result.user?.profile?.email ?? null,
+      tz: result.user?.tz ?? null,
     };
   }
 

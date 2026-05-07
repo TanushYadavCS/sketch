@@ -200,6 +200,64 @@ describe("handleManageScheduledTasks — add", () => {
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
 
+  it("uses creator's timezone when params.timezone is omitted", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "Asia/Kolkata" }));
+  });
+
+  it("falls back to creator's timezone when params.timezone is an empty string", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", timezone: "" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "Asia/Kolkata" }));
+  });
+
+  it("falls back to UTC when both params.timezone and creatorTimezone are blank", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", timezone: "   " },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "UTC" }));
+  });
+
+  it("explicit params.timezone wins over creatorTimezone", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "add",
+        prompt: "Do it",
+        schedule_type: "cron",
+        schedule_value: "0 9 * * 1",
+        timezone: "America/Los_Angeles",
+      },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+      },
+    );
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "America/Los_Angeles" }));
+  });
+
   it("rejects 'chat' session_mode for top-level channel (no threadTs)", async () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
@@ -334,6 +392,90 @@ describe("handleManageScheduledTasks — add", () => {
     );
     expect(result.content[0].text).toContain("Error: step content storage is not available");
     expect(scheduler.addTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleManageScheduledTasks — broker-capability gate", () => {
+  const httpOnlyProvider = {
+    type: "fake",
+    listApps: async () => ({ apps: [], pageInfo: { endCursor: null, hasMore: false } }),
+    initiateConnection: async () => ({ redirectUrl: "" }),
+    listConnections: async () => [],
+    removeConnection: async () => {},
+    isBrokerCapable: () => false,
+    getBrokerSpec: () => null,
+  };
+
+  const actionStepWorkflow = {
+    title: "Action wf",
+    schedule_type: "cron" as const,
+    schedule_value: "0 * * * *",
+    steps: [
+      {
+        id: "trigger",
+        type: "trigger" as const,
+        label: "Hourly",
+        icon: "clock",
+        position: { x: 0, y: 0 },
+        triggerConfig: { type: "schedule" as const },
+      },
+      {
+        id: "act1",
+        type: "action" as const,
+        label: "Run script",
+        icon: "code",
+        position: { x: 0, y: 100 },
+        script: "console.log('hi');",
+      },
+    ],
+  };
+
+  it("rejects 'add' with action steps when provider is HTTP-only", async () => {
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      { action: "add", ...actionStepWorkflow },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+        loadIntegrationProvider: async () => httpOnlyProvider,
+      },
+    );
+    expect(result.content[0].text).toContain("broker-capable integration provider");
+    expect(scheduler.addTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects 'add' with action steps when no provider is configured", async () => {
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      { action: "add", ...actionStepWorkflow },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+        loadIntegrationProvider: async () => null,
+      },
+    );
+    expect(result.content[0].text).toContain("broker-capable integration provider");
+    expect(scheduler.addTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects 'update' with action steps when provider is HTTP-only and does not mutate the task", async () => {
+    const localRepo = makeMockStepContentRepo();
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "task-1", steps: actionStepWorkflow.steps },
+      {
+        scheduler,
+        stepContentRepo: localRepo,
+        taskContext: dmContext,
+        loadIntegrationProvider: async () => httpOnlyProvider,
+      },
+    );
+    expect(result.content[0].text).toContain("broker-capable integration provider");
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+    expect(localRepo.upsert).not.toHaveBeenCalled();
+    expect(localRepo.deleteOrphanedSteps).not.toHaveBeenCalled();
   });
 });
 

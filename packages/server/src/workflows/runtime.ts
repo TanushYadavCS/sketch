@@ -6,7 +6,7 @@
  *
  * Steps are executed in array order (edges are metadata for the UI, ignored in Phase 1).
  * Step content (prompts, scripts) is loaded from automation_step_content at execution time.
- * Credentials are resolved at execution time via findIntegrationProvider (org-level) +
+ * Credentials are resolved at execution time via loadIntegrationProvider (org-level) +
  * creator's email (user scoping).
  */
 import { spawn } from "node:child_process";
@@ -21,6 +21,7 @@ import type { createAutomationStepContentRepository } from "../db/repositories/a
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { StepOutput, WorkflowStep } from "./types";
 
@@ -32,7 +33,7 @@ export interface ExecuteAutomationParams {
   config: { DATA_DIR: string; BASE_URL?: string; PORT: number; CLAUDE_CONFIG_DIR: string };
   runsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -183,7 +184,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           config: params.config,
           creatorEmail,
           workspaceDir,
-          findIntegrationProvider: params.findIntegrationProvider,
+          loadIntegrationProvider: params.loadIntegrationProvider,
         });
       } else if (step.type === "agent") {
         // Content from automation_step_content, fallback to task.prompt for legacy tasks
@@ -204,7 +205,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           creatorEmail,
           runAgent: params.runAgent,
           buildMcpServers: params.buildMcpServers,
-          findIntegrationProvider: params.findIntegrationProvider,
+          loadIntegrationProvider: params.loadIntegrationProvider,
           userRepo: params.userRepo,
           inboxMessagesRepo: params.inboxMessagesRepo,
           sendDm: params.sendDm,
@@ -370,27 +371,40 @@ interface ActionStepParams {
   config: ExecuteAutomationParams["config"];
   creatorEmail: string | null;
   workspaceDir: string;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
-  const { script, step, input, runId, logger, creatorEmail, workspaceDir, findIntegrationProvider } = params;
+  const { script, step, input, runId, logger, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
 
   // Resolve integration env vars for the action step child process.
   //
   // INTEGRATION_CLI is the generic contract that action-step scripts rely on:
   // scripts invoke `node $INTEGRATION_CLI <subcommand>` without knowing which
-  // provider is configured. Today only the Canvas provider is wired here; when
-  // a second provider lands, this block should branch to resolve the correct
-  // CLI path per provider type.
-  const integrationEnv: Record<string, string> = {};
-  const provider = await findIntegrationProvider();
-  if (provider?.type === "canvas") {
-    const creds = JSON.parse(provider.credentials);
-    if (creds.apiKey) integrationEnv.CANVAS_API_KEY_MCP = creds.apiKey;
-    if (creatorEmail) integrationEnv.CANVAS_USER_EMAIL = creatorEmail;
-    integrationEnv.INTEGRATION_CLI = join(params.config.CLAUDE_CONFIG_DIR, "skills", "canvas", "canvas-cli.js");
+  // provider is configured. The provider's broker spec supplies both the CLI
+  // path and the credential env vars; SKE-41 will route this through the
+  // brokered launcher so credentials never appear in the action-step env.
+  //
+  // Symmetric with the creation-time gate in handleManageScheduledTasks: a
+  // provider rotation that drops broker capability after an action-step task
+  // was created must fail loudly here rather than silently spawning the
+  // script with an empty INTEGRATION_CLI.
+  const provider = await loadIntegrationProvider();
+  const spec = provider?.isBrokerCapable()
+    ? provider.getBrokerSpec({
+        userEmail: creatorEmail,
+        claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
+      })
+    : null;
+  if (!spec) {
+    throw new Error(
+      `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
+    );
   }
+  const integrationEnv: Record<string, string> = {
+    ...spec.credentialEnv,
+    INTEGRATION_CLI: spec.cliPath,
+  };
 
   const tempFile = join(tmpdir(), `sketch-auto-${runId}-${step.id}.js`);
   const wrappedScript = `
@@ -482,7 +496,7 @@ interface AgentStepParams {
   creatorEmail: string | null;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
@@ -636,7 +650,7 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     platform: outputPlatform,
     onProgressEvent: async () => {},
     integrationMcpServers,
-    findIntegrationProvider: params.findIntegrationProvider,
+    loadIntegrationProvider: params.loadIntegrationProvider,
     sessionMode: "fresh",
     contextType: "scheduled_task",
     currentUserId: task.created_by,

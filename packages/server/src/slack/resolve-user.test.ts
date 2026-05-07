@@ -16,6 +16,7 @@ const makeUser = (
   email_verified_at: null as string | null,
   tool_progress: null as string | null,
   reasoning_text: null as number | null,
+  timezone: null as string | null,
   ...overrides,
 });
 
@@ -35,7 +36,7 @@ function makeDeps(overrides: Partial<ResolveSlackUserDeps> = {}): ResolveSlackUs
           makeUser({ id, slack_user_id: data.slackUserId ?? null, email: data.email ?? null }),
         ),
     },
-    getUserInfo: vi.fn().mockResolvedValue({ name: "alice", realName: "Alice", email: "alice@example.com" }),
+    getUserInfo: vi.fn().mockResolvedValue({ name: "alice", realName: "Alice", email: "alice@example.com", tz: null }),
     logger: {
       info: vi.fn(),
       debug: vi.fn(),
@@ -48,7 +49,12 @@ function makeDeps(overrides: Partial<ResolveSlackUserDeps> = {}): ResolveSlackUs
 
 describe("resolveSlackUser", () => {
   it("returns existing user found by Slack ID", async () => {
-    const existing = makeUser({ id: "u1", slack_user_id: "U001", email: "alice@example.com" });
+    const existing = makeUser({
+      id: "u1",
+      slack_user_id: "U001",
+      email: "alice@example.com",
+      timezone: "America/Los_Angeles",
+    });
     const deps = makeDeps();
     vi.mocked(deps.users.findBySlackId).mockResolvedValue(existing);
 
@@ -57,6 +63,57 @@ describe("resolveSlackUser", () => {
     expect(result).toBe(existing);
     expect(deps.getUserInfo).not.toHaveBeenCalled();
     expect(deps.users.create).not.toHaveBeenCalled();
+  });
+
+  it("hydrates timezone from Slack profile when user has none", async () => {
+    const existing = makeUser({
+      id: "u1",
+      slack_user_id: "U001",
+      email: "alice@example.com",
+      timezone: null,
+    });
+    const updated = makeUser({
+      id: "u1",
+      slack_user_id: "U001",
+      email: "alice@example.com",
+      timezone: "Asia/Kolkata",
+    });
+    const deps = makeDeps();
+    vi.mocked(deps.users.findBySlackId).mockResolvedValue(existing);
+    vi.mocked(deps.getUserInfo).mockResolvedValue({
+      name: "alice",
+      realName: "Alice",
+      email: "alice@example.com",
+      tz: "Asia/Kolkata",
+    });
+    vi.mocked(deps.users.update).mockResolvedValue(updated);
+
+    const result = await resolveSlackUser("U001", deps);
+
+    expect(deps.users.update).toHaveBeenCalledWith("u1", { timezone: "Asia/Kolkata" });
+    expect(result).toBe(updated);
+  });
+
+  it("does not write timezone when Slack profile has none", async () => {
+    const existing = makeUser({
+      id: "u1",
+      slack_user_id: "U001",
+      email: "alice@example.com",
+      timezone: null,
+    });
+    const deps = makeDeps();
+    vi.mocked(deps.users.findBySlackId).mockResolvedValue(existing);
+    vi.mocked(deps.getUserInfo).mockResolvedValue({
+      name: "alice",
+      realName: "Alice",
+      email: "alice@example.com",
+      tz: null,
+    });
+
+    const result = await resolveSlackUser("U001", deps);
+
+    expect(deps.users.update).not.toHaveBeenCalled();
+    expect(result).toBe(existing);
   });
 
   it("backfills email when existing user has none", async () => {
@@ -77,7 +134,7 @@ describe("resolveSlackUser", () => {
     const existing = makeUser({ id: "u1", slack_user_id: "U001", email: null });
     const deps = makeDeps();
     vi.mocked(deps.users.findBySlackId).mockResolvedValue(existing);
-    vi.mocked(deps.getUserInfo).mockResolvedValue({ name: "alice", realName: "Alice", email: null });
+    vi.mocked(deps.getUserInfo).mockResolvedValue({ name: "alice", realName: "Alice", email: null, tz: null });
 
     const result = await resolveSlackUser("U001", deps);
 
@@ -129,7 +186,7 @@ describe("resolveSlackUser", () => {
   it("creates new user when Slack profile has no email (skips email lookup)", async () => {
     const created = makeUser({ id: "u-new", slack_user_id: "U001", email: null });
     const deps = makeDeps();
-    vi.mocked(deps.getUserInfo).mockResolvedValue({ name: "bob", realName: "Bob", email: null });
+    vi.mocked(deps.getUserInfo).mockResolvedValue({ name: "bob", realName: "Bob", email: null, tz: null });
     vi.mocked(deps.users.create).mockResolvedValue(created);
 
     const result = await resolveSlackUser("U001", deps);

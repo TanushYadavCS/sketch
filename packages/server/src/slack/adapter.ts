@@ -32,6 +32,7 @@ import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
   type ProgressDisplaySettings,
@@ -83,7 +84,7 @@ export interface SlackAdapterDeps {
   };
   runAgent: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -202,7 +203,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     slack: slackDeps,
     runAgent,
     buildMcpServers,
-    findIntegrationProvider,
+    loadIntegrationProvider,
     scheduler,
     stepContentRepo,
     automationRunsRepo,
@@ -422,6 +423,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           currentUserEmail: user.email,
           workspaceDir,
           orgDir: config.CLAUDE_CONFIG_DIR,
+          timezone: user.timezone,
           isSharedContext: false,
           inboxMessages: pendingInbox.messages,
         });
@@ -442,13 +444,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
-          findIntegrationProvider,
+          loadIntegrationProvider,
           contextType: "dm",
           taskContext: {
             platform: "slack" as const,
             contextType: "dm" as const,
             deliveryTarget: message.channelId,
             createdBy: user.id,
+            creatorTimezone: user.timezone,
           },
           scheduler,
           stepContentRepo,
@@ -638,6 +641,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             currentUserEmail: user.email,
             workspaceDir,
             orgDir: config.CLAUDE_CONFIG_DIR,
+            timezone: user.timezone,
             isSharedContext: true,
             threadTag: "thread",
             channelContext: { channelName: channel.name },
@@ -667,6 +671,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             currentUserEmail: user.email,
             workspaceDir,
             orgDir: config.CLAUDE_CONFIG_DIR,
+            timezone: user.timezone,
             isSharedContext: true,
             threadTag,
             channelContext: { channelName: channel.name },
@@ -699,7 +704,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
-          findIntegrationProvider,
+          loadIntegrationProvider,
           contextType: "channel_mention",
           currentUserId: user.id,
           taskContext: {
@@ -707,6 +712,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             contextType: "channel" as const,
             deliveryTarget: message.channelId,
             createdBy: user.id,
+            creatorTimezone: user.timezone,
             threadTs: message.threadTs ? threadTs : undefined,
           },
           scheduler,

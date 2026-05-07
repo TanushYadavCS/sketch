@@ -52,6 +52,7 @@ import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
+import type { IntegrationProvider } from "./integrations/types";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
@@ -68,7 +69,7 @@ interface AppDeps {
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
   runAgent?: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider?: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
@@ -218,7 +219,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       whatsapp: deps?.whatsapp,
       runAgent: deps?.runAgent,
       buildMcpServers: deps?.buildMcpServers,
-      findIntegrationProvider: deps?.findIntegrationProvider,
+      loadIntegrationProvider: deps?.loadIntegrationProvider,
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
     }),
@@ -239,7 +240,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         whatsapp: deps.whatsapp,
         runAgent: deps.runAgent,
         buildMcpServers: deps.buildMcpServers,
-        findIntegrationProvider: deps.findIntegrationProvider,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
         scheduler: deps.scheduler as TaskScheduler | undefined,
         stepContentRepo: deps.stepContentRepo,
         automationRunsRepo: deps.automationRunsRepo,

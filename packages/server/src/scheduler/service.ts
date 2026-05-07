@@ -29,11 +29,13 @@ import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { executeAutomation } from "../workflows/runtime";
+import { parseOnceSchedule } from "./parse-once";
 import type { ScheduledTask } from "./types";
 
 export interface TaskSchedulerDeps {
@@ -46,7 +48,7 @@ export interface TaskSchedulerDeps {
   settingsRepo: ReturnType<typeof createSettingsRepository>;
   runAgent: typeof runAgent;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
-  findIntegrationProvider: () => Promise<{ type: string; credentials: string } | null>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   automationRunsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo: ReturnType<typeof createUserRepository>;
@@ -96,7 +98,7 @@ export class TaskScheduler {
     }
 
     if (task.schedule_type === "once") {
-      const runAt = new Date(task.schedule_value);
+      const runAt = parseOnceSchedule(task.schedule_value, task.timezone || "UTC");
       if (runAt.getTime() <= Date.now()) {
         await this.repo.updateStatus(task.id, "completed");
         await this.repo.update(task.id, { next_run_at: null });
@@ -146,7 +148,7 @@ export class TaskScheduler {
   }
 
   async executeTask(task: ScheduledTaskRow): Promise<void> {
-    const { config, logger, queueManager, getSlack, whatsapp, findIntegrationProvider } = this.deps;
+    const { config, logger, queueManager, getSlack, whatsapp, loadIntegrationProvider } = this.deps;
 
     // Build onMessage callback for delivery
     let onMessage: (text: string) => Promise<void>;
@@ -214,7 +216,7 @@ export class TaskScheduler {
           config,
           runsRepo: this.deps.automationRunsRepo,
           stepContentRepo: this.deps.stepContentRepo,
-          findIntegrationProvider,
+          loadIntegrationProvider,
           userRepo: this.deps.userRepo,
           runAgent: this.deps.runAgent,
           buildMcpServers: this.deps.buildMcpServers,
