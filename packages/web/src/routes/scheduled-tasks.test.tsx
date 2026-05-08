@@ -56,6 +56,7 @@ function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTas
     description: null,
     steps: null,
     stepCount: 0,
+    triggerConfig: null,
     outputTarget: null,
     outputPlatform: null,
     lastRunStatus: null,
@@ -216,6 +217,46 @@ describe("ScheduledTasksPage", () => {
     });
     expect(screen.getByText("UTC")).toBeInTheDocument();
     expect(screen.getByText("Session mode")).toBeInTheDocument();
+  });
+
+  it("shows Canvas-managed trigger state in task rows and details", async () => {
+    installTaskHandlers([
+      buildTask({
+        id: "task-canvas",
+        prompt: "Handle ClickUp issues",
+        scheduleType: "external",
+        scheduleValue: "canvas",
+        scheduleLabel: "Canvas managed: ClickUp - new issue created",
+        nextRunAt: null,
+        lastRunAt: null,
+        triggerConfig: {
+          type: "canvas",
+          app: "ClickUp",
+          eventDescription: "new issue created",
+          componentKey: "clickup.issue.created",
+          status: "pending_canvas_setup",
+        },
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Handle ClickUp issues")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Canvas")).toBeInTheDocument();
+    expect(screen.getByText("Trigger · Canvas · ClickUp · new issue created")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Show details for Handle ClickUp issues/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Trigger")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Type")).toBeInTheDocument();
+    expect(screen.getByText("Trigger-based")).toBeInTheDocument();
+    expect(screen.getByText("Canvas · ClickUp · new issue created")).toBeInTheDocument();
+    expect(screen.queryByText("Pending setup")).not.toBeInTheDocument();
   });
 
   it("pauses an active task via the dropdown menu", async () => {

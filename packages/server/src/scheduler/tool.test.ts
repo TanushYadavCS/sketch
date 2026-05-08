@@ -361,6 +361,57 @@ describe("handleManageScheduledTasks — add", () => {
     expect(agentStep.agentPrompt).toBeUndefined();
   });
 
+  it("creates Canvas-managed trigger workflows without requiring a local schedule", async () => {
+    const localRepo = makeMockStepContentRepo();
+    const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(makeTask({ id: "wf-canvas" })) });
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "New ClickUp issues",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "ClickUp issue created",
+            icon: "clickup",
+            position: { x: 0, y: 0 },
+            triggerConfig: {
+              type: "canvas",
+              app: "clickup",
+              eventDescription: "new issue created",
+              componentKey: "clickup.issue.created",
+            },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "Handle issue",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "Handle the incoming issue.",
+          },
+        ],
+      },
+      { scheduler, stepContentRepo: localRepo, taskContext: dmContext },
+    );
+
+    expect(result.content[0].text).toContain("Automation created:");
+    expect(scheduler.addTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scheduleType: "external",
+        scheduleValue: "canvas",
+      }),
+    );
+    const addTaskCall = (scheduler.addTask as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const stepsJson = JSON.parse(addTaskCall.steps);
+    expect(stepsJson[0].triggerConfig).toEqual(
+      expect.objectContaining({
+        type: "canvas",
+        status: "pending_canvas_setup",
+      }),
+    );
+  });
+
   it("fails loudly when multi-step workflow is created without stepContentRepo", async () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
@@ -513,6 +564,56 @@ describe("handleManageScheduledTasks — update", () => {
       timezone: undefined,
       sessionMode: undefined,
     });
+  });
+
+  it("normalizes schedule fields when updating steps to a Canvas-managed trigger", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Linear issue created",
+            icon: "linear",
+            position: { x: 0, y: 0 },
+            triggerConfig: {
+              type: "canvas",
+              app: "linear",
+              eventDescription: "new issue created",
+              componentKey: "linear.issue.created",
+            },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "Handle issue",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "Handle the issue.",
+          },
+        ],
+      },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        scheduleType: "external",
+        scheduleValue: "canvas",
+      }),
+    );
+    const updateFields = (scheduler.updateTask as ReturnType<typeof vi.fn>).mock.calls[0][1] as { steps: string };
+    const stepsJson = JSON.parse(updateFields.steps);
+    expect(stepsJson[0].triggerConfig).toEqual(
+      expect.objectContaining({
+        type: "canvas",
+        status: "pending_canvas_setup",
+      }),
+    );
   });
 
   it("returns updated task in response", async () => {

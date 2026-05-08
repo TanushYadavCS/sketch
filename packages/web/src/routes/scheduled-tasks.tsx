@@ -108,6 +108,32 @@ function isMultiStep(task: ScheduledTaskListItem): boolean {
   return task.stepCount > 2;
 }
 
+function isCanvasManaged(task: ScheduledTaskListItem): boolean {
+  return task.triggerConfig?.type === "canvas" || (task.scheduleType === "external" && task.scheduleValue === "canvas");
+}
+
+function getTriggerDetail(task: ScheduledTaskListItem): string {
+  if (isCanvasManaged(task)) {
+    const config = task.triggerConfig;
+    const parts = ["Canvas"];
+    if (config?.app) parts.push(config.app);
+    if (config?.eventDescription) parts.push(config.eventDescription);
+    return parts.join(" · ");
+  }
+
+  return `${task.scheduleType} · ${task.scheduleValue}`;
+}
+
+function getTaskScheduleLabel(task: ScheduledTaskListItem): string {
+  if (!isCanvasManaged(task)) return task.scheduleLabel;
+
+  const config = task.triggerConfig;
+  const parts = ["Trigger", "Canvas"];
+  if (config?.app) parts.push(config.app);
+  if (config?.eventDescription) parts.push(config.eventDescription);
+  return parts.join(" · ");
+}
+
 function getStepSummary(task: ScheduledTaskListItem): string | null {
   if (!task.steps) return null;
   try {
@@ -279,6 +305,7 @@ function TaskRow({
   onTrigger: () => void;
 }) {
   const multi = isMultiStep(task);
+  const canvasManaged = isCanvasManaged(task);
   const displayName = task.title ?? task.prompt;
   const stepSummary = multi ? getStepSummary(task) : null;
   const lastRunLabel = formatRelativeTime(task.lastRunAt);
@@ -311,7 +338,7 @@ function TaskRow({
             {stepSummary ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{stepSummary}</p> : null}
 
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
-              {task.scheduleLabel}
+              {getTaskScheduleLabel(task)}
               {lastRunLabel ? (
                 <>
                   <span className="mx-1.5">&middot;</span>
@@ -333,7 +360,10 @@ function TaskRow({
           </div>
         </button>
 
-        <TaskStatusBadge status={task.status} />
+        <div className="flex shrink-0 items-center gap-2">
+          {canvasManaged ? <CanvasManagedBadge triggerConfig={task.triggerConfig} /> : null}
+          <TaskStatusBadge status={task.status} />
+        </div>
 
         <button
           type="button"
@@ -395,6 +425,7 @@ function TaskRow({
 function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; isAdmin: boolean }) {
   const multi = isMultiStep(task);
   const targetLabel = task.targetLabel || task.deliveryTarget;
+  const canvasManaged = isCanvasManaged(task);
 
   return (
     <div className="border-t border-border bg-muted/20 px-4 py-4 space-y-4">
@@ -404,10 +435,11 @@ function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; is
 
       <dl className="grid gap-4 text-sm sm:grid-cols-2">
         <DetailItem label="Target" value={`${task.targetKindLabel} \u00b7 ${targetLabel}`} />
-        <DetailItem label="Schedule" value={`${task.scheduleType} \u00b7 ${task.scheduleValue}`} />
-        <DetailItem label="Timezone" value={task.timezone} />
+        <DetailItem label="Type" value={canvasManaged ? "Trigger-based" : "Scheduled"} />
+        <DetailItem label={canvasManaged ? "Trigger" : "Schedule"} value={getTriggerDetail(task)} />
+        {canvasManaged ? null : <DetailItem label="Timezone" value={task.timezone} />}
         <DetailItem label="Session mode" value={formatSessionMode(task.sessionMode)} />
-        <DetailItem label="Next run" value={formatDateTime(task.nextRunAt)} />
+        {canvasManaged ? null : <DetailItem label="Next run" value={formatDateTime(task.nextRunAt)} />}
         <DetailItem label="Last run" value={formatDateTime(task.lastRunAt)} />
         <DetailItem label="Created" value={formatDateTime(task.createdAt)} />
         {isAdmin ? <DetailItem label="Created by" value={task.creatorName ?? task.createdBy ?? "Unknown"} /> : null}
@@ -426,7 +458,7 @@ function StepsList({ task }: { task: ScheduledTaskListItem }) {
 
   if (!task.steps) return null;
 
-  let steps: Array<{ id: string; type: string; label: string }>;
+  let steps: Array<{ id: string; type: string; label: string; triggerConfig?: ScheduledTaskListItem["triggerConfig"] }>;
   try {
     steps = JSON.parse(task.steps);
   } catch {
@@ -759,6 +791,31 @@ function TaskStatusBadge({ status }: { status: ScheduledTaskListItem["status"] }
   return (
     <Badge variant="outline" className="shrink-0">
       Completed
+    </Badge>
+  );
+}
+
+function CanvasManagedBadge({ triggerConfig }: { triggerConfig: ScheduledTaskListItem["triggerConfig"] }) {
+  const status = triggerConfig?.status;
+  if (status === "active") {
+    return (
+      <Badge variant="outline" className="shrink-0 border-blue-500/30 text-blue-700 dark:text-blue-300">
+        Canvas
+      </Badge>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <Badge variant="outline" className="shrink-0 border-destructive/30 text-destructive">
+        Canvas error
+      </Badge>
+    );
+  }
+
+  return (
+    <Badge variant="outline" className="shrink-0">
+      Canvas
     </Badge>
   );
 }

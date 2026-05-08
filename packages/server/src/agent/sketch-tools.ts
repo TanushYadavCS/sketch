@@ -104,11 +104,23 @@ const workflowStepSchema = z.object({
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z
     .object({
-      type: z.enum(["webhook", "schedule"]),
+      type: z.enum(["webhook", "schedule", "canvas"]),
       scheduleType: z.enum(["cron", "interval", "once"]).optional(),
       scheduleValue: z.string().optional(),
       timezone: z.string().optional(),
+      app: z.string().optional().describe("Source app for Canvas-managed triggers, e.g. 'clickup' or 'linear'."),
+      eventDescription: z.string().optional().describe("Human-readable event description, e.g. 'new issue created'."),
+      componentKey: z.string().optional().describe("Canvas trigger component ID/key found through search_components."),
+      configuredProps: z.record(z.string(), z.unknown()).optional(),
+      status: z.enum(["pending_canvas_setup", "active", "error"]).optional(),
+      canvasWorkflowId: z.string().optional(),
+      canvasTriggerNodeId: z.string().optional(),
+      canvasActionNodeId: z.string().optional(),
+      errorMessage: z.string().optional(),
     })
+    .describe(
+      "Use type 'canvas' for Canvas-managed external triggers. Use it only when a Canvas skill/MCP has selected a trigger component via search_components; otherwise create a normal schedule trigger fallback.",
+    )
     .optional(),
 });
 
@@ -180,7 +192,7 @@ type WorkflowStepInput = z.infer<typeof workflowStepSchema>;
 type ManageScheduledTasksParams = {
   action: "list" | "add" | "update" | "remove" | "pause" | "resume" | "run" | "getRun" | "updateStepContent";
   prompt?: string;
-  schedule_type?: "cron" | "interval" | "once";
+  schedule_type?: "cron" | "interval" | "once" | "external";
   schedule_value?: string;
   timezone?: string;
   session_mode?: "fresh" | "persistent" | "chat";
@@ -282,8 +294,18 @@ export async function handleManageScheduledTasks(
         if (!params.title) {
           return text("Error: title is required when creating a multi-step automation.");
         }
-        if (!params.schedule_type || !params.schedule_value) {
+        const triggerStep = params.steps.find((step) => step.type === "trigger");
+        const isCanvasManagedTrigger = triggerStep?.triggerConfig?.type === "canvas";
+        if (!isCanvasManagedTrigger && (!params.schedule_type || !params.schedule_value)) {
           return text("Error: schedule_type and schedule_value are required for add action.");
+        }
+        if (triggerStep?.triggerConfig?.type === "canvas") {
+          params.schedule_type = "external";
+          params.schedule_value = "canvas";
+          triggerStep.triggerConfig = {
+            ...triggerStep.triggerConfig,
+            status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
+          };
         }
 
         const brokerError = await ensureBrokerForActionSteps(params.steps);
@@ -497,6 +519,15 @@ export async function handleManageScheduledTasks(
           );
         }
 
+        const triggerStep = params.steps.find((step) => step.type === "trigger");
+        if (triggerStep?.triggerConfig?.type === "canvas") {
+          updateFields.scheduleType = "external";
+          updateFields.scheduleValue = "canvas";
+          triggerStep.triggerConfig = {
+            ...triggerStep.triggerConfig,
+            status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
+          };
+        }
         const stepsForDb = stripContentFromSteps(params.steps);
         updateFields.steps = JSON.stringify(stepsForDb);
 
