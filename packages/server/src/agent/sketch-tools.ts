@@ -602,13 +602,21 @@ export async function handleManageScheduledTasks(
       if (!task_id) {
         return text("Error: task_id is required for run action.");
       }
-      if (!deps.queueManager) {
-        return text("Error: manual trigger is not available in this context.");
+      try {
+        const result = await deps.scheduler.executeTaskById(task_id);
+        if (!result) {
+          const latestRun = deps.automationRunsRepo ? await deps.automationRunsRepo.getLatest(task_id) : undefined;
+          return text(
+            latestRun
+              ? `Automation ${task_id} is already completed. Latest run:\n${JSON.stringify(latestRun, null, 2)}`
+              : `Automation ${task_id} is already completed and has no run history.`,
+          );
+        }
+        return text(`Automation ${task_id} completed:\n${JSON.stringify(result, null, 2)}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return text(`Error: ${message}`);
       }
-      deps.queueManager.getQueue(`task-${task_id}`).enqueue(async () => {
-        await deps.scheduler.executeTaskById(task_id);
-      });
-      return text(`Automation ${task_id} triggered. Check run history for results.`);
     }
 
     case "getRun": {

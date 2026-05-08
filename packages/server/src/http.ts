@@ -70,6 +70,7 @@ interface AppDeps {
   runAgent?: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
@@ -220,6 +221,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       runAgent: deps?.runAgent,
       buildMcpServers: deps?.buildMcpServers,
       loadIntegrationProvider: deps?.loadIntegrationProvider,
+      listAgentEnvForRuntime: deps?.listAgentEnvForRuntime ?? ((userId) => agentEnvVars.listForRuntime(userId)),
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
     }),

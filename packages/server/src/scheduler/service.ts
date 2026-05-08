@@ -34,7 +34,7 @@ import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
-import { executeAutomation } from "../workflows/runtime";
+import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
 import { parseOnceSchedule } from "./parse-once";
 import type { ScheduledTask } from "./types";
 
@@ -49,6 +49,7 @@ export interface TaskSchedulerDeps {
   runAgent: typeof runAgent;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
   automationRunsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo: ReturnType<typeof createUserRepository>;
@@ -154,90 +155,40 @@ export class TaskScheduler {
   }
 
   async executeTask(task: ScheduledTaskRow): Promise<void> {
-    const { config, logger, queueManager, getSlack, whatsapp, loadIntegrationProvider } = this.deps;
+    this.enqueueTaskRun(task, () => this.getRunnableTask(task.id, false)).catch((err) => {
+      this.deps.logger.error({ err, taskId: task.id }, "Automation execution failed");
+    });
+  }
 
-    // Build onMessage callback for delivery
-    let onMessage: (text: string) => Promise<void>;
+  private async executeTaskNow(task: ScheduledTaskRow): Promise<AutomationExecutionResult> {
+    const { config, logger, loadIntegrationProvider } = this.deps;
+    const sendMessage = this.getSendMessage(task);
 
-    if (task.platform === "slack") {
-      const slack = getSlack();
-      if (!slack) {
-        logger.warn({ taskId: task.id }, "TaskScheduler: Slack bot unavailable, skipping task");
-        return;
-      }
-
-      // Determine output target: use output_target if set (for workflows), else delivery_target
-      const outputTarget = task.output_target ?? task.delivery_target;
-
-      if (
-        task.context_type === "channel" &&
-        task.session_mode !== "fresh" &&
-        task.thread_ts &&
-        outputTarget === task.delivery_target
-      ) {
-        const threadTs = task.thread_ts;
-        onMessage = async (text) => {
-          await slack.postThreadReply(outputTarget, threadTs, text);
-        };
-      } else {
-        onMessage = async (text) => {
-          await slack.postMessage(outputTarget, text);
-        };
-      }
-    } else {
-      if (!whatsapp.isConnected) {
-        logger.warn({ taskId: task.id }, "TaskScheduler: WhatsApp not connected, skipping task");
-        return;
-      }
-      onMessage = async (text) => {
-        await whatsapp.sendText(task.output_target ?? task.delivery_target, text);
-      };
+    if (!sendMessage) {
+      throw new Error(`Delivery target for task ${task.id} is unavailable`);
     }
 
-    // Queue key: chat-mode keeps original key (sequential with conversation), everything else is isolated
-    let queueKey: string;
-    if (task.session_mode === "chat") {
-      // Chat mode: original queue key logic
-      const userId = task.created_by ?? task.delivery_target;
-      if (task.context_type === "dm") {
-        queueKey = userId;
-      } else if (task.platform === "slack" && task.context_type === "channel") {
-        queueKey = task.thread_ts ? `${task.delivery_target}:${task.thread_ts}` : task.delivery_target;
-      } else {
-        const groupId = task.delivery_target.replace("@g.us", "");
-        queueKey = `wa-group-${groupId}`;
-      }
-    } else {
-      // Fresh/persistent: isolated queue key
-      queueKey = `task-${task.id}`;
-    }
-
-    queueManager.getQueue(queueKey).enqueue(async () => {
-      try {
-        await executeAutomation({
-          task,
-          triggerData: { scheduledAt: new Date().toISOString(), taskId: task.id },
-          db: this.deps.db,
-          logger,
-          config,
-          runsRepo: this.deps.automationRunsRepo,
-          stepContentRepo: this.deps.stepContentRepo,
-          loadIntegrationProvider,
-          userRepo: this.deps.userRepo,
-          runAgent: this.deps.runAgent,
-          buildMcpServers: this.deps.buildMcpServers,
-          inboxMessagesRepo: this.deps.inboxMessagesRepo,
-          sendDm: this.deps.sendDm,
-          sendMessage: onMessage,
-        });
-      } catch (err) {
-        logger.error({ err, taskId: task.id }, "Automation execution failed");
-      }
+    const result = await executeAutomation({
+      task,
+      triggerData: { scheduledAt: new Date().toISOString(), taskId: task.id },
+      db: this.deps.db,
+      logger,
+      config,
+      runsRepo: this.deps.automationRunsRepo,
+      stepContentRepo: this.deps.stepContentRepo,
+      loadIntegrationProvider,
+      listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
+      userRepo: this.deps.userRepo,
+      runAgent: this.deps.runAgent,
+      buildMcpServers: this.deps.buildMcpServers,
+      inboxMessagesRepo: this.deps.inboxMessagesRepo,
+      sendDm: this.deps.sendDm,
+      sendMessage,
     });
 
     const now = new Date().toISOString();
     const cron = this.cronInstances.get(task.id);
-    const nextRun = cron?.nextRun()?.toISOString() ?? null;
+    const nextRun = task.schedule_type === "once" ? null : (cron?.nextRun()?.toISOString() ?? null);
     await this.repo.updateRunTimestamps(task.id, now, nextRun);
 
     if (task.schedule_type === "once") {
@@ -246,6 +197,94 @@ export class TaskScheduler {
       this.unscheduleTask(task.id);
       this.deps.logger.debug({ taskId: task.id }, "TaskScheduler: once task completed, unscheduled");
     }
+
+    return result;
+  }
+
+  private enqueueTaskRun(
+    task: ScheduledTaskRow,
+    getTask: () => Promise<ScheduledTaskRow | null>,
+  ): Promise<AutomationExecutionResult | null> {
+    const queueKey = this.getQueueKey(task);
+    return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
+      this.deps.queueManager.getQueue(queueKey).enqueue(async () => {
+        try {
+          const current = await getTask();
+          if (!current) {
+            resolve(null);
+            return;
+          }
+          resolve(await this.executeTaskNow(current));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+  }
+
+  private async getRunnableTask(id: string, strict: boolean): Promise<ScheduledTaskRow | null> {
+    const row = await this.repo.getById(id);
+    if (!row) {
+      if (strict) throw new Error(`Task ${id} not found`);
+      return null;
+    }
+    if (row.status === "completed" && row.schedule_type === "once") return null;
+    if (row.status !== "active") {
+      if (strict) throw new Error(`Task ${id} is not active`);
+      return null;
+    }
+    return row;
+  }
+
+  private getSendMessage(task: ScheduledTaskRow): ((text: string) => Promise<void>) | null {
+    const { logger, getSlack, whatsapp } = this.deps;
+
+    if (task.platform === "slack") {
+      const slack = getSlack();
+      if (!slack) {
+        logger.warn({ taskId: task.id }, "TaskScheduler: Slack bot unavailable, skipping task");
+        return null;
+      }
+
+      const outputTarget = task.output_target ?? task.delivery_target;
+      if (
+        task.context_type === "channel" &&
+        task.session_mode !== "fresh" &&
+        task.thread_ts &&
+        outputTarget === task.delivery_target
+      ) {
+        const threadTs = task.thread_ts;
+        return async (text) => {
+          await slack.postThreadReply(outputTarget, threadTs, text);
+        };
+      }
+
+      return async (text) => {
+        await slack.postMessage(outputTarget, text);
+      };
+    }
+
+    if (!whatsapp.isConnected) {
+      logger.warn({ taskId: task.id }, "TaskScheduler: WhatsApp not connected, skipping task");
+      return null;
+    }
+
+    return async (text) => {
+      await whatsapp.sendText(task.output_target ?? task.delivery_target, text);
+    };
+  }
+
+  private getQueueKey(task: ScheduledTaskRow): string {
+    if (task.session_mode === "chat") {
+      const userId = task.created_by ?? task.delivery_target;
+      if (task.context_type === "dm") return userId;
+      if (task.platform === "slack" && task.context_type === "channel") {
+        return task.thread_ts ? `${task.delivery_target}:${task.thread_ts}` : task.delivery_target;
+      }
+      return `wa-group-${task.delivery_target.replace("@g.us", "")}`;
+    }
+
+    return `task-${task.id}`;
   }
 
   async addTask(params: {
@@ -301,11 +340,12 @@ export class TaskScheduler {
     return this.toScheduledTask(updated ?? row);
   }
 
-  async executeTaskById(id: string): Promise<void> {
+  async executeTaskById(id: string): Promise<AutomationExecutionResult | null> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
+    if (row.status === "completed" && row.schedule_type === "once") return null;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
-    await this.executeTask(row);
+    return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true));
   }
 
   async getTaskById(id: string): Promise<ScheduledTask | null> {

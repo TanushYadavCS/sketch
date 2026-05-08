@@ -9,11 +9,10 @@
  * Credentials are resolved at execution time via loadIntegrationProvider (org-level) +
  * creator's email (user scoping).
  */
-import { spawn } from "node:child_process";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
+import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -22,6 +21,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
+import { cleanupIntegrationAccess, startIntegrationAccess } from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { StepOutput, WorkflowStep } from "./types";
 
@@ -34,6 +34,7 @@ export interface ExecuteAutomationParams {
   runsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -73,12 +74,14 @@ export type AutomationExecutionEvent =
       stepOutputs: Record<string, StepOutput>;
     };
 
-export async function executeAutomation(params: ExecuteAutomationParams): Promise<{
+export interface AutomationExecutionResult {
   runId: string;
   status: string;
   finalOutput: unknown;
   stepOutputs: Record<string, StepOutput>;
-}> {
+}
+
+export async function executeAutomation(params: ExecuteAutomationParams): Promise<AutomationExecutionResult> {
   const { task, triggerData, logger, runsRepo, stepContentRepo, sendMessage, onEvent } = params;
 
   // 1. Verify creator exists
@@ -179,12 +182,15 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           script: content.content,
           step,
           input: previousOutput,
+          taskId: task.id,
           runId,
           logger,
           config: params.config,
+          creatorId,
           creatorEmail,
           workspaceDir,
           loadIntegrationProvider: params.loadIntegrationProvider,
+          listAgentEnvForRuntime: params.listAgentEnvForRuntime,
         });
       } else if (step.type === "agent") {
         // Content from automation_step_content, fallback to task.prompt for legacy tasks
@@ -215,9 +221,10 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         });
       }
 
+      const normalizedOutput = normalizeStepOutput(output);
       const durationMs = Date.now() - startTime;
-      stepOutputs[step.id] = { output, status: "completed", duration_ms: durationMs };
-      previousOutput = output;
+      stepOutputs[step.id] = { output: normalizedOutput, status: "completed", duration_ms: durationMs };
+      previousOutput = normalizedOutput;
 
       logger.info({ taskId: task.id, runId, stepId: step.id, durationMs }, "Automation: step completed");
 
@@ -229,7 +236,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         stepId: step.id,
         status: "completed",
         durationMs,
-        outputSummary: output != null ? JSON.stringify(output).slice(0, 200) : null,
+        outputSummary: summarizeOutput(normalizedOutput),
       });
     } catch (err) {
       const durationMs = Date.now() - startTime;
@@ -321,15 +328,16 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     taskId: task.id,
     runId,
     title: task.title ?? task.prompt,
-    triggerSummary: triggerData ? JSON.stringify(triggerData).slice(0, 200) : "Manual/scheduled trigger",
+    triggerSummary: triggerData
+      ? (summarizeOutput(triggerData) ?? "Manual/scheduled trigger")
+      : "Manual/scheduled trigger",
     steps: steps
       .filter((s) => s.type !== "trigger")
       .map((s) => ({
         label: s.label,
         status: stepOutputs[s.id]?.status ?? "skipped",
         duration_ms: stepOutputs[s.id]?.duration_ms ?? 0,
-        outputSummary:
-          stepOutputs[s.id]?.output != null ? JSON.stringify(stepOutputs[s.id].output).slice(0, 200) : undefined,
+        outputSummary: summarizeOutput(stepOutputs[s.id]?.output) ?? undefined,
       })),
     logger,
   });
@@ -360,124 +368,167 @@ function resolveWorkspaceKey(task: ScheduledTaskRow): string {
   return task.created_by ?? task.delivery_target;
 }
 
-// --- Action step: child process ---
+// --- Action step: in-process script ---
+
+type AsyncFunctionConstructor = (
+  ...args: string[]
+) => (input: unknown, ctx: ScriptContext, signal: AbortSignal) => Promise<unknown>;
+
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as AsyncFunctionConstructor;
+
+export interface ScriptContext {
+  log: Logger;
+  env: Readonly<Record<string, string>>;
+  workspaceDir: string;
+}
 
 interface ActionStepParams {
   script: string;
   step: WorkflowStep;
   input: unknown;
+  taskId: string;
   runId: string;
   logger: Logger;
   config: ExecuteAutomationParams["config"];
+  creatorId: string | null;
   creatorEmail: string | null;
   workspaceDir: string;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   const { script, step, input, runId, logger, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
 
-  // Resolve integration env vars for the action step child process.
-  //
-  // INTEGRATION_CLI is the generic contract that action-step scripts rely on:
-  // scripts invoke `node $INTEGRATION_CLI <subcommand>` without knowing which
-  // provider is configured. The provider's broker spec supplies both the CLI
-  // path and the credential env vars; SKE-41 will route this through the
-  // brokered launcher so credentials never appear in the action-step env.
-  //
-  // Symmetric with the creation-time gate in handleManageScheduledTasks: a
-  // provider rotation that drops broker capability after an action-step task
-  // was created must fail loudly here rather than silently spawning the
-  // script with an empty INTEGRATION_CLI.
-  const provider = await loadIntegrationProvider();
-  const spec = provider?.isBrokerCapable()
-    ? provider.getBrokerSpec({
-        userEmail: creatorEmail,
-        claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
-      })
-    : null;
-  if (!spec) {
+  const integrationAccess = await startIntegrationAccess({
+    userEmail: creatorEmail,
+    claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
+    workspaceDir,
+    loadIntegrationProvider,
+    logger,
+  });
+
+  if (!integrationAccess.envVars.CANVAS_CLI) {
+    await cleanupIntegrationAccess(integrationAccess);
     throw new Error(
       `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
     );
   }
-  const integrationEnv: Record<string, string> = {
-    ...spec.credentialEnv,
-    INTEGRATION_CLI: spec.cliPath,
-  };
-
-  const tempFile = join(tmpdir(), `sketch-auto-${runId}-${step.id}.js`);
-  const wrappedScript = `
-const input = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
-async function main() {
-  ${script}
-}
-main().then(output => {
-  process.stdout.write(JSON.stringify(output ?? null));
-}).catch(err => {
-  process.stderr.write(JSON.stringify({ message: err.message, stack: err.stack }));
-  process.exit(1);
-});
-`;
-
-  await writeFile(tempFile, wrappedScript, "utf-8");
 
   try {
-    return await new Promise<unknown>((resolve, reject) => {
-      const timeoutMs = (step.timeout ?? 1800) * 1000;
-      const child = spawn(process.execPath, [tempFile], {
-        timeout: timeoutMs,
-        env: {
-          PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-          NODE_NO_WARNINGS: "1",
-          ...integrationEnv,
-        },
-        cwd: workspaceDir,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      let stdout = "";
-      let stderr = "";
-
-      child.stdout.on("data", (data: Buffer) => {
-        stdout += data.toString();
-      });
-      child.stderr.on("data", (data: Buffer) => {
-        stderr += data.toString();
-      });
-
-      child.stdin.write(JSON.stringify(input ?? null));
-      child.stdin.end();
-
-      child.on("close", (code) => {
-        logger.info(
-          { stepId: step.id, exitCode: code, stdoutLen: stdout.length, stderrLen: stderr.length },
-          "Automation action: child process exited",
-        );
-        if (code !== 0) {
-          let errorMsg: string;
-          try {
-            const parsed = JSON.parse(stderr);
-            errorMsg = parsed.message || stderr;
-          } catch {
-            errorMsg = stderr || `Process exited with code ${code}`;
-          }
-          reject(new Error(errorMsg));
-        } else {
-          try {
-            resolve(stdout ? JSON.parse(stdout) : null);
-          } catch {
-            resolve(stdout || null);
-          }
-        }
-      });
-
-      child.on("error", (err) => {
-        reject(err);
-      });
+    const env = await buildScriptEnv({
+      creatorId: params.creatorId,
+      listAgentEnvForRuntime: params.listAgentEnvForRuntime,
+      integrationEnv: integrationAccess.envVars,
     });
+
+    const ctx = buildScriptContext({
+      taskId: params.taskId,
+      runId,
+      stepId: step.id,
+      logger,
+      env,
+      workspaceDir,
+    });
+
+    const timeoutMs = (step.timeout ?? 1800) * 1000;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener(
+        "abort",
+        () => reject(new Error(`Action step ${step.id} timed out after ${timeoutMs}ms`)),
+        { once: true },
+      );
+    });
+
+    try {
+      const fn = AsyncFunction("input", "ctx", "signal", wrapActionScript(script));
+      const output = await Promise.race([fn(input ?? null, ctx, controller.signal), timeoutPromise]);
+      logger.info({ runId, stepId: step.id, timeoutMs }, "Automation action: script completed");
+      return output ?? null;
+    } finally {
+      clearTimeout(timeout);
+    }
   } finally {
-    await rm(tempFile, { force: true }).catch(() => {});
+    await cleanupIntegrationAccess(integrationAccess);
+  }
+}
+
+function wrapActionScript(script: string): string {
+  return `"use strict";\n${normalizeActionScript(script)}\nif (typeof action === "function") {\n  return await action(input, ctx, signal);\n}`;
+}
+
+function normalizeActionScript(script: string): string {
+  const trimmed = script.trimStart();
+  return trimmed
+    .replace(/^export\s+default\s+(async\s+function\s+action\b)/, "$1")
+    .replace(/^export\s+default\s+(function\s+action\b)/, "$1")
+    .replace(/^export\s+(async\s+function\s+action\b)/, "$1")
+    .replace(/^export\s+(function\s+action\b)/, "$1")
+    .replace(/^export\s+default\s+(async\s+function)\s*\(/, "const action = $1(")
+    .replace(/^export\s+default\s+(function)\s*\(/, "const action = $1(");
+}
+
+async function buildScriptEnv(params: {
+  creatorId: string | null;
+  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  integrationEnv: Record<string, string>;
+}): Promise<Readonly<Record<string, string>>> {
+  const userEnv =
+    params.creatorId && params.listAgentEnvForRuntime
+      ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.creatorId))
+      : {};
+  const env: Record<string, string> = {
+    PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+    NODE_NO_WARNINGS: "1",
+    ...userEnv,
+    ...params.integrationEnv,
+  };
+  if (env.CANVAS_CLI && !env.INTEGRATION_CLI) {
+    env.INTEGRATION_CLI = env.CANVAS_CLI;
+  }
+  return Object.freeze(env);
+}
+
+function buildScriptContext(params: {
+  taskId: string;
+  runId: string;
+  stepId: string;
+  logger: Logger;
+  env: Readonly<Record<string, string>>;
+  workspaceDir: string;
+}): ScriptContext {
+  const log =
+    params.logger.child?.({ taskId: params.taskId, runId: params.runId, stepId: params.stepId }) ?? params.logger;
+  return Object.freeze({
+    log,
+    env: params.env,
+    workspaceDir: params.workspaceDir,
+  });
+}
+
+function normalizeStepOutput(output: unknown): unknown {
+  if (output === undefined) return null;
+  try {
+    const serialized = JSON.stringify(output);
+    if (serialized === undefined) {
+      throw new Error("Action output is not JSON-serializable");
+    }
+    return JSON.parse(serialized);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Action output is not JSON-serializable: ${message}`);
+  }
+}
+
+function summarizeOutput(output: unknown, maxLength = 200): string | null {
+  if (output == null) return null;
+  try {
+    const text = typeof output === "string" ? output : JSON.stringify(output);
+    return text.length > maxLength ? text.slice(0, maxLength) : text;
+  } catch {
+    return "[unserializable output]";
   }
 }
 

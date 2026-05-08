@@ -17,7 +17,7 @@ interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
   resumeTask: (id: string) => Promise<void>;
   removeTask: (id: string) => Promise<boolean>;
-  executeTaskById: (id: string) => Promise<void>;
+  executeTaskById: (id: string) => Promise<unknown>;
 }
 
 interface ScheduledTaskListItem {

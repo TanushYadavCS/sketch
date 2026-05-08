@@ -34,6 +34,7 @@ interface WorkflowRouteDeps {
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
 }
@@ -237,6 +238,7 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
           runsRepo,
           stepContentRepo,
           loadIntegrationProvider,
+          listAgentEnvForRuntime: deps.listAgentEnvForRuntime,
           userRepo: deps.users,
           runAgent: deps.runAgent,
           buildMcpServers: deps.buildMcpServers,

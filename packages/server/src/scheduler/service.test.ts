@@ -32,9 +32,17 @@ let lastExecuteAutomationParams: ExecuteAutomationParams | null = null;
 vi.mock("../workflows/runtime", () => ({
   executeAutomation: vi.fn().mockImplementation(async (params: ExecuteAutomationParams) => {
     lastExecuteAutomationParams = params;
-    return { runId: "mock-run-1", status: "completed" };
+    return { runId: "mock-run-1", status: "completed", finalOutput: null, stepOutputs: {} };
   }),
 }));
+
+async function resetExecuteAutomationMock(): Promise<void> {
+  const { executeAutomation } = await import("../workflows/runtime");
+  vi.mocked(executeAutomation).mockImplementation(async (params: ExecuteAutomationParams) => {
+    lastExecuteAutomationParams = params;
+    return { runId: "mock-run-1", status: "completed", finalOutput: null, stepOutputs: {} };
+  });
+}
 
 let cronCallCount = 0;
 
@@ -168,6 +176,7 @@ beforeEach(async () => {
   db = await createTestDb();
   repo = createScheduledTaskRepository(db);
   vi.clearAllMocks();
+  await resetExecuteAutomationMock();
   mockCronInstances.length = 0;
   cronCallCount = 0;
 });
@@ -777,6 +786,93 @@ describe("executeTask() queue key derivation", () => {
   });
 });
 
+describe("executeTaskById() queueing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("serializes manual runs through the scheduler queue", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    let releaseFirst: (() => void) | undefined;
+    let activeRuns = 0;
+    let maxActiveRuns = 0;
+    let callCount = 0;
+
+    executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+      lastExecuteAutomationParams = params;
+      activeRuns += 1;
+      maxActiveRuns = Math.max(maxActiveRuns, activeRuns);
+      callCount += 1;
+      const runNumber = callCount;
+      if (runNumber === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      activeRuns -= 1;
+      return { runId: `run-${runNumber}`, status: "completed", finalOutput: null, stepOutputs: {} };
+    });
+
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({ ...baseTaskFields, session_mode: "persistent" });
+
+    const firstRun = scheduler.executeTaskById(row.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(1);
+
+    const secondRun = scheduler.executeTaskById(row.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(1);
+    expect(maxActiveRuns).toBe(1);
+
+    releaseFirst?.();
+    await firstRun;
+    await secondRun;
+
+    expect(callCount).toBe(2);
+    expect(maxActiveRuns).toBe(1);
+  });
+
+  it("does not rerun a once task that completes while a manual run is queued", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    let releaseScheduledRun: (() => void) | undefined;
+    let callCount = 0;
+
+    executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+      lastExecuteAutomationParams = params;
+      callCount += 1;
+      if (callCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseScheduledRun = resolve;
+        });
+      }
+      return { runId: `run-${callCount}`, status: "completed", finalOutput: null, stepOutputs: {} };
+    });
+
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({
+      ...baseTaskFields,
+      schedule_type: "once",
+      schedule_value: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const manualRun = scheduler.executeTaskById(row.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(1);
+
+    releaseScheduledRun?.();
+    await expect(manualRun).resolves.toBeNull();
+    expect(callCount).toBe(1);
+  });
+});
+
 describe("executeTask() run timestamps", () => {
   it("updates last_run_at after execution", async () => {
     const deps = buildDeps(db);
@@ -792,7 +888,7 @@ describe("executeTask() run timestamps", () => {
 
     const updated = await repo.getById(row.id);
     expect(updated?.last_run_at).toBeDefined();
-    expect(typeof updated?.last_run_at).toBe("string");
+    expect(Number.isNaN(new Date(updated?.last_run_at as string).getTime())).toBe(false);
 
     vi.restoreAllMocks();
   });

@@ -703,6 +703,57 @@ describe("handleManageScheduledTasks — resume", () => {
   });
 });
 
+describe("handleManageScheduledTasks — run", () => {
+  it("awaits execution and returns the run result", async () => {
+    const runResult = {
+      runId: "run-1",
+      status: "completed",
+      finalOutput: { ok: true },
+      stepOutputs: { step1: { output: { ok: true }, status: "completed", duration_ms: 12 } },
+    };
+    const scheduler = makeMockScheduler({
+      executeTaskById: vi.fn().mockResolvedValue(runResult),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "run", task_id: "task-1" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1");
+    expect(result.content[0].text).toContain("Automation task-1 completed");
+    expect(result.content[0].text).toContain('"runId": "run-1"');
+    expect(result.content[0].text).toContain('"ok": true');
+  });
+
+  it("returns the latest run when a completed once task is run again", async () => {
+    const scheduler = makeMockScheduler({
+      executeTaskById: vi.fn().mockResolvedValue(null),
+    });
+    const automationRunsRepo = {
+      getLatest: vi.fn().mockResolvedValue({
+        id: "run-1",
+        task_id: "task-1",
+        status: "completed",
+        step_outputs: "{}",
+        trigger_data: null,
+        error_message: null,
+        started_at: "2026-05-08T00:00:00.000Z",
+        completed_at: "2026-05-08T00:00:01.000Z",
+      }),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
+
+    const result = await handleManageScheduledTasks(
+      { action: "run", task_id: "task-1" },
+      { scheduler, stepContentRepo, automationRunsRepo, taskContext: dmContext },
+    );
+
+    expect(automationRunsRepo.getLatest).toHaveBeenCalledWith("task-1");
+    expect(result.content[0].text).toContain("already completed");
+    expect(result.content[0].text).toContain('"id": "run-1"');
+  });
+});
+
 describe("handleManageScheduledTasks — add with once schedule type", () => {
   it("succeeds with a valid future ISO datetime", async () => {
     const futureDate = new Date(Date.now() + 3_600_000).toISOString();
