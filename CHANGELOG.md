@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.27.1] -- 2026-05-11
+
+- Runtime tooling: install GitHub CLI `2.92.0` from the official GitHub release package with pinned SHA256 checksums for `amd64` and `arm64`, replacing the older Debian Bookworm package while keeping the temporary downloader out of the final image.
+
 ## [0.27.0] -- 2026-05-11
 
 - Runtime: preinstall `md-to-pdf` with Debian Chromium, `fonts-liberation`, and Puppeteer configured to use `/usr/bin/chromium`, so managed tenants can generate PDFs without first-run package/browser downloads.
