@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { whatsappNumberSchema } from "@sketch/shared";
 /**
  * System API routes — internal management endpoints authenticated by bearer token.
@@ -122,6 +123,10 @@ const whatsappPairingValidationSchema = z.object({
   adminWhatsappNumber: whatsappNumberSchema,
 });
 
+function generateSketchApiKey(): string {
+  return `sk_live_${randomBytes(32).toString("base64url")}`;
+}
+
 function buildOpeningIntroMessage(botName: string): string {
   return `I've added your team to ${botName}. Who should I introduce myself to first? Reply with names or @mentions.`;
 }
@@ -204,6 +209,19 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid system secret" } }, 401);
     }
     return next();
+  });
+
+  routes.put("/api-key", async (c) => {
+    await ensureSettingsRow();
+
+    const row = await settings.get();
+    if (row?.sketch_api_key) {
+      return c.json({ configured: true, apiKey: row.sketch_api_key });
+    }
+
+    const apiKey = generateSketchApiKey();
+    await settings.update({ sketchApiKey: apiKey });
+    return c.json({ configured: true, apiKey });
   });
 
   routes.put("/slack/tokens", async (c) => {
