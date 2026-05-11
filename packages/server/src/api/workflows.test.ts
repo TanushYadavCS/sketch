@@ -91,7 +91,7 @@ async function seedTenant(db: Kysely<DB>) {
 async function createWorkflow(
   db: Kysely<DB>,
   params: {
-    createdBy: string;
+    createdBy: string | null;
     status?: "active" | "paused" | "completed";
     deliveryTarget?: string;
     outputTarget?: string | null;
@@ -243,6 +243,111 @@ describe("workflow invoke API", () => {
       data: { payload: { customerId: "cus_123" } },
     });
     expect(runBody.run.step_outputs.step1.output).toBe("workflow result");
+  });
+
+  it("runs Canvas-style requests as JSON using the workflow creator as requester", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), { logger: createTestLogger() });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        responseMode: "json",
+        source: "canvas",
+        canvasWorkflowId: "canvas-workflow-1",
+        canvasTriggerNodeId: "trigger-node-1",
+        canvasActionNodeId: "sketch-action-node-1",
+        canvasRunId: "canvas-run-1",
+        triggerComponentKey: "linear-new-issue",
+        triggerData: { issue: { title: "Fix onboarding", url: "https://linear.app/test/issue/SKE-1" } },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      ok: true,
+      workflowId: task.id,
+      status: "completed",
+      finalOutput: "workflow result",
+      finalOutputSummary: "workflow result",
+      delivery: { mode: "silent" },
+    });
+    expect(body.runId).toEqual(expect.any(String));
+    expect(body.stepOutputs.step1.output).toBe("workflow result");
+
+    const runRes = await app.request(`/api/workflows/${task.id}/runs/${body.runId}`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+    expect(runRes.status).toBe(200);
+    const runBody = await runRes.json();
+    expect(runBody.run.trigger_data).toMatchObject({
+      source: "canvas",
+      requesterUserId: requester.id,
+      canvas: {
+        workflowId: "canvas-workflow-1",
+        triggerNodeId: "trigger-node-1",
+        actionNodeId: "sketch-action-node-1",
+        runId: "canvas-run-1",
+        triggerComponentKey: "linear-new-issue",
+      },
+      data: { issue: { title: "Fix onboarding", url: "https://linear.app/test/issue/SKE-1" } },
+    });
+  });
+
+  it("returns ok false for failed JSON workflow runs", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id });
+    sdk.query.mockImplementation(() => {
+      throw new Error("boom");
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), { logger: createTestLogger() });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        responseMode: "json",
+        source: "canvas",
+        triggerData: { issue: { title: "Fix onboarding" } },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      ok: false,
+      workflowId: task.id,
+      status: "failed",
+      finalOutput: null,
+      finalOutputSummary: null,
+      delivery: { mode: "silent" },
+    });
+    expect(body.stepOutputs.step1.status).toBe("failed");
+    expect(body.stepOutputs.step1.error.message).toBe("boom");
+  });
+
+  it("returns a clear error when no requester or workflow creator can be resolved", async () => {
+    await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: null });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), { logger: createTestLogger() });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({ responseMode: "json", source: "canvas" }),
+    });
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: {
+        code: "REQUESTER_NOT_FOUND",
+        message: "Workflow requester could not be resolved",
+      },
+    });
   });
 
   it.each(["paused", "completed"] as const)("returns persisted runs after a workflow is %s", async (status) => {
