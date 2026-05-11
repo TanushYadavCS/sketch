@@ -32,7 +32,24 @@ RUN pnpm --filter @sketch/server deploy --prod --legacy /app/pruned
 # ── Stage 2: Runtime ──────────────────────────────────────────────
 FROM node:24-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends git gh python3 python3-pip python3-venv ca-certificates chromium fonts-liberation && rm -rf /var/lib/apt/lists/*
+ARG GH_VERSION=2.92.0
+ARG GH_ARM64_DEB_SHA256=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
+ARG GH_AMD64_DEB_SHA256=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
+ARG TARGETARCH
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git python3 python3-pip python3-venv ca-certificates chromium fonts-liberation wget \
+  && case "${TARGETARCH}" in \
+    arm64) gh_arch=arm64; gh_sha256="${GH_ARM64_DEB_SHA256}" ;; \
+    amd64) gh_arch=amd64; gh_sha256="${GH_AMD64_DEB_SHA256}" ;; \
+    *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+  esac \
+  && wget -O /tmp/gh.deb "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.deb" \
+  && echo "${gh_sha256}  /tmp/gh.deb" | sha256sum -c - \
+  && apt-get install -y --no-install-recommends /tmp/gh.deb \
+  && rm -f /tmp/gh.deb \
+  && apt-get purge -y --auto-remove wget \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
