@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.27.0] -- 2026-05-11
+
+- Runtime: preinstall `md-to-pdf` with Debian Chromium, `fonts-liberation`, and Puppeteer configured to use `/usr/bin/chromium`, so managed tenants can generate PDFs without first-run package/browser downloads.
+- Runtime tooling: add `gh`, Debian `python3`, `python3-pip`, and `python3-venv` to the tenant image while keeping broad converters such as `pandoc`, `wkhtmltopdf`, and `libreoffice` out of scope.
+- Workflows: run workflow action steps in-process and add Canvas-managed automation support, including Canvas trigger state in scheduled task APIs and UI.
+- Agents: add agent-as-teammate configuration with per-agent tool allowlists, Slack channel bindings, WhatsApp group bindings, and WhatsApp fallback agent support.
+- API: add Sketch invoke and workflow invoke APIs for authenticated external runs, including API key settings and run/session surfaces.
+- Search: restore recency, kind, and multi-entity search behavior with a composite entity mention index.
+- Scheduling: add per-user timezone support across Slack, WhatsApp, scheduled tasks, and parse-once scheduling.
+- Reliability: guard WhatsApp auth clearing races and truncate/summarize long connector sync errors.
+
 ## [0.26.0] -- 2026-05-03
 
 - Slack: add App Home support with an Assistant pane DM entry point and update the Slack app manifest for the new home tab surface.
