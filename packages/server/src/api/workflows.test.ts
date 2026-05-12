@@ -297,6 +297,30 @@ describe("workflow invoke API", () => {
     });
   });
 
+  it("requires requesterUserId for external API workflow runs", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), { logger: createTestLogger() });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        responseMode: "json",
+        source: "external-api",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "requesterUserId is required for external-api workflow runs",
+      },
+    });
+  });
+
   it("returns ok false for failed JSON workflow runs", async () => {
     const { requester } = await seedTenant(db);
     const task = await createWorkflow(db, { createdBy: requester.id });
