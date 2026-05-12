@@ -20,18 +20,28 @@ const deliveryModeSchema = z.enum(["silent", "target"]).default("silent");
 const responseModeSchema = z.enum(["sse", "json"]).default("sse");
 const workflowRunSourceSchema = z.enum(["external-api", "canvas"]).default("external-api");
 
-const workflowRunSchema = z.object({
-  requesterUserId: z.string().min(1).optional(),
-  triggerData: z.unknown().optional(),
-  deliveryMode: deliveryModeSchema,
-  responseMode: responseModeSchema,
-  source: workflowRunSourceSchema,
-  canvasWorkflowId: z.string().min(1).optional(),
-  canvasTriggerNodeId: z.string().min(1).optional(),
-  canvasActionNodeId: z.string().min(1).optional(),
-  canvasRunId: z.string().min(1).optional(),
-  triggerComponentKey: z.string().min(1).optional(),
-});
+const workflowRunSchema = z
+  .object({
+    requesterUserId: z.string().min(1).optional(),
+    triggerData: z.unknown().optional(),
+    deliveryMode: deliveryModeSchema,
+    responseMode: responseModeSchema,
+    source: workflowRunSourceSchema,
+    canvasWorkflowId: z.string().min(1).optional(),
+    canvasTriggerNodeId: z.string().min(1).optional(),
+    canvasActionNodeId: z.string().min(1).optional(),
+    canvasRunId: z.string().min(1).optional(),
+    triggerComponentKey: z.string().min(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.source === "external-api" && !value.requesterUserId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requesterUserId"],
+        message: "requesterUserId is required for external-api workflow runs",
+      });
+    }
+  });
 
 interface WorkflowRouteDeps {
   db: Kysely<DB>;
@@ -240,7 +250,7 @@ async function resolveRequesterId(
   task: ScheduledTaskRow,
   users: ReturnType<typeof createUserRepository>,
 ): Promise<string> {
-  const requesterUserId = parsed.requesterUserId ?? task.created_by;
+  const requesterUserId = parsed.requesterUserId ?? (parsed.source === "canvas" ? task.created_by : undefined);
   if (!requesterUserId) {
     throw new WorkflowApiError("REQUESTER_NOT_FOUND", "Workflow requester could not be resolved", 404);
   }
