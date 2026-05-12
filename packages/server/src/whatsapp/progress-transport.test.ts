@@ -99,7 +99,7 @@ describe("createWhatsAppProgressTransport", () => {
     }
   });
 
-  it("replaces the latest concise status in place", async () => {
+  it("replaces the latest status in place", async () => {
     const bot = createMockWhatsApp();
     const transport = createWhatsAppProgressTransport(bot, "jid", "replace");
 
@@ -116,17 +116,17 @@ describe("createWhatsAppProgressTransport", () => {
     const bot = createMockWhatsApp();
     const transport = createWhatsAppProgressTransport(bot, "jid", "accumulate");
 
-    await transport.syncLines(["🔧 Tweaking things"]);
-    await transport.syncLines(["🔧 Tweaking things (x2)"]);
+    await transport.syncLines(['🔧 Editing "a.ts"']);
+    await transport.syncLines(['🔧 Editing "a.ts" (x2)']);
     await vi.advanceTimersByTimeAsync(1_500);
     await transport.flush();
 
     expect(bot.sendText).toHaveBeenCalledTimes(1);
-    expect(bot.sendText).toHaveBeenCalledWith("jid", "🔧 Tweaking things", undefined);
+    expect(bot.sendText).toHaveBeenCalledWith("jid", '🔧 Editing "a.ts"', undefined);
     expect(bot.editText).toHaveBeenCalledWith(
       "jid",
       { remoteJid: "jid", id: "sent-1", fromMe: true },
-      "🔧 Tweaking things (x2)",
+      '🔧 Editing "a.ts" (x2)',
     );
   });
 });

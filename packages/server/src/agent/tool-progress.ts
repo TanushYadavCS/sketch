@@ -6,6 +6,17 @@ export interface ProgressRenderer {
   getLines(): string[];
 }
 
+interface FriendlyTargetLine {
+  prefix: string;
+  keys: string[];
+  fallback: string;
+}
+
+interface CanvasInvocation {
+  subcommand: string | null;
+  target: string | null;
+}
+
 const TOOL_EMOJI: Record<string, string> = {
   Read: "📖",
   Write: "✍️",
@@ -13,6 +24,8 @@ const TOOL_EMOJI: Record<string, string> = {
   Bash: "💻",
   Glob: "📂",
   Grep: "🔎",
+  WebSearch: "🌐",
+  WebFetch: "🌐",
   Skill: "📚",
   SendFileToChat: "📎",
   ManageScheduledTasks: "⏰",
@@ -29,146 +42,200 @@ const PRIMARY_ARG: Record<string, string> = {
   Bash: "command",
   Glob: "pattern",
   Grep: "pattern",
+  WebSearch: "query",
+  WebFetch: "url",
   Skill: "skill",
   SendFileToChat: "file_path",
   ManageScheduledTasks: "action",
   SearchEntities: "queries",
 };
 
+const EXTRA_FALLBACK_ARG_KEYS = ["path", "folder"];
+const SAFE_FALLBACK_ARG_KEYS = [
+  ...new Set([...Object.values(PRIMARY_ARG).filter((key) => key !== "command"), ...EXTRA_FALLBACK_ARG_KEYS]),
+];
 const MAX_ARG_LENGTH = 40;
 
-const FRIENDLY_MESSAGES: Record<string, string[]> = {
-  Read: ["📖 Flipping through some pages", "📖 Digging into the files", "📖 Scanning the code", "📖 Having a read"],
-  Write: ["✨ Creating something new", "📝 Drafting a new file", "🛠️ Building from scratch"],
-  Edit: [
-    "🔧 Tweaking things",
-    "✂️ Making some cuts",
-    "🪚 Fixing things up",
-    "🎯 Nailing the fix",
-    "🧩 Putting pieces together",
-  ],
-  Bash: ["🚀 Running commands", "⚡ Crunching away", "🖥️ Talking to the machine", "🔥 Firing things up"],
-  Glob: ["🔍 Hunting for files", "🗺️ Exploring the codebase", "📂 Sifting through folders"],
-  Grep: ["🕵️ On the hunt", "🔎 Searching high and low", "🎪 Looking for clues"],
-  Skill: ["📚 Loading a new trick", "🎓 Brushing up on skills", "🎒 Packing the toolkit"],
-  SendFileToChat: ["📦 Wrapping up a file for you", "🎁 Sending something your way", "📎 Getting that ready for you"],
-  ManageScheduledTasks: ["⏰ Setting up schedules", "📅 Marking the calendar", "🕰️ Planning ahead"],
-  SearchEntities: ["🕵️ Looking things up", "🌐 Scanning the knowledge base", "🔭 Searching far and wide"],
-  GetEntityContext: ["🧠 Gathering some context", "📋 Getting the full picture", "🪞 Pulling up the details"],
-  Fallback: [
-    "⚙️ Working on it",
-    "🧙 Cooking something up",
-    "🔮 Consulting the magic ball",
-    "🤖 Beep boop, working on it",
-  ],
+const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
+  Read: { prefix: "Reading", keys: ["file_path"], fallback: "Reading a file" },
+  Write: { prefix: "Creating", keys: ["file_path"], fallback: "Creating a file" },
+  Edit: { prefix: "Editing", keys: ["file_path"], fallback: "Editing a file" },
+  Glob: { prefix: "Finding files matching", keys: ["pattern"], fallback: "Finding files" },
+  Grep: { prefix: "Searching for", keys: ["pattern"], fallback: "Searching files" },
+  WebSearch: { prefix: "Searching the web for", keys: ["query"], fallback: "Searching the web" },
+  WebFetch: { prefix: "Fetching", keys: ["url"], fallback: "Fetching a web page" },
+  Skill: { prefix: "Loading skill", keys: ["skill", "name"], fallback: "Loading a skill" },
+  SendFileToChat: { prefix: "Sending file", keys: ["file_path"], fallback: "Sending a file" },
+  ManageScheduledTasks: {
+    prefix: "Managing scheduled tasks:",
+    keys: ["action"],
+    fallback: "Managing scheduled tasks",
+  },
+  SearchEntities: { prefix: "Searching entities for", keys: ["queries"], fallback: "Searching entities" },
+};
+
+const FRIENDLY_STATIC_LINES: Record<string, string> = {
+  GetEntityContext: "Getting entity context",
+};
+
+const CANVAS_FRIENDLY_TARGET_PREFIX: Record<string, string> = {
+  "direct-execute-action": "Canvas action:",
+  "direct-execute-web-search": "Canvas web search:",
+  "direct-execute-web-scrape": "Canvas web scrape:",
+};
+
+const CANVAS_FRIENDLY_FALLBACK: Record<string, string> = {
+  "direct-execute-action": "Running Canvas action",
+  "direct-execute-web-search": "Searching the web with Canvas",
+  "direct-execute-web-scrape": "Scraping a web page with Canvas",
 };
 
 function stripMcpPrefix(toolName: string): string {
   return toolName.replace(/^mcp__.+?__/, "");
 }
 
+function stringifyValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value.trim() ? value : null;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value.map((entry) => stringifyValue(entry)).filter((entry): entry is string => Boolean(entry));
+    return parts.length > 0 ? parts.join(", ") : null;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
+function quoteValue(value: string): string {
+  const chars = Array.from(value);
+  const clipped = chars.length > MAX_ARG_LENGTH ? `${chars.slice(0, MAX_ARG_LENGTH).join("")}...` : value;
+  return JSON.stringify(clipped);
+}
+
+function findInputValue(input: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = stringifyValue(input[key]);
+    if (value) return value;
+  }
+  return null;
+}
+
+function findFallbackInputValue(input: Record<string, unknown>): string | null {
+  return findInputValue(input, SAFE_FALLBACK_ARG_KEYS);
+}
+
+function findCanvasFlag(command: string, flags: string[]): string | null {
+  for (const flag of flags) {
+    const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = command.match(new RegExp(`${escaped}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|([^\\s|;&]+))`));
+    const value = match?.[1] ?? match?.[2] ?? match?.[3];
+    if (value) return value;
+  }
+  return null;
+}
+
+function parseCanvasInvocation(command: string): CanvasInvocation | null {
+  if (!/\$\{?CANVAS_CLI\}?/.test(command)) return null;
+
+  const normalized = command.replace(/["']?\$\{?CANVAS_CLI\}?["']?/g, "$CANVAS_CLI");
+  const afterCli = normalized.match(/\$CANVAS_CLI\s+([\s\S]+)/)?.[1] ?? "";
+  const segment = afterCli.split(/[|;&\n]/)[0]?.trim() ?? "";
+  const subcommand = segment.match(/^([^\s]+)/)?.[1] ?? null;
+  const target = findCanvasFlag(segment, [
+    "--component-key",
+    "--componentKey",
+    "--query",
+    "--queries",
+    "--q",
+    "--url",
+    "--apps",
+    "--key",
+    "--field-name",
+    "--fieldName",
+    "--search-query",
+    "--searchQuery",
+  ]);
+
+  return subcommand || target ? { subcommand, target } : { subcommand: null, target: null };
+}
+
+function getCanvasFriendlyLine(invocation: CanvasInvocation): string {
+  const target = invocation.target ? quoteValue(invocation.target) : null;
+  if (!invocation.subcommand) return "🧩 Running Canvas";
+
+  const prefix = CANVAS_FRIENDLY_TARGET_PREFIX[invocation.subcommand] ?? `Canvas ${invocation.subcommand}:`;
+  const fallback = CANVAS_FRIENDLY_FALLBACK[invocation.subcommand] ?? `Canvas ${invocation.subcommand}`;
+  return target ? `🧩 ${prefix} ${target}` : `🧩 ${fallback}`;
+}
+
+function getCanvasTechnicalLine(invocation: CanvasInvocation): string {
+  if (!invocation.subcommand) return "🧩 Canvas...";
+  const target = invocation.target ? `${invocation.subcommand} ${invocation.target}` : invocation.subcommand;
+  return `🧩 Canvas: ${quoteValue(target)}`;
+}
+
 function buildTechnicalLine(toolName: string, input: Record<string, unknown>): string {
   const display = stripMcpPrefix(toolName);
   const emoji = TOOL_EMOJI[display] ?? FALLBACK_EMOJI;
-  const argKey = PRIMARY_ARG[display];
 
-  if (argKey) {
-    const rawValue = input[argKey];
-    if (rawValue != null) {
-      const raw = typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
-      const clipped = raw.length > MAX_ARG_LENGTH ? `${raw.slice(0, MAX_ARG_LENGTH)}...` : raw;
-      return `${emoji} ${display}: "${clipped}"`;
-    }
+  if (display === "Bash") {
+    const command = findInputValue(input, ["command"]);
+    const canvasInvocation = command ? parseCanvasInvocation(command) : null;
+    if (canvasInvocation) return getCanvasTechnicalLine(canvasInvocation);
   }
 
-  return `${emoji} ${display}...`;
+  const argKey = PRIMARY_ARG[display];
+  const rawValue = argKey ? stringifyValue(input[argKey]) : findFallbackInputValue(input);
+  return rawValue ? `${emoji} ${display}: ${quoteValue(rawValue)}` : `${emoji} ${display}...`;
 }
 
-function buildVerboseLine(toolName: string, input: Record<string, unknown>): string {
+function getFriendlyLine(toolName: string, input: Record<string, unknown>): string {
   const display = stripMcpPrefix(toolName);
   const emoji = TOOL_EMOJI[display] ?? FALLBACK_EMOJI;
-  return Object.keys(input).length > 0 ? `${emoji} ${display}: ${JSON.stringify(input)}` : `${emoji} ${display}`;
-}
 
-function dedup(lines: string[]): string[] {
-  if (lines.length < 2) return [...lines];
-
-  const result = [...lines];
-  const last = result[result.length - 1];
-  if (!last) return result;
-
-  let runStart = result.length - 2;
-  while (runStart >= 0) {
-    const entry = result[runStart];
-    if (!entry) break;
-    const counterMatch = entry.match(/^(.*) \(x(\d+)\)$/);
-    const base = counterMatch ? counterMatch[1] : entry;
-    if (base === last) {
-      runStart--;
-    } else {
-      break;
-    }
-  }
-  runStart++;
-
-  const runLength = result.length - runStart;
-  if (runLength < 2) return result;
-
-  let totalCount = 0;
-  for (let i = runStart; i < result.length; i++) {
-    const entry = result[i];
-    if (!entry) continue;
-    const counterMatch = entry.match(/^(.*) \(x(\d+)\)$/);
-    totalCount += counterMatch ? Number(counterMatch[2]) : 1;
+  if (display === "Bash") {
+    const command = findInputValue(input, ["command"]);
+    const canvasInvocation = command ? parseCanvasInvocation(command) : null;
+    if (canvasInvocation) return getCanvasFriendlyLine(canvasInvocation);
+    return command ? `${emoji} Running ${quoteValue(command)}` : `${emoji} Running a shell command`;
   }
 
-  result.splice(runStart, runLength, `${last} (x${totalCount})`);
-  return result;
-}
+  const targetLine = FRIENDLY_TARGET_LINES[display];
+  if (targetLine) {
+    const value = findInputValue(input, targetLine.keys);
+    return value ? `${emoji} ${targetLine.prefix} ${quoteValue(value)}` : `${emoji} ${targetLine.fallback}`;
+  }
 
-function getFriendlyPool(toolName: string): string[] {
-  return FRIENDLY_MESSAGES[stripMcpPrefix(toolName)] ?? FRIENDLY_MESSAGES.Fallback;
-}
+  const staticLine = FRIENDLY_STATIC_LINES[display];
+  if (staticLine) {
+    return `${emoji} ${staticLine}`;
+  }
 
-function pickFriendlyLine(toolName: string, random: () => number): string {
-  const pool = getFriendlyPool(toolName);
-  const index = Math.floor(random() * pool.length);
-  return pool[index] ?? pool[0] ?? `${FALLBACK_EMOJI} Working on it`;
+  const fallback = findFallbackInputValue(input);
+  return fallback ? `${emoji} Using ${display}: ${quoteValue(fallback)}` : `${emoji} Using ${display}`;
 }
 
 export function getProgressTransportStrategy(settings: ProgressDisplaySettings): "accumulate" | "replace" | "none" {
-  if (settings.toolProgress === "concise") return "replace";
   if (settings.toolProgress === "off" && !settings.reasoningText) return "none";
-  return "accumulate";
+  return "replace";
 }
 
-export function createProgressRenderer(
-  settings: ProgressDisplaySettings,
-  random: () => number = Math.random,
-): ProgressRenderer {
+export function createProgressRenderer(settings: ProgressDisplaySettings): ProgressRenderer {
   const lines: string[] = [];
-  let lastFriendlyToolName: string | null = null;
-  let lastFriendlyLine: string | null = null;
-
-  const getFriendlyLine = (toolName: string) => {
-    if (toolName === lastFriendlyToolName && lastFriendlyLine) {
-      return lastFriendlyLine;
-    }
-
-    const line = pickFriendlyLine(toolName, random);
-    lastFriendlyToolName = toolName;
-    lastFriendlyLine = line;
-    return line;
-  };
-
-  const appendAccumulateLine = (line: string) => {
-    lines.push(line);
-    const deduped = dedup(lines);
-    lines.splice(0, lines.length, ...deduped);
-  };
+  let lastLine: string | null = null;
+  let repeatCount = 0;
 
   const replaceLine = (line: string) => {
     lines.splice(0, lines.length, line);
+  };
+
+  const appendAccumulateLine = (line: string) => {
+    repeatCount = line === lastLine ? repeatCount + 1 : 1;
+    lastLine = line;
+    replaceLine(repeatCount > 1 ? `${line} (x${repeatCount})` : line);
   };
 
   return {
@@ -176,10 +243,6 @@ export function createProgressRenderer(
       if (event.kind === "intermediate_text") {
         if (!settings.reasoningText) return;
         const line = `💬 ${event.text}`;
-        if (settings.toolProgress === "concise") {
-          replaceLine(line);
-          return;
-        }
         appendAccumulateLine(line);
         return;
       }
@@ -191,17 +254,7 @@ export function createProgressRenderer(
         return;
       }
 
-      if (settings.toolProgress === "verbose") {
-        appendAccumulateLine(buildVerboseLine(event.toolName, event.input));
-        return;
-      }
-
-      const friendlyLine = getFriendlyLine(event.toolName);
-      if (settings.toolProgress === "concise") {
-        replaceLine(friendlyLine);
-        return;
-      }
-
+      const friendlyLine = getFriendlyLine(event.toolName, event.input);
       appendAccumulateLine(friendlyLine);
     },
 

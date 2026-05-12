@@ -537,7 +537,7 @@ describe("whatsapp/adapter", () => {
 
       await handler({
         type: "dm",
-        text: "/toolprogress verbose",
+        text: "/toolprogress technical",
         jid: "1234@s.whatsapp.net",
         messageId: "m1",
         pushName: "Alice",
@@ -546,9 +546,9 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "verbose" });
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "technical" });
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "🔍 Tool progress set to verbose.");
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "🛠️ Tool progress set to technical.");
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
