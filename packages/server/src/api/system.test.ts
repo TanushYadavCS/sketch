@@ -237,6 +237,31 @@ describe("PUT /api/system/api-key", () => {
     expect(secondBody.apiKey).toBe(firstBody.apiKey);
   });
 
+  it("returns one Sketch API key for concurrent ensure requests", async () => {
+    const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const [first, second] = await Promise.all([
+      app.request("/api/system/api-key", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+      }),
+      app.request("/api/system/api-key", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+      }),
+    ]);
+    const firstBody = (await first.json()) as { apiKey: string };
+    const secondBody = (await second.json()) as { apiKey: string };
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(firstBody.apiKey).toBe(secondBody.apiKey);
+
+    const settingsRow = await settingsRepo.get();
+    expect(settingsRow?.sketch_api_key).toBe(firstBody.apiKey);
+  });
+
   it("rejects calls without the system secret", async () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });

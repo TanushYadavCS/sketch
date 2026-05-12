@@ -198,9 +198,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
   const routes = new Hono();
 
   async function ensureSettingsRow() {
-    if (!(await settings.get())) {
-      await settings.create();
-    }
+    await settings.ensure();
   }
 
   routes.use("/*", async (c, next) => {
@@ -212,15 +210,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
   });
 
   routes.put("/api-key", async (c) => {
-    await ensureSettingsRow();
-
-    const row = await settings.get();
-    if (row?.sketch_api_key) {
-      return c.json({ configured: true, apiKey: row.sketch_api_key });
-    }
-
-    const apiKey = generateSketchApiKey();
-    await settings.update({ sketchApiKey: apiKey });
+    const apiKey = await settings.ensureSketchApiKey(generateSketchApiKey);
     return c.json({ configured: true, apiKey });
   });
 
