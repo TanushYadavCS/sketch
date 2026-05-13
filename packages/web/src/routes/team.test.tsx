@@ -172,6 +172,46 @@ describe("TeamPage", () => {
         expect(screen.getByText("This email or number is already linked to another member")).toBeInTheDocument();
       });
     });
+
+    it("uses the same capped form viewport when the dialog opens", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<TeamPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Alice Smith")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: /Add member/i }));
+
+      const dialog = await screen.findByRole("dialog");
+      const formBody = within(dialog).getByRole("button", { name: "Human" }).parentElement?.parentElement;
+
+      expect(dialog).not.toHaveClass("data-[state=open]:zoom-in-95");
+      expect(dialog).not.toHaveClass("data-[state=closed]:zoom-out-95");
+      expect(formBody).toHaveClass("max-h-[50vh]");
+      expect(formBody).toHaveClass("overflow-y-auto");
+    });
+
+    it("keeps the agent form in the same capped scroll viewport inside the dialog", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<TeamPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Alice Smith")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: /Add member/i }));
+
+      const dialog = await screen.findByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: "Agent" }));
+
+      const formBody = within(dialog).getByRole("button", { name: "Human" }).parentElement?.parentElement;
+
+      expect(dialog).not.toHaveClass("overflow-hidden");
+      expect(formBody).toHaveClass("max-h-[50vh]");
+      expect(formBody).toHaveClass("overflow-y-auto");
+      expect(within(dialog).getByRole("button", { name: "Add agent" })).toBeInTheDocument();
+    });
   });
 
   it("shows 'You' badge when userId matches a member", async () => {

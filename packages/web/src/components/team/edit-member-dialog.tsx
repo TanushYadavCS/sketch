@@ -191,7 +191,7 @@ export function EditMemberDialog({
           <DialogDescription>Update this member's details.</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="max-h-[50vh] space-y-4 overflow-y-auto py-2 pr-1">
           <div>
             {isAgent ? (
               <Badge variant="secondary">
