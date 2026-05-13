@@ -1,4 +1,5 @@
 import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute } from "../dashboard";
@@ -17,7 +18,7 @@ function UsagePage() {
   const [timePeriod, setTimePeriod] = useState<TimePeriod>("Month");
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div>
         <h1 className="text-[22px] font-medium">Usage</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">Monitor your workspace activity and team adoption.</p>
@@ -28,11 +29,13 @@ function UsagePage() {
         <TabButton label="My usage" isActive={activeTab === "my-usage"} onClick={() => setActiveTab("my-usage")} />
       </div>
 
-      {activeTab === "team" ? (
-        <TeamView timePeriod={timePeriod} onTimePeriodChange={setTimePeriod} />
-      ) : (
-        <PersonalView timePeriod={timePeriod} onTimePeriodChange={setTimePeriod} />
-      )}
+      <TabContentContainer>
+        {activeTab === "team" ? (
+          <TeamView timePeriod={timePeriod} onTimePeriodChange={setTimePeriod} />
+        ) : (
+          <PersonalView timePeriod={timePeriod} onTimePeriodChange={setTimePeriod} />
+        )}
+      </TabContentContainer>
     </div>
   );
 }

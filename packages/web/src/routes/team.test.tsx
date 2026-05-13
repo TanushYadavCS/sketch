@@ -27,6 +27,13 @@ afterEach(() => {
 });
 
 describe("TeamPage", () => {
+  it("uses the shared dashboard page width", () => {
+    const { container } = renderWithProviders(<TeamPage />);
+
+    expect(container.firstElementChild).toHaveClass("mx-auto", "box-content", "max-w-4xl", "px-10", "py-8");
+    expect(container.firstElementChild?.className).not.toContain("max-w-[");
+  });
+
   it("renders member list", async () => {
     renderWithProviders(<TeamPage />);
 

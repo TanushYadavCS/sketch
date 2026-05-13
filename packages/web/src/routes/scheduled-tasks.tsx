@@ -207,7 +207,7 @@ export function ScheduledTasksPage() {
   const isAdmin = auth.role === "admin";
 
   return (
-    <div className="mx-auto max-w-4xl px-10 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div>
         <h1 className="text-xl font-semibold text-foreground">Automations</h1>
         <p className="mt-2 text-sm text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>

@@ -40,7 +40,7 @@ function SettingsPage() {
 
   if (auth.role !== "admin") {
     return (
-      <div className="mx-auto max-w-4xl px-10 py-8">
+      <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <h1 className="text-xl font-semibold text-foreground">Settings</h1>
         <p className="mt-2 text-sm text-muted-foreground">Admin access is required to manage workspace settings.</p>
       </div>
@@ -48,7 +48,7 @@ function SettingsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl px-10 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <h1 className="text-xl font-semibold text-foreground">Settings</h1>
       <p className="mt-2 text-sm text-muted-foreground">Manage workspace-level configuration.</p>
 

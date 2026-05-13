@@ -28,6 +28,7 @@ import { api } from "@/lib/api";
 import { PlusIcon } from "@phosphor-icons/react";
 import type { AgentEnvironmentVariableRecord, McpServerRecord } from "@sketch/shared";
 import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -57,7 +58,7 @@ function ConnectionsCallback() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-4xl px-10 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <p className="text-sm text-muted-foreground">Connection complete. You can close this window.</p>
     </div>
   );
@@ -146,7 +147,7 @@ function ConnectionsPage() {
   const isLoading = serversQuery.isLoading;
 
   return (
-    <div className="mx-auto max-w-4xl px-10 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div>
         <h1 className="text-xl font-semibold text-foreground">Integrations</h1>
         <p className="mt-2 text-sm text-muted-foreground">Connect apps and tools to extend your workspace.</p>
@@ -166,7 +167,7 @@ function ConnectionsPage() {
         />
       </div>
 
-      <div className="mt-5 space-y-8">
+      <TabContentContainer className="mt-5 space-y-8">
         {isLoading || (activeTab === "environment" && envVarsQuery.isLoading) ? (
           <LoadingSkeleton />
         ) : activeTab === "applications" ? (
@@ -235,7 +236,7 @@ function ConnectionsPage() {
             onShare={setSharingEnvVar}
           />
         )}
-      </div>
+      </TabContentContainer>
 
       <AddMcpDialog open={showAddMcpDialog} onOpenChange={setShowAddMcpDialog} onSuccess={invalidateAll} />
 
