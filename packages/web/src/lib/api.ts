@@ -5,6 +5,7 @@
 
 import type { SkillCategory } from "@/lib/skills-data";
 import type {
+  AgentEnvironmentShareTargetInput,
   AgentEnvironmentVariableRecord,
   FileMetadata,
   IntegrationApp,
@@ -980,6 +981,21 @@ export const api = {
     },
     remove(id: string) {
       return request<{ success: true }>(`/api/agent-environment-variables/${id}`, { method: "DELETE" });
+    },
+    async replaceShares(id: string, targets: AgentEnvironmentShareTargetInput[]) {
+      const res = await request<{ variable: AgentEnvironmentVariableRecord }>(
+        `/api/agent-environment-variables/${id}/shares`,
+        {
+          method: "POST",
+          body: JSON.stringify({ targets }),
+        },
+      );
+      return res.variable;
+    },
+    deleteShare(id: string, shareId: string) {
+      return request<{ success: true }>(`/api/agent-environment-variables/${id}/shares/${shareId}`, {
+        method: "DELETE",
+      });
     },
   },
   entities: {

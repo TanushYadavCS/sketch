@@ -4,6 +4,7 @@ import type { Kysely } from "kysely";
 import { z } from "zod";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
 import type { Config } from "../config";
+import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -34,7 +35,7 @@ interface WorkflowRouteDeps {
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
-  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
 }

@@ -1,3 +1,19 @@
+export type AgentEnvironmentShareTargetType = "user" | "slack_channel" | "whatsapp_group" | "org";
+
+export interface AgentEnvironmentShareTargetInput {
+  type: AgentEnvironmentShareTargetType;
+  id: string;
+}
+
+export interface AgentEnvironmentVariableShareRecord {
+  id: string;
+  targetType: AgentEnvironmentShareTargetType;
+  targetId: string;
+  targetLabel: string;
+  targetSecondaryLabel: string | null;
+  createdAt: string;
+}
+
 export interface AgentEnvironmentVariableRecord {
   id: string;
   name: string;
@@ -5,6 +21,7 @@ export interface AgentEnvironmentVariableRecord {
   isSecret: boolean;
   createdAt: string;
   updatedAt: string;
+  shares: AgentEnvironmentVariableShareRecord[];
 }
 
 const RESERVED_AGENT_ENV_EXACT = new Set([

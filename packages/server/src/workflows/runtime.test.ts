@@ -188,13 +188,46 @@ describe("executeAutomation agent steps", () => {
     expect(call.inboxMessagesRepo).toBe(inboxMessagesRepo);
     expect(call.sendDm).toBe(sendDm);
     expect(call.scheduler).toBeUndefined();
-    expect(call.taskContext).toBeUndefined();
+    expect(call.taskContext).toEqual({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D123",
+      createdBy: "user-1",
+    });
     expect(call.userMessage).toContain("<task>Daily workflow planning summary</task>");
     expect(call.userMessage).toContain("You are executing one step of a scheduled workflow.");
     expect(call.userMessage).toContain("Step: Summarize Linear issues");
     expect(call.userMessage).toContain("Step prompt:");
     expect(call.userMessage).toContain("Input from previous step:");
     expect(params.sendMessage).toHaveBeenCalledWith("sketch result");
+  });
+
+  it("keeps channel task context for creator-less sketch-mode agent steps", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      toolCalls: [],
+      trace: { finalText: "sketch result" },
+    });
+    const params = makeParams({
+      runAgent,
+      task: makeTask({
+        platform: "slack",
+        context_type: "channel",
+        delivery_target: "C123",
+        created_by: null,
+      }),
+    });
+
+    await executeAutomation(params as never);
+
+    const call = runAgent.mock.calls[0][0];
+    expect(call.currentUserId).toBeNull();
+    expect(call.taskContext).toEqual({
+      platform: "slack",
+      contextType: "channel",
+      deliveryTarget: "C123",
+      createdBy: null,
+    });
   });
 
   it("keeps light-mode agent steps on the lightweight SDK path", async () => {
@@ -266,6 +299,12 @@ describe("executeAutomation action steps", () => {
     logger.child.mockReturnValue(childLogger);
     const onEvent = vi.fn();
     const { spawn } = await import("node:child_process");
+    const listAgentEnvForRuntime = vi.fn().mockResolvedValue({
+      MY_SAFE_VAR: "safe-value",
+      ANTHROPIC_MODEL: "should-not-win",
+      PATH: "should-not-win",
+      CANVAS_CLI: "should-not-win",
+    });
     const params = makeParams({
       logger,
       onEvent,
@@ -300,12 +339,7 @@ describe("executeAutomation action steps", () => {
         },
       ]),
       loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
-      listAgentEnvForRuntime: vi.fn().mockResolvedValue({
-        MY_SAFE_VAR: "safe-value",
-        ANTHROPIC_MODEL: "should-not-win",
-        PATH: "should-not-win",
-        CANVAS_CLI: "should-not-win",
-      }),
+      listAgentEnvForRuntime,
     });
 
     const result = await executeAutomation(params as never);
@@ -331,6 +365,12 @@ describe("executeAutomation action steps", () => {
       ),
     );
     expect(spawn).not.toHaveBeenCalled();
+    expect(listAgentEnvForRuntime).toHaveBeenCalledWith({
+      currentUserId: "user-1",
+      contextType: "scheduled_task",
+      allowOrgSharedEnv: true,
+      taskContext: { platform: "slack", contextType: "dm", deliveryTarget: "D123", createdBy: "user-1" },
+    });
     expect(onEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: "step.completed", stepId: "act1", outputSummary: expect.any(String) }),
     );

@@ -274,17 +274,21 @@ export async function handleManageScheduledTasks(
   const OWNERSHIP_GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"];
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
-    if (!task || task.createdBy !== ctx.createdBy) {
+    if (!ctx.createdBy || !task || task.createdBy !== ctx.createdBy) {
       return text("Error: task not found.");
     }
   }
 
   switch (action) {
     case "list": {
-      const tasks =
-        ctx.contextType === "dm"
-          ? await deps.scheduler.listTasks({ createdBy: ctx.createdBy })
-          : await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
+      if (ctx.contextType === "dm") {
+        if (!ctx.createdBy) {
+          return text("Error: scheduled task creator is not available in this context.");
+        }
+        const tasks = await deps.scheduler.listTasks({ createdBy: ctx.createdBy });
+        return text(JSON.stringify(tasks, null, 2));
+      }
+      const tasks = await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
       return text(JSON.stringify(tasks, null, 2));
     }
 

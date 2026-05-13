@@ -19,8 +19,8 @@ import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
 import type { McpServerConfig, runAgent } from "../agent/runner";
-import { ensureChannelWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
+import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -49,7 +49,7 @@ export interface TaskSchedulerDeps {
   runAgent: typeof runAgent;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
-  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   automationRunsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   userRepo: ReturnType<typeof createUserRepository>;

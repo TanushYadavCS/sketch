@@ -18,6 +18,7 @@ import {
   DeleteEnvironmentVariableDialog,
   EditEnvironmentVariableDialog,
   EnvironmentVariablesSection,
+  ShareEnvironmentVariableDialog,
 } from "@/components/connections/environment-variables-section";
 import { IntegrationsSection } from "@/components/connections/integrations-section";
 import { McpServersSection } from "@/components/connections/mcp-servers-section";
@@ -32,6 +33,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
+import { useDashboardAuth } from "./dashboard";
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -72,6 +74,7 @@ type IntegrationsTab = "applications" | "mcps" | "environment";
 // ---------------------------------------------------------------------------
 
 function ConnectionsPage() {
+  const auth = useDashboardAuth();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
     if (typeof window === "undefined") return "applications";
@@ -103,6 +106,25 @@ function ConnectionsPage() {
   });
   const envVars = envVarsQuery.data ?? [];
 
+  const usersQuery = useQuery({
+    queryKey: ["users"],
+    queryFn: () => api.users.list(),
+    enabled: activeTab === "environment",
+  });
+
+  const slackChannelsQuery = useQuery({
+    queryKey: ["slack-channels"],
+    queryFn: () => api.channels.listSlack(),
+    enabled: activeTab === "environment",
+    retry: false,
+  });
+
+  const whatsappGroupsQuery = useQuery({
+    queryKey: ["whatsapp-groups"],
+    queryFn: () => api.channels.listWhatsAppGroups(),
+    enabled: activeTab === "environment",
+  });
+
   const [showAddMcpDialog, setShowAddMcpDialog] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerRecord | null>(null);
   const [editingProvider, setEditingProvider] = useState<McpServerRecord | null>(null);
@@ -110,6 +132,7 @@ function ConnectionsPage() {
   const [showAddEnvDialog, setShowAddEnvDialog] = useState(false);
   const [editingEnvVar, setEditingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
   const [deletingEnvVar, setDeletingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
+  const [sharingEnvVar, setSharingEnvVar] = useState<AgentEnvironmentVariableRecord | null>(null);
   const [showAddIntegrationDialog, setShowAddIntegrationDialog] = useState(false);
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
@@ -209,6 +232,7 @@ function ConnectionsPage() {
             onAdd={() => setShowAddEnvDialog(true)}
             onEdit={setEditingEnvVar}
             onDelete={setDeletingEnvVar}
+            onShare={setSharingEnvVar}
           />
         )}
       </div>
@@ -259,6 +283,20 @@ function ConnectionsPage() {
       <DeleteEnvironmentVariableDialog
         variable={deletingEnvVar}
         onOpenChange={(open) => !open && setDeletingEnvVar(null)}
+        onSuccess={invalidateAll}
+      />
+      <ShareEnvironmentVariableDialog
+        variable={sharingEnvVar}
+        users={usersQuery.data?.users ?? []}
+        usersLoading={usersQuery.isLoading}
+        slackChannels={slackChannelsQuery.data?.channels ?? []}
+        whatsappGroups={whatsappGroupsQuery.data?.groups ?? []}
+        currentUserId={auth.userId}
+        isAdmin={auth.role === "admin"}
+        slackChannelsLoading={slackChannelsQuery.isLoading}
+        slackChannelsUnavailable={slackChannelsQuery.isError}
+        whatsappGroupsLoading={whatsappGroupsQuery.isLoading}
+        onOpenChange={(open) => !open && setSharingEnvVar(null)}
         onSuccess={invalidateAll}
       />
 
