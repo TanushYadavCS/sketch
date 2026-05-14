@@ -136,6 +136,34 @@ export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
 /**
+ * Result of resolving a speaker / attendee name against Sketch-side state
+ * (users table, person entities). Carries the resolved entity id and the
+ * source map so downstream code (alias-confirmation backfill, logs, tests)
+ * can distinguish recovery paths without redoing the lookup.
+ */
+export interface NameResolution {
+  email: string;
+  /** Present when resolution went through the entities map. */
+  entityId?: string;
+  /**
+   * Provenance of the resolution. `"users"` means the Sketch users table
+   * (team directory, canonical); `"entities"` means the broader person
+   * entity register (seeded by any connector).
+   */
+  source: "users" | "entities";
+}
+
+/**
+ * Resolve a speaker / attendee name to an existing identity in Sketch.
+ * Returns null when no unambiguous match is found.
+ *
+ * Built once per sync run by the dispatcher; passed to connectors that
+ * need to attribute names to people without a per-meeting roster (today:
+ * Fireflies). Connectors that don't need it leave the field unset.
+ */
+export type NameResolver = (name: string) => NameResolution | null;
+
+/**
  * Base interface all connectors must implement.
  */
 export interface Connector {
@@ -178,6 +206,20 @@ export interface Connector {
     scopeConfig: Record<string, unknown>;
     cursor: string | null;
     logger: Logger;
+    /**
+     * Sketch email of the user who owns this connector config. Used by
+     * connectors whose upstream ACL may not include the owner (e.g. Fireflies
+     * Zoom meetings where Fireflies returns only the bot account). Connectors
+     * that don't need it ignore the field.
+     */
+    ownerEmail?: string | null;
+    /**
+     * Resolve a speaker / attendee name to a Sketch-side identity. Built
+     * by the dispatcher from the users table + person entity register
+     * (with alias flattening + ambiguity drop); see runConnectorSync.
+     * Optional — connectors that don't need it leave it unset.
+     */
+    resolveNameToEmail?: NameResolver;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
   }): AsyncGenerator<SyncedItem>;
