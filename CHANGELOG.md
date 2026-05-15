@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.28.0] -- 2026-05-15
+
+- Agent environment: add sharing controls so admins can make environment variables available to selected users, agents, Slack channels, WhatsApp groups, or the whole org without copying secrets into skills or workspace files.
+- Tool progress: make progress lines operation-specific so long-running agent work reports clearer, less generic status across tools.
+- Connectors: recover Fireflies attendee emails for Zoom meetings, improving identity matching and downstream transcript context.
+- Managed auth: prevent managed tenant SPAs from rendering the tenant-local login page; managed `/login` and unauthenticated SPA navigation now route to the central platform login.
+- UI reliability: stabilize dialog layout and standardize tab content width across the web app.
+
 ## [0.27.1] -- 2026-05-11
 
 - Runtime tooling: install GitHub CLI `2.92.0` from the official GitHub release package with pinned SHA256 checksums for `amd64` and `arm64`, replacing the older Debian Bookworm package while keeping the temporary downloader out of the final image.
