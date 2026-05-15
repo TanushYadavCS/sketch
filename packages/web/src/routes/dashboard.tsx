@@ -2,6 +2,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { api } from "@/lib/api";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@sketch/ui/components/sidebar";
 import { Outlet, createRoute, redirect, useRouteContext } from "@tanstack/react-router";
+import { redirectToManagedLogin } from "./managed-redirect";
 import { rootRoute } from "./root";
 
 export interface AuthContext {
@@ -26,6 +27,9 @@ async function checkAuth(): Promise<{ auth: AuthContext }> {
 
   const session = await api.auth.session();
   if (!session.authenticated) {
+    if (status.managedUrl) {
+      redirectToManagedLogin(status.managedUrl);
+    }
     throw redirect({ to: "/login" });
   }
 
