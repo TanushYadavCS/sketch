@@ -7,7 +7,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
-import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { createTestConfig, createTestDb, createTestLogger, createTestPgDb } from "../test-utils";
 
 const config = createTestConfig();
 const logger = createTestLogger();
@@ -779,5 +779,66 @@ describe("Usage API", () => {
       const summaryRes = await app.request("/api/usage/summary");
       expect(summaryRes.status).toBe(401);
     });
+  });
+});
+
+describe("Usage API on Postgres", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestPgDb();
+    await seedAdmin(db);
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("returns member and org usage without Postgres real rounding errors", async () => {
+    const users = createUserRepository(db);
+    const member = await users.create({ name: "PgUsage", email: "pg-usage@test.com" });
+    const repo = createAgentRunsRepo(db);
+
+    await repo.insertRun({
+      trace_id: "pg-usage-1",
+      user_id: member.id,
+      platform: "slack",
+      context_type: "dm",
+      cost_usd: 1.11,
+      created_at: "2026-03-10T10:00:00.000Z",
+    });
+    await repo.insertRun({
+      trace_id: "pg-usage-2",
+      user_id: member.id,
+      platform: "whatsapp",
+      context_type: "dm",
+      cost_usd: 0.22,
+      created_at: "2026-03-11T10:00:00.000Z",
+    });
+
+    const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), { logger });
+    const memberCookie = await getMemberCookie(db, member.id);
+    const adminCookie = await loginAdmin(app);
+
+    const memberRes = await app.request("/api/usage/me?period=monthly&date=2026-03-15", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(memberRes.status).toBe(200);
+    const memberBody = await memberRes.json();
+    expect(memberBody.messages.total).toBe(2);
+    expect(memberBody.spend.total_cost_usd).toBe(1.33);
+
+    const summaryRes = await app.request("/api/usage/summary?period=monthly&date=2026-03-15", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryBody = await summaryRes.json();
+    expect(summaryBody.messages.total).toBe(2);
+    expect(summaryBody.spend.total_cost_usd).toBe(1.33);
+    expect(summaryBody.by_user[0].costUsd).toBe(1.33);
   });
 });
