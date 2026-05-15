@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.28.1] -- 2026-05-15
+
+- Fix(usage): make usage cost aggregation work on managed Postgres tenants by casting `real` cost sums to `numeric` before two-argument rounding; adds Postgres regression coverage for both member and org usage APIs.
+
 ## [0.28.0] -- 2026-05-15
 
 - Agent environment: add sharing controls so admins can make environment variables available to selected users, agents, Slack channels, WhatsApp groups, or the whole org without copying secrets into skills or workspace files.
