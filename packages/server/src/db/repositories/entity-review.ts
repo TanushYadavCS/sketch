@@ -8,6 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
 import { isPg } from "../dialect";
 import type { DB, EntityAliasRejectionsTable, EntityReviewEvidenceTable, EntityReviewQueueTable } from "../schema";
 
@@ -30,7 +31,7 @@ export type EvidenceRow = Selectable<EntityReviewEvidenceTable>;
  */
 export const DEFAULT_REVIEW_FREEZE_MS = 24 * 60 * 60 * 1000;
 
-function readReviewFreezeMs(): number {
+export function readReviewFreezeMs(): number {
   const raw = process.env.SKETCH_REVIEW_FREEZE_MS;
   if (!raw) return DEFAULT_REVIEW_FREEZE_MS;
   const parsed = Number.parseInt(raw, 10);
@@ -208,11 +209,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     },
 
     /**
-     * Read-side listing for direct DB inspection. No API surface yet — ECR-02
-     * adds the route handlers. Owner scope filters to rows triggered by the
-     * caller, unless `isAdmin` is true. Cross-user rows (multiple unique
-     * triggers in evidence) require admin; ECR-01 doesn't materialize that
-     * filter — left for ECR-02 when admin escalation lands.
+     * Read-side listing for direct DB inspection and the ECR-02 GET route.
+     * Owner scope filters to rows triggered by the caller, unless `isAdmin`
+     * is true. Cross-user-evidence rows are admin-only — the route layer
+     * filters those via the DISTINCT-owner query before showing them; this
+     * repo method intentionally does NOT replicate that filter so callers
+     * can choose their own owner-aware view.
      */
     async listPending(opts: {
       ownerUserId?: string;
@@ -227,6 +229,116 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       q = q.orderBy("last_seen_at", "desc").limit(opts.limit);
       if (opts.offset) q = q.offset(opts.offset);
       return q.execute();
+    },
+
+    /**
+     * Fetch a single queue row by id, regardless of status.
+     */
+    async getById(reviewId: string) {
+      return db.selectFrom("entity_review_queue").selectAll().where("id", "=", reviewId).executeTakeFirst();
+    },
+
+    /**
+     * Set review_started_at = :now on a pending row, but only if the row is
+     * not currently inside its freeze window. If review_started_at is null
+     * or older than the freeze boundary, the write fires. Inside the freeze
+     * window the WHERE clause gates the UPDATE so it's a no-op. Returns the
+     * post-update row (or the unchanged row).
+     *
+     * The route handler MUST run owner-scope checks BEFORE calling this —
+     * a 403 GET should not flip review_started_at. See review.ts.
+     */
+    async markReviewStarted(reviewId: string, userId: string, now: string, freezeBoundary: string) {
+      await db
+        .updateTable("entity_review_queue")
+        .set({ review_started_at: now, review_started_by: userId })
+        .where("id", "=", reviewId)
+        .where("status", "=", "pending")
+        .where((eb) => eb.or([eb("review_started_at", "is", null), eb("review_started_at", "<", freezeBoundary)]))
+        .execute();
+      return db.selectFrom("entity_review_queue").selectAll().where("id", "=", reviewId).executeTakeFirst();
+    },
+
+    /**
+     * Mark a queue row resolved. Sets status, resolved_entity_id, resolved_by,
+     * resolved_at. Status must be 'confirmed' or 'rejected'. resolved_entity_id
+     * is required — by construction, both Confirm and Reject end with a
+     * concrete target entity id (after Reject's re-resolve-or-create step).
+     */
+    async markResolved(
+      reviewId: string,
+      status: "confirmed" | "rejected",
+      resolvedEntityId: string,
+      by: string,
+    ): Promise<void> {
+      await db
+        .updateTable("entity_review_queue")
+        .set({
+          status,
+          resolved_entity_id: resolvedEntityId,
+          resolved_by: by,
+          resolved_at: new Date().toISOString(),
+        })
+        .where("id", "=", reviewId)
+        .execute();
+    },
+
+    /**
+     * Insert into entity_alias_rejections. Normalizes `rejectedName` here so
+     * route handlers and resolve.ts never call normalizeName directly. On
+     * conflict against UNIQUE (entity_id, normalized_rejected_name), this is
+     * a no-op — re-rejecting the same (entity, name) pair won't error.
+     */
+    async addRejection(input: { entityId: string; rejectedName: string; rejectedBy: string }): Promise<void> {
+      const normalized = normalizeName(input.rejectedName);
+      const id = randomUUID();
+      const rejectedAt = new Date().toISOString();
+      if (isPg(db)) {
+        await sql`
+          INSERT INTO entity_alias_rejections (id, entity_id, rejected_name, normalized_rejected_name, rejected_by, rejected_at)
+          VALUES (${id}, ${input.entityId}, ${input.rejectedName}, ${normalized}, ${input.rejectedBy}, ${rejectedAt})
+          ON CONFLICT (entity_id, normalized_rejected_name) DO NOTHING
+        `.execute(db);
+      } else {
+        await sql`
+          INSERT INTO entity_alias_rejections (id, entity_id, rejected_name, normalized_rejected_name, rejected_by, rejected_at)
+          VALUES (${id}, ${input.entityId}, ${input.rejectedName}, ${normalized}, ${input.rejectedBy}, ${rejectedAt})
+          ON CONFLICT (entity_id, normalized_rejected_name) DO NOTHING
+        `.execute(db);
+      }
+    },
+
+    /**
+     * Return all evidence rows for a review, ordered by seen_at ascending.
+     * v1 callers should cap the size (resolve.ts caps Confirm/Reject at
+     * 1000 evidence rows). No `afterCursor` pagination yet — added when
+     * chunking lands.
+     */
+    async listEvidenceForResolve(reviewId: string) {
+      return db
+        .selectFrom("entity_review_evidence")
+        .selectAll()
+        .where("review_id", "=", reviewId)
+        .orderBy("seen_at", "asc")
+        .execute();
+    },
+
+    /**
+     * Count distinct owners of evidence files for a review (via
+     * indexed_files.connector_config_id → connector_configs.created_by),
+     * excluding `triggeredByUserId`. >0 means the row's evidence spans
+     * other users — admin-only per ECR-02's owner-scope rules.
+     */
+    async countOtherOwnersInEvidence(reviewId: string, triggeredByUserId: string): Promise<number> {
+      const row = await db
+        .selectFrom("entity_review_evidence as e")
+        .innerJoin("indexed_files as i", "i.id", "e.indexed_file_id")
+        .innerJoin("connector_configs as cc", "cc.id", "i.connector_config_id")
+        .select((eb) => eb.fn.count<number>(sql`DISTINCT cc.created_by`).as("owners"))
+        .where("e.review_id", "=", reviewId)
+        .where("cc.created_by", "!=", triggeredByUserId)
+        .executeTakeFirst();
+      return Number(row?.owners ?? 0);
     },
   };
 }

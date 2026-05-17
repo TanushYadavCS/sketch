@@ -190,6 +190,13 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
     // collapsing to a single match. A plain Map silently overwrites and
     // misfires on this case.
     const personEntitiesByNormalizedName = new Map<string, Entity[]>();
+    // Parallel index over aliases — entity may appear under multiple keys
+    // (one per alias). Used by proposeEntity's exact-name/alias fast-path
+    // (Fix 2 in ECR-02) so a post-Confirm proposal whose canonical-name
+    // match lives only in the entity's aliases JSON still auto-links.
+    // Bucketed by alias key; an alias shared across two entities yields a
+    // 2-bucket — exactly what the ambiguity-aware fast-path expects.
+    const personEntitiesByNormalizedAlias = new Map<string, Entity[]>();
     // Ambiguity-aware lookup keyed by normalizeName: name → { email, entityId }.
     // Covers canonical name AND aliases (alias-confirmation persists merges
     // there). Conflicting values on the same key drop the key — single
@@ -201,6 +208,16 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       const bucket = personEntitiesByNormalizedName.get(normKey);
       if (bucket) bucket.push(p);
       else personEntitiesByNormalizedName.set(normKey, [p]);
+      for (const alias of parseAliases(p.aliases)) {
+        const aliasKey = normalizeName(alias);
+        if (!aliasKey) continue;
+        const aliasBucket = personEntitiesByNormalizedAlias.get(aliasKey);
+        if (aliasBucket) {
+          if (!aliasBucket.some((b) => b.id === p.id)) aliasBucket.push(p);
+        } else {
+          personEntitiesByNormalizedAlias.set(aliasKey, [p]);
+        }
+      }
       const email = readPersonEmail(p.metadata);
       if (!email) continue;
       const value = { email, entityId: p.id };
@@ -262,6 +279,7 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
      */
     const entityLookup: EntityLookup = {
       getByNormalizedName: (normalized) => personEntitiesByNormalizedName.get(normalized) ?? [],
+      getByAlias: (normalized) => personEntitiesByNormalizedAlias.get(normalized) ?? [],
       listByType: (entityType) => (entityType === "person" ? personEntities : []),
     };
 
@@ -286,6 +304,16 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
         if (!bucket.some((b) => b.id === entity.id)) bucket.push(entity);
       } else {
         personEntitiesByNormalizedName.set(normKey, [entity]);
+      }
+      for (const alias of parseAliases(entity.aliases)) {
+        const aliasKey = normalizeName(alias);
+        if (!aliasKey) continue;
+        const aliasBucket = personEntitiesByNormalizedAlias.get(aliasKey);
+        if (aliasBucket) {
+          if (!aliasBucket.some((b) => b.id === entity.id)) aliasBucket.push(entity);
+        } else {
+          personEntitiesByNormalizedAlias.set(aliasKey, [entity]);
+        }
       }
       if (!personEntities.some((p) => p.id === entity.id)) {
         personEntities.push(entity);

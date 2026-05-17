@@ -24,6 +24,15 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
       }
       return out;
     },
+    getByAlias: (n) => {
+      const list = getList();
+      const out: Entity[] = [];
+      for (const e of list) {
+        const aliases: string[] = e.aliases ? JSON.parse(e.aliases) : [];
+        if (aliases.some((a) => normalizeName(a) === n)) out.push(e);
+      }
+      return out;
+    },
     listByType: (t) => (t === "person" ? getList() : []),
   };
 }
@@ -675,5 +684,92 @@ describe("proposeEntity", () => {
     // The acceptance criterion that matters: the fast-path did NOT silently
     // link to one of the two duplicates.
     expect(result.kind === "linked").toBe(false);
+  });
+
+  it("13. alias-match links — post-Confirm proposal hits the alias half of the fast-path", async () => {
+    // Models the post-Confirm scenario: existing entity 'Simran Suri'
+    // already carries 'Simran Suri Neeli' in its aliases JSON (the state
+    // left behind after a reviewer Confirmed a merge proposal). A future
+    // propose for 'Simran Suri Neeli' with no email must auto-link to
+    // that entity, not fall through to the fuzzy ranker.
+    const entityRepo = createEntityRepository(db);
+    const ss = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:simran",
+    });
+    await entityRepo.appendAlias(ss.id, "Simran Suri Neeli");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:alias-1",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(ss.id);
+
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("14. alias-match dedup — same entity returned by name+alias counts as one (no ambiguity misfire)", async () => {
+    // Edge case: an entity whose canonical name AND one of its aliases
+    // both normalize to the proposed input. Both `getByNormalizedName`
+    // and `getByAlias` return the same entity; the Map-by-id dedup in
+    // step 3 must keep the count at 1 so we link rather than ambiguously
+    // fall through. Guards against a future refactor that switches to a
+    // length-only check on the concatenated arrays.
+    const entityRepo = createEntityRepository(db);
+    const ss = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:dup",
+    });
+    // Append an alias that normalizes to the same form as the canonical
+    // name. appendAlias dedups case-insensitively, so we have to write
+    // a slightly differently-cased copy.
+    await db
+      .updateTable("entities")
+      .set({ aliases: JSON.stringify(["SIMRAN SURI "]), updated_at: new Date().toISOString() })
+      .where("id", "=", ss.id)
+      .execute();
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran Suri",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:dup-1",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(ss.id);
   });
 });

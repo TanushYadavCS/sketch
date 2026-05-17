@@ -33,14 +33,14 @@ describe("runMigrations — full sequence", () => {
     await expect(runMigrations(db)).resolves.not.toThrow();
   });
 
-  it("records all 51 migration entries in the kysely_migration table", async () => {
+  it("records all 52 migration entries in the kysely_migration table", async () => {
     await runMigrations(db);
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(51);
+    expect(rows.rows).toHaveLength(52);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -88,6 +88,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[48]).toBe("053-whatsapp-fallback-agent");
     expect(names[49]).toBe("054-agent-environment-variable-shares");
     expect(names[50]).toBe("055-entity-review-queue");
+    expect(names[51]).toBe("056-entity-mentions-unique");
   });
 
   it("creates the users table", async () => {
@@ -193,7 +194,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(51);
+    expect(rows.rows).toHaveLength(52);
   });
 });
 
@@ -225,6 +226,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(51);
+    expect(rows.rows).toHaveLength(52);
   });
 });

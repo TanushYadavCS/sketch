@@ -27,6 +27,7 @@ import { settingsRoutes } from "./api/settings";
 import { setupRoutes } from "./api/setup";
 import { skillsRoutes } from "./api/skills";
 import { verifyJwt } from "./auth/jwt";
+import { entityReviewRoutes } from "./entities/review";
 
 import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
@@ -283,6 +284,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
   app.route("/api/usage", usageRoutes(db));
   app.route("/api/entities", entityRoutes(db));
+  if (config.EXPERIMENTAL_FLAG) {
+    app.route("/api/entity-review", entityReviewRoutes(db));
+  }
 
   if (deps?.logger) {
     app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users));
