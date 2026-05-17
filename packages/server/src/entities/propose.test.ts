@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
@@ -12,7 +13,17 @@ async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {
 
 function makeLookup(getList: () => Entity[]): EntityLookup {
   return {
-    getByNormalizedName: () => [],
+    getByNormalizedName: (n) => {
+      // Mirror sync.ts's ambiguity-preserving index: bucket entities by
+      // normalized name. Built lazily on every call so tests that mutate
+      // the underlying list (via getList) see fresh state.
+      const list = getList();
+      const out: Entity[] = [];
+      for (const e of list) {
+        if (normalizeName(e.name) === n) out.push(e);
+      }
+      return out;
+    },
     listByType: (t) => (t === "person" ? getList() : []),
   };
 }
@@ -504,5 +515,165 @@ describe("proposeEntity", () => {
     expect(queueAfter.status).toBe("confirmed");
     expect(queueAfter.occurrence_count).toBe(queueBefore.occurrence_count);
     expect(queueAfter.last_seen_at).toBe(queueBefore.last_seen_at);
+  });
+
+  it("10. exact-name match links even when a fuzzy candidate also exists (Saurabh Kumar regression)", async () => {
+    // Reproduces the production bug: two distinct entities exist with
+    // different emails — "Saurabh Kumar" and "Saurabh Kumar Singh". A
+    // name-only attendee "Saurabh Kumar" must link to the matching entity,
+    // not get queued against Singh just because Singh is a fuzzy superset.
+    const entityRepo = createEntityRepository(db);
+    const sk = await entityRepo.upsertPersonEntity({
+      name: "Saurabh Kumar",
+      email: "saurabh@canvasx.ai",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:sk",
+    });
+    await entityRepo.upsertPersonEntity({
+      name: "Saurabh Kumar Singh",
+      email: "saurabhkumar.singh@habuild.in",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:sks",
+    });
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Saurabh Kumar",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:meeting-1",
+      evidence: [{ indexedFileId: "file-does-not-need-to-exist" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(sk.id);
+
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+    const evidence = await db.selectFrom("entity_review_evidence").selectAll().execute();
+    expect(evidence).toHaveLength(0);
+
+    // No new person entity was created — count is unchanged.
+    const after = await fetchPersonEntities(db);
+    expect(after.map((p) => p.id).sort()).toEqual(before.map((p) => p.id).sort());
+  });
+
+  it("11. exact-name match is case-insensitive", async () => {
+    const entityRepo = createEntityRepository(db);
+    const bob = await entityRepo.upsertPersonEntity({
+      name: "Bob Chen",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:bob",
+    });
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "bob  chen", // double space + lowercase — normalizeName collapses both
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:meeting-2",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(bob.id);
+
+    // The canonical name stays "Bob Chen" — exact-name fast-path passes the
+    // matched entity's name (not the proposed casing) to upsertPersonEntity.
+    const refreshed = await db.selectFrom("entities").selectAll().where("id", "=", bob.id).executeTakeFirstOrThrow();
+    expect(refreshed.name).toBe("Bob Chen");
+  });
+
+  it("12. ambiguous exact-name (two entities share the same canonical name) falls through to ranker", async () => {
+    // upsertPersonEntity dedups by name, so we have to insert directly.
+    // This shouldn't happen in healthy data but the fast-path must not
+    // silently pick one of two same-name entities — that would be the
+    // Saurabh Bothra–class bug.
+    const entityRepo = createEntityRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "dup-1",
+          name: "Bob Chen",
+          source_type: "person",
+          subtype: "external",
+          metadata: JSON.stringify({}),
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        },
+        {
+          id: "dup-2",
+          name: "Bob Chen",
+          source_type: "person",
+          subtype: "external",
+          metadata: JSON.stringify({}),
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        },
+      ])
+      .execute();
+
+    await insertTestFile(db, "file-12");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Bob Chen",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:meeting-3",
+      evidence: [{ indexedFileId: "file-12" }],
+      triggeredByUserId: "user-1",
+    });
+
+    // Two same-name entities → exact-name fast-path declines to link →
+    // ranker takes over. The ranker's token-superset/subset rule requires
+    // different token counts, so "Bob Chen" vs "Bob Chen" doesn't match
+    // there either, and the prefix rule also requires different lengths.
+    // Net result: no ranker candidate, falls through to "created".
+    //
+    // The acceptance criterion that matters: the fast-path did NOT silently
+    // link to one of the two duplicates.
+    expect(result.kind === "linked").toBe(false);
   });
 });

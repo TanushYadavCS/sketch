@@ -1158,6 +1158,94 @@ describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
     expect(allEvidence).toHaveLength(1);
   });
 
+  it("14. exact-name attendee links to existing entity even when a fuzzy candidate is present (Saurabh Kumar regression)", async () => {
+    // Reproduces the production bug found during the first real Fireflies
+    // re-sync after ECR-01 landed: two entities exist with distinct emails —
+    // "Saurabh Kumar" (saurabh@canvasx.ai) and "Saurabh Kumar Singh"
+    // (saurabhkumar.singh@habuild.in). A meeting yields a name-only
+    // attendee "Saurabh Kumar" (no email). The fuzzy ranker correctly
+    // identifies Singh as a token-superset, but the obvious exact-name
+    // link must win — otherwise we queue a row asking "is this the same
+    // as Singh?" when the answer is clearly the existing Kumar entity.
+    db = await createTestDb();
+    const testDb = db;
+    await seedConnector(testDb, "connector-ecr-14");
+
+    const now = new Date().toISOString();
+    await testDb
+      .insertInto("entities")
+      .values([
+        {
+          id: "entity-saurabh-kumar",
+          name: "Saurabh Kumar",
+          source_type: "person",
+          subtype: "external",
+          metadata: JSON.stringify({ email: "saurabh@canvasx.ai" }),
+          aliases: JSON.stringify(["saurabh@canvasx.ai"]),
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        },
+        {
+          id: "entity-saurabh-kumar-singh",
+          name: "Saurabh Kumar Singh",
+          source_type: "person",
+          subtype: "external",
+          metadata: JSON.stringify({ email: "saurabhkumar.singh@habuild.in" }),
+          aliases: JSON.stringify(["saurabhkumar.singh@habuild.in"]),
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        },
+      ])
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "p-ecr-14",
+        providerUrl: null,
+        fileName: "meeting.md",
+        fileType: "meeting_transcript",
+        contentCategory: "document" as const,
+        content: "transcript",
+        sourcePath: null,
+        contentHash: "hash-ecr-14",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Saurabh Kumar" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    await runConnectorSync(testDb, "connector-ecr-14", logger);
+
+    // Critical: no queue row.
+    const queue = await testDb.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+
+    // Critical: no new entity was created — both originals are still here
+    // and no third "Saurabh Kumar" row appeared.
+    const persons = await testDb
+      .selectFrom("entities")
+      .select(["id", "name"])
+      .where("source_type", "=", "person")
+      .execute();
+    expect(persons.map((p) => p.id).sort()).toEqual(["entity-saurabh-kumar", "entity-saurabh-kumar-singh"]);
+
+    // Source-ref was recorded against the correct entity (Kumar, not Singh).
+    const refs = await testDb
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source_id", "like", "p-ecr-14:%")
+      .execute();
+    expect(refs).toHaveLength(1);
+    expect(refs[0].entity_id).toBe("entity-saurabh-kumar");
+  });
+
   it("13. evidence accumulates across multiple meetings for the same speaker", async () => {
     db = await createTestDb();
     const testDb = db;

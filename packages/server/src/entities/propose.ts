@@ -195,11 +195,34 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     return { kind: "created", entity: created };
   }
 
-  // 3) Fuzzy-rank against same-type entities.
+  // 3) Exact-name fast-path — an entity already shares this canonical name
+  //    (case-insensitively, via normalizeName). Restores the "match by
+  //    exact name" path that upsertPersonEntity used pre-ECR-01. Without
+  //    this, the fuzzy ranker can silently route around the obvious match
+  //    — e.g. a name-only "Saurabh Kumar" attendee gets queued against
+  //    "Saurabh Kumar Singh" instead of linking to the existing "Saurabh
+  //    Kumar" entity. Ambiguity-aware: ≥2 entities sharing the canonical
+  //    name fall through to the ranker (which queues with NULL candidate).
+  const exactMatches = deps.lookup.getByNormalizedName(normalized);
+  if (exactMatches.length === 1) {
+    const matched = exactMatches[0];
+    // Pass the matched entity's canonical name (not the proposed one) so
+    // upsertPersonEntity's name comparison hits exactly even if the
+    // attendee's casing drifted from the stored entity's.
+    const entity = await deps.entityRepo.upsertPersonEntity({
+      name: matched.name,
+      subtype: input.subtype,
+      source: input.source,
+      sourceId: input.sourceId,
+    });
+    return { kind: "linked", entity };
+  }
+
+  // 4) Fuzzy-rank against same-type entities.
   const candidates = deps.lookup.listByType(input.entityType);
   let ranked = rank(input.name, candidates);
 
-  // 4) Drop candidates that have a sticky rejection for this normalized name.
+  // 5) Drop candidates that have a sticky rejection for this normalized name.
   if (ranked.length > 0) {
     const filtered: RankedCandidate[] = [];
     for (const r of ranked) {
@@ -209,7 +232,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     ranked = filtered;
   }
 
-  // 5) Decide.
+  // 6) Decide.
   if (ranked.length === 0) {
     const created = await deps.entityRepo.upsertPersonEntity({
       name: input.name,
