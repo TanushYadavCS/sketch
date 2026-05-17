@@ -232,6 +232,50 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     },
 
     /**
+     * Count of `pending` rows under the same owner-scope predicate as
+     * `listPending`. Used by the badge endpoint. Multi-user-evidence
+     * exclusion is applied by the route layer, NOT here — the caller is
+     * responsible for matching the visibility filter to the row fetch so
+     * the badge count matches what the user sees.
+     */
+    async countPending(opts: { ownerUserId?: string; isAdmin: boolean }): Promise<number> {
+      let q = db
+        .selectFrom("entity_review_queue")
+        .select(db.fn.countAll<number>().as("c"))
+        .where("status", "=", "pending");
+      if (!opts.isAdmin && opts.ownerUserId) {
+        q = q.where("triggered_by_user_id", "=", opts.ownerUserId);
+      }
+      const row = await q.executeTakeFirst();
+      return Number(row?.c ?? 0);
+    },
+
+    /**
+     * For each review id, return (source, count) aggregated from
+     * `entity_review_evidence`. One round-trip — the row fetch + this call
+     * give the route handler everything it needs to assemble the
+     * evidenceCount + sourceBreakdown fields.
+     *
+     * Returns an empty map when `reviewIds` is empty.
+     */
+    async evidenceSummaryByReview(reviewIds: string[]): Promise<Map<string, Array<{ source: string; count: number }>>> {
+      const map = new Map<string, Array<{ source: string; count: number }>>();
+      if (reviewIds.length === 0) return map;
+      const rows = await db
+        .selectFrom("entity_review_evidence")
+        .select(["review_id", "source", db.fn.countAll<number>().as("c")])
+        .where("review_id", "in", reviewIds)
+        .groupBy(["review_id", "source"])
+        .execute();
+      for (const r of rows) {
+        const list = map.get(r.review_id) ?? [];
+        list.push({ source: r.source, count: Number(r.c) });
+        map.set(r.review_id, list);
+      }
+      return map;
+    },
+
+    /**
      * Fetch a single queue row by id, regardless of status.
      */
     async getById(reviewId: string) {
