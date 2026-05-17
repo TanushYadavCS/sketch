@@ -134,6 +134,7 @@ export interface RunAgentParams {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  activeQueueKey?: string;
   toolConfig?: { BASE_URL?: string; PORT: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
@@ -295,6 +296,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     stepContentRepo: params.stepContentRepo,
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,
+    activeQueueKey: params.activeQueueKey,
     toolConfig: params.toolConfig,
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,

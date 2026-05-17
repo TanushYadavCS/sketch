@@ -161,6 +161,41 @@ function makeStepContent(rows: Array<{ stepId: string; content: string }>) {
 }
 
 describe("executeAutomation agent steps", () => {
+  it("defaults scheduled agent steps without an explicit mode to the Sketch runtime", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      toolCalls: [],
+      trace: { finalText: "sketch result" },
+    });
+    const params = makeParams({
+      runAgent,
+      task: makeTask({
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+          {
+            id: "step1",
+            type: "agent",
+            label: "Summarize Linear issues",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+          },
+        ]),
+      }),
+    });
+
+    await executeAutomation(params as never);
+
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(runAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        contextType: "scheduled_task",
+        currentUserId: "user-1",
+        sessionMode: "fresh",
+      }),
+    );
+    expect(params.sendMessage).toHaveBeenCalledWith("sketch result");
+  });
+
   it("routes sketch-mode agent steps through runAgent with workflow context", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],

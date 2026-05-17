@@ -29,8 +29,9 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import { parseOnceSchedule } from "../scheduler/parse-once";
+import { getActiveTaskContextQueueKey, getScheduledTaskQueueKey } from "../scheduler/queue-key";
 import type { TaskScheduler } from "../scheduler/service";
-import type { TaskContext } from "../scheduler/types";
+import type { ScheduledTask, TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
 
 type SelectableUser = Selectable<UsersTable>;
@@ -75,6 +76,7 @@ export interface SketchMcpDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
+  activeQueueKey?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -216,6 +218,7 @@ export interface ManageScheduledTasksDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  activeQueueKey?: string;
   config?: { BASE_URL?: string; PORT: number };
 }
 
@@ -272,11 +275,13 @@ export async function handleManageScheduledTasks(
   // existence leaks. Admin bypass is deliberately not offered here; admins use the
   // web UI for tenant-wide ops. Matches the HTTP layer's same-behavior guarantee.
   const OWNERSHIP_GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"];
+  let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
     if (!ctx.createdBy || !task || task.createdBy !== ctx.createdBy) {
       return text("Error: task not found.");
     }
+    guardedTask = task;
   }
 
   switch (action) {
@@ -334,6 +339,7 @@ export async function handleManageScheduledTasks(
             type: "agent",
             label: params.prompt.slice(0, 80),
             icon: "sketch-ai",
+            agentMode: "sketch",
             agentPrompt: params.prompt,
             position: { x: 0, y: 100 },
           },
@@ -607,6 +613,16 @@ export async function handleManageScheduledTasks(
         return text("Error: task_id is required for run action.");
       }
       try {
+        const activeQueueKey = deps.activeQueueKey ?? getActiveTaskContextQueueKey(ctx);
+        if (
+          guardedTask?.status === "active" &&
+          activeQueueKey &&
+          getScheduledTaskQueueKey(guardedTask) === activeQueueKey
+        ) {
+          await deps.scheduler.enqueueTaskById(task_id);
+          return text(`Automation ${task_id} queued to run after this chat turn completes.`);
+        }
+
         const result = await deps.scheduler.executeTaskById(task_id);
         if (!result) {
           const latestRun = deps.automationRunsRepo ? await deps.automationRunsRepo.getLatest(task_id) : undefined;
@@ -1080,6 +1096,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           automationRunsRepo: deps.automationRunsRepo,
           loadIntegrationProvider: deps.loadIntegrationProvider,
           queueManager: deps.queueManager,
+          activeQueueKey: deps.activeQueueKey,
           config: deps.toolConfig,
         });
       },
