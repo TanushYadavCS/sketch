@@ -952,3 +952,263 @@ describe("runConnectorSync — name resolver wiring", () => {
     });
   });
 });
+
+describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
+  let db: Kysely<DB> | null = null;
+  const logger = createTestLogger();
+
+  afterEach(async () => {
+    if (db) {
+      try {
+        await db.destroy();
+      } catch {
+        // already destroyed
+      }
+      db = null;
+    }
+  });
+
+  async function seedConnector(testDb: Kysely<DB>, configId: string, createdBy = "user-1") {
+    await testDb
+      .insertInto("connector_configs")
+      .values({
+        id: configId,
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: createdBy,
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+  }
+
+  it("10. queues a name-only attendee with a fuzzy collision (change branch)", async () => {
+    db = await createTestDb();
+    const testDb = db;
+    await seedConnector(testDb, "connector-ecr-1");
+
+    // Pre-seed an existing entity that the attendee name fuzzy-collides with.
+    await testDb
+      .insertInto("entities")
+      .values({
+        id: "entity-simran-suri",
+        name: "Simran Suri",
+        source_type: "person",
+        subtype: "external",
+        metadata: JSON.stringify({}),
+        aliases: null,
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "p-ecr-10",
+        providerUrl: null,
+        fileName: "meeting.md",
+        fileType: "meeting_transcript",
+        contentCategory: "document" as const,
+        content: "transcript",
+        sourcePath: null,
+        contentHash: "hash-ecr-10",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Simran Suri Neeli" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    await runConnectorSync(testDb, "connector-ecr-1", logger);
+
+    const queue = await testDb.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].proposed_name).toBe("Simran Suri Neeli");
+    expect(queue[0].candidate_entity_id).toBe("entity-simran-suri");
+    expect(queue[0].candidate_reason).toBe("token-superset");
+    expect(queue[0].triggered_by_user_id).toBe("user-1");
+
+    const evidence = await testDb.selectFrom("entity_review_evidence").selectAll().execute();
+    expect(evidence).toHaveLength(1);
+
+    // Person entity for the queued proposal is NOT created.
+    const persons = await testDb.selectFrom("entities").select(["name"]).where("source_type", "=", "person").execute();
+    expect(persons.map((p) => p.name).sort()).toEqual(["Simran Suri"]);
+  });
+
+  it("11. auto-creates a name-only attendee when no fuzzy collision (change branch)", async () => {
+    db = await createTestDb();
+    const testDb = db;
+    await seedConnector(testDb, "connector-ecr-2");
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "p-ecr-11",
+        providerUrl: null,
+        fileName: "meeting.md",
+        fileType: "meeting_transcript",
+        contentCategory: "document" as const,
+        content: "transcript",
+        sourcePath: null,
+        contentHash: "hash-ecr-11",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Aryaman Soni" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    await runConnectorSync(testDb, "connector-ecr-2", logger);
+
+    const queue = await testDb.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+    const persons = await testDb.selectFrom("entities").select(["name"]).where("source_type", "=", "person").execute();
+    expect(persons.map((p) => p.name)).toEqual(["Aryaman Soni"]);
+  });
+
+  it("12. cursor reset re-walk bumps evidence seen_at and queue occurrence_count (skip branch)", async () => {
+    db = await createTestDb();
+    const testDb = db;
+    await seedConnector(testDb, "connector-ecr-3");
+
+    await testDb
+      .insertInto("entities")
+      .values({
+        id: "entity-simran-suri-3",
+        name: "Simran Suri",
+        source_type: "person",
+        subtype: "external",
+        metadata: JSON.stringify({}),
+        aliases: null,
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .execute();
+
+    // First pass: change-branch through to itemResult, queue row written.
+    async function* firstPass() {
+      yield {
+        providerFileId: "p-ecr-12",
+        providerUrl: null,
+        fileName: "meet.md",
+        fileType: "meeting_transcript",
+        contentCategory: "document" as const,
+        content: "first content",
+        sourcePath: null,
+        contentHash: "hash-A",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Simran Suri Neeli" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValueOnce(firstPass());
+    await runConnectorSync(testDb, "connector-ecr-3", logger);
+
+    const queueAfterFirst = await testDb.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    const evidenceAfterFirst = await testDb.selectFrom("entity_review_evidence").selectAll().executeTakeFirstOrThrow();
+    expect(queueAfterFirst.occurrence_count).toBe(1);
+
+    // Step "forward in time" so seen_at updates are observable.
+    await new Promise((r) => setTimeout(r, 25));
+
+    // Second pass: same content hash → goes through the skip branch and
+    // re-walks the meeting via the cursor-reset attendee loop.
+    async function* skipPass() {
+      yield {
+        providerFileId: "p-ecr-12",
+        providerUrl: null,
+        fileName: "meet.md",
+        fileType: "meeting_transcript",
+        contentCategory: "document" as const,
+        content: "first content",
+        sourcePath: null,
+        contentHash: "hash-A",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Simran Suri Neeli" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValueOnce(skipPass());
+    await runConnectorSync(testDb, "connector-ecr-3", logger);
+
+    const queueAfterSkip = await testDb.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    const evidenceAfterSkip = await testDb.selectFrom("entity_review_evidence").selectAll().executeTakeFirstOrThrow();
+
+    expect(queueAfterSkip.occurrence_count).toBe(2);
+    expect(new Date(queueAfterSkip.last_seen_at).getTime()).toBeGreaterThan(
+      new Date(queueAfterFirst.last_seen_at).getTime(),
+    );
+    expect(evidenceAfterSkip.id).toBe(evidenceAfterFirst.id);
+    expect(new Date(evidenceAfterSkip.seen_at).getTime()).toBeGreaterThanOrEqual(
+      new Date(evidenceAfterFirst.seen_at).getTime(),
+    );
+
+    // Still exactly one evidence row — UNIQUE constraint held, no insert.
+    const allEvidence = await testDb.selectFrom("entity_review_evidence").selectAll().execute();
+    expect(allEvidence).toHaveLength(1);
+  });
+
+  it("13. evidence accumulates across multiple meetings for the same speaker", async () => {
+    db = await createTestDb();
+    const testDb = db;
+    await seedConnector(testDb, "connector-ecr-4");
+
+    await testDb
+      .insertInto("entities")
+      .values({
+        id: "entity-simran-suri-4",
+        name: "Simran Suri",
+        source_type: "person",
+        subtype: "external",
+        metadata: JSON.stringify({}),
+        aliases: null,
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .execute();
+
+    async function* threeMeetings() {
+      for (let i = 1; i <= 3; i++) {
+        yield {
+          providerFileId: `p-ecr-13-${i}`,
+          providerUrl: null,
+          fileName: `meet-${i}.md`,
+          fileType: "meeting_transcript",
+          contentCategory: "document" as const,
+          content: `content ${i}`,
+          sourcePath: null,
+          contentHash: `hash-${i}`,
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+          attendees: [{ name: "Simran Suri Neeli" }],
+        } satisfies SyncedItem;
+      }
+    }
+    mockConnectorSync.mockReturnValue(threeMeetings());
+    await runConnectorSync(testDb, "connector-ecr-4", logger);
+
+    const queue = await testDb.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].occurrence_count).toBe(3);
+
+    const evidence = await testDb
+      .selectFrom("entity_review_evidence")
+      .selectAll()
+      .orderBy("indexed_file_id", "asc")
+      .execute();
+    expect(evidence).toHaveLength(3);
+  });
+});

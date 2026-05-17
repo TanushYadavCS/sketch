@@ -1,0 +1,508 @@
+import type { Kysely } from "kysely";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import type { DB } from "../db/schema";
+import { createTestDb } from "../test-utils";
+import { type Entity, type EntityLookup, proposeEntity } from "./propose";
+
+async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {
+  return db.selectFrom("entities").selectAll().where("source_type", "=", "person").execute();
+}
+
+function makeLookup(getList: () => Entity[]): EntityLookup {
+  return {
+    getByNormalizedName: () => [],
+    listByType: (t) => (t === "person" ? getList() : []),
+  };
+}
+
+function readEmail(e: Entity): string | null {
+  if (!e.metadata) return null;
+  try {
+    const m = JSON.parse(e.metadata);
+    return typeof m.email === "string" ? m.email : null;
+  } catch {
+    return null;
+  }
+}
+
+async function insertTestFile(db: Kysely<DB>, id: string): Promise<void> {
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id,
+      connector_config_id: "config-test",
+      provider_file_id: `p-${id}`,
+      file_name: `${id}.md`,
+      file_type: "meeting_transcript",
+      content_category: "document",
+      source: "fireflies",
+      source_path: null,
+      provider_url: null,
+      content: null,
+      summary: null,
+      context_note: null,
+      access_scope_id: null,
+      content_hash: null,
+      source_updated_at: null,
+      source_created_at: null,
+      synced_at: new Date().toISOString(),
+      embedding_status: "pending",
+    })
+    .execute();
+}
+
+describe("proposeEntity", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    // Single connector_config for all tests that need to reference indexed_files.
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "config-test",
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: JSON.stringify({ type: "api_key", apiKey: "test" }),
+        created_by: "user-1",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("1. links to existing entity when email matches", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Bob Chen",
+      email: "bob@acme.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => []),
+      readEmail,
+    };
+    // Refresh lookup so it reads the just-inserted entity.
+    deps.lookup = makeLookup(() => []);
+    const existing = await fetchPersonEntities(db);
+    deps.lookup = makeLookup(() => existing);
+
+    const result = await proposeEntity(deps, {
+      name: "Bob C",
+      email: "bob@acme.com",
+      entityType: "person",
+      subtype: "external",
+      source: "test",
+      sourceId: "test:1",
+      evidence: [{ indexedFileId: "file-1" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(existing[0].id);
+
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("2. email-present-but-not-linked auto-creates and skips fuzzy ranking", async () => {
+    // Pre-seed an existing Simran Suri with a different email so the ranker
+    // would otherwise queue. The email-present short-circuit must take over.
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      email: "simran@old.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      email: "neeli@acme.com",
+      entityType: "person",
+      subtype: "external",
+      source: "test",
+      sourceId: "test:2",
+      evidence: [{ indexedFileId: "file-2" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("created");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+    const persons = await fetchPersonEntities(db);
+    expect(persons.map((p) => p.name).sort()).toEqual(["Simran Suri", "Simran Suri Neeli"]);
+  });
+
+  it("3. auto-creates when no fuzzy collision", async () => {
+    const entityRepo = createEntityRepository(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => []),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Aryaman Soni",
+      entityType: "person",
+      subtype: "external",
+      source: "test",
+      sourceId: "test:3",
+      evidence: [{ indexedFileId: "file-3" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("created");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("4. token-superset → queue with single candidate + evidence", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+
+    // Need a real indexed_files row because evidence has an FK to it.
+    await insertTestFile(db, "file-4");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:1",
+      evidence: [{ indexedFileId: "file-4" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    if (result.kind !== "queued") throw new Error("unreachable");
+
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].candidate_entity_id).toBe(before[0].id);
+    expect(queue[0].candidate_score).toBe(0.9);
+    expect(queue[0].candidate_reason).toBe("token-superset");
+    expect(queue[0].triggered_by_user_id).toBe("user-1");
+    expect(queue[0].occurrence_count).toBe(1);
+
+    const evidence = await db.selectFrom("entity_review_evidence").selectAll().execute();
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].indexed_file_id).toBe("file-4");
+
+    // Crucial: no person entity was created for the queued proposal.
+    const persons = await fetchPersonEntities(db);
+    expect(persons.map((p) => p.name)).toEqual(["Simran Suri"]);
+  });
+
+  it("5. ambiguous token-superset → queue with NULL candidate", async () => {
+    // This test only passes if the ranker preserves multi-match — a plain
+    // Map lookup would collapse to one of the two and falsely single-match.
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Kumar",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:2",
+    });
+
+    await insertTestFile(db, "file-5");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:2",
+      evidence: [{ indexedFileId: "file-5" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].candidate_entity_id).toBeNull();
+    // Reason still set so reviewer knows what kind of collision triggered it.
+    expect(queue[0].candidate_reason).toBe("token-superset");
+  });
+
+  it("6. rejection filter dropping the only candidate falls through to auto-create", async () => {
+    const entityRepo = createEntityRepository(db);
+    const existing = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+
+    await db
+      .insertInto("entity_alias_rejections")
+      .values({
+        id: "rej-1",
+        entity_id: existing.id,
+        rejected_name: "Simran Suri Neeli",
+        normalized_rejected_name: "simran suri neeli",
+        rejected_by: "user-1",
+        rejected_at: new Date().toISOString(),
+      })
+      .execute();
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:3",
+      evidence: [{ indexedFileId: "file-doesnt-exist" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("created");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("7. rejection in multi-candidate collapses to single → queues that one", async () => {
+    const entityRepo = createEntityRepository(db);
+    const e1 = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Kumar",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:2",
+    });
+
+    await db
+      .insertInto("entity_alias_rejections")
+      .values({
+        id: "rej-2",
+        entity_id: e1.id,
+        rejected_name: "Simran",
+        normalized_rejected_name: "simran",
+        rejected_by: "user-1",
+        rejected_at: new Date().toISOString(),
+      })
+      .execute();
+
+    await insertTestFile(db, "file-7");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Simran",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:7",
+      evidence: [{ indexedFileId: "file-7" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    // After rejection filter only Simran Kumar survives → candidate = Kumar.
+    const kumar = before.find((b) => b.name === "Simran Kumar");
+    expect(queue[0].candidate_entity_id).toBe(kumar?.id);
+  });
+
+  it("8. mid-review row only bumps occurrence_count + last_seen_at", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+
+    await insertTestFile(db, "file-8");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:8",
+      evidence: [{ indexedFileId: "file-8" }],
+      triggeredByUserId: "user-1",
+    });
+
+    // Mark the row as mid-review (within the freeze window).
+    const reviewStart = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await db
+      .updateTable("entity_review_queue")
+      .set({ review_started_at: reviewStart, review_started_by: "user-1" })
+      .where("normalized_name", "=", "simran suri neeli")
+      .execute();
+
+    const snapshot = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("normalized_name", "=", "simran suri neeli")
+      .executeTakeFirstOrThrow();
+
+    // Propose again with a candidate that would normally rewrite the fields.
+    // The mid-review row should preserve its snapshot.
+    await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:8b",
+      evidence: [{ indexedFileId: "file-8" }],
+      triggeredByUserId: "user-2",
+    });
+
+    const after = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("normalized_name", "=", "simran suri neeli")
+      .executeTakeFirstOrThrow();
+
+    expect(after.candidate_entity_id).toBe(snapshot.candidate_entity_id);
+    expect(after.candidate_generated_at).toBe(snapshot.candidate_generated_at);
+    expect(after.triggered_by_user_id).toBe("user-1");
+    expect(after.occurrence_count).toBe(snapshot.occurrence_count + 1);
+  });
+
+  it("9. resolved row → no-op (skipEvidence honored, no new evidence written)", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:1",
+    });
+
+    await insertTestFile(db, "file-9");
+
+    const before = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:9",
+      evidence: [{ indexedFileId: "file-9" }],
+      triggeredByUserId: "user-1",
+    });
+
+    // Flip the row to 'confirmed' to simulate ECR-02 resolve.
+    await db
+      .updateTable("entity_review_queue")
+      .set({ status: "confirmed", resolved_at: new Date().toISOString(), resolved_by: "user-1" })
+      .where("normalized_name", "=", "simran suri neeli")
+      .execute();
+
+    const evidenceBefore = await db.selectFrom("entity_review_evidence").selectAll().execute();
+    const queueBefore = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("normalized_name", "=", "simran suri neeli")
+      .executeTakeFirstOrThrow();
+
+    // Late-arriving propose for the same name. Should be a complete no-op.
+    await proposeEntity(deps, {
+      name: "Simran Suri Neeli",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:9b",
+      evidence: [{ indexedFileId: "file-9" }],
+      triggeredByUserId: "user-1",
+    });
+
+    const evidenceAfter = await db.selectFrom("entity_review_evidence").selectAll().execute();
+    const queueAfter = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("normalized_name", "=", "simran suri neeli")
+      .executeTakeFirstOrThrow();
+
+    expect(evidenceAfter).toHaveLength(evidenceBefore.length);
+    expect(queueAfter.status).toBe("confirmed");
+    expect(queueAfter.occurrence_count).toBe(queueBefore.occurrence_count);
+    expect(queueAfter.last_seen_at).toBe(queueBefore.last_seen_at);
+  });
+});
