@@ -169,6 +169,9 @@ importers:
 
   packages/shared:
     dependencies:
+      libphonenumber-js:
+        specifier: ^1.13.2
+        version: 1.13.2
       zod:
         specifier: ^4.3.6
         version: 4.3.6
@@ -4818,6 +4821,9 @@ packages:
 
   lie@3.3.0:
     resolution: {integrity: sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==}
+
+  libphonenumber-js@1.13.2:
+    resolution: {integrity: sha512-S3kmBrptp3yRTm83NUcHy9g1vbwiWMzI8WvY22+koBJ6zkRteLnedBL2VX0MIAGwx2yiyxX4J85pceZyQ6ffgg==}
 
   lightningcss-android-arm64@1.31.1:
     resolution: {integrity: sha512-HXJF3x8w9nQ4jbXRiNppBCqeZPIAfUo8zE/kOEGbW5NZvGc/K7nMxbhIr+YlFlHW5mpbg/YFPdbnCh1wAXCKFg==}
@@ -11682,6 +11688,8 @@ snapshots:
   lie@3.3.0:
     dependencies:
       immediate: 3.0.6
+
+  libphonenumber-js@1.13.2: {}
 
   lightningcss-android-arm64@1.31.1:
     optional: true

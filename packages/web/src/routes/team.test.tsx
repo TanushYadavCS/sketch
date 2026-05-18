@@ -1,6 +1,6 @@
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -96,7 +96,7 @@ describe("TeamPage", () => {
       expect(within(dialog).getByRole("button", { name: "Add member" })).toBeDisabled();
     }, 15000);
 
-    it("creates a user on submit", async () => {
+    it("creates a user with a normalized WhatsApp number on submit", async () => {
       const createFn = vi.fn();
       server.use(
         http.post("/api/users", async ({ request }) => {
@@ -131,7 +131,8 @@ describe("TeamPage", () => {
 
       await user.type(within(dialog).getByLabelText("Name"), "Charlie");
       await user.type(within(dialog).getByLabelText("Email"), "charlie@test.com");
-      await user.type(within(dialog).getByLabelText("WhatsApp number"), "+14155551234");
+      expect(within(dialog).getByRole("combobox", { name: "WhatsApp number country" })).toBeInTheDocument();
+      await user.type(within(dialog).getByLabelText("WhatsApp number"), "98765 43210");
       await user.click(within(dialog).getByRole("button", { name: "Add member" }));
 
       await waitFor(() => {
@@ -141,10 +142,30 @@ describe("TeamPage", () => {
           role: null,
           reportsTo: null,
           email: "charlie@test.com",
-          whatsappNumber: "+14155551234",
+          whatsappNumber: "+919876543210",
           description: null,
         });
       });
+    }, 15000);
+
+    it("disables submit for an invalid WhatsApp number", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<TeamPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Alice Smith")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: /Add member/i }));
+
+      const dialog = await screen.findByRole("dialog");
+
+      await user.type(within(dialog).getByLabelText("Name"), "Charlie");
+      await user.type(within(dialog).getByLabelText("Email"), "charlie@test.com");
+      await user.type(within(dialog).getByLabelText("WhatsApp number"), "123");
+
+      expect(within(dialog).getByText("Enter a valid WhatsApp number for the selected country")).toBeInTheDocument();
+      expect(within(dialog).getByRole("button", { name: "Add member" })).toBeDisabled();
     }, 15000);
 
     it("shows inline error on duplicate number", async () => {
@@ -172,7 +193,7 @@ describe("TeamPage", () => {
 
       await user.type(screen.getByLabelText("Name"), "Dupe");
       await user.type(screen.getByLabelText("Email"), "dupe@test.com");
-      await user.type(screen.getByLabelText("WhatsApp number"), "+919876543210");
+      fireEvent.change(screen.getByLabelText("WhatsApp number"), { target: { value: "98765 43210" } });
       await user.click(screen.getByRole("button", { name: "Add member" }));
 
       await waitFor(() => {
