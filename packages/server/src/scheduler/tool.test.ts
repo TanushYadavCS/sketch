@@ -50,6 +50,7 @@ function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskSchedule
     pauseTask: vi.fn().mockResolvedValue(undefined),
     resumeTask: vi.fn().mockResolvedValue(undefined),
     executeTaskById: vi.fn().mockResolvedValue(undefined),
+    enqueueTaskById: vi.fn().mockResolvedValue(undefined),
     start: vi.fn(),
     stop: vi.fn(),
     scheduleTask: vi.fn(),
@@ -302,6 +303,20 @@ describe("handleManageScheduledTasks — add", () => {
       { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ threadTs: "1234567890.123456" }));
+  });
+
+  it("creates simple prompt automations as Sketch-mode agent steps", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    const addTaskCall = (scheduler.addTask as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const stepsJson = JSON.parse(addTaskCall.steps);
+    expect(stepsJson.find((step: { id: string }) => step.id === "step1")).toEqual(
+      expect.objectContaining({ type: "agent", agentMode: "sketch" }),
+    );
   });
 
   it("returns created task in response", async () => {
@@ -712,6 +727,7 @@ describe("handleManageScheduledTasks — run", () => {
       stepOutputs: { step1: { output: { ok: true }, status: "completed", duration_ms: 12 } },
     };
     const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(makeTask({ sessionMode: "fresh" })),
       executeTaskById: vi.fn().mockResolvedValue(runResult),
     });
 
@@ -726,8 +742,39 @@ describe("handleManageScheduledTasks — run", () => {
     expect(result.content[0].text).toContain('"ok": true');
   });
 
+  it("queues same-conversation runs instead of awaiting the current queue", async () => {
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(
+        makeTask({
+          contextType: "channel",
+          deliveryTarget: "C456",
+          threadTs: "1234567890.123456",
+          sessionMode: "chat",
+          createdBy: "U123",
+        }),
+      ),
+      executeTaskById: vi.fn(),
+      enqueueTaskById: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "run", task_id: "task-1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: channelThreadContext,
+        activeQueueKey: "C456:1234567890.123456",
+      },
+    );
+
+    expect(scheduler.enqueueTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("queued to run after this chat turn completes");
+  });
+
   it("returns the latest run when a completed once task is run again", async () => {
     const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(makeTask({ scheduleType: "once", status: "completed" })),
       executeTaskById: vi.fn().mockResolvedValue(null),
     });
     const automationRunsRepo = {

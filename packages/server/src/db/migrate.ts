@@ -53,6 +53,7 @@ import * as m050 from "./migrations/050-agent-tool-allowlist";
 import * as m051 from "./migrations/051-channel-agent-binding";
 import * as m052 from "./migrations/052-whatsapp-group-agent-binding";
 import * as m053 from "./migrations/053-whatsapp-fallback-agent";
+import * as m054 from "./migrations/054-agent-environment-variable-shares";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -110,6 +111,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "051-channel-agent-binding": m051,
           "052-whatsapp-group-agent-binding": m052,
           "053-whatsapp-fallback-agent": m053,
+          "054-agent-environment-variable-shares": m054,
         };
       },
     },

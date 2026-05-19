@@ -232,8 +232,8 @@ describe("update()", () => {
 
   it("updates tool_progress and reasoning_text", async () => {
     const created = await users.create({ name: "Jules", slackUserId: "U017" });
-    const updated = await users.update(created.id, { toolProgress: "concise", reasoningText: true });
-    expect(updated.tool_progress).toBe("concise");
+    const updated = await users.update(created.id, { toolProgress: "technical", reasoningText: true });
+    expect(updated.tool_progress).toBe("technical");
     expect(updated.reasoning_text).toBe(1);
   });
 });

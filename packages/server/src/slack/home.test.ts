@@ -60,14 +60,14 @@ describe("buildHomeView", () => {
   });
 
   it("wires the tool-progress select with the right action_id, options, and initial value", () => {
-    const view = buildHomeView({ ...baseParams, toolProgress: "concise" });
+    const view = buildHomeView({ ...baseParams, toolProgress: "technical" });
     const select = getSelect(findActionsBlock(view, "home_tool_progress_actions"));
 
     expect(select.type).toBe("static_select");
     expect(select.action_id).toBe(HOME_ACTION_TOOL_PROGRESS);
     expect(select.options.map((o) => o.value)).toEqual([...TOOL_PROGRESS_OPTIONS]);
-    expect(select.initial_option.value).toBe("concise");
-    expect(select.initial_option.text.text).toBe("Concise");
+    expect(select.initial_option.value).toBe("technical");
+    expect(select.initial_option.text.text).toBe("Technical");
   });
 
   it("wires the reasoning-text select with the right action_id, options, and initial value", () => {

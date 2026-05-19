@@ -16,7 +16,6 @@ import { agentSessionRoutes } from "./api/agent-sessions";
 import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
-import { emailRoutes } from "./api/email";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
 import { mcpServerRoutes } from "./api/mcp-servers";
@@ -36,7 +35,10 @@ import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
 import { createWorkspaceApi } from "./api/workspace";
 import type { Config } from "./config";
-import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
+import {
+  type AgentEnvironmentRuntimeContext,
+  createAgentEnvironmentVariableRepository,
+} from "./db/repositories/agent-environment-variables";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConnectorRepository } from "./db/repositories/connectors";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
@@ -70,7 +72,7 @@ interface AppDeps {
   runAgent?: (params: RunAgentParams) => Promise<AgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
-  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
@@ -207,7 +209,10 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/users",
     userRoutes(users, { settings, db, logger, config, channels, whatsappGroups, getSlack: deps?.getSlack }),
   );
-  app.route("/api/agent-environment-variables", agentEnvironmentRoutes(agentEnvVars));
+  app.route(
+    "/api/agent-environment-variables",
+    agentEnvironmentRoutes(agentEnvVars, { users, channels, whatsappGroups, getSlack: deps?.getSlack, logger }),
+  );
   app.route("/api/agent-sessions", agentSessionRoutes());
   app.route(
     "/api/workflows",
@@ -221,7 +226,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       runAgent: deps?.runAgent,
       buildMcpServers: deps?.buildMcpServers,
       loadIntegrationProvider: deps?.loadIntegrationProvider,
-      listAgentEnvForRuntime: deps?.listAgentEnvForRuntime ?? ((userId) => agentEnvVars.listForRuntime(userId)),
+      listAgentEnvForRuntime:
+        deps?.listAgentEnvForRuntime ?? ((context) => agentEnvVars.listForRuntimeContext(context)),
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
     }),
@@ -271,8 +277,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   if (deps?.whatsapp) {
     app.route("/api/channels/whatsapp", whatsappRoutes(deps.whatsapp));
   }
-
-  app.route("/api/channels/email", emailRoutes(settings));
 
   app.route("/api/usage", usageRoutes(db));
   app.route("/api/entities", entityRoutes(db));

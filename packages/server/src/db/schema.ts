@@ -219,6 +219,16 @@ export interface AgentEnvironmentVariablesTable {
   updated_at: Generated<string>;
 }
 
+export interface AgentEnvironmentVariableSharesTable {
+  id: string;
+  variable_id: string;
+  variable_name: string;
+  target_type: string;
+  target_id: string;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
 export interface McpServersTable {
   id: string;
   type: string | null;
@@ -397,6 +407,7 @@ export interface DB {
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
+  agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   scheduled_tasks: ScheduledTasksTable;

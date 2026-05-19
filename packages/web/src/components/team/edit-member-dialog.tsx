@@ -7,6 +7,7 @@
  */
 import { ConnectorLogo } from "@/components/connector-logos";
 import { AgentToolsField } from "@/components/team/agent-tools-field";
+import { PhoneNumberField } from "@/components/team/phone-number-field";
 import { SlackChannelsField } from "@/components/team/slack-channels-field";
 import { WhatsappFallbackField } from "@/components/team/whatsapp-fallback-field";
 import { WhatsAppGroupsField } from "@/components/team/whatsapp-groups-field";
@@ -22,7 +23,16 @@ import {
   SpinnerGapIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { AGENT_INSTRUCTIONS_MAX_LENGTH, emailSchema, whatsappNumberSchema } from "@sketch/shared";
+import {
+  AGENT_INSTRUCTIONS_MAX_LENGTH,
+  DEFAULT_PHONE_COUNTRY,
+  type PhoneCountryCode,
+  emailSchema,
+  formatPhoneNumberNationalInput,
+  getPhoneNumberInputParts,
+  normalizePhoneNumberToE164,
+  whatsappNumberSchema,
+} from "@sketch/shared";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -67,7 +77,8 @@ export function EditMemberDialog({
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<PhoneCountryCode>(DEFAULT_PHONE_COUNTRY);
+  const [phoneNationalNumber, setPhoneNationalNumber] = useState("");
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
   const [allowedTools, setAllowedTools] = useState<string[]>([]);
@@ -77,13 +88,20 @@ export function EditMemberDialog({
   const [error, setError] = useState("");
 
   const isAgent = user?.type === "agent";
+  const normalizedPhone = phoneNationalNumber.trim()
+    ? normalizePhoneNumberToE164(phoneNationalNumber, phoneCountry)
+    : null;
+  const phoneError =
+    phoneNationalNumber.trim() && !normalizedPhone ? "Enter a valid WhatsApp number for the selected country" : "";
 
   useEffect(() => {
     if (user) {
       setName(user.name);
       setRole(user.role ?? "");
       setEmail(user.email ?? "");
-      setPhone(user.whatsapp_number ?? "");
+      const phoneParts = getPhoneNumberInputParts(user.whatsapp_number);
+      setPhoneCountry(phoneParts.country);
+      setPhoneNationalNumber(formatPhoneNumberNationalInput(phoneParts.nationalNumber, phoneParts.country));
       setDescription(user.description ?? "");
       setReportsTo(user.reports_to ?? "none");
       setAllowedTools(user.allowed_tools ?? []);
@@ -105,7 +123,7 @@ export function EditMemberDialog({
           ? { allowedTools, slackChannelIds, whatsappGroupJids, isWhatsappFallback }
           : {
               email: email.trim() || null,
-              whatsappNumber: phone.trim() || null,
+              whatsappNumber: normalizedPhone,
             }),
       }),
     onSuccess: (data) => {
@@ -174,12 +192,13 @@ export function EditMemberDialog({
       whatsappGroupJidsDirty ||
       isWhatsappFallbackDirty ||
       (!isAgent &&
-        ((email.trim() || null) !== (user.email ?? null) ||
-          (phone.trim() || null) !== (user.whatsapp_number ?? null))));
+        ((email.trim() || null) !== (user.email ?? null) || normalizedPhone !== (user.whatsapp_number ?? null))));
 
   const canSubmit =
     isDirty &&
-    editMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: phone.trim() }).success;
+    !phoneError &&
+    editMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: normalizedPhone ?? "" })
+      .success;
 
   const otherUsers = users.filter((u) => u.id !== user?.id);
 
@@ -191,7 +210,7 @@ export function EditMemberDialog({
           <DialogDescription>Update this member's details.</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="max-h-[50vh] space-y-4 overflow-y-auto py-2 pr-1">
           <div>
             {isAgent ? (
               <Badge variant="secondary">
@@ -349,26 +368,19 @@ export function EditMemberDialog({
                 </div>
               )}
 
-              <div className="space-y-1.5">
-                <Label htmlFor="edit-phone">WhatsApp number</Label>
-                <Input
-                  id="edit-phone"
-                  value={phone}
-                  onChange={(e) => {
-                    setPhone(e.target.value);
-                    setError("");
-                  }}
-                  placeholder="+91 98765 43210"
-                  disabled={updateMutation.isPending}
-                />
-                {error ? (
-                  <p className="text-xs text-destructive">{error}</p>
-                ) : phone.trim() ? (
-                  <p className="text-xs text-muted-foreground">
-                    This number will be linked to {user?.name}'s identity on WhatsApp.
-                  </p>
-                ) : null}
-              </div>
+              <PhoneNumberField
+                id="edit-phone"
+                label="WhatsApp number"
+                country={phoneCountry}
+                nationalNumber={phoneNationalNumber}
+                onCountryChange={setPhoneCountry}
+                onNationalNumberChange={(value) => {
+                  setPhoneNationalNumber(value);
+                  setError("");
+                }}
+                disabled={updateMutation.isPending}
+                error={error || phoneError}
+              />
             </>
           )}
         </div>

@@ -210,7 +210,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         }
       }
 
-      const userQueue = queue.getQueue(user.id);
+      const activeQueueKey = user.id;
+      const userQueue = queue.getQueue(activeQueueKey);
 
       userQueue.enqueue(async () => {
         const command = parseSketchCommand(message.text);
@@ -362,6 +363,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             stepContentRepo,
             automationRunsRepo,
             queueManager: queue,
+            activeQueueKey,
             toolConfig,
             inboxMessagesRepo,
             userRepo: repos.users,
@@ -423,7 +425,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
     const userName = user?.name ?? message.pushName;
 
     const groupJid = message.jid;
-    const groupQueue = queue.getQueue(`wa-group-${groupJid}`);
+    const activeQueueKey = `wa-group-${groupJid}`;
+    const groupQueue = queue.getQueue(activeQueueKey);
 
     groupQueue.enqueue(async () => {
       const command = parseSketchCommand(message.text);
@@ -615,6 +618,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           stepContentRepo,
           automationRunsRepo,
           queueManager: queue,
+          activeQueueKey,
           toolConfig,
           inboxMessagesRepo,
           userRepo: repos.users,

@@ -206,6 +206,7 @@ export function buildSystemContext(params: {
     "## Scheduled Tasks",
     "",
     "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. Platform and delivery target are filled in automatically from context. Do not ask the user for these.",
+    "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
   );
 

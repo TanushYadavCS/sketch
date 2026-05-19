@@ -1,11 +1,20 @@
 import { AgentToolsField } from "@/components/team/agent-tools-field";
+import { PhoneNumberField } from "@/components/team/phone-number-field";
 import { SlackChannelsField } from "@/components/team/slack-channels-field";
 import { WhatsappFallbackField } from "@/components/team/whatsapp-fallback-field";
 import { WhatsAppGroupsField } from "@/components/team/whatsapp-groups-field";
 import type { User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { SpinnerGapIcon } from "@phosphor-icons/react";
-import { AGENT_INSTRUCTIONS_MAX_LENGTH, AGENT_TOOL_CATALOG, emailSchema, whatsappNumberSchema } from "@sketch/shared";
+import {
+  AGENT_INSTRUCTIONS_MAX_LENGTH,
+  AGENT_TOOL_CATALOG,
+  DEFAULT_PHONE_COUNTRY,
+  type PhoneCountryCode,
+  emailSchema,
+  normalizePhoneNumberToE164,
+  whatsappNumberSchema,
+} from "@sketch/shared";
 /**
  * AddMemberDialog — create a new human member or AI agent.
  * Human members require a name + email; agents require only a name.
@@ -58,7 +67,8 @@ export function AddMemberDialog({
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<PhoneCountryCode>(DEFAULT_PHONE_COUNTRY);
+  const [phoneNationalNumber, setPhoneNationalNumber] = useState("");
   const [description, setDescription] = useState("");
   const [reportsTo, setReportsTo] = useState("none");
   const [allowedTools, setAllowedTools] = useState<string[]>(() => AGENT_TOOL_CATALOG.map((t) => t.name));
@@ -66,6 +76,11 @@ export function AddMemberDialog({
   const [whatsappGroupJids, setWhatsappGroupJids] = useState<string[]>([]);
   const [isWhatsappFallback, setIsWhatsappFallback] = useState(false);
   const [error, setError] = useState("");
+  const normalizedPhone = phoneNationalNumber.trim()
+    ? normalizePhoneNumberToE164(phoneNationalNumber, phoneCountry)
+    : null;
+  const phoneError =
+    phoneNationalNumber.trim() && !normalizedPhone ? "Enter a valid WhatsApp number for the selected country" : "";
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -78,7 +93,7 @@ export function AddMemberDialog({
         ...(memberType === "human"
           ? {
               email: email.trim() || null,
-              whatsappNumber: phone.trim() || null,
+              whatsappNumber: normalizedPhone,
             }
           : {
               allowedTools,
@@ -110,7 +125,8 @@ export function AddMemberDialog({
     setName("");
     setRole("");
     setEmail("");
-    setPhone("");
+    setPhoneCountry(DEFAULT_PHONE_COUNTRY);
+    setPhoneNationalNumber("");
     setDescription("");
     setReportsTo("none");
     setAllowedTools(AGENT_TOOL_CATALOG.map((t) => t.name));
@@ -124,7 +140,12 @@ export function AddMemberDialog({
   const canSubmit =
     memberType === "agent"
       ? addAgentSchema.safeParse({ name: name.trim() }).success
-      : addMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: phone.trim() }).success;
+      : !phoneError &&
+        addMemberSchema.safeParse({
+          name: name.trim(),
+          email: email.trim(),
+          whatsappNumber: normalizedPhone ?? "",
+        }).success;
 
   return (
     <Dialog
@@ -144,7 +165,7 @@ export function AddMemberDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="max-h-[50vh] space-y-4 overflow-y-auto py-2 pr-1">
           <div className="flex rounded-md border border-border">
             <button
               type="button"
@@ -280,20 +301,19 @@ export function AddMemberDialog({
                   disabled={createMutation.isPending}
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="add-phone">WhatsApp number</Label>
-                <Input
-                  id="add-phone"
-                  value={phone}
-                  onChange={(e) => {
-                    setPhone(e.target.value);
-                    setError("");
-                  }}
-                  placeholder="+91 98765 43210"
-                  disabled={createMutation.isPending}
-                />
-                {error && <p className="text-xs text-destructive">{error}</p>}
-              </div>
+              <PhoneNumberField
+                id="add-phone"
+                label="WhatsApp number"
+                country={phoneCountry}
+                nationalNumber={phoneNationalNumber}
+                onCountryChange={setPhoneCountry}
+                onNationalNumberChange={(value) => {
+                  setPhoneNationalNumber(value);
+                  setError("");
+                }}
+                disabled={createMutation.isPending}
+                error={error || phoneError}
+              />
             </>
           )}
         </div>

@@ -79,8 +79,8 @@ describe("findById()", () => {
 describe("update()", () => {
   it("updates tool_progress and reasoning_text", async () => {
     const created = await channels.create({ slackChannelId: "C007", name: "ops", type: "public_channel" });
-    const updated = await channels.update(created.id, { toolProgress: "verbose", reasoningText: true });
-    expect(updated.tool_progress).toBe("verbose");
+    const updated = await channels.update(created.id, { toolProgress: "technical", reasoningText: true });
+    expect(updated.tool_progress).toBe("technical");
     expect(updated.reasoning_text).toBe(1);
     expect(updated.name).toBe("ops");
   });

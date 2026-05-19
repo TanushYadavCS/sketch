@@ -5,6 +5,7 @@
 
 import type { SkillCategory } from "@/lib/skills-data";
 import type {
+  AgentEnvironmentShareTargetInput,
   AgentEnvironmentVariableRecord,
   FileMetadata,
   IntegrationApp,
@@ -433,17 +434,6 @@ export const api = {
     },
     deleteEmail() {
       return request<{ success: boolean }>("/api/channels/email", { method: "DELETE" });
-    },
-  },
-  email: {
-    configure(data: { host: string; port: number; user: string; pass: string; from: string; secure: boolean }) {
-      return request<{ success: boolean }>("/api/channels/email/config", {
-        method: "PUT",
-        body: JSON.stringify(data),
-      });
-    },
-    disconnect() {
-      return request<{ success: boolean }>("/api/channels/email/config", { method: "DELETE" });
     },
   },
   whatsapp: {
@@ -980,6 +970,21 @@ export const api = {
     },
     remove(id: string) {
       return request<{ success: true }>(`/api/agent-environment-variables/${id}`, { method: "DELETE" });
+    },
+    async replaceShares(id: string, targets: AgentEnvironmentShareTargetInput[]) {
+      const res = await request<{ variable: AgentEnvironmentVariableRecord }>(
+        `/api/agent-environment-variables/${id}/shares`,
+        {
+          method: "POST",
+          body: JSON.stringify({ targets }),
+        },
+      );
+      return res.variable;
+    },
+    deleteShare(id: string, shareId: string) {
+      return request<{ success: true }>(`/api/agent-environment-variables/${id}/shares/${shareId}`, {
+        method: "DELETE",
+      });
     },
   },
   entities: {

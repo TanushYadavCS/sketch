@@ -54,7 +54,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
-import { dashboardRoute } from "./dashboard";
+import { dashboardRoute, useDashboardAuth } from "./dashboard";
 
 export const channelsRoute = createRoute({
   getParentRoute: () => dashboardRoute,
@@ -63,6 +63,8 @@ export const channelsRoute = createRoute({
 });
 
 export function ChannelsPage() {
+  const auth = useDashboardAuth();
+  const canManageChannels = auth.role === "admin";
   const { data, isLoading } = useQuery({
     queryKey: ["channels", "status"],
     queryFn: () => api.channels.status(),
@@ -72,9 +74,14 @@ export function ChannelsPage() {
   const allDisconnected = data?.channels?.every((ch) => ch.connected !== true);
 
   return (
-    <div className="mx-auto max-w-4xl px-10 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <h1 className="text-xl font-semibold text-foreground">Channels</h1>
       <p className="mt-2 text-sm text-muted-foreground">Manage your messaging platform connections.</p>
+      {!canManageChannels && (
+        <p className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+          Channel settings are managed by admins.
+        </p>
+      )}
 
       <div className="mt-6 space-y-4">
         {!isLoading && allDisconnected && (
@@ -92,24 +99,26 @@ export function ChannelsPage() {
             <Skeleton className="h-32 rounded-lg" />
           </>
         ) : (
-          data?.channels.map((channel) => <PlatformCard key={channel.platform} channel={channel} />)
+          data?.channels.map((channel) => (
+            <PlatformCard key={channel.platform} channel={channel} canManage={canManageChannels} />
+          ))
         )}
       </div>
     </div>
   );
 }
 
-function PlatformCard({ channel }: { channel: ChannelStatus }) {
+function PlatformCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
   if (channel.platform === "slack") {
-    return <SlackCard channel={channel} />;
+    return <SlackCard channel={channel} canManage={canManage} />;
   }
   if (channel.platform === "email") {
-    return <EmailCard channel={channel} />;
+    return <EmailCard channel={channel} canManage={canManage} />;
   }
-  return <WhatsAppCard channel={channel} />;
+  return <WhatsAppCard channel={channel} canManage={canManage} />;
 }
 
-function SlackCard({ channel }: { channel: ChannelStatus }) {
+function SlackCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [showDisconnectDialog, setShowDisconnectDialog] = useState(false);
@@ -151,7 +160,7 @@ function SlackCard({ channel }: { channel: ChannelStatus }) {
             <span className="text-sm font-medium">Slack</span>
           </div>
           <div className="flex items-center gap-2">
-            {!isConfigured && (
+            {canManage && !isConfigured && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -162,7 +171,7 @@ function SlackCard({ channel }: { channel: ChannelStatus }) {
                 Connect
               </Button>
             )}
-            {isConfigured && (
+            {canManage && isConfigured && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" className="size-7" aria-label="Slack actions">
@@ -217,7 +226,7 @@ function SlackCard({ channel }: { channel: ChannelStatus }) {
   );
 }
 
-function WhatsAppCard({ channel }: { channel: ChannelStatus }) {
+function WhatsAppCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [showPairDialog, setShowPairDialog] = useState(false);
   const [showDisconnectDialog, setShowDisconnectDialog] = useState(false);
@@ -258,7 +267,7 @@ function WhatsAppCard({ channel }: { channel: ChannelStatus }) {
             <span className="text-sm font-medium">WhatsApp</span>
           </div>
           <div className="flex items-center gap-2">
-            {!isConnected && (
+            {canManage && !isConnected && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -269,10 +278,10 @@ function WhatsAppCard({ channel }: { channel: ChannelStatus }) {
                 Pair
               </Button>
             )}
-            {isConnected && (
+            {canManage && isConnected && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-7">
+                  <Button variant="ghost" size="icon" className="size-7" aria-label="WhatsApp actions">
                     <DotsThreeIcon size={16} />
                   </Button>
                 </DropdownMenuTrigger>
@@ -351,7 +360,7 @@ function WhatsAppPairDialog({
   );
 }
 
-function EmailCard({ channel }: { channel: ChannelStatus }) {
+function EmailCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [showDisconnectDialog, setShowDisconnectDialog] = useState(false);
@@ -397,7 +406,7 @@ function EmailCard({ channel }: { channel: ChannelStatus }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {!isConfigured && (
+            {canManage && !isConfigured && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -408,10 +417,10 @@ function EmailCard({ channel }: { channel: ChannelStatus }) {
                 Configure
               </Button>
             )}
-            {isConfigured && (
+            {canManage && isConfigured && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-7">
+                  <Button variant="ghost" size="icon" className="size-7" aria-label="Email actions">
                     <DotsThreeIcon size={16} />
                   </Button>
                 </DropdownMenuTrigger>
