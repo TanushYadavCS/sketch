@@ -1,9 +1,65 @@
+import {
+  type CountryCode,
+  formatIncompletePhoneNumber,
+  getCountries,
+  getCountryCallingCode,
+  parseIncompletePhoneNumber,
+  parsePhoneNumberFromString,
+} from "libphonenumber-js/max";
 import { z } from "zod";
 
-export const whatsappNumberSchema = z
-  .string()
-  .min(8, "Phone number must be at least 8 characters")
-  .startsWith("+", "Phone number must start with +");
+export type PhoneCountryCode = CountryCode;
+
+export const DEFAULT_PHONE_COUNTRY: PhoneCountryCode = "IN";
+
+export function getSupportedPhoneCountries(): Array<{ country: PhoneCountryCode; callingCode: string }> {
+  return getCountries().map((country) => ({ country, callingCode: getCountryCallingCode(country) }));
+}
+
+export function normalizePhoneNumberToE164(value: string, country?: PhoneCountryCode): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const parsed = parsePhoneNumberFromString(trimmed, {
+    ...(country ? { defaultCountry: country } : {}),
+    extract: false,
+  });
+  if (!parsed?.isValid()) return null;
+  return parsed.number;
+}
+
+export function getPhoneNumberInputParts(value: string | null | undefined): {
+  country: PhoneCountryCode;
+  nationalNumber: string;
+} {
+  if (!value) return { country: DEFAULT_PHONE_COUNTRY, nationalNumber: "" };
+
+  const parsed = parsePhoneNumberFromString(value, { extract: false });
+  if (!parsed?.country) return { country: DEFAULT_PHONE_COUNTRY, nationalNumber: value };
+
+  return {
+    country: parsed.country,
+    nationalNumber: parsed.nationalNumber,
+  };
+}
+
+export function formatPhoneNumberNationalInput(value: string, country = DEFAULT_PHONE_COUNTRY): string {
+  const incomplete = parseIncompletePhoneNumber(value);
+  if (!incomplete) return "";
+  return formatIncompletePhoneNumber(incomplete, country);
+}
+
+export const whatsappNumberSchema = z.string().transform((value, ctx) => {
+  const normalized = normalizePhoneNumberToE164(value);
+  if (!normalized) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Enter a valid phone number with country code",
+    });
+    return z.NEVER;
+  }
+  return normalized;
+});
 
 export const emailSchema = z.string().email("Invalid email address");
 

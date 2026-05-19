@@ -50,6 +50,11 @@ export interface DailyBucket {
   skills: number;
 }
 
+function roundedCostSum(db: Kysely<DB>, column: "cost_usd" | "r.cost_usd") {
+  const sum = sql`COALESCE(SUM(${sql.ref(column)}), 0)`;
+  return isPg(db) ? sql<number>`ROUND(${sum}::numeric, 6)` : sql<number>`ROUND(${sum}, 6)`;
+}
+
 /**
  * Agent runs repository — write path (insertRun, insertToolCalls) and read path (usage queries).
  *
@@ -82,11 +87,7 @@ export function createAgentRunsRepo(db: Kysely<DB>) {
     async getMemberSummary(userId: string, from: string, to: string): Promise<MemberSummary> {
       const byPlatform = await db
         .selectFrom("agent_runs")
-        .select([
-          "platform",
-          sql<number>`COUNT(id)`.as("count"),
-          sql<number>`ROUND(COALESCE(SUM(cost_usd), 0), 6)`.as("cost"),
-        ])
+        .select(["platform", sql<number>`COUNT(id)`.as("count"), roundedCostSum(db, "cost_usd").as("cost")])
         .where("user_id", "=", userId)
         .where("created_at", ">=", from)
         .where("created_at", "<", to)
@@ -142,11 +143,7 @@ export function createAgentRunsRepo(db: Kysely<DB>) {
     async getOrgSummary(from: string, to: string): Promise<OrgSummary> {
       const byPlatform = await db
         .selectFrom("agent_runs")
-        .select([
-          "platform",
-          sql<number>`COUNT(id)`.as("count"),
-          sql<number>`ROUND(COALESCE(SUM(cost_usd), 0), 6)`.as("cost"),
-        ])
+        .select(["platform", sql<number>`COUNT(id)`.as("count"), roundedCostSum(db, "cost_usd").as("cost")])
         .where("created_at", ">=", from)
         .where("created_at", "<", to)
         .groupBy("platform")
@@ -202,7 +199,7 @@ export function createAgentRunsRepo(db: Kysely<DB>) {
           "u.name as userName",
           "u.type as userType",
           sql<number>`COUNT(r.id)`.as("messageCount"),
-          sql<number>`ROUND(COALESCE(SUM(r.cost_usd), 0), 6)`.as("costUsd"),
+          roundedCostSum(db, "r.cost_usd").as("costUsd"),
           sql<string>`MAX(r.created_at)`.as("lastRunAt"),
         ])
         .where("r.created_at", ">=", from)

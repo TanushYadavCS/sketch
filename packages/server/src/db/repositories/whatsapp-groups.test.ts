@@ -73,9 +73,9 @@ describe("createWhatsAppGroupRepository", () => {
       updated_at: "2026-03-13T10:00:00.000Z",
     });
 
-    const updated = await repo.updateProgressSettings("123@g.us", { toolProgress: "concise", reasoningText: true });
+    const updated = await repo.updateProgressSettings("123@g.us", { toolProgress: "technical", reasoningText: true });
 
-    expect(updated?.tool_progress).toBe("concise");
+    expect(updated?.tool_progress).toBe("technical");
     expect(updated?.reasoning_text).toBe(1);
     expect(updated?.name).toBe("Founders");
   });

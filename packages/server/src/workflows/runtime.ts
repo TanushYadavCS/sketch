@@ -15,6 +15,7 @@ import type { Kysely } from "kysely";
 import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
+import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -34,7 +35,7 @@ export interface ExecuteAutomationParams {
   runsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
-  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -113,7 +114,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   } else {
     steps = [
       { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
-      { id: "step1", type: "agent", label: task.prompt, icon: "sketch-ai", position: { x: 0, y: 100 } },
+      {
+        id: "step1",
+        type: "agent",
+        label: task.prompt,
+        icon: "sketch-ai",
+        position: { x: 0, y: 100 },
+        agentMode: "sketch",
+      },
     ];
   }
 
@@ -183,6 +191,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           step,
           input: previousOutput,
           taskId: task.id,
+          task,
           runId,
           logger,
           config: params.config,
@@ -368,6 +377,32 @@ function resolveWorkspaceKey(task: ScheduledTaskRow): string {
   return task.created_by ?? task.delivery_target;
 }
 
+function buildAgentEnvironmentRuntimeContext(task: ScheduledTaskRow): AgentEnvironmentRuntimeContext {
+  const platform = task.platform === "whatsapp" ? "whatsapp" : "slack";
+  const contextType = task.context_type === "group" ? "group" : task.context_type === "channel" ? "channel" : "dm";
+  return {
+    currentUserId: task.created_by,
+    contextType: "scheduled_task",
+    allowOrgSharedEnv: true,
+    taskContext: {
+      platform,
+      contextType,
+      deliveryTarget: task.delivery_target,
+      createdBy: task.created_by,
+    },
+  };
+}
+
+function buildRunAgentTaskContext(task: ScheduledTaskRow): RunAgentParams["taskContext"] | undefined {
+  const runtimeContext = buildAgentEnvironmentRuntimeContext(task).taskContext;
+  if (!runtimeContext) return undefined;
+  return {
+    ...runtimeContext,
+    createdBy: task.created_by,
+    ...(task.thread_ts ? { threadTs: task.thread_ts } : {}),
+  };
+}
+
 // --- Action step: in-process script ---
 
 type AsyncFunctionConstructor = (
@@ -387,6 +422,7 @@ interface ActionStepParams {
   step: WorkflowStep;
   input: unknown;
   taskId: string;
+  task: ScheduledTaskRow;
   runId: string;
   logger: Logger;
   config: ExecuteAutomationParams["config"];
@@ -394,7 +430,7 @@ interface ActionStepParams {
   creatorEmail: string | null;
   workspaceDir: string;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
-  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
@@ -417,7 +453,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
 
   try {
     const env = await buildScriptEnv({
-      creatorId: params.creatorId,
+      runtimeContext: buildAgentEnvironmentRuntimeContext(params.task),
       listAgentEnvForRuntime: params.listAgentEnvForRuntime,
       integrationEnv: integrationAccess.envVars,
     });
@@ -471,14 +507,13 @@ function normalizeActionScript(script: string): string {
 }
 
 async function buildScriptEnv(params: {
-  creatorId: string | null;
-  listAgentEnvForRuntime?: (userId: string) => Promise<Record<string, string>>;
+  runtimeContext: AgentEnvironmentRuntimeContext;
+  listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   integrationEnv: Record<string, string>;
 }): Promise<Readonly<Record<string, string>>> {
-  const userEnv =
-    params.creatorId && params.listAgentEnvForRuntime
-      ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.creatorId))
-      : {};
+  const userEnv = params.listAgentEnvForRuntime
+    ? removeReservedAgentEnv(await params.listAgentEnvForRuntime(params.runtimeContext))
+    : {};
   const env: Record<string, string> = {
     PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
     NODE_NO_WARNINGS: "1",
@@ -557,7 +592,7 @@ interface AgentStepParams {
 async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   const { prompt, step, input, logger, workspaceDir, outputPlatform } = params;
 
-  if (step.agentMode === "sketch") {
+  if (step.agentMode !== "light") {
     return executeSketchAgentStep(params);
   }
 
@@ -705,6 +740,7 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     sessionMode: "fresh",
     contextType: "scheduled_task",
     currentUserId: task.created_by,
+    taskContext: buildRunAgentTaskContext(task),
     userRepo: params.userRepo,
     inboxMessagesRepo: params.inboxMessagesRepo,
     sendDm: params.sendDm,

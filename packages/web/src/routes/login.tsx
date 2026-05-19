@@ -18,6 +18,7 @@ import { useMutation } from "@tanstack/react-query";
 import { createRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { redirectToManagedLogin } from "./managed-redirect";
 import { rootRoute } from "./root";
 
 type LoginStep = "choose" | "password" | "magic-link" | "magic-link-sent";
@@ -29,6 +30,9 @@ export const loginRoute = createRoute({
     const status = await api.setup.status();
     if (!status.completed) {
       throw redirect({ to: "/onboarding" });
+    }
+    if (status.managedUrl) {
+      redirectToManagedLogin(status.managedUrl);
     }
   },
   component: LoginPage,

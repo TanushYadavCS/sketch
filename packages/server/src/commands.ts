@@ -1,13 +1,11 @@
-export type ToolProgressCommand = "off" | "friendly" | "concise" | "technical" | "verbose";
+export type ToolProgressCommand = "off" | "friendly" | "technical";
 export type ReasoningTextCommand = "on" | "off";
 
 export type SketchCommand =
   | "new_session"
   | "tool_progress_off"
   | "tool_progress_friendly"
-  | "tool_progress_concise"
   | "tool_progress_technical"
-  | "tool_progress_verbose"
   | "tool_progress_query"
   | "reasoning_text_on"
   | "reasoning_text_off"
@@ -21,15 +19,13 @@ export const NEW_SESSION_CONFIRMATIONS = [
   "New conversation started. 💬",
 ] as const;
 
-export const TOOL_PROGRESS_OPTIONS = ["off", "friendly", "concise", "technical", "verbose"] as const;
+export const TOOL_PROGRESS_OPTIONS = ["off", "friendly", "technical"] as const;
 export const REASONING_TEXT_OPTIONS = ["on", "off"] as const;
 
 export const TOOL_PROGRESS_LABELS: Record<ToolProgressCommand, string> = {
   off: "Off",
   friendly: "Friendly",
-  concise: "Concise",
   technical: "Technical",
-  verbose: "Verbose",
 };
 
 export const REASONING_TEXT_LABELS: Record<ReasoningTextCommand, string> = {
@@ -82,12 +78,8 @@ export function getToolProgressConfirmation(style: ToolProgressCommand, reasonin
         : "🛑 Tool progress turned off.";
     case "friendly":
       return "🪄 Tool progress set to friendly.";
-    case "concise":
-      return "🎯 Tool progress set to concise.";
     case "technical":
       return "🛠️ Tool progress set to technical.";
-    case "verbose":
-      return "🔍 Tool progress set to verbose.";
   }
 }
 

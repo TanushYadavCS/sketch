@@ -17,6 +17,7 @@ import type { IntegrationDefinition, IntegrationType } from "@/lib/integrations"
 import { getIntegration } from "@/lib/integrations";
 import { SparkleIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -232,7 +233,7 @@ function FilesPage() {
   });
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold">Files</h1>
@@ -284,81 +285,83 @@ function FilesPage() {
         </button>
       </div>
 
-      {activeTab === "entities" ? (
-        <EntityExplorer />
-      ) : (
-        <>
-          <ConnectorPicker
-            connectors={connectors}
-            sourceCounts={sourceCounts}
-            totalFiles={totalFiles}
-            localFileCount={localFileCount}
-            sourceFilter={sourceFilter}
-            onSourceFilterChange={setSourceFilter}
-            onConnected={handleConnected}
-            onManageConnector={(def, connector) => setManagingConnector({ definition: def, connector })}
-            forcedConnectIntegration={reconnectTarget}
-            onForcedConnectDone={() => setReconnectTarget(null)}
-          />
-
-          {totalFiles > 0 && (
-            <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
-              <div className="flex items-center gap-4 text-muted-foreground">
-                <span>
-                  <SparkleIcon size={12} weight="fill" className="mr-1 inline text-primary" />
-                  {enrichmentStats
-                    ? `${enrichmentStats.total - pendingEnrichment}/${enrichmentStats.total} indexed`
-                    : pendingEnrichment > 0
-                      ? `${pendingEnrichment} file${pendingEnrichment !== 1 ? "s" : ""} need to be indexed`
-                      : "All files indexed"}
-                </span>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-6 gap-1 text-xs"
-                onClick={() => enrichMutation.mutate()}
-                disabled={enrichMutation.isPending || enrichmentActive}
-              >
-                {(enrichMutation.isPending || enrichmentActive) && (
-                  <SpinnerGapIcon size={12} className="animate-spin" />
-                )}
-                {enrichmentActive ? "Indexing..." : "Enrich now"}
-              </Button>
-            </div>
-          )}
-
-          <SearchBar
-            search={search}
-            onSearchChange={setSearch}
-            typeFilter={typeFilter}
-            accessFilter={accessFilter}
-            statusFilter={statusFilter}
-            onTypeChange={setTypeFilter}
-            onAccessChange={setAccessFilter}
-            onStatusChange={setStatusFilter}
-          />
-
-          <div className="mt-4">
-            <FileList
-              isLoading={isLoading}
-              isSearching={isSearching}
-              isInSearchMode={isInSearchMode}
-              isFetchingFiles={isFetchingFiles}
-              filteredFiles={filteredFiles}
-              searchResults={searchResults}
-              debouncedSearch={debouncedSearch}
-              hasAnyFilter={hasAnyFilter}
-              hasMore={hasMore}
-              hasClientOnlyFilter={hasClientOnlyFilter}
-              allFilesCount={allFiles.length}
+      <TabContentContainer>
+        {activeTab === "entities" ? (
+          <EntityExplorer />
+        ) : (
+          <>
+            <ConnectorPicker
+              connectors={connectors}
+              sourceCounts={sourceCounts}
               totalFiles={totalFiles}
-              onView={setViewingFile}
-              onLoadMore={loadMore}
+              localFileCount={localFileCount}
+              sourceFilter={sourceFilter}
+              onSourceFilterChange={setSourceFilter}
+              onConnected={handleConnected}
+              onManageConnector={(def, connector) => setManagingConnector({ definition: def, connector })}
+              forcedConnectIntegration={reconnectTarget}
+              onForcedConnectDone={() => setReconnectTarget(null)}
             />
-          </div>
-        </>
-      )}
+
+            {totalFiles > 0 && (
+              <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
+                <div className="flex items-center gap-4 text-muted-foreground">
+                  <span>
+                    <SparkleIcon size={12} weight="fill" className="mr-1 inline text-primary" />
+                    {enrichmentStats
+                      ? `${enrichmentStats.total - pendingEnrichment}/${enrichmentStats.total} indexed`
+                      : pendingEnrichment > 0
+                        ? `${pendingEnrichment} file${pendingEnrichment !== 1 ? "s" : ""} need to be indexed`
+                        : "All files indexed"}
+                  </span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 gap-1 text-xs"
+                  onClick={() => enrichMutation.mutate()}
+                  disabled={enrichMutation.isPending || enrichmentActive}
+                >
+                  {(enrichMutation.isPending || enrichmentActive) && (
+                    <SpinnerGapIcon size={12} className="animate-spin" />
+                  )}
+                  {enrichmentActive ? "Indexing..." : "Enrich now"}
+                </Button>
+              </div>
+            )}
+
+            <SearchBar
+              search={search}
+              onSearchChange={setSearch}
+              typeFilter={typeFilter}
+              accessFilter={accessFilter}
+              statusFilter={statusFilter}
+              onTypeChange={setTypeFilter}
+              onAccessChange={setAccessFilter}
+              onStatusChange={setStatusFilter}
+            />
+
+            <div className="mt-4">
+              <FileList
+                isLoading={isLoading}
+                isSearching={isSearching}
+                isInSearchMode={isInSearchMode}
+                isFetchingFiles={isFetchingFiles}
+                filteredFiles={filteredFiles}
+                searchResults={searchResults}
+                debouncedSearch={debouncedSearch}
+                hasAnyFilter={hasAnyFilter}
+                hasMore={hasMore}
+                hasClientOnlyFilter={hasClientOnlyFilter}
+                allFilesCount={allFiles.length}
+                totalFiles={totalFiles}
+                onView={setViewingFile}
+                onLoadMore={loadMore}
+              />
+            </div>
+          </>
+        )}
+      </TabContentContainer>
 
       <ManageConnectorDialog
         definition={managingConnector?.definition ?? null}

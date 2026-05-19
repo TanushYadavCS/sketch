@@ -435,12 +435,12 @@ describe("slack/adapter", () => {
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { dm } = getHandlers();
 
-      await dm({ text: "/toolprogress concise", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await dm({ text: "/toolprogress technical", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "concise" });
+      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "technical" });
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "🎯 Tool progress set to concise.");
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "🛠️ Tool progress set to technical.");
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -598,7 +598,7 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
         "C1",
         "1",
-        "🛠️ Tool progress: technical. 🧠 Reasoning text: off.\nUse /toolprogress off|friendly|concise|technical|verbose",
+        "🛠️ Tool progress: technical. 🧠 Reasoning text: off.\nUse /toolprogress off|friendly|technical",
       );
     });
   });
@@ -791,7 +791,6 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.setAssistantStatus).toHaveBeenCalledWith("C1", "1", "💭 Thinking…");
       expect(mockBotInstance.setAssistantStatus).toHaveBeenLastCalledWith("C1", "1", "");
     });
-
     it("applies bound agent overlay when channel.agent_user_id is set", async () => {
       const baseDeps = makeDeps();
       const agentUser = makeUser({
@@ -924,7 +923,7 @@ describe("slack/adapter", () => {
         await dm({ text: "hi", userId: "S1", channelId: "D1", ts: "1", threadTs: "t1", type: "dm" });
         await flush();
 
-        expect(mockBotInstance.setAssistantStatus).toHaveBeenCalledWith("D1", "t1", "📖 Flipping through some pages");
+        expect(mockBotInstance.setAssistantStatus).toHaveBeenCalledWith("D1", "t1", '📖 Reading "a.ts"');
       } finally {
         randomSpy.mockRestore();
       }

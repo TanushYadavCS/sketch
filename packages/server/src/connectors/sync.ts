@@ -10,11 +10,13 @@ import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
+import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 import { getConnector } from "./registry";
-import type { ConnectorCredentials, ConnectorType, SyncResult } from "./types";
+import type { ConnectorCredentials, ConnectorType, NameResolution, NameResolver, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
 export interface SyncProgress {
@@ -70,11 +72,48 @@ function serializeCredentials(credentials: ConnectorCredentials): string {
 }
 
 /**
+ * Read a person entity's email from its JSON metadata column. SQLite and
+ * Postgres both store this as a text JSON blob; we parse it once at
+ * pre-load time rather than reaching for dialect-specific extraction in
+ * the SELECT — the full row is already in memory.
+ */
+function readPersonEmail(metadata: string | null): string | null {
+  if (!metadata) return null;
+  try {
+    const parsed = JSON.parse(metadata) as { email?: unknown };
+    if (typeof parsed.email === "string" && parsed.email.length > 0) {
+      return parsed.email.toLowerCase();
+    }
+  } catch {
+    // Corrupt metadata — skip rather than fail the whole sync.
+  }
+  return null;
+}
+
+/**
+ * Parse a person entity's aliases column (JSON array of strings). Returns
+ * an empty array on null/parse-failure to keep callers branch-free.
+ */
+function parseAliases(aliases: string | null): string[] {
+  if (!aliases) return [];
+  try {
+    const parsed = JSON.parse(aliases);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((v): v is string => typeof v === "string");
+    }
+  } catch {
+    // Corrupt aliases — skip.
+  }
+  return [];
+}
+
+/**
  * Run a sync for a single connector config.
  */
 export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string, logger: Logger): Promise<SyncResult> {
   const repo = createConnectorRepository(db);
   const entityRepo = createEntityRepository(db);
+  const userRepo = createUserRepository(db);
   const config = await repo.findConfigById(connectorConfigId);
 
   if (!config) {
@@ -84,6 +123,8 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
   const connector = getConnector(config.connector_type as ConnectorType);
   let credentials = parseCredentials(config.credentials);
   const scopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
+  const owner = await userRepo.findById(config.created_by);
+  const ownerEmail = owner?.email ?? null;
 
   const syncLogger = logger.child({ connectorId: config.id, type: config.connector_type });
   syncLogger.info("Starting sync");
@@ -141,8 +182,20 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
     const personEntities = allEntities.filter((e) => e.source_type === "person");
     const personBySourceRef = new Map<string, (typeof personEntities)[0]>();
     const personByNameLower = new Map<string, (typeof personEntities)[0]>();
+    // Ambiguity-aware lookup keyed by normalizeName: name → { email, entityId }.
+    // Covers canonical name AND aliases (alias-confirmation persists merges
+    // there). Conflicting values on the same key drop the key — single
+    // unambiguous match only, matching the rule the in-meeting maps use.
+    const personEmailByName = createAmbiguityAwareMap<string, { email: string; entityId: string }>();
     for (const p of personEntities) {
       personByNameLower.set(p.name.toLowerCase(), p);
+      const email = readPersonEmail(p.metadata);
+      if (!email) continue;
+      const value = { email, entityId: p.id };
+      personEmailByName.add(normalizeName(p.name), value);
+      for (const alias of parseAliases(p.aliases)) {
+        personEmailByName.add(normalizeName(alias), value);
+      }
     }
     const sourceRefs = await db
       .selectFrom("entity_source_refs")
@@ -162,11 +215,40 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       }
     }
 
+    // Team-directory map. Sketch's users table is the canonical source for
+    // team emails — entity dedup can promote a different stored name, so we
+    // keep this separate from personEmailByName and check it first.
+    const userEmailByName = createAmbiguityAwareMap<string, string>();
+    const userRows = await db
+      .selectFrom("users")
+      .select(["name", "email"])
+      .where("email", "is not", null)
+      .where("type", "!=", "external")
+      .execute();
+    for (const u of userRows) {
+      if (!u.email) continue;
+      userEmailByName.add(normalizeName(u.name), u.email.toLowerCase());
+    }
+
+    // Closure over both maps with users-first precedence. Built once per
+    // sync; snapshot semantics — a user added mid-sync won't appear until
+    // the next run. Connectors that don't need it leave the field unset.
+    const resolveNameToEmail: NameResolver = (name: string): NameResolution | null => {
+      const key = normalizeName(name);
+      const userEmail = userEmailByName.get(key);
+      if (userEmail) return { email: userEmail, source: "users" };
+      const entityHit = personEmailByName.get(key);
+      if (entityHit) return { email: entityHit.email, entityId: entityHit.entityId, source: "entities" };
+      return null;
+    };
+
     for await (const item of connector.sync({
       credentials,
       scopeConfig,
       cursor: config.sync_cursor,
       logger: syncLogger,
+      ownerEmail,
+      resolveNameToEmail,
       onEntitySeed: async (seed) => {
         const entity = await entityRepo.upsertEntityFromTool(seed);
         // Keep in-memory maps current so items yielded later can link to this entity
@@ -250,6 +332,23 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                   });
                 }
               }
+            }
+          }
+
+          // Idempotent — re-seed person entities so that fixes to attendee
+          // resolution (e.g. better name→email matching) flow through to
+          // already-synced items on a cursor reset. Mirrors the post-transaction
+          // block in the change branch.
+          if (item.attendees) {
+            for (const a of item.attendees) {
+              if (!a.name) continue;
+              await entityRepo.upsertPersonEntity({
+                name: a.name,
+                email: a.email,
+                subtype: "external",
+                source: config.connector_type,
+                sourceId: `${item.providerFileId}:${a.email ?? a.name}`,
+              });
             }
           }
 

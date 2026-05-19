@@ -133,6 +133,12 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("ManageScheduledTasks tool");
     });
+
+    it("tells scheduled tasks to return final text instead of sending chat messages", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("Sketch will automatically deliver your returned text");
+      expect(result).toContain("do not try to find or use a chat-sending tool");
+    });
   });
 
   describe("file attachments section", () => {

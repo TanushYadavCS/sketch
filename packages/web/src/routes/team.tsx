@@ -21,6 +21,7 @@ import { Button } from "@sketch/ui/components/button";
 import { Card, CardContent } from "@sketch/ui/components/card";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
 import { getInitials } from "@sketch/ui/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -51,57 +52,51 @@ export function TeamPage() {
   const users = data?.users ?? [];
 
   return (
-    <div className="px-10 py-8">
-      <div className="mx-auto max-w-4xl">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-foreground">Team</h1>
-            <p className="mt-2 text-sm text-muted-foreground">Manage your workspace members and roles.</p>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gap-1.5 hover:bg-brand-accent/8"
-            onClick={() => setShowAddDialog(true)}
-          >
-            <PlusIcon size={14} weight="bold" />
-            Add member
-          </Button>
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">Team</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Manage your workspace members and roles.</p>
         </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-1.5 hover:bg-brand-accent/8"
+          onClick={() => setShowAddDialog(true)}
+        >
+          <PlusIcon size={14} weight="bold" />
+          Add member
+        </Button>
       </div>
 
-      <div className="mx-auto mt-6 w-full max-w-4xl">
+      <div className="mt-6 w-full">
         <div className="flex items-center gap-6 border-b border-border">
           <TabButton label="List" isActive={activeTab === "list"} onClick={() => setActiveTab("list")} />
           <TabButton label="Chart" isActive={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
         </div>
       </div>
 
-      <div className="mt-5">
+      <TabContentContainer className="mt-5">
         {activeTab === "list" ? (
-          <div className="mx-auto w-full max-w-4xl">
-            {isLoading ? (
-              <LoadingSkeleton />
-            ) : users.length === 0 ? (
-              <EmptyState onAdd={() => setShowAddDialog(true)} />
-            ) : (
-              <MemberList
-                users={users}
-                auth={auth}
-                onEdit={setEditingUser}
-                onRemove={setRemovingUser}
-                onLink={setLinkingUser}
-              />
-            )}
-          </div>
-        ) : isLoading ? (
-          <div className="mx-auto w-full max-w-4xl">
+          isLoading ? (
             <LoadingSkeleton />
-          </div>
+          ) : users.length === 0 ? (
+            <EmptyState onAdd={() => setShowAddDialog(true)} />
+          ) : (
+            <MemberList
+              users={users}
+              auth={auth}
+              onEdit={setEditingUser}
+              onRemove={setRemovingUser}
+              onLink={setLinkingUser}
+            />
+          )
+        ) : isLoading ? (
+          <LoadingSkeleton />
         ) : (
           <OrgChart users={users} />
         )}
-      </div>
+      </TabContentContainer>
 
       <AddMemberDialog
         open={showAddDialog}

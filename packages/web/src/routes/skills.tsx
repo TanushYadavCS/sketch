@@ -234,7 +234,7 @@ export function SkillsPage() {
   // ── Loading skeleton ───────────────────────────────────────
   if (skillsQuery.isLoading && skills.length === 0) {
     return (
-      <div className="mx-auto max-w-4xl px-10 py-8">
+      <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <div className="flex items-start justify-between">
           <Skeleton className="h-7 w-24" />
           <Skeleton className="h-8 w-32" />
@@ -255,7 +255,7 @@ export function SkillsPage() {
 
   if (skillsQuery.isError && skills.length === 0) {
     return (
-      <div className="mx-auto max-w-4xl px-10 py-8">
+      <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Skills</h1>
           <p className="mt-2 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
@@ -279,7 +279,7 @@ export function SkillsPage() {
   // ── View mode ──────────────────────────────────────────────
   if (mode === "view" && selectedSkill) {
     return (
-      <div className="mx-auto max-w-4xl px-10 py-8">
+      <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <SkillDetailView
           skill={selectedSkill}
           onBack={handleBackToListing}
@@ -300,7 +300,7 @@ export function SkillsPage() {
   // ── Edit / Create mode ─────────────────────────────────────
   if (mode === "edit" || mode === "create") {
     return (
-      <div className="mx-auto max-w-4xl px-10 py-8">
+      <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <SkillDetailEdit
           skill={mode === "edit" && selectedSkill ? selectedSkill : null}
           onBack={handleCancelEdit}
@@ -323,7 +323,7 @@ export function SkillsPage() {
     skills.length === 0 ? "no-skills" : searchQuery.trim() ? "no-results" : "no-skills";
 
   return (
-    <div className="mx-auto max-w-4xl px-10 py-8">
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

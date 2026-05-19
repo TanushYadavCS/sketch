@@ -680,13 +680,12 @@ describe("POST /api/system/users", () => {
     expect(body.userId).toBe(user?.id);
   });
 
-  it("returns the existing user when the email already exists", async () => {
+  it("returns and verifies the existing user when the email already exists", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
     const existing = await userRepo.create({
       email: "member@acme.com",
       name: "Existing Member",
-      emailVerified: true,
     });
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
 
@@ -706,6 +705,7 @@ describe("POST /api/system/users", () => {
     const user = await userRepo.findByEmail("member@acme.com");
     expect(user?.id).toBe(existing.id);
     expect(user?.name).toBe("Existing Member");
+    expect(user?.email_verified_at).toBeTruthy();
   });
 
   it("returns 400 when email is missing or invalid", async () => {
