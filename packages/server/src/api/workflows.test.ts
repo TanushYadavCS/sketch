@@ -297,6 +297,46 @@ describe("workflow invoke API", () => {
     });
   });
 
+  it("treats null Canvas metadata fields as absent", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), { logger: createTestLogger() });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        responseMode: "json",
+        source: "canvas",
+        canvasWorkflowId: "canvas-workflow-1",
+        canvasTriggerNodeId: null,
+        canvasActionNodeId: "sketch-action-node-1",
+        canvasRunId: null,
+        triggerComponentKey: null,
+        triggerData: { task: { id: "task-1" } },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const runRes = await app.request(`/api/workflows/${task.id}/runs/${body.runId}`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+    const runBody = await runRes.json();
+    expect(runBody.run.trigger_data).toMatchObject({
+      source: "canvas",
+      requesterUserId: requester.id,
+      canvas: {
+        workflowId: "canvas-workflow-1",
+        actionNodeId: "sketch-action-node-1",
+      },
+      data: { task: { id: "task-1" } },
+    });
+    expect(runBody.run.trigger_data.canvas).not.toHaveProperty("triggerNodeId");
+    expect(runBody.run.trigger_data.canvas).not.toHaveProperty("runId");
+    expect(runBody.run.trigger_data.canvas).not.toHaveProperty("triggerComponentKey");
+  });
+
   it("requires requesterUserId for external API workflow runs", async () => {
     const { requester } = await seedTenant(db);
     const task = await createWorkflow(db, { createdBy: requester.id });
