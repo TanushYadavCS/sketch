@@ -3,8 +3,15 @@ import { ConnectorLogo } from "@/components/connector-logos";
  * EntityExplorer — basic entity list for verifying entity seeding.
  * Simple table: name, type, source, aliases, created_at.
  * Filter by type, search by name.
+ *
+ * ECR-03B: when the experimental flag is on, the tab also hosts the
+ * entity-review queue inline — a top banner for multi-candidate and
+ * off-page proposals plus a per-entity chip + inline <ReviewActions>
+ * for proposals whose candidate is currently in the visible list.
  */
-import type { EntityListItem } from "@/lib/api";
+import { COUNT_KEY, LIST_KEY, ReviewActions } from "@/components/review-actions";
+import { ReviewBanner } from "@/components/review-banner";
+import type { EntityListItem, EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
 import {
   ArrowSquareOutIcon,
@@ -198,10 +205,82 @@ export function EntityExplorer() {
   const total = data?.total ?? 0;
   const tentativeCount = entities.filter((e) => e.status === "tentative").length;
 
+  // ECR-03B inline review surface — gated, two-stage fetch.
+  const { data: setupStatus } = useQuery({
+    queryKey: ["setup", "status"],
+    queryFn: () => api.setup.status(),
+  });
+  const experimentalEnabled = setupStatus?.experimentalFlag === true;
+
+  const { data: reviewCount } = useQuery({
+    queryKey: COUNT_KEY,
+    queryFn: () => api.entityReview.list({ limit: 0 }),
+    enabled: experimentalEnabled,
+    refetchInterval: experimentalEnabled ? 30000 : false,
+  });
+  const reviewTotal = reviewCount?.total ?? 0;
+  const hasPendingReviews = experimentalEnabled && reviewTotal > 0;
+
+  const { data: reviewList } = useQuery({
+    queryKey: LIST_KEY,
+    queryFn: () => api.entityReview.list({ limit: 200 }),
+    enabled: hasPendingReviews,
+  });
+
+  // Derive the chip lookup, multi-candidate bucket, and off-page bucket
+  // from the queue-list response. Single source of truth: optimistic
+  // removal in <ReviewActions> updates this same cache, so the chip
+  // count and tab-header badge decrement (and roll back) atomically.
+  const queueRows: EntityReviewQueueRow[] = reviewList?.rows ?? [];
+  const visibleEntityIds = new Set(entities.map((e) => e.id));
+
+  const pendingByEntity = new Map<string, EntityReviewQueueRow[]>();
+  const multiCandidateRows: EntityReviewQueueRow[] = [];
+  const offPageRows: EntityReviewQueueRow[] = [];
+  for (const row of queueRows) {
+    if (row.candidate_entity_id === null) {
+      multiCandidateRows.push(row);
+      continue;
+    }
+    if (visibleEntityIds.has(row.candidate_entity_id)) {
+      const existing = pendingByEntity.get(row.candidate_entity_id);
+      if (existing) existing.push(row);
+      else pendingByEntity.set(row.candidate_entity_id, [row]);
+    } else {
+      offPageRows.push(row);
+    }
+  }
+
+  const [expandedReviewRows, setExpandedReviewRows] = useState<Set<string>>(new Set());
+  const toggleReviewRow = (entityId: string) => {
+    setExpandedReviewRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(entityId)) next.delete(entityId);
+      else next.add(entityId);
+      return next;
+    });
+  };
+
   const typeLabel = TYPE_GROUPS.find((g) => g.types.join(",") === typeFilter)?.label ?? null;
 
   return (
     <div>
+      {hasPendingReviews ? (
+        <div className="mt-3 flex items-center gap-2">
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">
+            {reviewTotal} pending review{reviewTotal === 1 ? "" : "s"}
+          </span>
+        </div>
+      ) : null}
+
+      {hasPendingReviews ? (
+        <ReviewBanner
+          total={reviewTotal}
+          multiCandidateRows={multiCandidateRows}
+          offPageRows={offPageRows}
+        />
+      ) : null}
+
       {/* Toolbar */}
       <div className="mt-4 flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
@@ -316,9 +395,20 @@ export function EntityExplorer() {
             </div>
 
             {/* Rows */}
-            {entities.map((entity) => (
-              <EntityRow key={entity.id} entity={entity} onSelect={setSelectedEntityId} />
-            ))}
+            {entities.map((entity) => {
+              const pending = pendingByEntity.get(entity.id) ?? [];
+              const isExpanded = expandedReviewRows.has(entity.id);
+              return (
+                <EntityRow
+                  key={entity.id}
+                  entity={entity}
+                  onSelect={setSelectedEntityId}
+                  pendingRows={pending}
+                  isReviewExpanded={isExpanded}
+                  onToggleReview={() => toggleReviewRow(entity.id)}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -430,69 +520,116 @@ export function EntityExplorer() {
   );
 }
 
-function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id: string) => void }) {
+function EntityRow({
+  entity,
+  onSelect,
+  pendingRows,
+  isReviewExpanded,
+  onToggleReview,
+}: {
+  entity: EntityListItem;
+  onSelect: (id: string) => void;
+  pendingRows: EntityReviewQueueRow[];
+  isReviewExpanded: boolean;
+  onToggleReview: () => void;
+}) {
   const isPerson = entity.sourceType === "person";
   const source = sourceFromType(entity.sourceType);
   const context = entityContext(entity);
+  const pendingCount = pendingRows.length;
 
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(entity.id)}
-      className="flex w-full items-center gap-3 border-b border-border px-3 py-2.5 text-sm last:border-b-0 hover:bg-muted/30 text-left"
-    >
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        {isPerson ? (
-          <UserIcon size={14} className="shrink-0 text-muted-foreground" />
-        ) : (
-          <CubeIcon size={14} className="shrink-0 text-muted-foreground" />
-        )}
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium">{entity.name}</p>
-          {context ? (
-            <p className="truncate text-[11px] text-muted-foreground">{context}</p>
+    <div className="border-b border-border last:border-b-0" data-testid={`entity-row-${entity.id}`}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onSelect(entity.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect(entity.id);
+          }
+        }}
+        className="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-muted/30"
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          {isPerson ? (
+            <UserIcon size={14} className="shrink-0 text-muted-foreground" />
           ) : (
-            entity.aliases.length > 0 && (
-              <p className="truncate text-[11px] text-muted-foreground">aka {entity.aliases.join(", ")}</p>
-            )
+            <CubeIcon size={14} className="shrink-0 text-muted-foreground" />
+          )}
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{entity.name}</p>
+            {context ? (
+              <p className="truncate text-[11px] text-muted-foreground">{context}</p>
+            ) : (
+              entity.aliases.length > 0 && (
+                <p className="truncate text-[11px] text-muted-foreground">aka {entity.aliases.join(", ")}</p>
+              )
+            )}
+          </div>
+        </div>
+
+        <div className="flex w-32 items-center justify-center gap-1.5">
+          {source && <ConnectorLogo type={source} size={14} className="shrink-0 text-muted-foreground" />}
+          <Badge variant="outline" className="text-[10px]">
+            {humanSourceType(entity.sourceType)}
+          </Badge>
+          {isAiDiscovered(entity) && (
+            <Badge
+              variant="secondary"
+              className="text-[9px] px-1 py-0 bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300"
+            >
+              AI
+            </Badge>
           )}
         </div>
-      </div>
 
-      <div className="flex w-32 items-center justify-center gap-1.5">
-        {source && <ConnectorLogo type={source} size={14} className="shrink-0 text-muted-foreground" />}
-        <Badge variant="outline" className="text-[10px]">
-          {humanSourceType(entity.sourceType)}
-        </Badge>
-        {isAiDiscovered(entity) && (
+        <span className="w-16 text-center text-xs font-mono text-muted-foreground">
+          {entity.mentionCount > 0 ? entity.mentionCount : "-"}
+        </span>
+
+        <div className="flex w-20 items-center justify-center gap-1">
           <Badge
-            variant="secondary"
-            className="text-[9px] px-1 py-0 bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300"
+            variant={
+              entity.status === "confirmed" ? "secondary" : entity.status === "tentative" ? "outline" : "destructive"
+            }
+            className="text-[10px]"
           >
-            AI
+            {entity.status}
           </Badge>
-        )}
+        </div>
+
+        <div className="flex w-24 flex-col items-end gap-1">
+          <span className="text-xs text-muted-foreground">
+            {entity.lastMentionAt ? formatRelativeTime(entity.lastMentionAt) : "-"}
+          </span>
+          {pendingCount > 0 ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleReview();
+              }}
+              className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-900 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200 dark:hover:bg-amber-900/60"
+              aria-expanded={isReviewExpanded}
+              data-testid={`review-chip-${entity.id}`}
+            >
+              {pendingCount} proposal{pendingCount === 1 ? "" : "s"}
+            </button>
+          ) : null}
+        </div>
       </div>
-
-      <span className="w-16 text-center text-xs font-mono text-muted-foreground">
-        {entity.mentionCount > 0 ? entity.mentionCount : "-"}
-      </span>
-
-      <div className="w-20 text-center">
-        <Badge
-          variant={
-            entity.status === "confirmed" ? "secondary" : entity.status === "tentative" ? "outline" : "destructive"
-          }
-          className="text-[10px]"
-        >
-          {entity.status}
-        </Badge>
-      </div>
-
-      <span className="w-24 text-right text-xs text-muted-foreground">
-        {entity.lastMentionAt ? formatRelativeTime(entity.lastMentionAt) : "-"}
-      </span>
-    </button>
+      {isReviewExpanded && pendingCount > 0 ? (
+        <div className="border-t border-border bg-muted/20 px-3 py-3">
+          <div className="flex flex-col gap-3">
+            {pendingRows.map((row) => (
+              <ReviewActions key={row.id} row={row} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
