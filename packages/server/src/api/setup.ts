@@ -90,6 +90,13 @@ type UserRepo = ReturnType<typeof createUserRepository>;
 
 interface SetupDeps {
   managedUrl?: string;
+  /**
+   * Mirrors `config.EXPERIMENTAL_FLAG`. Surfaced on /status so the web UI
+   * can gate experimental surfaces (per CLAUDE.md §"Feature Gating").
+   * ECR-03's "Review entities" nav item is the first consumer; future
+   * experimental UI surfaces read the same field.
+   */
+  experimentalFlag?: boolean;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   userRepo?: UserRepo;
@@ -187,6 +194,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       slackConnected: hasSlack,
       llmConnected: hasLlm,
       llmProvider,
+      experimentalFlag: deps.experimentalFlag ?? false,
       ...(deps.managedUrl ? { managedUrl: deps.managedUrl } : {}),
     });
   });

@@ -303,7 +303,98 @@ describe("entity-review routes — owner-scope & auth-before-mutation", () => {
 
     const res = await app.request("/api/entity-review", { headers: { Cookie: ownerCookie } });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { rows: Array<{ id: string }> };
+    const body = (await res.json()) as { rows: Array<{ id: string }>; total: number };
     expect(body.rows.map((r) => r.id)).toEqual([okId]);
+    // total must match visible rows for the non-admin owner (not the raw pending count).
+    expect(body.total).toBe(1);
+  });
+
+  it("403 carries code=OWNER_SCOPE_DENIED in body", async () => {
+    await seedIndexedFile(db, "file-1", "config-owner");
+    const reviewId = await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["file-1"] });
+    const res = await app.request(`/api/entity-review/${reviewId}`, { headers: { Cookie: otherCookie } });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("OWNER_SCOPE_DENIED");
+  });
+});
+
+describe("entity-review routes — list endpoint shape", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let ownerId: string;
+  let ownerCookie: string;
+  let adminCookie: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    ownerId = await userIdByEmail(db, OWNER_EMAIL);
+    await seedConnectorConfig(db, "config-owner", ownerId);
+    const otherId = await userIdByEmail(db, OTHER_EMAIL);
+    await seedConnectorConfig(db, "config-other", otherId);
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+      logger: createTestLogger(),
+    });
+    ownerCookie = await login(app, OWNER_EMAIL);
+    adminCookie = await login(app, ADMIN_EMAIL);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("includes total and per-row evidenceCount + sourceBreakdown", async () => {
+    await seedIndexedFile(db, "f1", "config-owner");
+    await seedIndexedFile(db, "f2", "config-owner");
+    await seedIndexedFile(db, "f3", "config-owner");
+    // Row 1: 2 evidence rows across 1 source.
+    await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["f1", "f2"] });
+    // Row 2: 1 evidence row.
+    await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["f3"] });
+
+    const res = await app.request("/api/entity-review", { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      rows: Array<{ id: string; evidenceCount: number; sourceBreakdown: Array<{ source: string; count: number }> }>;
+      total: number;
+    };
+    expect(body.total).toBe(2);
+    expect(body.rows).toHaveLength(2);
+    // Sum of evidenceCount across rows should equal 3.
+    const totalEvidence = body.rows.reduce((acc, r) => acc + r.evidenceCount, 0);
+    expect(totalEvidence).toBe(3);
+    // Each row's sourceBreakdown should sum to its evidenceCount.
+    for (const row of body.rows) {
+      const sum = row.sourceBreakdown.reduce((acc, s) => acc + s.count, 0);
+      expect(sum).toBe(row.evidenceCount);
+    }
+  });
+
+  it("?limit=0 short-circuits to { rows: [], total }", async () => {
+    await seedIndexedFile(db, "f1", "config-owner");
+    await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["f1"] });
+    await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["f1"] });
+
+    const res = await app.request("/api/entity-review?limit=0", { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: unknown[]; total: number };
+    expect(body.rows).toEqual([]);
+    expect(body.total).toBe(2);
+  });
+
+  it("admin total counts all pending rows including multi-user-evidence", async () => {
+    await seedIndexedFile(db, "file-mine", "config-owner");
+    await seedIndexedFile(db, "file-theirs", "config-other");
+    // Single-owner row.
+    await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["file-mine"] });
+    // Multi-owner row.
+    await seedPendingRow(db, { triggeredBy: ownerId, evidenceFileIds: ["file-mine", "file-theirs"] });
+
+    const res = await app.request("/api/entity-review", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: unknown[]; total: number };
+    expect(body.total).toBe(2);
+    expect(body.rows).toHaveLength(2);
   });
 });

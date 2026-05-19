@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
  * App sidebar — navigation, branding, and user actions.
  * Follows the designer's sidebar structure with Phosphor icons.
  */
+import { SidebarReviewCount } from "@/components/sidebar-review-count";
 import {
   ArrowSquareOutIcon,
   BrainIcon,
@@ -18,6 +19,7 @@ import {
   SignOutIcon,
   SunIcon,
   UsersThreeIcon,
+  UserCircleCheckIcon,
 } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import {
@@ -54,11 +56,21 @@ interface NavItem {
   href: string;
   disabled?: boolean;
   adminOnly?: boolean;
+  /** Render only when `setupStatus.experimentalFlag === true`. */
+  experimentalOnly?: boolean;
+  /** Optional render-prop for a trailing element (e.g. a count badge). */
+  trailing?: React.ReactNode;
 }
 
 const allPrimaryNav: NavItem[] = [
   { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
+  {
+    label: "Review entities",
+    icon: <UserCircleCheckIcon size={18} />,
+    href: "/review-entities",
+    experimentalOnly: true,
+  },
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
   { label: "Automations", icon: <CalendarDotsIcon size={18} />, href: "/scheduled-tasks" },
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
@@ -97,7 +109,12 @@ export function AppSidebar({
     queryFn: () => api.setup.status(),
   });
 
-  const primaryNav = allPrimaryNav.filter((item) => !item.adminOnly || role === "admin");
+  const experimentalEnabled = setupStatus?.experimentalFlag === true;
+  const primaryNav = allPrimaryNav.filter((item) => {
+    if (item.adminOnly && role !== "admin") return false;
+    if (item.experimentalOnly && !experimentalEnabled) return false;
+    return true;
+  });
   const roleLabel = formatRole(role);
 
   const logoutMutation = useMutation({
@@ -143,7 +160,8 @@ export function AppSidebar({
                     tooltip={item.label}
                   >
                     {item.icon}
-                    <span>{item.label}</span>
+                    <span className="flex-1">{item.label}</span>
+                    {item.href === "/review-entities" ? <SidebarReviewCount enabled={experimentalEnabled} /> : null}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
