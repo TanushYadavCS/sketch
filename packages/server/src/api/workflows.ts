@@ -20,6 +20,10 @@ import { executeAutomation } from "../workflows/runtime";
 const deliveryModeSchema = z.enum(["silent", "target"]).default("silent");
 const responseModeSchema = z.enum(["sse", "json"]).default("sse");
 const workflowRunSourceSchema = z.enum(["external-api", "canvas"]).default("external-api");
+const nullableCanvasMetadataStringSchema = z.preprocess(
+  (value) => (value === null ? undefined : value),
+  z.string().min(1).optional(),
+);
 
 const workflowRunSchema = z
   .object({
@@ -28,11 +32,11 @@ const workflowRunSchema = z
     deliveryMode: deliveryModeSchema,
     responseMode: responseModeSchema,
     source: workflowRunSourceSchema,
-    canvasWorkflowId: z.string().min(1).optional(),
-    canvasTriggerNodeId: z.string().min(1).optional(),
-    canvasActionNodeId: z.string().min(1).optional(),
-    canvasRunId: z.string().min(1).optional(),
-    triggerComponentKey: z.string().min(1).optional(),
+    canvasWorkflowId: nullableCanvasMetadataStringSchema,
+    canvasTriggerNodeId: nullableCanvasMetadataStringSchema,
+    canvasActionNodeId: nullableCanvasMetadataStringSchema,
+    canvasRunId: nullableCanvasMetadataStringSchema,
+    triggerComponentKey: nullableCanvasMetadataStringSchema,
   })
   .superRefine((value, ctx) => {
     if (value.source === "external-api" && !value.requesterUserId) {
