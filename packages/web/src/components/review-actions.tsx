@@ -1,15 +1,18 @@
 /**
- * <ReviewActions> — shared resolve UI for an entity_review_queue row.
+ * Entity-review mutations + the standalone <ReviewActions> button bar.
  *
- * Optimistic mutation pattern: snapshot list state in onMutate, restore in
- * onError, invalidate list + count on success. Refresh-able 409s
- * (CANDIDATE_DRIFT / CANDIDATE_MISSING / TARGET_DELETED) invalidate the
- * detail query so the next render shows the new candidate. 422 conditions
- * (EVIDENCE_TOO_LARGE / TYPE_MISMATCH) surface sticky admin messages.
+ * `useReviewMutations` is the shared mutation pipeline — optimistic remove
+ * from LIST_KEY in onMutate, restore in onError, invalidate count + detail
+ * keys on success. Refresh-able 409s (CANDIDATE_DRIFT / CANDIDATE_MISSING /
+ * TARGET_DELETED) invalidate the detail key so the next render shows the
+ * new candidate; 422 conditions (EVIDENCE_TOO_LARGE / TYPE_MISMATCH) surface
+ * as sticky-admin messages.
  *
- * Extracted from routes/review-entities/index.tsx in ECR-03B so the same
- * component can be hosted both on the standalone review page and inline
- * inside the entities tab.
+ * `<ReviewActions>` is the standalone-page button bar (Confirm / Reject /
+ * Pick existing) that uses the hook internally. Hosts that need a custom
+ * layout (e.g. the side-drawer with ✓/✗ icon buttons embedded in the
+ * candidate card) should call `useReviewMutations` directly and render
+ * their own UI.
  */
 import { EntityPicker } from "@/components/entity-picker";
 import {
@@ -32,7 +35,7 @@ export interface ResolveResult {
   targetEntityId: string;
 }
 
-interface ResolveCopy {
+export interface ResolveCopy {
   variant: "refresh" | "admin" | "sticky-admin" | "generic";
   message: string;
 }
@@ -55,10 +58,7 @@ function copyForError(err: unknown): ResolveCopy {
             "Duplicate entities found in the workspace. An admin needs to clean these up before this row can resolve.",
         };
       case "ALREADY_CONFIRMING":
-        return {
-          variant: "refresh",
-          message: "This row is already being processed. Refresh in a moment.",
-        };
+        return { variant: "refresh", message: "This row is already being processed. Refresh in a moment." };
       case "EVIDENCE_TOO_LARGE":
         return {
           variant: "sticky-admin",
@@ -79,25 +79,39 @@ function copyForError(err: unknown): ResolveCopy {
   return { variant: "generic", message: "Something went wrong. Try again." };
 }
 
-export interface ReviewActionsProps {
-  row: EntityReviewQueueRow;
-  onResolved?: (result: ResolveResult) => void;
+/**
+ * Shared mutation pipeline for an entity_review_queue row. Returns three
+ * action functions + the current pending/error state, all wired up with the
+ * optimistic LIST_KEY filter + COUNT_KEY/detail invalidations that every
+ * resolve path needs.
+ */
+export interface UseReviewMutationsResult {
+  /** Confirm the row's default suggested candidate. No-op if the row has no candidate. */
+  confirm: () => void;
+  /** Reject the proposal — server creates a brand-new entity. */
+  reject: () => void;
+  /** Confirm with a host-picked target entity (overrides the row's suggested candidate). */
+  mergeInto: (entityId: string) => void;
+  isPending: boolean;
+  errorCopy: ResolveCopy | null;
+  clearError: () => void;
 }
 
-export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
-  const [showPicker, setShowPicker] = useState(false);
+export function useReviewMutations(
+  row: EntityReviewQueueRow,
+  onResolved?: (result: ResolveResult) => void,
+): UseReviewMutationsResult {
   const queryClient = useQueryClient();
   const [errorCopy, setErrorCopy] = useState<ResolveCopy | null>(null);
-
   const candidateGeneratedAt = row.candidate_generated_at ?? "";
 
-  const onSuccess = () => {
+  const onSuccessCommon = () => {
     setErrorCopy(null);
     queryClient.invalidateQueries({ queryKey: LIST_KEY });
     queryClient.invalidateQueries({ queryKey: COUNT_KEY });
   };
 
-  const buildOnMutate = () => async () => {
+  const onMutate = async () => {
     await queryClient.cancelQueries({ queryKey: LIST_KEY });
     const prev = queryClient.getQueryData<EntityReviewListResponse>(LIST_KEY);
     queryClient.setQueryData<EntityReviewListResponse>(LIST_KEY, (old) =>
@@ -118,25 +132,51 @@ export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
         candidateGeneratedAt,
         ...(input.mergeIntoEntityId ? { mergeIntoEntityId: input.mergeIntoEntityId } : {}),
       }),
-    onMutate: buildOnMutate(),
+    onMutate,
     onError,
     onSuccess: (result) => {
-      onSuccess();
+      onSuccessCommon();
       onResolved?.({ kind: "confirmed", targetEntityId: result.targetEntityId });
     },
   });
 
   const rejectMutation = useMutation({
     mutationFn: (_: void) => api.entityReview.reject(row.id, { candidateGeneratedAt }),
-    onMutate: buildOnMutate(),
+    onMutate,
     onError,
     onSuccess: (result) => {
-      onSuccess();
+      onSuccessCommon();
       onResolved?.({ kind: "rejected", targetEntityId: result.targetEntityId });
     },
   });
 
-  const pending = confirmMutation.isPending || rejectMutation.isPending;
+  return {
+    confirm: () => confirmMutation.mutate({}),
+    reject: () => rejectMutation.mutate(),
+    mergeInto: (entityId: string) => confirmMutation.mutate({ mergeIntoEntityId: entityId }),
+    isPending: confirmMutation.isPending || rejectMutation.isPending,
+    errorCopy,
+    clearError: () => setErrorCopy(null),
+  };
+}
+
+export interface ReviewActionsProps {
+  row: EntityReviewQueueRow;
+  onResolved?: (result: ResolveResult) => void;
+}
+
+/**
+ * Standalone Confirm / Reject — create new / Pick existing button bar with
+ * an inline EntityPicker. Used by the colocated component tests and any
+ * host that wants the off-the-shelf review UI.
+ *
+ * Hosts that need a custom layout (e.g. the side-drawer with ✓/✗ icon
+ * buttons inside the candidate card) should call `useReviewMutations`
+ * directly and render their own UI.
+ */
+export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
+  const [showPicker, setShowPicker] = useState(false);
+  const mutations = useReviewMutations(row, onResolved);
   const hasCandidate = row.candidate_entity_id !== null;
 
   return (
@@ -145,12 +185,8 @@ export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
         <div className="text-sm">
           <span className="text-muted-foreground">Suggested match:</span>{" "}
           <span className="font-medium">{row.candidate?.name ?? row.candidate_entity_id}</span>
-          {row.candidate?.email ? (
-            <span className="text-muted-foreground"> · {row.candidate.email}</span>
-          ) : null}
-          {row.candidate_reason ? (
-            <span className="text-muted-foreground"> · {row.candidate_reason}</span>
-          ) : null}
+          {row.candidate?.email ? <span className="text-muted-foreground"> · {row.candidate.email}</span> : null}
+          {row.candidate_reason ? <span className="text-muted-foreground"> · {row.candidate_reason}</span> : null}
         </div>
       ) : (
         <div className="text-sm text-muted-foreground">
@@ -168,23 +204,23 @@ export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
           ))}
         </div>
       ) : null}
-      {errorCopy ? <div className="text-sm text-destructive">{errorCopy.message}</div> : null}
+      {mutations.errorCopy ? <div className="text-sm text-destructive">{mutations.errorCopy.message}</div> : null}
       <div className="flex flex-wrap items-center gap-2">
         {hasCandidate ? (
-          <Button size="sm" onClick={() => confirmMutation.mutate({})} disabled={pending}>
+          <Button size="sm" onClick={() => mutations.confirm()} disabled={mutations.isPending}>
             Confirm
           </Button>
         ) : null}
         <Button
           size="sm"
           variant="outline"
-          onClick={() => rejectMutation.mutate()}
-          disabled={pending}
+          onClick={() => mutations.reject()}
+          disabled={mutations.isPending}
           data-testid="reject-button"
         >
           {hasCandidate ? "Reject — create new" : "Create new"}
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => setShowPicker((s) => !s)} disabled={pending}>
+        <Button size="sm" variant="ghost" onClick={() => setShowPicker((s) => !s)} disabled={mutations.isPending}>
           {hasCandidate ? "Pick a different existing" : "Pick existing"}
         </Button>
       </div>
@@ -194,7 +230,7 @@ export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
           excludeEntityId={row.candidate_entity_id ?? undefined}
           onPick={(entityId) => {
             setShowPicker(false);
-            confirmMutation.mutate({ mergeIntoEntityId: entityId });
+            mutations.mergeInto(entityId);
           }}
         />
       ) : null}

@@ -1,17 +1,18 @@
 /**
  * Tests for the entity explorer's ECR-03B inline review surface.
  *
- * Covers the contract that PR 2 of ECR-03B adds:
+ * Contract:
  * - count-probe short-circuits when no pending rows exist (no list query)
- * - banner renders when count > 0, with three counts in the header
- * - off-page bucket lists candidate-keyed rows whose entity isn't visible
- * - per-entity chip renders only for visible candidate-keyed entities
- * - chip click expands inline <ReviewActions> below the row
- * - EXPERIMENTAL_FLAG=false hides everything (no probe issued)
+ * - pending review rows render as "ghost rows" at the top of the entities
+ *   table; a divider separates them from confirmed entities
+ * - EXPERIMENTAL_FLAG=false hides everything (no probe issued, no ghost rows)
+ * - clicking a ghost row opens the drawer in review mode (two-column
+ *   reconcile view with the proposed entity + ReviewActions)
+ * - "Confirm" inside the drawer resolves the row and shrinks the ghost set
  */
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -99,7 +100,7 @@ function rowFactory(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe("EntityExplorer ECR-03B inline review", () => {
-  it("EXPERIMENTAL_FLAG=false: no banner, no chip, no count probe issued", async () => {
+  it("EXPERIMENTAL_FLAG=false: no ghost rows, no count probe issued", async () => {
     let probeCalls = 0;
     server.use(
       http.get("/api/setup/status", () => statusResponse(false)),
@@ -112,14 +113,13 @@ describe("EntityExplorer ECR-03B inline review", () => {
 
     renderWithProviders(<EntityExplorer />);
     await waitFor(() => expect(screen.getByText("Simran S")).toBeInTheDocument());
-    // Give any erroneous probe a chance to fire.
     await new Promise((r) => setTimeout(r, 50));
     expect(probeCalls).toBe(0);
-    expect(screen.queryByTestId("review-banner")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("review-chip-ent-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pending-reviews-badge")).not.toBeInTheDocument();
+    expect(screen.queryByTestId(/^review-row-/)).not.toBeInTheDocument();
   });
 
-  it("count=0: probe fires, list query does NOT, no banner rendered", async () => {
+  it("count=0: probe fires, list query does NOT, no ghost rows rendered", async () => {
     let listCalls = 0;
     server.use(
       http.get("/api/setup/status", () => statusResponse(true)),
@@ -135,42 +135,10 @@ describe("EntityExplorer ECR-03B inline review", () => {
     await waitFor(() => expect(screen.getByText("Simran S")).toBeInTheDocument());
     await new Promise((r) => setTimeout(r, 50));
     expect(listCalls).toBe(0);
-    expect(screen.queryByTestId("review-banner")).not.toBeInTheDocument();
+    expect(screen.queryByTestId(/^review-row-/)).not.toBeInTheDocument();
   });
 
-  it("banner renders with three counts when count > 0", async () => {
-    server.use(
-      http.get("/api/setup/status", () => statusResponse(true)),
-      http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
-      http.get("/api/entity-review", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.get("limit") === "0") {
-          return HttpResponse.json({ rows: [], total: 4 });
-        }
-        return HttpResponse.json({
-          rows: [
-            rowFactory({ id: "r1", candidate_entity_id: "ent-1", proposed_name: "Simran Suri" }),
-            rowFactory({ id: "r2", candidate_entity_id: "ent-99", proposed_name: "Off Page Person" }),
-            rowFactory({ id: "r3", candidate_entity_id: null, proposed_name: "Orphan One" }),
-            rowFactory({ id: "r4", candidate_entity_id: null, proposed_name: "Orphan Two" }),
-          ],
-          total: 4,
-        });
-      }),
-    );
-
-    renderWithProviders(<EntityExplorer />);
-    const banner = await screen.findByTestId("review-banner");
-    expect(banner).toHaveTextContent(/4 proposals waiting/);
-    // multi-candidate and off-page counts derive from the list query, which
-    // resolves separately from the count probe — wait for it to settle.
-    await waitFor(() => {
-      expect(banner).toHaveTextContent(/2 multi-candidate/);
-      expect(banner).toHaveTextContent(/1 off-page/);
-    });
-  });
-
-  it("off-page row appears in banner; visible-candidate row appears as chip on entity row", async () => {
+  it("renders ghost rows above the entities divider when there are pending proposals", async () => {
     server.use(
       http.get("/api/setup/status", () => statusResponse(true)),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
@@ -181,8 +149,8 @@ describe("EntityExplorer ECR-03B inline review", () => {
         }
         return HttpResponse.json({
           rows: [
-            rowFactory({ id: "r1", candidate_entity_id: "ent-1", proposed_name: "Simran Suri" }),
-            rowFactory({ id: "r2", candidate_entity_id: "ent-99", proposed_name: "Off Page Person" }),
+            rowFactory({ id: "r1", proposed_name: "Simran Suri Neeli" }),
+            rowFactory({ id: "r2", proposed_name: "Aditya Giri", candidate_entity_id: null, candidate: null }),
           ],
           total: 2,
         });
@@ -190,31 +158,121 @@ describe("EntityExplorer ECR-03B inline review", () => {
     );
 
     renderWithProviders(<EntityExplorer />);
-    expect(await screen.findByTestId("review-chip-ent-1")).toHaveTextContent("1 proposal");
-    expect(await screen.findByTestId("banner-row-r2")).toBeInTheDocument();
-    expect(screen.queryByTestId("banner-row-r1")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("pending-reviews-badge")).toHaveTextContent("To review · 2");
+    expect(await screen.findByTestId("review-row-r1")).toHaveTextContent("Simran Suri Neeli");
+    expect(screen.getByTestId("review-row-r2")).toHaveTextContent("Aditya Giri");
+    // The "Existing · N" band only shows when both sections coexist.
+    expect(screen.getByText(/Existing · /)).toBeInTheDocument();
+    expect(screen.getByText("Simran S")).toBeInTheDocument();
   });
 
-  it("chip click expands inline ReviewActions; Confirm resolves and chip count drops", async () => {
+  it("clicking a ghost row opens the drawer in review mode with proposed + candidate columns", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
+      http.get("/api/entities/ent-1", () =>
+        HttpResponse.json({
+          entity: {
+            id: "ent-1",
+            name: "Simran S",
+            sourceType: "person",
+            subtype: null,
+            aliases: [],
+            metadata: null,
+            status: "confirmed",
+            hotness: 0,
+            mentionCount: 3,
+            lastMentionAt: null,
+            createdAt: "x",
+            updatedAt: "x",
+          },
+          sourceRefs: [],
+        }),
+      ),
+      http.get("/api/entities/ent-1/mentions", () => HttpResponse.json({ mentions: [], total: 0, hiddenCount: 0 })),
+      http.get("/api/entity-review", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("limit") === "0") {
+          return HttpResponse.json({ rows: [], total: 1 });
+        }
+        return HttpResponse.json({
+          rows: [rowFactory({ id: "r1", proposed_name: "Simran Suri Neeli" })],
+          total: 1,
+        });
+      }),
+      http.get("/api/entity-review/r1", () =>
+        HttpResponse.json({
+          row: rowFactory({ id: "r1", proposed_name: "Simran Suri Neeli" }),
+          evidence: [
+            {
+              id: "e1",
+              review_id: "r1",
+              indexed_file_id: "f1",
+              source: "fireflies",
+              note: null,
+              seen_at: "2026-01-02T00:00:00.000Z",
+              file: {
+                name: "meeting-2026-01-02.txt",
+                providerUrl: "https://example.com/f1",
+                sourcePath: null,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<EntityExplorer />);
+    const ghost = await screen.findByTestId("review-row-r1");
+    await user.click(within(ghost).getByRole("button"));
+
+    expect(await screen.findByText(/Reconcile: Simran Suri Neeli/)).toBeInTheDocument();
+    const proposed = await screen.findByTestId("reconcile-proposed");
+    expect(within(proposed).getByText("meeting-2026-01-02.txt")).toBeInTheDocument();
+    const candidate = await screen.findByTestId("reconcile-candidate");
+    expect(candidate).toHaveTextContent("Simran S");
+    // ✓ confirm-merge button lives on the candidate card itself.
+    expect(within(candidate).getByTestId("confirm-merge")).toBeInTheDocument();
+    expect(within(candidate).getByTestId("reject-match")).toBeInTheDocument();
+  });
+
+  it("Confirm inside drawer resolves the row and shrinks the ghost set", async () => {
     const user = userEvent.setup();
     let listFetches = 0;
     server.use(
       http.get("/api/setup/status", () => statusResponse(true)),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
+      http.get("/api/entities/ent-1", () =>
+        HttpResponse.json({
+          entity: {
+            id: "ent-1",
+            name: "Simran S",
+            sourceType: "person",
+            subtype: null,
+            aliases: [],
+            metadata: null,
+            status: "confirmed",
+            hotness: 0,
+            mentionCount: 0,
+            lastMentionAt: null,
+            createdAt: "x",
+            updatedAt: "x",
+          },
+          sourceRefs: [],
+        }),
+      ),
+      http.get("/api/entities/ent-1/mentions", () => HttpResponse.json({ mentions: [], total: 0, hiddenCount: 0 })),
       http.get("/api/entity-review", ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get("limit") === "0") {
-          return HttpResponse.json({ rows: [], total: listFetches === 0 ? 2 : 1 });
+          return HttpResponse.json({ rows: [], total: listFetches === 0 ? 1 : 0 });
         }
         listFetches++;
-        const rows = listFetches === 1
-          ? [
-              rowFactory({ id: "r1", candidate_entity_id: "ent-1", proposed_name: "Simran A" }),
-              rowFactory({ id: "r2", candidate_entity_id: "ent-1", proposed_name: "Simran B" }),
-            ]
-          : [rowFactory({ id: "r2", candidate_entity_id: "ent-1", proposed_name: "Simran B" })];
+        const rows = listFetches === 1 ? [rowFactory({ id: "r1" })] : [];
         return HttpResponse.json({ rows, total: rows.length });
       }),
+      http.get("/api/entity-review/r1", () => HttpResponse.json({ row: rowFactory({ id: "r1" }), evidence: [] })),
       http.post("/api/entity-review/r1/confirm", () =>
         HttpResponse.json({
           row: rowFactory({ id: "r1", status: "confirmed" }),
@@ -227,17 +285,14 @@ describe("EntityExplorer ECR-03B inline review", () => {
     );
 
     renderWithProviders(<EntityExplorer />);
-    const chip = await screen.findByTestId("review-chip-ent-1");
-    expect(chip).toHaveTextContent("2 proposals");
-    await user.click(chip);
+    const ghost = await screen.findByTestId("review-row-r1");
+    await user.click(within(ghost).getByRole("button"));
 
-    // Two ReviewActions render under the entity row — each has a Confirm.
-    const confirmButtons = await screen.findAllByRole("button", { name: "Confirm" });
-    expect(confirmButtons.length).toBe(2);
-    await user.click(confirmButtons[0]);
+    const confirm = await screen.findByTestId("confirm-merge");
+    await user.click(confirm);
 
     await waitFor(() => {
-      expect(screen.getByTestId("review-chip-ent-1")).toHaveTextContent("1 proposal");
+      expect(screen.queryByTestId("review-row-r1")).not.toBeInTheDocument();
     });
   });
 });
