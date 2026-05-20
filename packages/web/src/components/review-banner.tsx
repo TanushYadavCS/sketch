@@ -13,7 +13,6 @@
  */
 import { ReviewActions } from "@/components/review-actions";
 import type { EntityReviewQueueRow } from "@/lib/api";
-import { Button } from "@sketch/ui/components/button";
 import { CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 
@@ -130,9 +129,7 @@ function BannerProposalRow({ row }: { row: EntityReviewQueueRow }) {
             {row.candidate?.name ? ` · suggests ${row.candidate.name}` : ""}
           </span>
         </div>
-        <Button variant="ghost" size="sm" className="h-6 text-[11px]">
-          {expanded ? "Hide" : "Review"}
-        </Button>
+        <span className="text-[11px] text-muted-foreground">{expanded ? "Hide" : "Review"}</span>
       </button>
       {expanded ? <ReviewActions row={row} /> : null}
     </div>

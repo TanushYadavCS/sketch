@@ -162,8 +162,12 @@ describe("EntityExplorer ECR-03B inline review", () => {
     renderWithProviders(<EntityExplorer />);
     const banner = await screen.findByTestId("review-banner");
     expect(banner).toHaveTextContent(/4 proposals waiting/);
-    expect(banner).toHaveTextContent(/2 multi-candidate/);
-    expect(banner).toHaveTextContent(/1 off-page/);
+    // multi-candidate and off-page counts derive from the list query, which
+    // resolves separately from the count probe — wait for it to settle.
+    await waitFor(() => {
+      expect(banner).toHaveTextContent(/2 multi-candidate/);
+      expect(banner).toHaveTextContent(/1 off-page/);
+    });
   });
 
   it("off-page row appears in banner; visible-candidate row appears as chip on entity row", async () => {
