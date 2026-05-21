@@ -65,6 +65,14 @@ export type ProposeResult =
 export type EntityLookup = {
   /** All entities sharing this normalized name. */
   getByNormalizedName(normalized: string): Entity[];
+  /**
+   * All entities carrying this normalized form as an alias. Confirm appends
+   * the proposed name to an existing entity's aliases, so the next propose
+   * for that same name must be able to find it via alias as well as name.
+   * Optional for backwards compat with callers that only have a name map
+   * (cold callers without alias indexing); defaults to `[]`.
+   */
+  getByAlias?(normalized: string): Entity[];
   /** All entities of the given type (used for prefix/token-superset scan). */
   listByType(entityType: ProposeEntityType): Entity[];
 };
@@ -195,20 +203,29 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     return { kind: "created", entity: created };
   }
 
-  // 3) Exact-name fast-path — an entity already shares this canonical name
-  //    (case-insensitively, via normalizeName). Restores the "match by
-  //    exact name" path that upsertPersonEntity used pre-ECR-01. Without
-  //    this, the fuzzy ranker can silently route around the obvious match
-  //    — e.g. a name-only "Saurabh Kumar" attendee gets queued against
+  // 3) Exact-name / alias fast-path — an entity already shares this canonical
+  //    name OR carries it as an alias (case-insensitively, via normalizeName).
+  //    Without this, the fuzzy ranker can silently route around the obvious
+  //    match — e.g. a name-only "Saurabh Kumar" attendee gets queued against
   //    "Saurabh Kumar Singh" instead of linking to the existing "Saurabh
-  //    Kumar" entity. Ambiguity-aware: ≥2 entities sharing the canonical
-  //    name fall through to the ranker (which queues with NULL candidate).
-  const exactMatches = deps.lookup.getByNormalizedName(normalized);
-  if (exactMatches.length === 1) {
-    const matched = exactMatches[0];
+  //    Kumar" entity. The alias half catches the post-Confirm case: an
+  //    entity whose canonical name is "Simran Suri" and whose aliases include
+  //    "Simran Suri Neeli" (because a reviewer Confirmed the merge) — a
+  //    future propose for "Simran Suri Neeli" should auto-link rather than
+  //    re-queue. Ambiguity-aware: ≥2 distinct entities sharing the name or
+  //    holding it as an alias fall through to the ranker (which queues with
+  //    NULL candidate).
+  const nameMatches = deps.lookup.getByNormalizedName(normalized);
+  const aliasMatches = deps.lookup.getByAlias?.(normalized) ?? [];
+  const exactById = new Map<string, Entity>();
+  for (const e of nameMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
+  for (const e of aliasMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
+  if (exactById.size === 1) {
+    const matched = exactById.values().next().value as Entity;
     // Pass the matched entity's canonical name (not the proposed one) so
     // upsertPersonEntity's name comparison hits exactly even if the
-    // attendee's casing drifted from the stored entity's.
+    // attendee's casing drifted from the stored entity's. The matched name
+    // may differ from `input.name` when the hit came from an alias.
     const entity = await deps.entityRepo.upsertPersonEntity({
       name: matched.name,
       subtype: input.subtype,
