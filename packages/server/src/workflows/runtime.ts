@@ -114,7 +114,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   } else {
     steps = [
       { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
-      { id: "step1", type: "agent", label: task.prompt, icon: "sketch-ai", position: { x: 0, y: 100 } },
+      {
+        id: "step1",
+        type: "agent",
+        label: task.prompt,
+        icon: "sketch-ai",
+        position: { x: 0, y: 100 },
+        agentMode: "sketch",
+      },
     ];
   }
 
@@ -585,7 +592,7 @@ interface AgentStepParams {
 async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   const { prompt, step, input, logger, workspaceDir, outputPlatform } = params;
 
-  if (step.agentMode === "sketch") {
+  if (step.agentMode !== "light") {
     return executeSketchAgentStep(params);
   }
 

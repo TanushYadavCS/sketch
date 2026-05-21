@@ -16,7 +16,6 @@ import { agentSessionRoutes } from "./api/agent-sessions";
 import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
-import { emailRoutes } from "./api/email";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
 import { mcpServerRoutes } from "./api/mcp-servers";
@@ -278,8 +277,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   if (deps?.whatsapp) {
     app.route("/api/channels/whatsapp", whatsappRoutes(deps.whatsapp));
   }
-
-  app.route("/api/channels/email", emailRoutes(settings));
 
   app.route("/api/usage", usageRoutes(db));
   app.route("/api/entities", entityRoutes(db));
