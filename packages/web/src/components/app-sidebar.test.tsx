@@ -95,5 +95,4 @@ describe("AppSidebar", () => {
 
     expect(screen.getByText("Admin")).toBeInTheDocument();
   });
-
 });

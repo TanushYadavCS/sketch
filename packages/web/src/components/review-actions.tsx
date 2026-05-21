@@ -141,7 +141,7 @@ export function useReviewMutations(
   });
 
   const rejectMutation = useMutation({
-    mutationFn: (_: void) => api.entityReview.reject(row.id, { candidateGeneratedAt }),
+    mutationFn: (_: undefined) => api.entityReview.reject(row.id, { candidateGeneratedAt }),
     onMutate,
     onError,
     onSuccess: (result) => {
@@ -152,7 +152,7 @@ export function useReviewMutations(
 
   return {
     confirm: () => confirmMutation.mutate({}),
-    reject: () => rejectMutation.mutate(),
+    reject: () => rejectMutation.mutate(undefined),
     mergeInto: (entityId: string) => confirmMutation.mutate({ mergeIntoEntityId: entityId }),
     isPending: confirmMutation.isPending || rejectMutation.isPending,
     errorCopy,
