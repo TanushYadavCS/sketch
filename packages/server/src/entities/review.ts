@@ -232,8 +232,25 @@ export function entityReviewRoutes(db: Kysely<DB>) {
       }
     }
 
+    // Evidence with file names for the review-mode drawer — capped so a
+    // 1000-evidence proposal doesn't drag the modal to its knees.
+    const evidenceWithFiles = await repo.listEvidenceWithFiles(id, 50);
+    const enrichedEvidence = evidenceWithFiles.map((e) => ({
+      id: e.id,
+      review_id: e.review_id,
+      indexed_file_id: e.indexed_file_id,
+      source: e.source,
+      note: e.note,
+      seen_at: e.seen_at,
+      file: {
+        name: e.file_name,
+        providerUrl: e.provider_url,
+        sourcePath: e.source_path,
+      },
+    }));
+
     const enrichedRow = { ...baseRow, evidenceCount: evidence.length, sourceBreakdown, candidate };
-    return c.json({ row: enrichedRow, evidence });
+    return c.json({ row: enrichedRow, evidence: enrichedEvidence });
   });
 
   app.post("/:id/confirm", async (c) => {
