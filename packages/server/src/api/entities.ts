@@ -211,24 +211,14 @@ export function entityRoutes(db: Kysely<DB>) {
       })
       .execute();
 
-    if (toDelete.length === 0) {
-      return c.json({ message: "No entities matched.", entitiesDeleted: 0, candidatesCleared: 0 });
-    }
-
-    const ids = toDelete.map((e) => e.id);
-
-    await db.deleteFrom("entity_mentions").where("entity_id", "in", ids).execute();
-    await db.deleteFrom("entity_source_refs").where("entity_id", "in", ids).execute();
-    await db.deleteFrom("entities").where("id", "in", ids).execute();
-
-    // Clear candidates + ECR review state when connectors or AI selected.
-    // Candidates get re-discovered on the next sync. Queue/evidence/rejections
-    // are tied to the connector-driven proposeEntity path — leaving them in
-    // place would mean a fresh sync hits stale "pending review" rows whose
-    // candidate_entity_id was just nulled by the cascade-set-null, or finds
-    // rejections against entities that no longer exist. Cleaning up a
-    // half-deleted entity graph is hard; nuking the review state is the
-    // pragmatic call for a Reset.
+    /**
+     * Clear candidates + ECR review state when connectors or AI selected.
+     *
+     * Candidates get re-discovered on the next sync. Queue, evidence, and
+     * rejections are tied to the connector-driven proposeEntity path; leaving
+     * them in place would mean a fresh sync hits stale review state. This must
+     * run even when no entities currently match the reset category.
+     */
     let candidatesCleared = 0;
     let reviewQueueCleared = 0;
     let reviewEvidenceCleared = 0;
@@ -251,6 +241,23 @@ export function entityRoutes(db: Kysely<DB>) {
       const rejectionsResult = await db.deleteFrom("entity_alias_rejections").execute();
       rejectionsCleared = Number(rejectionsResult[0]?.numDeletedRows ?? 0);
     }
+
+    if (toDelete.length === 0) {
+      return c.json({
+        message: "No entities matched.",
+        entitiesDeleted: 0,
+        candidatesCleared,
+        reviewQueueCleared,
+        reviewEvidenceCleared,
+        rejectionsCleared,
+      });
+    }
+
+    const ids = toDelete.map((e) => e.id);
+
+    await db.deleteFrom("entity_mentions").where("entity_id", "in", ids).execute();
+    await db.deleteFrom("entity_source_refs").where("entity_id", "in", ids).execute();
+    await db.deleteFrom("entities").where("id", "in", ids).execute();
 
     return c.json({
       message: `Deleted ${ids.length} entities.`,

@@ -187,6 +187,91 @@ describe("PUT /api/system/slack/tokens", () => {
   });
 });
 
+describe("PUT /api/system/api-key", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("creates and returns a Sketch API key when none exists", async () => {
+    const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/api-key", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { configured: boolean; apiKey: string };
+    expect(body.configured).toBe(true);
+    expect(body.apiKey).toMatch(/^sk_live_/);
+
+    const raw = await rawField(db, "sketch_api_key");
+    expect(raw).not.toBe(body.apiKey);
+    expect(raw?.startsWith("enc:")).toBe(true);
+  });
+
+  it("returns the existing Sketch API key on rerun", async () => {
+    const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const first = await app.request("/api/system/api-key", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+    const firstBody = (await first.json()) as { apiKey: string };
+
+    const second = await app.request("/api/system/api-key", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+    const secondBody = (await second.json()) as { apiKey: string };
+
+    expect(second.status).toBe(200);
+    expect(secondBody.apiKey).toBe(firstBody.apiKey);
+  });
+
+  it("returns one Sketch API key for concurrent ensure requests", async () => {
+    const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const [first, second] = await Promise.all([
+      app.request("/api/system/api-key", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+      }),
+      app.request("/api/system/api-key", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+      }),
+    ]);
+    const firstBody = (await first.json()) as { apiKey: string };
+    const secondBody = (await second.json()) as { apiKey: string };
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(firstBody.apiKey).toBe(secondBody.apiKey);
+
+    const settingsRow = await settingsRepo.get();
+    expect(settingsRow?.sketch_api_key).toBe(firstBody.apiKey);
+  });
+
+  it("rejects calls without the system secret", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/api-key", { method: "PUT" });
+
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("PUT /api/system/identity", () => {
   let db: Kysely<DB>;
 

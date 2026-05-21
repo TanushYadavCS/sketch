@@ -138,6 +138,32 @@ async function fetchEntity(ctx: ResolveTxnCtx, entityId: string): Promise<Entity
 }
 
 /**
+ * Complete the terminal transition only if the queue row is still pending at
+ * the candidate snapshot this transaction validated. A lost CAS throws so the
+ * transaction rolls back any alias, entity, evidence, or rejection writes that
+ * happened before the terminal update.
+ */
+async function markResolvedOrThrow(
+  ctx: ResolveTxnCtx,
+  row: QueueRow,
+  status: "confirmed" | "rejected",
+  resolvedEntityId: string,
+): Promise<QueueRow> {
+  if (!row.candidate_generated_at) {
+    throw new ResolveError("CANDIDATE_DRIFT", "row missing candidate_generated_at", { currentRow: row });
+  }
+  const won = await ctx.repo.markResolved(row.id, status, resolvedEntityId, ctx.userId, row.candidate_generated_at);
+  if (!won) {
+    const currentRow = await fetchRow(ctx, row.id);
+    throw new ResolveError("CANDIDATE_DRIFT", "row was resolved or refreshed by another request", {
+      currentStatus: currentRow.status,
+      currentRow,
+    });
+  }
+  return fetchRow(ctx, row.id);
+}
+
+/**
  * Insert one entity_mentions row for (entityId, fileId). Idempotent via the
  * UNIQUE index from migration 056. `chunk_index` and `context_snippet` left
  * null — held mentions don't carry chunk-level info (that's a connector's
@@ -414,8 +440,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     }
 
     // 7. Mark resolved.
-    await trxCtx.repo.markResolved(reviewId, "confirmed", target.id, trxCtx.userId);
-    const refreshedRow = await fetchRow(trxCtx, reviewId);
+    const refreshedRow = await markResolvedOrThrow(trxCtx, row, "confirmed", target.id);
 
     return { row: refreshedRow, targetEntityId: target.id, shortCircuited, mergedStaleEntityId, idempotent: false };
   });
@@ -585,8 +610,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     }
 
     // 6. Mark resolved.
-    await trxCtx.repo.markResolved(reviewId, "rejected", target.id, trxCtx.userId);
-    const refreshedRow = await fetchRow(trxCtx, reviewId);
+    const refreshedRow = await markResolvedOrThrow(trxCtx, row, "rejected", target.id);
 
     return { row: refreshedRow, targetEntityId: target.id, reResolvedToExisting, createdEntityId, idempotent: false };
   });

@@ -1,8 +1,8 @@
-import { api } from "@/lib/api";
 /**
  * App sidebar — navigation, branding, and user actions.
  * Follows the designer's sidebar structure with Phosphor icons.
  */
+import { api } from "@/lib/api";
 import {
   ArrowSquareOutIcon,
   BrainIcon,

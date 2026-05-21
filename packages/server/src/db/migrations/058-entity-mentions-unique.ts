@@ -43,7 +43,7 @@ export async function up<DB>(db: Kysely<DB>): Promise<void> {
       .map((r) => `(entity_id=${r.entity_id}, indexed_file_id=${r.indexed_file_id}, count=${r.cnt})`)
       .join("; ");
     throw new Error(
-      `migration 056-entity-mentions-unique: duplicate (entity_id, indexed_file_id) pairs found in entity_mentions — cannot apply UNIQUE index. Sample: ${sample}. Dedupe with: DELETE FROM entity_mentions WHERE id NOT IN (SELECT MIN(id) FROM entity_mentions GROUP BY entity_id, indexed_file_id);`,
+      `migration 058-entity-mentions-unique: duplicate (entity_id, indexed_file_id) pairs found in entity_mentions — cannot apply UNIQUE index. Sample: ${sample}. Dedupe with: DELETE FROM entity_mentions WHERE id NOT IN (SELECT MIN(id) FROM entity_mentions GROUP BY entity_id, indexed_file_id);`,
     );
   }
 
