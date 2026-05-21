@@ -295,4 +295,98 @@ describe("EntityExplorer ECR-03B inline review", () => {
       expect(screen.queryByTestId("review-row-r1")).not.toBeInTheDocument();
     });
   });
+
+  it("shows picked entity identity when choosing a different candidate", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/entities", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("search")) {
+          return entityListResponse([
+            {
+              id: "ent-2",
+              name: "Priya Picked",
+              metadata: { email: "picked@example.com" },
+            },
+          ]);
+        }
+        return entityListResponse([{ id: "ent-1", name: "Simran S", metadata: { email: "original@example.com" } }]);
+      }),
+      http.get("/api/entities/ent-1", () =>
+        HttpResponse.json({
+          entity: {
+            id: "ent-1",
+            name: "Simran S",
+            sourceType: "person",
+            subtype: null,
+            aliases: [],
+            metadata: { email: "original@example.com" },
+            status: "confirmed",
+            hotness: 0,
+            mentionCount: 0,
+            lastMentionAt: null,
+            createdAt: "x",
+            updatedAt: "x",
+          },
+          sourceRefs: [],
+        }),
+      ),
+      http.get("/api/entities/ent-2", () =>
+        HttpResponse.json({
+          entity: {
+            id: "ent-2",
+            name: "Priya Picked",
+            sourceType: "person",
+            subtype: null,
+            aliases: [],
+            metadata: { email: "picked@example.com" },
+            status: "confirmed",
+            hotness: 0,
+            mentionCount: 0,
+            lastMentionAt: null,
+            createdAt: "x",
+            updatedAt: "x",
+          },
+          sourceRefs: [],
+        }),
+      ),
+      http.get("/api/entities/:id/mentions", () => HttpResponse.json({ mentions: [], total: 0, hiddenCount: 0 })),
+      http.get("/api/entity-review", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("limit") === "0") {
+          return HttpResponse.json({ rows: [], total: 1 });
+        }
+        return HttpResponse.json({
+          rows: [
+            rowFactory({
+              id: "r1",
+              candidate: { id: "ent-1", name: "Simran S", email: "original@example.com" },
+            }),
+          ],
+          total: 1,
+        });
+      }),
+      http.get("/api/entity-review/r1", () =>
+        HttpResponse.json({
+          row: rowFactory({
+            id: "r1",
+            candidate: { id: "ent-1", name: "Simran S", email: "original@example.com" },
+          }),
+          evidence: [],
+        }),
+      ),
+    );
+
+    renderWithProviders(<EntityExplorer />);
+    const ghost = await screen.findByTestId("review-row-r1");
+    await user.click(within(ghost).getByRole("button"));
+    await user.click(await screen.findByTestId("reject-match"));
+    await user.type(screen.getByRole("textbox", { name: "Entity search" }), "Priya");
+    await user.click(await screen.findByText("Priya Picked"));
+
+    const candidate = await screen.findByTestId("reconcile-candidate");
+    await waitFor(() => expect(candidate).toHaveTextContent("picked@example.com"));
+    expect(candidate).not.toHaveTextContent("original@example.com");
+  });
 });
