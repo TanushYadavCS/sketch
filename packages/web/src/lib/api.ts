@@ -84,6 +84,7 @@ export interface ScheduledTaskListItem {
   triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputMode: "deliver" | "silent";
   lastRunStatus: string | null;
   runCount: number;
 }

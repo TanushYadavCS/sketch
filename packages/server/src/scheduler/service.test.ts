@@ -538,6 +538,18 @@ describe("executeTask() bot availability checks", () => {
     vi.restoreAllMocks();
   });
 
+  it("runs silent workflows even when Slack delivery is unavailable", async () => {
+    const deps = buildDeps(db, { slack: null });
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({ ...baseTaskFields, platform: "slack", output_mode: "silent" });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    expect(lastExecuteAutomationParams?.sendMessage).toBeUndefined();
+  });
+
   it("skips execution when WhatsApp is not connected", async () => {
     const deps = buildDeps(db, { whatsapp: buildMockWhatsApp(false) });
     const scheduler = new TaskScheduler(deps as never);
