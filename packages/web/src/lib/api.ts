@@ -180,7 +180,102 @@ export interface SetupStatus {
   slackConnected: boolean;
   llmConnected: boolean;
   llmProvider: LlmProvider | null;
+  experimentalFlag?: boolean;
   managedUrl?: string;
+}
+
+export interface EntityReviewQueueRow {
+  id: string;
+  proposed_name: string;
+  normalized_name: string;
+  entity_type: string;
+  proposed_email: string | null;
+  candidate_entity_id: string | null;
+  candidate_score: number | null;
+  candidate_reason: string | null;
+  candidate_generated_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  occurrence_count: number;
+  status: "pending" | "confirmed" | "rejected" | "confirming";
+  triggered_by_user_id: string;
+  review_started_at: string | null;
+  review_started_by: string | null;
+  backfill_cursor: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolved_entity_id: string | null;
+  evidenceCount: number;
+  sourceBreakdown: Array<{ source: string; count: number }>;
+  candidate: { id: string; name: string; email: string | null } | null;
+}
+
+export interface EntityReviewEvidenceRow {
+  id: string;
+  review_id: string;
+  indexed_file_id: string;
+  source: string;
+  note: string | null;
+  seen_at: string;
+}
+
+export interface EntityReviewListResponse {
+  rows: EntityReviewQueueRow[];
+  total: number;
+}
+
+export interface EntityReviewDetailResponse {
+  row: EntityReviewQueueRow;
+  evidence: EntityReviewEvidenceRow[];
+}
+
+export interface EntityReviewConfirmResult {
+  row: EntityReviewQueueRow;
+  targetEntityId: string;
+  shortCircuited: boolean;
+  mergedStaleEntityId: string | null;
+  idempotent: boolean;
+}
+
+export interface EntityReviewRejectResult {
+  row: EntityReviewQueueRow;
+  targetEntityId: string;
+  reResolvedToExisting: boolean;
+  createdEntityId: string | null;
+  idempotent: boolean;
+}
+
+/**
+ * Closed set of error codes the entity-review API emits. Mirrors
+ * `REVIEW_ERROR_CODES` on the server. The UI switches on these to render
+ * locked copy.
+ */
+export type EntityReviewErrorCode =
+  | "CANDIDATE_DRIFT"
+  | "CANDIDATE_MISSING"
+  | "TARGET_DELETED"
+  | "MULTIPLE_STALE_CANDIDATES"
+  | "MULTIPLE_RE_RESOLVE_MATCHES"
+  | "ALREADY_CONFIRMING"
+  | "EVIDENCE_TOO_LARGE"
+  | "TYPE_MISMATCH"
+  | "ROW_NOT_FOUND"
+  | "OWNER_SCOPE_DENIED";
+
+export function isEntityReviewErrorCode(code: string | undefined): code is EntityReviewErrorCode {
+  if (!code) return false;
+  return (
+    code === "CANDIDATE_DRIFT" ||
+    code === "CANDIDATE_MISSING" ||
+    code === "TARGET_DELETED" ||
+    code === "MULTIPLE_STALE_CANDIDATES" ||
+    code === "MULTIPLE_RE_RESOLVE_MATCHES" ||
+    code === "ALREADY_CONFIRMING" ||
+    code === "EVIDENCE_TOO_LARGE" ||
+    code === "TYPE_MISMATCH" ||
+    code === "ROW_NOT_FOUND" ||
+    code === "OWNER_SCOPE_DENIED"
+  );
 }
 
 export interface EntityListItem {
@@ -1072,6 +1167,31 @@ export const api = {
         entities: EntityListItem[];
         total: number;
       }>(`/api/entities${qs ? `?${qs}` : ""}`);
+    },
+  },
+  entityReview: {
+    list(opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      // `limit=0` is a meaningful value (count-only mode) — send it explicitly.
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<EntityReviewListResponse>(`/api/entity-review${qs ? `?${qs}` : ""}`);
+    },
+    get(id: string) {
+      return request<EntityReviewDetailResponse>(`/api/entity-review/${id}`);
+    },
+    confirm(id: string, body: { candidateGeneratedAt: string; mergeIntoEntityId?: string }) {
+      return request<EntityReviewConfirmResult>(`/api/entity-review/${id}/confirm`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    reject(id: string, body: { candidateGeneratedAt: string; rejectAgainstEntityId?: string }) {
+      return request<EntityReviewRejectResult>(`/api/entity-review/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
     },
   },
   usage: {

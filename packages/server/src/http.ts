@@ -199,6 +199,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/setup",
     setupRoutes(settings, {
       managedUrl: config.MANAGED_URL,
+      experimentalFlag: config.EXPERIMENTAL_FLAG,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,

@@ -13,19 +13,39 @@
  * via `countOtherOwnersInEvidence` (JOIN through indexed_files →
  * connector_configs.created_by).
  *
- * Error mapping (from resolve.ts ResolveError codes):
+ * Error mapping (from resolve.ts ResolveError codes; the closed set lives
+ * in review-errors.ts):
  *   CANDIDATE_DRIFT, CANDIDATE_MISSING, TARGET_DELETED,
  *   MULTIPLE_STALE_CANDIDATES, MULTIPLE_RE_RESOLVE_MATCHES,
  *   ALREADY_CONFIRMING                           → 409
  *   EVIDENCE_TOO_LARGE, TYPE_MISMATCH            → 422
  *   ROW_NOT_FOUND                                → 404
+ *   OWNER_SCOPE_DENIED                           → 403
+ *   missing `candidateGeneratedAt` in body       → 400
+ *
+ * Refresh-able 409s (CANDIDATE_DRIFT, CANDIDATE_MISSING, TARGET_DELETED)
+ * include `currentRow` in the response body so the UI can re-render
+ * without an additional GET.
  */
 import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import { isAdmin } from "../api/auth-helpers";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo, readReviewFreezeMs } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
 import { ResolveError, confirmReview, rejectReview } from "./resolve";
+
+function readEmail(metadata: string | null): string | null {
+  if (!metadata) return null;
+  try {
+    const parsed = JSON.parse(metadata) as { email?: unknown };
+    return typeof parsed.email === "string" && parsed.email.length > 0 ? parsed.email : null;
+  } catch {
+    return null;
+  }
+}
+
+type CandidateSummary = { id: string; name: string; email: string | null };
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -90,8 +110,15 @@ export function entityReviewRoutes(db: Kysely<DB>) {
   const app = new Hono();
 
   app.get("/", async (c) => {
-    const limitRaw = Number(c.req.query("limit"));
-    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, MAX_LIMIT) : DEFAULT_LIMIT;
+    const limitRaw = c.req.query("limit");
+    // ?limit=0 → count-only short-circuit (badge); other invalid values fall to default.
+    const limitParsed = limitRaw === undefined ? Number.NaN : Number(limitRaw);
+    const countOnly = limitRaw === "0";
+    const limit = countOnly
+      ? 0
+      : Number.isFinite(limitParsed) && limitParsed > 0
+        ? Math.min(limitParsed, MAX_LIMIT)
+        : DEFAULT_LIMIT;
     const offsetRaw = Number(c.req.query("offset"));
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
     const status = c.req.query("status") ?? "pending";
@@ -102,25 +129,44 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     const repo = createEntityReviewRepo(db);
     const callerIsAdmin = isAdmin(c);
     const callerId = c.get("sub");
-    // Repo's listPending already filters by triggered_by_user_id when
-    // non-admin; we still post-filter for multi-user-evidence rows since
-    // those need to escalate even when triggered_by_user_id matches.
-    const rows = await repo.listPending({
+
+    const total = await repo.countPending({ ownerUserId: callerId, isAdmin: callerIsAdmin });
+
+    if (countOnly) {
+      return c.json({ rows: [], total });
+    }
+
+    const visibleRows = await repo.listPending({
       ownerUserId: callerId,
       isAdmin: callerIsAdmin,
       limit,
       offset,
     });
 
-    if (callerIsAdmin) {
-      return c.json({ rows });
+    // Evidence summary per visible row.
+    const summaryByReview = await repo.evidenceSummaryByReview(visibleRows.map((r) => r.id));
+
+    // Candidate-entity summary (name + email) — UI renders this in place of the raw id.
+    const entityRepo = createEntityRepository(db);
+    const candidateIds = Array.from(
+      new Set(visibleRows.map((r) => r.candidate_entity_id).filter((v): v is string => !!v)),
+    );
+    const candidatesById = new Map<string, CandidateSummary>();
+    if (candidateIds.length > 0) {
+      const entities = await entityRepo.getEntities(candidateIds);
+      for (const e of entities) {
+        candidatesById.set(e.id, { id: e.id, name: e.name, email: readEmail(e.metadata) });
+      }
     }
-    const visible = [] as typeof rows;
-    for (const r of rows) {
-      const otherOwners = await repo.countOtherOwnersInEvidence(r.id, r.triggered_by_user_id);
-      if (otherOwners === 0) visible.push(r);
-    }
-    return c.json({ rows: visible });
+
+    const rowsWithSummary = visibleRows.map((r) => {
+      const breakdown = summaryByReview.get(r.id) ?? [];
+      const evidenceCount = breakdown.reduce((acc, b) => acc + b.count, 0);
+      const candidate = r.candidate_entity_id ? (candidatesById.get(r.candidate_entity_id) ?? null) : null;
+      return { ...r, evidenceCount, sourceBreakdown: breakdown, candidate };
+    });
+
+    return c.json({ rows: rowsWithSummary, total });
   });
 
   app.get("/:id", async (c) => {
@@ -133,15 +179,29 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     if (denied) return denied;
 
     // Side-effecting freeze step runs ONLY after the access check passes.
+    let baseRow = row;
     if (row.status === "pending") {
       const now = new Date().toISOString();
       const boundary = new Date(Date.now() - readReviewFreezeMs()).toISOString();
       const refreshed = await repo.markReviewStarted(id, c.get("sub"), now, boundary);
-      const evidence = await repo.listEvidenceForResolve(id);
-      return c.json({ row: refreshed ?? row, evidence });
+      if (refreshed) baseRow = refreshed;
     }
     const evidence = await repo.listEvidenceForResolve(id);
-    return c.json({ row, evidence });
+    const breakdown = new Map<string, number>();
+    for (const e of evidence) breakdown.set(e.source, (breakdown.get(e.source) ?? 0) + 1);
+    const sourceBreakdown = Array.from(breakdown, ([source, count]) => ({ source, count }));
+
+    let candidate: CandidateSummary | null = null;
+    if (baseRow.candidate_entity_id) {
+      const entityRepo = createEntityRepository(db);
+      const candidateEntity = await entityRepo.getEntity(baseRow.candidate_entity_id);
+      if (candidateEntity) {
+        candidate = { id: candidateEntity.id, name: candidateEntity.name, email: readEmail(candidateEntity.metadata) };
+      }
+    }
+
+    const enrichedRow = { ...baseRow, evidenceCount: evidence.length, sourceBreakdown, candidate };
+    return c.json({ row: enrichedRow, evidence });
   });
 
   app.post("/:id/confirm", async (c) => {
@@ -160,11 +220,6 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
     if (denied) return denied;
 
-    // Idempotent replay: confirmed row returns 200 with current state.
-    if (row.status === "confirmed") {
-      return c.json({ row, idempotent: true });
-    }
-
     try {
       const result = await confirmReview({ db, userId: c.get("sub") }, id, {
         mergeIntoEntityId: body.mergeIntoEntityId,
@@ -175,6 +230,7 @@ export function entityReviewRoutes(db: Kysely<DB>) {
         targetEntityId: result.targetEntityId,
         shortCircuited: result.shortCircuited,
         mergedStaleEntityId: result.mergedStaleEntityId,
+        idempotent: result.idempotent,
       });
     } catch (err) {
       return handleResolveError(c, err);
@@ -197,10 +253,6 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
     if (denied) return denied;
 
-    if (row.status === "rejected") {
-      return c.json({ row, idempotent: true });
-    }
-
     try {
       const result = await rejectReview({ db, userId: c.get("sub") }, id, {
         rejectAgainstEntityId: body.rejectAgainstEntityId,
@@ -211,6 +263,7 @@ export function entityReviewRoutes(db: Kysely<DB>) {
         targetEntityId: result.targetEntityId,
         reResolvedToExisting: result.reResolvedToExisting,
         createdEntityId: result.createdEntityId,
+        idempotent: result.idempotent,
       });
     } catch (err) {
       return handleResolveError(c, err);

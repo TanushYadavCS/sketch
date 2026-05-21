@@ -211,10 +211,8 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     /**
      * Read-side listing for direct DB inspection and the ECR-02 GET route.
      * Owner scope filters to rows triggered by the caller, unless `isAdmin`
-     * is true. Cross-user-evidence rows are admin-only — the route layer
-     * filters those via the DISTINCT-owner query before showing them; this
-     * repo method intentionally does NOT replicate that filter so callers
-     * can choose their own owner-aware view.
+     * is true. Cross-user-evidence rows are admin-only and are excluded in
+     * SQL for non-admin callers so pagination happens over visible rows.
      */
     async listPending(opts: {
       ownerUserId?: string;
@@ -223,8 +221,24 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       offset?: number;
     }) {
       let q = db.selectFrom("entity_review_queue").selectAll().where("status", "=", "pending");
-      if (!opts.isAdmin && opts.ownerUserId) {
-        q = q.where("triggered_by_user_id", "=", opts.ownerUserId);
+      if (!opts.isAdmin) {
+        if (!opts.ownerUserId) return [];
+        const ownerUserId = opts.ownerUserId;
+        q = q
+          .where("triggered_by_user_id", "=", ownerUserId)
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom("entity_review_evidence as e")
+                  .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
+                  .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
+                  .select("e.review_id")
+                  .whereRef("e.review_id", "=", "entity_review_queue.id")
+                  .where("cc.created_by", "!=", ownerUserId),
+              ),
+            ),
+          );
       }
       q = q.orderBy("last_seen_at", "desc").limit(opts.limit);
       if (opts.offset) q = q.offset(opts.offset);
@@ -232,19 +246,32 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     },
 
     /**
-     * Count of `pending` rows under the same owner-scope predicate as
-     * `listPending`. Used by the badge endpoint. Multi-user-evidence
-     * exclusion is applied by the route layer, NOT here — the caller is
-     * responsible for matching the visibility filter to the row fetch so
-     * the badge count matches what the user sees.
+     * Count of `pending` rows under the same visibility predicate as
+     * `listPending`. Used by the badge endpoint and by list pagination.
      */
     async countPending(opts: { ownerUserId?: string; isAdmin: boolean }): Promise<number> {
       let q = db
         .selectFrom("entity_review_queue")
         .select(db.fn.countAll<number>().as("c"))
         .where("status", "=", "pending");
-      if (!opts.isAdmin && opts.ownerUserId) {
-        q = q.where("triggered_by_user_id", "=", opts.ownerUserId);
+      if (!opts.isAdmin) {
+        if (!opts.ownerUserId) return 0;
+        const ownerUserId = opts.ownerUserId;
+        q = q
+          .where("triggered_by_user_id", "=", ownerUserId)
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom("entity_review_evidence as e")
+                  .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
+                  .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
+                  .select("e.review_id")
+                  .whereRef("e.review_id", "=", "entity_review_queue.id")
+                  .where("cc.created_by", "!=", ownerUserId),
+              ),
+            ),
+          );
       }
       const row = await q.executeTakeFirst();
       return Number(row?.c ?? 0);
