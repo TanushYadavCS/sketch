@@ -364,6 +364,9 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     const email = parsed.data.email.toLowerCase();
     const existing = await deps.userRepo.findByEmail(email);
     if (existing) {
+      if (!existing.email_verified_at) {
+        await deps.userRepo.update(existing.id, { emailVerified: true });
+      }
       return c.json({ ok: true, userId: existing.id });
     }
 

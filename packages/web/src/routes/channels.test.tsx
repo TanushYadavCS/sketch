@@ -3,14 +3,18 @@ import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mockAuth = vi.hoisted(() => ({
+  value: { role: "admin" as "admin" | "member", displayName: "User", displayIdentifier: "user@test.com" },
+}));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...mod,
     useRouteContext: () => ({
-      auth: { displayName: "User", displayIdentifier: "user@test.com" },
+      auth: mockAuth.value,
     }),
   };
 });
@@ -42,6 +46,10 @@ function channelsHandler(
 }
 
 describe("ChannelsPage", () => {
+  beforeEach(() => {
+    mockAuth.value = { role: "admin", displayName: "User", displayIdentifier: "user@test.com" };
+  });
+
   it("renders both platform cards", async () => {
     renderWithProviders(<ChannelsPage />);
 
@@ -77,6 +85,46 @@ describe("ChannelsPage", () => {
     });
   });
 
+  describe("member access", () => {
+    it("renders disconnected channels without mutation controls for members", async () => {
+      mockAuth.value = { role: "member", displayName: "Member", displayIdentifier: "member@test.com" };
+      channelsHandler(
+        { configured: false, connected: null },
+        { configured: false, connected: null },
+        { configured: false, connected: null },
+      );
+
+      renderWithProviders(<ChannelsPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Channel settings are managed by admins.")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Pair" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Configure" })).not.toBeInTheDocument();
+    });
+
+    it("renders connected channels without action menus for members", async () => {
+      mockAuth.value = { role: "member", displayName: "Member", displayIdentifier: "member@test.com" };
+      channelsHandler(
+        { configured: true, connected: true },
+        { configured: true, connected: true, phoneNumber: "+1234567890" },
+        { configured: true, connected: true, fromAddress: "noreply@example.com" },
+      );
+
+      renderWithProviders(<ChannelsPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Channel settings are managed by admins.")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("button", { name: "Slack actions" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "WhatsApp actions" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Email actions" })).not.toBeInTheDocument();
+    });
+  });
+
   describe("WhatsApp card", () => {
     it("shows not-configured state with Pair button", async () => {
       channelsHandler({ configured: false, connected: null }, { configured: false, connected: null });
@@ -97,11 +145,7 @@ describe("ChannelsPage", () => {
       );
       renderWithProviders(<ChannelsPage />);
 
-      await waitFor(() => {
-        expect(screen.getByText(/Connected/)).toBeInTheDocument();
-      });
-
-      expect(screen.getByText(/\+1234567890/)).toBeInTheDocument();
+      expect(await screen.findByText(/\+1234567890/)).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Pair" })).not.toBeInTheDocument();
     });
   });

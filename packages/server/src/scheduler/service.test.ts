@@ -784,6 +784,24 @@ describe("executeTask() queue key derivation", () => {
 
     expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
+
+  it("uses the active WhatsApp group queue key for chat mode", async () => {
+    const queueManager = new QueueManager();
+    const getQueueSpy = vi.spyOn(queueManager, "getQueue");
+    const deps = buildDeps(db, { queueManager });
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "whatsapp",
+      context_type: "group",
+      delivery_target: "987654321@g.us",
+      session_mode: "chat",
+    });
+    await scheduler.executeTask(row as ScheduledTaskRow);
+
+    expect(getQueueSpy).toHaveBeenCalledWith("wa-group-987654321@g.us");
+  });
 });
 
 describe("executeTaskById() queueing", () => {
@@ -870,6 +888,33 @@ describe("executeTaskById() queueing", () => {
     releaseScheduledRun?.();
     await expect(manualRun).resolves.toBeNull();
     expect(callCount).toBe(1);
+  });
+
+  it("enqueueTaskById validates then returns without waiting for execution", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    let releaseRun: (() => void) | undefined;
+    let callCount = 0;
+
+    executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+      lastExecuteAutomationParams = params;
+      callCount += 1;
+      await new Promise<void>((resolve) => {
+        releaseRun = resolve;
+      });
+      return { runId: "run-1", status: "completed", finalOutput: null, stepOutputs: {} };
+    });
+
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({ ...baseTaskFields, session_mode: "chat" });
+
+    await scheduler.enqueueTaskById(row.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(1);
+
+    releaseRun?.();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   });
 });
 
