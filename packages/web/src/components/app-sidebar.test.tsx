@@ -95,7 +95,6 @@ describe("AppSidebar", () => {
 
     expect(screen.getByText("Admin")).toBeInTheDocument();
   });
-
   it("hides the Review entities nav item when experimentalFlag is off", async () => {
     server.use(
       http.get("/api/setup/status", () =>

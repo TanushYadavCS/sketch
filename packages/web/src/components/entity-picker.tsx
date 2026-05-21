@@ -55,15 +55,13 @@ export function EntityPicker({ entityType, excludeEntityId, onPick, placeholder 
         aria-label="Entity search"
       />
       {debounced.length > 0 ? (
-        <div className="rounded-md border bg-popover text-sm max-h-64 overflow-y-auto" role="listbox">
+        <div className="rounded-md border bg-popover text-sm max-h-64 overflow-y-auto">
           {isFetching && results.length === 0 ? (
             <div className="px-3 py-2 text-muted-foreground">Searching…</div>
           ) : results.length === 0 ? (
             <div className="px-3 py-2 text-muted-foreground">No matches</div>
           ) : (
-            results.map((entity) => (
-              <EntityRow key={entity.id} entity={entity} onPick={() => onPick(entity.id)} />
-            ))
+            results.map((entity) => <EntityRow key={entity.id} entity={entity} onPick={() => onPick(entity.id)} />)
           )}
         </div>
       ) : null}
@@ -78,7 +76,6 @@ function EntityRow({ entity, onPick }: { entity: EntityListItem; onPick: () => v
       type="button"
       onClick={onPick}
       className="w-full flex items-center justify-between gap-3 px-3 py-2 hover:bg-accent text-left"
-      role="option"
     >
       <span className="font-medium truncate">{entity.name}</span>
       {email ? <span className="text-muted-foreground truncate">{email}</span> : null}

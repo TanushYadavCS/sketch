@@ -75,7 +75,7 @@ describe("EntityPicker", () => {
 
     renderWithProviders(<EntityPicker entityType="person" onPick={onPick} />);
     await user.type(screen.getByRole("textbox", { name: /entity search/i }), "simr");
-    const option = await screen.findByRole("option", { name: /Simran Suri/i });
+    const option = await screen.findByRole("button", { name: /Simran Suri/i });
     await user.click(option);
     expect(onPick).toHaveBeenCalledWith("e1");
   });

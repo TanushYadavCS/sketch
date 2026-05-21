@@ -127,7 +127,7 @@ export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
   });
 
   const rejectMutation = useMutation({
-    mutationFn: (_: void) => api.entityReview.reject(row.id, { candidateGeneratedAt }),
+    mutationFn: (_: undefined) => api.entityReview.reject(row.id, { candidateGeneratedAt }),
     onMutate: buildOnMutate(),
     onError,
     onSuccess: (result) => {
@@ -178,7 +178,7 @@ export function ReviewActions({ row, onResolved }: ReviewActionsProps) {
         <Button
           size="sm"
           variant="outline"
-          onClick={() => rejectMutation.mutate()}
+          onClick={() => rejectMutation.mutate(undefined)}
           disabled={pending}
           data-testid="reject-button"
         >

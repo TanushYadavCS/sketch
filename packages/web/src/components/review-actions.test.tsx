@@ -66,9 +66,7 @@ describe("ReviewActions", () => {
 
     await waitFor(() => expect(confirmCalls).toHaveLength(1));
     expect(confirmCalls[0]).toEqual({ candidateGeneratedAt: "2026-01-01T00:00:00.000Z" });
-    await waitFor(() =>
-      expect(onResolved).toHaveBeenCalledWith({ kind: "confirmed", targetEntityId: "cand-1" }),
-    );
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: "confirmed", targetEntityId: "cand-1" }));
   });
 
   it("Reject fires onResolved with kind=rejected and the created entity id", async () => {
@@ -89,9 +87,7 @@ describe("ReviewActions", () => {
     renderWithProviders(<ReviewActions row={rowFactory() as never} onResolved={onResolved} />);
     await user.click(await screen.findByTestId("reject-button"));
 
-    await waitFor(() =>
-      expect(onResolved).toHaveBeenCalledWith({ kind: "rejected", targetEntityId: "new-1" }),
-    );
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: "rejected", targetEntityId: "new-1" }));
   });
 
   it("Confirm 409 CANDIDATE_DRIFT shows refresh-prompt copy and does not fire onResolved", async () => {
@@ -99,10 +95,7 @@ describe("ReviewActions", () => {
     const onResolved = vi.fn();
     server.use(
       http.post("/api/entity-review/:id/confirm", () =>
-        HttpResponse.json(
-          { error: { code: "CANDIDATE_DRIFT", message: "drift" } },
-          { status: 409 },
-        ),
+        HttpResponse.json({ error: { code: "CANDIDATE_DRIFT", message: "drift" } }, { status: 409 }),
       ),
     );
 
