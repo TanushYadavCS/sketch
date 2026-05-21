@@ -201,6 +201,22 @@ describe("createCanUseTool", () => {
       const result = await canUseTool("Bash", { command: `cat ${WORKSPACE}/file.txt` });
       expect(result.behavior).toBe("allow");
     });
+
+    it("allows brokered Canvas CLI commands with slashes in JSON values", async () => {
+      const result = await canUseTool("Bash", {
+        command:
+          '$CANVAS_CLI direct-execute-action --component-key clickup-create-task --configured-props \'{"name":"Script / Quote | Parent","description":"A/B test"}\' --output json',
+      });
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("temporarily allows brokered Canvas CLI commands with shell chaining", async () => {
+      const result = await canUseTool("Bash", {
+        command:
+          '$CANVAS_CLI direct-execute-action --component-key clickup-create-task --configured-props \'{"name":"Script / Quote | Parent"}\' && cat /etc/passwd',
+      });
+      expect(result.behavior).toBe("allow");
+    });
   });
 
   describe("edge cases", () => {

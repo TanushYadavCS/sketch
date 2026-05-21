@@ -40,6 +40,15 @@ afterEach(async () => {
 });
 
 describe("markRunningAsFailed", () => {
+  it("stores started_at as ISO UTC when creating a run", async () => {
+    const id = await runs.create({ taskId: "task-1" });
+
+    const run = await runs.getById(id);
+
+    expect(run?.started_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(run?.started_at).toMatch(/Z$/);
+  });
+
   it("marks all running runs as failed and returns the count", async () => {
     const r1 = await runs.create({ taskId: "task-1" });
     const r2 = await runs.create({ taskId: "task-1" });

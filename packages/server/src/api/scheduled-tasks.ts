@@ -50,6 +50,7 @@ interface ScheduledTaskListItem {
   triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputMode: "deliver" | "silent";
   lastRunStatus: string | null;
   runCount: number;
 }
@@ -243,6 +244,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       triggerConfig,
       outputTarget: row.output_target,
       outputPlatform: row.output_platform,
+      outputMode: row.output_mode === "silent" ? "silent" : "deliver",
       lastRunStatus: rd?.lastRunStatus ?? null,
       runCount: rd?.runCount ?? 0,
     };

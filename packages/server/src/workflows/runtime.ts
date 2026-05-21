@@ -314,7 +314,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     logger.info({ taskId: task.id, runId }, "Automation: execution completed");
 
     // Deliver final step's output
-    if (sendMessage) {
+    if (sendMessage && task.output_mode !== "silent") {
       if (finalOutput != null) {
         const message = typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput, null, 2);
         await sendMessage(message);
