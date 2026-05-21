@@ -217,6 +217,27 @@ export interface EntityReviewEvidenceRow {
   source: string;
   note: string | null;
   seen_at: string;
+  file: {
+    name: string;
+    providerUrl: string | null;
+    sourcePath: string | null;
+  };
+}
+
+export interface EntityMention {
+  id: string;
+  contextSnippet: string | null;
+  chunkIndex: number | null;
+  mentionedAt: string;
+  sourceDate: string;
+  file: {
+    id: string;
+    fileName: string;
+    fileType: string | null;
+    source: string;
+    sourcePath: string | null;
+    providerUrl: string | null;
+  };
 }
 
 export interface EntityReviewListResponse {
@@ -1104,21 +1125,7 @@ export const api = {
       if (opts?.offset) params.set("offset", String(opts.offset));
       const qs = params.toString();
       return request<{
-        mentions: Array<{
-          id: string;
-          contextSnippet: string | null;
-          chunkIndex: number | null;
-          mentionedAt: string;
-          sourceDate: string;
-          file: {
-            id: string;
-            fileName: string;
-            fileType: string | null;
-            source: string;
-            sourcePath: string | null;
-            providerUrl: string | null;
-          };
-        }>;
+        mentions: EntityMention[];
         total: number;
         hiddenCount: number;
       }>(`/api/entities/${id}/mentions${qs ? `?${qs}` : ""}`);

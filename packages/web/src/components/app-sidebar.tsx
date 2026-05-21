@@ -1,9 +1,9 @@
-import { api } from "@/lib/api";
 /**
  * App sidebar — navigation, branding, and user actions.
  * Follows the designer's sidebar structure with Phosphor icons.
  */
 import { SidebarReviewCount } from "@/components/sidebar-review-count";
+import { api } from "@/lib/api";
 import {
   ArrowSquareOutIcon,
   BrainIcon,
@@ -18,8 +18,8 @@ import {
   MoonIcon,
   SignOutIcon,
   SunIcon,
-  UsersThreeIcon,
   UserCircleCheckIcon,
+  UsersThreeIcon,
 } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import {

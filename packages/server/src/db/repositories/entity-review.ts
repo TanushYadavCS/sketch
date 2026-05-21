@@ -398,6 +398,33 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     },
 
     /**
+     * Same as `listEvidenceForResolve` but joined with indexed_files so the
+     * UI can render a human-readable file name + link instead of an opaque
+     * UUID. Capped to the most-recent 50 rows so the review-mode drawer
+     * doesn't blow up on huge proposals — admin SQL is the path for those.
+     */
+    async listEvidenceWithFiles(reviewId: string, limit: number) {
+      return db
+        .selectFrom("entity_review_evidence as e")
+        .innerJoin("indexed_files as i", "i.id", "e.indexed_file_id")
+        .select([
+          "e.id as id",
+          "e.review_id as review_id",
+          "e.indexed_file_id as indexed_file_id",
+          "e.source as source",
+          "e.note as note",
+          "e.seen_at as seen_at",
+          "i.file_name as file_name",
+          "i.provider_url as provider_url",
+          "i.source_path as source_path",
+        ])
+        .where("e.review_id", "=", reviewId)
+        .orderBy("e.seen_at", "desc")
+        .limit(limit)
+        .execute();
+    },
+
+    /**
      * Count distinct owners of evidence files for a review (via
      * indexed_files.connector_config_id → connector_configs.created_by),
      * excluding `triggeredByUserId`. >0 means the row's evidence spans

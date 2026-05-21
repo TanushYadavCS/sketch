@@ -62,7 +62,15 @@ describe("ReviewEntitiesPage", () => {
     server.use(
       http.get("/api/entity-review", () =>
         HttpResponse.json({
-          rows: [rowFactory(), rowFactory({ id: "r2", proposed_name: "Aryaman Soni", evidenceCount: 1, sourceBreakdown: [{ source: "fireflies", count: 1 }] })],
+          rows: [
+            rowFactory(),
+            rowFactory({
+              id: "r2",
+              proposed_name: "Aryaman Soni",
+              evidenceCount: 1,
+              sourceBreakdown: [{ source: "fireflies", count: 1 }],
+            }),
+          ],
           total: 2,
         }),
       ),
@@ -81,12 +89,8 @@ describe("ReviewEntitiesPage", () => {
     const user = userEvent.setup();
     const confirmCalls: unknown[] = [];
     server.use(
-      http.get("/api/entity-review", () =>
-        HttpResponse.json({ rows: [rowFactory()], total: 1 }),
-      ),
-      http.get("/api/entity-review/r1", () =>
-        HttpResponse.json({ row: rowFactory(), evidence: [] }),
-      ),
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [rowFactory()], total: 1 })),
+      http.get("/api/entity-review/r1", () => HttpResponse.json({ row: rowFactory(), evidence: [] })),
       http.post("/api/entity-review/:id/confirm", async ({ request }) => {
         confirmCalls.push(await request.json());
         return HttpResponse.json({
@@ -146,12 +150,8 @@ describe("ReviewEntitiesPage", () => {
   it("Confirm 409 CANDIDATE_DRIFT shows refresh-prompt copy and rolls back optimistic removal", async () => {
     const user = userEvent.setup();
     server.use(
-      http.get("/api/entity-review", () =>
-        HttpResponse.json({ rows: [rowFactory()], total: 1 }),
-      ),
-      http.get("/api/entity-review/r1", () =>
-        HttpResponse.json({ row: rowFactory(), evidence: [] }),
-      ),
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [rowFactory()], total: 1 })),
+      http.get("/api/entity-review/r1", () => HttpResponse.json({ row: rowFactory(), evidence: [] })),
       http.post("/api/entity-review/:id/confirm", () =>
         HttpResponse.json(
           { error: { code: "CANDIDATE_DRIFT", message: "drift", currentRow: rowFactory() } },
@@ -174,17 +174,10 @@ describe("ReviewEntitiesPage", () => {
   it("Confirm 422 EVIDENCE_TOO_LARGE shows the sticky admin message", async () => {
     const user = userEvent.setup();
     server.use(
-      http.get("/api/entity-review", () =>
-        HttpResponse.json({ rows: [rowFactory()], total: 1 }),
-      ),
-      http.get("/api/entity-review/r1", () =>
-        HttpResponse.json({ row: rowFactory(), evidence: [] }),
-      ),
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [rowFactory()], total: 1 })),
+      http.get("/api/entity-review/r1", () => HttpResponse.json({ row: rowFactory(), evidence: [] })),
       http.post("/api/entity-review/:id/confirm", () =>
-        HttpResponse.json(
-          { error: { code: "EVIDENCE_TOO_LARGE", message: "too many" } },
-          { status: 422 },
-        ),
+        HttpResponse.json({ error: { code: "EVIDENCE_TOO_LARGE", message: "too many" } }, { status: 422 }),
       ),
     );
 
@@ -201,12 +194,8 @@ describe("ReviewEntitiesPage", () => {
     const user = userEvent.setup();
     const confirmCalls: unknown[] = [];
     server.use(
-      http.get("/api/entity-review", () =>
-        HttpResponse.json({ rows: [rowFactory()], total: 1 }),
-      ),
-      http.get("/api/entity-review/r1", () =>
-        HttpResponse.json({ row: rowFactory(), evidence: [] }),
-      ),
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [rowFactory()], total: 1 })),
+      http.get("/api/entity-review/r1", () => HttpResponse.json({ row: rowFactory(), evidence: [] })),
       http.get("/api/entities", () =>
         HttpResponse.json({
           entities: [
@@ -244,7 +233,7 @@ describe("ReviewEntitiesPage", () => {
     await user.click(await screen.findByTestId("review-row-r1"));
     await user.click(await screen.findByRole("button", { name: /Pick a different existing/i }));
     await user.type(await screen.findByRole("textbox", { name: /entity search/i }), "kap");
-    await user.click(await screen.findByRole("option", { name: /Simran Kapur/i }));
+    await user.click(await screen.findByRole("button", { name: /Simran Kapur/i }));
 
     await waitFor(() => expect(confirmCalls).toHaveLength(1));
     expect(confirmCalls[0]).toEqual({
@@ -256,12 +245,8 @@ describe("ReviewEntitiesPage", () => {
   it("Idempotent replay (idempotent: true) treated as success — no UI error", async () => {
     const user = userEvent.setup();
     server.use(
-      http.get("/api/entity-review", () =>
-        HttpResponse.json({ rows: [rowFactory()], total: 1 }),
-      ),
-      http.get("/api/entity-review/r1", () =>
-        HttpResponse.json({ row: rowFactory(), evidence: [] }),
-      ),
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [rowFactory()], total: 1 })),
+      http.get("/api/entity-review/r1", () => HttpResponse.json({ row: rowFactory(), evidence: [] })),
       http.post("/api/entity-review/:id/confirm", () =>
         HttpResponse.json({
           row: rowFactory({ status: "confirmed" }),
@@ -283,9 +268,7 @@ describe("ReviewEntitiesPage", () => {
   });
 
   it("shows the empty-state when the list is empty", async () => {
-    server.use(
-      http.get("/api/entity-review", () => HttpResponse.json({ rows: [], total: 0 })),
-    );
+    server.use(http.get("/api/entity-review", () => HttpResponse.json({ rows: [], total: 0 })));
     renderWithProviders(<ReviewEntitiesPage />);
     await waitFor(() => {
       expect(screen.getByText(/Nothing pending/i)).toBeInTheDocument();

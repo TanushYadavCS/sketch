@@ -33,8 +33,8 @@ function ReviewEntitiesPage() {
         <header className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold tracking-tight">Review entities</h1>
           <p className="text-sm text-muted-foreground">
-            Names proposed by syncs that fuzzy-collide with existing entities. Confirm to merge, reject to create a
-            new entity, or pick a different existing entity.
+            Names proposed by syncs that fuzzy-collide with existing entities. Confirm to merge, reject to create a new
+            entity, or pick a different existing entity.
           </p>
         </header>
         {isLoading ? (
@@ -63,11 +63,7 @@ function ListError({ error }: { error: unknown }) {
       </div>
     );
   }
-  return (
-    <div className="text-sm text-destructive">
-      Could not load the review queue. Try refreshing in a moment.
-    </div>
-  );
+  return <div className="text-sm text-destructive">Could not load the review queue. Try refreshing in a moment.</div>;
 }
 
 function ReviewRow({ row }: { row: EntityReviewQueueRow }) {
