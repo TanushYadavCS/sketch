@@ -72,6 +72,13 @@ export function createCanUseTool(
     // Layer 3: bash path validation
     if (toolName === "Bash") {
       const command = (input.command as string) || "";
+      // Temporary broad carveout: CANVAS_CLI is a brokered launcher created by
+      // Sketch, and Canvas CLI commands commonly carry JSON/text values that
+      // trip the generic path scanner. Revisit with a structured shell parser.
+      if (command.includes("CANVAS_CLI")) {
+        return { behavior: "allow", updatedInput: input };
+      }
+
       const hasAbsolutePath = /(?:^|\s)\/(?!dev\/null|tmp\/)/.test(command);
       if (hasAbsolutePath && !command.includes(absWorkspace) && !(absClaudeDir && command.includes(absClaudeDir))) {
         logger.warn({ toolName, command, absWorkspace }, "Blocked bash command referencing outside paths");
