@@ -8,6 +8,7 @@ import { createScheduledTaskRepository } from "../db/repositories/scheduled-task
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
+import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import type { WorkflowStep } from "../workflows/types";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
@@ -72,28 +73,6 @@ function formatDateTime(value: string, timezone: string): string {
   }).format(date);
 }
 
-function formatIntervalLabel(rawSeconds: string): string {
-  const seconds = Number.parseInt(rawSeconds, 10);
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return `Every ${rawSeconds} seconds`;
-  }
-
-  const units: Array<{ seconds: number; label: string }> = [
-    { seconds: 86_400, label: "day" },
-    { seconds: 3_600, label: "hour" },
-    { seconds: 60, label: "minute" },
-  ];
-
-  for (const unit of units) {
-    if (seconds % unit.seconds === 0) {
-      const count = seconds / unit.seconds;
-      return `Every ${count} ${unit.label}${count === 1 ? "" : "s"}`;
-    }
-  }
-
-  return `Every ${seconds} seconds`;
-}
-
 function formatCanvasTriggerLabel(triggerConfig: WorkflowTriggerConfig | null): string {
   if (triggerConfig?.type !== "canvas") return "Canvas managed trigger";
 
@@ -112,7 +91,7 @@ function formatScheduleLabel(row: ScheduledTaskRow, triggerConfig: WorkflowTrigg
   }
 
   if (row.schedule_type === "interval") {
-    return formatIntervalLabel(row.schedule_value);
+    return formatIntervalScheduleLabel(row.schedule_value);
   }
 
   if (row.schedule_type === "once") {
@@ -132,6 +111,10 @@ function parseTriggerConfig(stepsValue: string | null): WorkflowTriggerConfig | 
   } catch {
     return null;
   }
+}
+
+function isLocalScheduleType(value: string): value is "cron" | "interval" | "once" {
+  return value === "cron" || value === "interval" || value === "once";
 }
 
 function getTargetKindLabel(row: ScheduledTaskRow): ScheduledTaskListItem["targetKindLabel"] {
@@ -203,13 +186,21 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       targetLabel = groupNames.get(row.delivery_target) ?? row.delivery_target;
     }
 
+    const normalizedSteps = isLocalScheduleType(row.schedule_type)
+      ? normalizeScheduleTriggerStepsJson(row.steps, {
+          scheduleType: row.schedule_type,
+          scheduleValue: row.schedule_value,
+          timezone: row.timezone,
+        })
+      : row.steps;
+
     let stepCount = 0;
-    if (row.steps) {
+    if (normalizedSteps) {
       try {
-        stepCount = JSON.parse(row.steps).length;
+        stepCount = JSON.parse(normalizedSteps).length;
       } catch {}
     }
-    const triggerConfig = parseTriggerConfig(row.steps);
+    const triggerConfig = parseTriggerConfig(normalizedSteps ?? null);
 
     const rd = runData.get(row.id);
 
@@ -238,7 +229,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       canDelete: true,
       title: row.title,
       description: row.description,
-      steps: row.steps,
+      steps: normalizedSteps ?? null,
       stepCount,
       triggerConfig,
       outputTarget: row.output_target,
