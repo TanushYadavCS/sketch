@@ -248,6 +248,13 @@ describe("agent invoke API", () => {
     expect(call.resumeSessionId).toBeUndefined();
     expect(call.userMessage).toContain("Requester");
     expect(call.userMessage).toContain("run in target workspace");
+    expect(call.taskContext).toEqual({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "STARGET",
+      createdBy: requester.id,
+      creatorTimezone: null,
+    });
   });
 
   it("resumes an explicit API sessionId without persisting it to workspace chat state", async () => {

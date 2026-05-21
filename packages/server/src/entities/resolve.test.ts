@@ -501,6 +501,54 @@ describe("confirmReview", () => {
     const aliases: string[] = aliasesCount.aliases ? JSON.parse(aliasesCount.aliases) : [];
     expect(aliases.filter((a) => normalizeName(a) === "simran suri neeli")).toHaveLength(1);
   });
+
+  it("terminal update does not overwrite a row resolved by another request", async () => {
+    const confirmedTarget = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      email: "simran@acme.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:ss",
+    });
+    await seedIndexedFile(db, "file-1");
+    const reviewId = await queuePendingRow(db, {
+      proposedName: "Simran Suri Neeli",
+      candidateEntityId: confirmedTarget.id,
+      fileIds: ["file-1"],
+    });
+    const rejectedTarget = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri Neeli",
+      email: "neeli@acme.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:neeli",
+    });
+    const row = await reviewRepo.getById(reviewId);
+    if (!row?.candidate_generated_at) throw new Error("missing");
+
+    const firstWon = await reviewRepo.markResolved(
+      reviewId,
+      "confirmed",
+      confirmedTarget.id,
+      "resolver-1",
+      row.candidate_generated_at,
+    );
+    const secondWon = await reviewRepo.markResolved(
+      reviewId,
+      "rejected",
+      rejectedTarget.id,
+      "resolver-2",
+      row.candidate_generated_at,
+    );
+
+    expect(firstWon).toBe(true);
+    expect(secondWon).toBe(false);
+
+    const finalRow = await reviewRepo.getById(reviewId);
+    expect(finalRow?.status).toBe("confirmed");
+    expect(finalRow?.resolved_entity_id).toBe(confirmedTarget.id);
+    expect(finalRow?.resolved_by).toBe("resolver-1");
+  });
 });
 
 describe("rejectReview", () => {

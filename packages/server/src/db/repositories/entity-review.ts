@@ -304,18 +304,18 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     },
 
     /**
-     * Mark a queue row resolved. Sets status, resolved_entity_id, resolved_by,
-     * resolved_at. Status must be 'confirmed' or 'rejected'. resolved_entity_id
-     * is required — by construction, both Confirm and Reject end with a
-     * concrete target entity id (after Reject's re-resolve-or-create step).
+     * Mark a pending queue row resolved only if the caller still owns the
+     * candidate snapshot it read earlier. Returns false when another resolver
+     * won first or propose() refreshed the candidate before the terminal write.
      */
     async markResolved(
       reviewId: string,
       status: "confirmed" | "rejected",
       resolvedEntityId: string,
       by: string,
-    ): Promise<void> {
-      await db
+      candidateGeneratedAt: string,
+    ): Promise<boolean> {
+      const result = await db
         .updateTable("entity_review_queue")
         .set({
           status,
@@ -324,7 +324,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           resolved_at: new Date().toISOString(),
         })
         .where("id", "=", reviewId)
+        .where("status", "=", "pending")
+        .where("candidate_generated_at", "=", candidateGeneratedAt)
         .execute();
+      return Number(result[0]?.numUpdatedRows ?? 0) > 0;
     },
 
     /**

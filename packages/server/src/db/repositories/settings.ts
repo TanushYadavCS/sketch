@@ -15,38 +15,81 @@ const SENSITIVE_FIELDS = new Set<string>([
   "sketch_api_key",
 ]);
 
+function buildSettingsInsert(
+  encryptionKey: string | undefined,
+  data: { adminEmail?: string; adminPasswordHash?: string; orgName?: string; botName?: string } = {},
+) {
+  const jwtSecret = randomBytes(32).toString("hex");
+  return {
+    id: "default",
+    ...(data.adminEmail !== undefined ? { admin_email: data.adminEmail } : {}),
+    ...(data.adminPasswordHash !== undefined ? { admin_password_hash: data.adminPasswordHash } : {}),
+    jwt_secret: encryptionKey ? encrypt(jwtSecret, encryptionKey) : jwtSecret,
+    ...(data.orgName !== undefined ? { org_name: data.orgName } : {}),
+    ...(data.botName !== undefined ? { bot_name: data.botName } : {}),
+  };
+}
+
+function decryptSettingsRow<T extends Record<string, unknown>>(row: T, encryptionKey?: string): T {
+  const mutableRow = row as Record<string, unknown>;
+  for (const field of SENSITIVE_FIELDS) {
+    const value = mutableRow[field];
+    if (typeof value === "string" && value.startsWith("enc:")) {
+      if (!encryptionKey) {
+        throw new Error(`Encrypted value found for ${field} but ENCRYPTION_KEY is not set`);
+      }
+      mutableRow[field] = decrypt(value, encryptionKey);
+    }
+  }
+  return row;
+}
+
 export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string) {
   return {
     async get() {
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirst();
       if (!row) return null;
-      for (const field of SENSITIVE_FIELDS) {
-        const value = (row as Record<string, unknown>)[field];
-        if (typeof value === "string" && value.startsWith("enc:")) {
-          if (!encryptionKey) {
-            throw new Error(`Encrypted value found for ${field} but ENCRYPTION_KEY is not set`);
-          }
-          (row as Record<string, unknown>)[field] = decrypt(value, encryptionKey);
-        }
-      }
-      return row;
+      return decryptSettingsRow(row, encryptionKey);
     },
 
     async create(data: { adminEmail?: string; adminPasswordHash?: string; orgName?: string; botName?: string } = {}) {
-      const jwtSecret = randomBytes(32).toString("hex");
-      await db
-        .insertInto("settings")
-        .values({
-          id: "default",
-          ...(data.adminEmail !== undefined ? { admin_email: data.adminEmail } : {}),
-          ...(data.adminPasswordHash !== undefined ? { admin_password_hash: data.adminPasswordHash } : {}),
-          jwt_secret: encryptionKey ? encrypt(jwtSecret, encryptionKey) : jwtSecret,
-          ...(data.orgName !== undefined ? { org_name: data.orgName } : {}),
-          ...(data.botName !== undefined ? { bot_name: data.botName } : {}),
-        })
-        .execute();
+      await db.insertInto("settings").values(buildSettingsInsert(encryptionKey, data)).execute();
 
       return db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
+    },
+
+    async ensure() {
+      await db
+        .insertInto("settings")
+        .values(buildSettingsInsert(encryptionKey))
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+
+      const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
+      return decryptSettingsRow(row, encryptionKey);
+    },
+
+    async ensureSketchApiKey(generateApiKey: () => string) {
+      await db
+        .insertInto("settings")
+        .values(buildSettingsInsert(encryptionKey))
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+
+      const apiKey = generateApiKey();
+      await db
+        .updateTable("settings")
+        .set({ sketch_api_key: encryptionKey ? encrypt(apiKey, encryptionKey) : apiKey })
+        .where("id", "=", "default")
+        .where("sketch_api_key", "is", null)
+        .execute();
+
+      const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
+      const decrypted = decryptSettingsRow(row, encryptionKey);
+      if (!decrypted.sketch_api_key) {
+        throw new Error("Sketch API key could not be ensured");
+      }
+      return decrypted.sketch_api_key;
     },
 
     async update(
