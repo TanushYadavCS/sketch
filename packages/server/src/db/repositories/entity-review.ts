@@ -224,19 +224,21 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       if (!opts.isAdmin) {
         if (!opts.ownerUserId) return [];
         const ownerUserId = opts.ownerUserId;
-        q = q.where("triggered_by_user_id", "=", ownerUserId).where((eb) =>
-          eb.not(
-            eb.exists(
-              eb
-                .selectFrom("entity_review_evidence as e")
-                .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
-                .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
-                .select("e.review_id")
-                .whereRef("e.review_id", "=", "entity_review_queue.id")
-                .where("cc.created_by", "!=", ownerUserId),
+        q = q
+          .where("triggered_by_user_id", "=", ownerUserId)
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom("entity_review_evidence as e")
+                  .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
+                  .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
+                  .select("e.review_id")
+                  .whereRef("e.review_id", "=", "entity_review_queue.id")
+                  .where("cc.created_by", "!=", ownerUserId),
+              ),
             ),
-          ),
-        );
+          );
       }
       q = q.orderBy("last_seen_at", "desc").limit(opts.limit);
       if (opts.offset) q = q.offset(opts.offset);
@@ -255,19 +257,21 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       if (!opts.isAdmin) {
         if (!opts.ownerUserId) return 0;
         const ownerUserId = opts.ownerUserId;
-        q = q.where("triggered_by_user_id", "=", ownerUserId).where((eb) =>
-          eb.not(
-            eb.exists(
-              eb
-                .selectFrom("entity_review_evidence as e")
-                .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
-                .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
-                .select("e.review_id")
-                .whereRef("e.review_id", "=", "entity_review_queue.id")
-                .where("cc.created_by", "!=", ownerUserId),
+        q = q
+          .where("triggered_by_user_id", "=", ownerUserId)
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom("entity_review_evidence as e")
+                  .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
+                  .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
+                  .select("e.review_id")
+                  .whereRef("e.review_id", "=", "entity_review_queue.id")
+                  .where("cc.created_by", "!=", ownerUserId),
+              ),
             ),
-          ),
-        );
+          );
       }
       const row = await q.executeTakeFirst();
       return Number(row?.c ?? 0);
