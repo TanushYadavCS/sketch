@@ -531,17 +531,6 @@ export const api = {
       return request<{ success: boolean }>("/api/channels/email", { method: "DELETE" });
     },
   },
-  email: {
-    configure(data: { host: string; port: number; user: string; pass: string; from: string; secure: boolean }) {
-      return request<{ success: boolean }>("/api/channels/email/config", {
-        method: "PUT",
-        body: JSON.stringify(data),
-      });
-    },
-    disconnect() {
-      return request<{ success: boolean }>("/api/channels/email/config", { method: "DELETE" });
-    },
-  },
   whatsapp: {
     cancelPairing() {
       return request<{ success: boolean }>("/api/channels/whatsapp/pair", { method: "DELETE" });

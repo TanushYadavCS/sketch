@@ -110,6 +110,39 @@ describe("Users API — agent fields", () => {
     expect(body.error.code).toBe("VALIDATION_ERROR");
   });
 
+  it("normalizes formatted WhatsApp numbers on human user create", async () => {
+    const res = await app.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "Phone User",
+        type: "human",
+        email: "phone@test.com",
+        whatsappNumber: "+91 98765 43210",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.user.whatsapp_number).toBe("+919876543210");
+  });
+
+  it("rejects WhatsApp numbers without an international country code", async () => {
+    const res = await app.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "Bad Phone User",
+        type: "human",
+        email: "bad-phone@test.com",
+        whatsappNumber: "98765 43210",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe("VALIDATION_ERROR");
+    expect(body.error.message).toContain("valid phone number");
+  });
+
   it("accepts long instruction sets up to the agent cap", async () => {
     const longInstructions = "x".repeat(4999);
     const ok = await app.request("/api/users", {
@@ -552,7 +585,7 @@ describe("Users API — agent fields", () => {
       const ext = await users.create({
         name: "External user",
         type: "external",
-        whatsappNumber: "+1555111111",
+        whatsappNumber: "+14155552671",
       });
 
       const res = await app.request("/api/users", {
@@ -562,7 +595,7 @@ describe("Users API — agent fields", () => {
           name: "Now Joining",
           type: "human",
           email: "nj@test.com",
-          whatsappNumber: "+1555111111",
+          whatsappNumber: "+14155552671",
         }),
       });
       expect(res.status).toBe(409);

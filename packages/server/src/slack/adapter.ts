@@ -337,7 +337,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       }
       throw err;
     }
-    const userQueue = queue.getQueue(user.id);
+    const activeQueueKey = user.id;
+    const userQueue = queue.getQueue(activeQueueKey);
 
     userQueue.enqueue(async () => {
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing message");
@@ -457,6 +458,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           stepContentRepo,
           automationRunsRepo,
           queueManager: queue,
+          activeQueueKey,
           toolConfig,
           inboxMessagesRepo,
           userRepo: repos.users,
@@ -530,7 +532,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   // Channel mention handler
   slackBot.onChannelMention(async (message) => {
     const threadTs = message.threadTs ?? message.ts;
-    const mentionQueue = queue.getQueue(`${message.channelId}:${threadTs}`);
+    const activeQueueKey = `${message.channelId}:${threadTs}`;
+    const mentionQueue = queue.getQueue(activeQueueKey);
 
     mentionQueue.enqueue(async () => {
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
@@ -725,6 +728,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           stepContentRepo,
           automationRunsRepo,
           queueManager: queue,
+          activeQueueKey,
           toolConfig,
           inboxMessagesRepo,
           userRepo: repos.users,

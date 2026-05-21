@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [0.28.2] -- 2026-05-17
+
+- Fix(scheduling): run prompt-created scheduled automations through the full Sketch runtime by default, including legacy agent steps without an explicit mode, so shared agent environment variables and normal Sketch tools are available to cron runs.
+- Fix(scheduling): queue manual run-now requests from the same active Slack or WhatsApp conversation behind the current chat turn instead of awaiting them inside the same queue, preventing the setup-and-test automation flow from hanging.
+
 ## [0.28.1] -- 2026-05-15
 
 - Fix(usage): make usage cost aggregation work on managed Postgres tenants by casting `real` cost sums to `numeric` before two-argument rounding; adds Postgres regression coverage for both member and org usage APIs.

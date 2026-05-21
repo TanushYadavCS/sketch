@@ -11,6 +11,7 @@ import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import { slackApiCall } from "../slack/api";
 import { createSession } from "./auth";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 async function verifySlackTokens(botToken: string, appToken: string): Promise<{ workspaceName?: string }> {
   const auth = await slackApiCall(botToken, "auth.test");
@@ -200,6 +201,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/slack/verify", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     if (deps.managedUrl) {
       return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
     }
@@ -292,6 +296,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/slack", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     if (deps.managedUrl) {
       return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
     }
