@@ -29,6 +29,7 @@ export interface ScheduledTask {
   edges: string | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputMode: "deliver" | "silent";
 }
 
 export interface TaskContext {

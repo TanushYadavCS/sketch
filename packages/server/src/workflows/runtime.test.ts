@@ -57,6 +57,7 @@ function makeTask(overrides: Record<string, unknown> = {}) {
     edges: null,
     output_target: null,
     output_platform: null,
+    output_mode: "deliver",
     ...overrides,
   };
 }
@@ -194,6 +195,22 @@ describe("executeAutomation agent steps", () => {
       }),
     );
     expect(params.sendMessage).toHaveBeenCalledWith("sketch result");
+  });
+
+  it("does not deliver successful final output for silent workflows", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      toolCalls: [],
+      trace: { finalText: "sketch result" },
+    });
+    const params = makeParams({
+      runAgent,
+      task: makeTask({ output_mode: "silent" }),
+    });
+
+    await executeAutomation(params as never);
+
+    expect(params.sendMessage).not.toHaveBeenCalled();
   });
 
   it("routes sketch-mode agent steps through runAgent with workflow context", async () => {

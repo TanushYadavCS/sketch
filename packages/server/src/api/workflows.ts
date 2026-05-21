@@ -118,6 +118,7 @@ function workflowMetadata(task: ScheduledTaskRow, summary?: { runCount: number; 
     deliveryTarget: task.delivery_target,
     outputTarget: task.output_target,
     outputPlatform: task.output_platform,
+    outputMode: task.output_mode === "silent" ? "silent" : "deliver",
     scheduleType: task.schedule_type,
     scheduleValue: task.schedule_value,
     timezone: task.timezone,
@@ -151,6 +152,13 @@ function assertActiveWorkflow(task: ScheduledTaskRow | undefined): ScheduledTask
 }
 
 function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
+  if (task.output_mode === "silent") {
+    return {
+      delivery: { mode: "silent" },
+      sendMessage: undefined,
+    };
+  }
+
   if (task.platform === "slack") {
     const slack = deps.getSlack?.() ?? null;
     if (!slack) {
