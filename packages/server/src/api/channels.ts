@@ -5,6 +5,7 @@ import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-
 import { createEmailTransport, verifyEmailTransport } from "../email";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type WhatsAppGroupsRepo = ReturnType<typeof createWhatsAppGroupRepository>;
@@ -82,6 +83,9 @@ export function channelRoutes(deps: ChannelDeps) {
   });
 
   routes.delete("/slack", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const slackBot = deps.getSlack?.() ?? null;
     if (!slackBot) {
       return c.json({ error: { code: "NOT_CONFIGURED", message: "Slack is not configured" } }, 400);
@@ -93,6 +97,9 @@ export function channelRoutes(deps: ChannelDeps) {
   // --- Email SMTP endpoints ---
 
   routes.post("/email/test", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const body = await c.req.json();
     const parsed = smtpConfigSchema.safeParse(body);
     if (!parsed.success) {
@@ -110,6 +117,9 @@ export function channelRoutes(deps: ChannelDeps) {
   });
 
   routes.put("/email", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const body = await c.req.json();
     const parsed = smtpConfigSchema.safeParse(body);
     if (!parsed.success) {
@@ -131,6 +141,9 @@ export function channelRoutes(deps: ChannelDeps) {
   });
 
   routes.delete("/email", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     await deps.settings.update({
       smtpHost: null,
       smtpPort: null,
