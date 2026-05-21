@@ -36,6 +36,7 @@ import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
 import { parseOnceSchedule } from "./parse-once";
+import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
 
 export interface TaskSchedulerDeps {
@@ -275,16 +276,7 @@ export class TaskScheduler {
   }
 
   private getQueueKey(task: ScheduledTaskRow): string {
-    if (task.session_mode === "chat") {
-      const userId = task.created_by ?? task.delivery_target;
-      if (task.context_type === "dm") return userId;
-      if (task.platform === "slack" && task.context_type === "channel") {
-        return task.thread_ts ? `${task.delivery_target}:${task.thread_ts}` : task.delivery_target;
-      }
-      return `wa-group-${task.delivery_target.replace("@g.us", "")}`;
-    }
-
-    return `task-${task.id}`;
+    return getScheduledTaskRowQueueKey(task);
   }
 
   async addTask(params: {
@@ -346,6 +338,17 @@ export class TaskScheduler {
     if (row.status === "completed" && row.schedule_type === "once") return null;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
     return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true));
+  }
+
+  async enqueueTaskById(id: string): Promise<void> {
+    const row = await this.repo.getById(id);
+    if (!row) throw new Error(`Task ${id} not found`);
+    if (row.status === "completed" && row.schedule_type === "once") return;
+    if (row.status !== "active") throw new Error(`Task ${id} is not active`);
+
+    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true)).catch((err) => {
+      this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
+    });
   }
 
   async getTaskById(id: string): Promise<ScheduledTask | null> {
