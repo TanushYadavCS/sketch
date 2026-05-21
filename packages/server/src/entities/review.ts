@@ -130,50 +130,18 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     const callerIsAdmin = isAdmin(c);
     const callerId = c.get("sub");
 
-    // Total counts pending rows under the same owner-scope predicate as the
-    // row fetch. For non-admin callers we additionally subtract multi-user
-    // evidence rows (which are admin-only) so badge count matches visible
-    // rows. The visibility check needs the full pending set under the
-    // owner predicate to count how many to exclude; for typical workspaces
-    // (≤200 pending rows per user) this is one extra query.
-    let total: number;
-    if (callerIsAdmin) {
-      total = await repo.countPending({ ownerUserId: callerId, isAdmin: true });
-    } else {
-      const allOwnerRows = await repo.listPending({
-        ownerUserId: callerId,
-        isAdmin: false,
-        limit: MAX_LIMIT,
-      });
-      let visibleCount = 0;
-      for (const r of allOwnerRows) {
-        const otherOwners = await repo.countOtherOwnersInEvidence(r.id, r.triggered_by_user_id);
-        if (otherOwners === 0) visibleCount++;
-      }
-      total = visibleCount;
-    }
+    const total = await repo.countPending({ ownerUserId: callerId, isAdmin: callerIsAdmin });
 
     if (countOnly) {
       return c.json({ rows: [], total });
     }
 
-    const rows = await repo.listPending({
+    const visibleRows = await repo.listPending({
       ownerUserId: callerId,
       isAdmin: callerIsAdmin,
       limit,
       offset,
     });
-
-    // Visibility filter for non-admin (multi-user evidence rows are admin-only).
-    let visibleRows = rows;
-    if (!callerIsAdmin) {
-      const out = [] as typeof rows;
-      for (const r of rows) {
-        const otherOwners = await repo.countOtherOwnersInEvidence(r.id, r.triggered_by_user_id);
-        if (otherOwners === 0) out.push(r);
-      }
-      visibleRows = out;
-    }
 
     // Evidence summary per visible row.
     const summaryByReview = await repo.evidenceSummaryByReview(visibleRows.map((r) => r.id));
