@@ -31,6 +31,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import { parseOnceSchedule } from "../scheduler/parse-once";
 import { getActiveTaskContextQueueKey, getScheduledTaskQueueKey } from "../scheduler/queue-key";
 import type { TaskScheduler } from "../scheduler/service";
+import { normalizeScheduleTriggerSteps, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import type { ScheduledTask, TaskContext } from "../scheduler/types";
 import type { WorkflowStep } from "../workflows/types";
 
@@ -229,6 +230,10 @@ export interface ManageScheduledTasksDeps {
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
   return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
+}
+
+function isLocalScheduleType(value: unknown): value is "cron" | "interval" | "once" {
+  return value === "cron" || value === "interval" || value === "once";
 }
 
 /**
@@ -439,7 +444,14 @@ export async function handleManageScheduledTasks(
       const title = params.title as string;
       const scheduleType = params.schedule_type as NonNullable<typeof params.schedule_type>;
       const scheduleValue = params.schedule_value as string;
-      const stepsForDb = stripContentFromSteps(steps);
+      let stepsForDb = stripContentFromSteps(steps);
+      if (isLocalScheduleType(scheduleType)) {
+        stepsForDb = normalizeScheduleTriggerSteps(stepsForDb, {
+          scheduleType,
+          scheduleValue,
+          timezone: resolvedTimezone,
+        });
+      }
 
       // Guard against silently dropping step content if the repo wasn't plumbed
       // through. Runs after input validation so user-input errors surface first.
@@ -545,7 +557,15 @@ export async function handleManageScheduledTasks(
             status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
           };
         }
-        const stepsForDb = stripContentFromSteps(params.steps);
+        let stepsForDb = stripContentFromSteps(params.steps);
+        if (triggerStep?.triggerConfig?.type !== "canvas") {
+          const scheduleType = updateFields.scheduleType ?? guardedTask?.scheduleType;
+          const scheduleValue = updateFields.scheduleValue ?? guardedTask?.scheduleValue;
+          const timezone = updateFields.timezone ?? guardedTask?.timezone;
+          if (isLocalScheduleType(scheduleType) && scheduleValue && timezone) {
+            stepsForDb = normalizeScheduleTriggerSteps(stepsForDb, { scheduleType, scheduleValue, timezone });
+          }
+        }
         updateFields.steps = JSON.stringify(stepsForDb);
 
         // Sync step content
@@ -576,6 +596,21 @@ export async function handleManageScheduledTasks(
       }
 
       if (params.edges !== undefined) updateFields.edges = JSON.stringify(params.edges);
+
+      const scheduleChanged =
+        params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;
+      if (!params.steps && scheduleChanged && guardedTask?.steps) {
+        const scheduleType = updateFields.scheduleType ?? guardedTask.scheduleType;
+        const scheduleValue = updateFields.scheduleValue ?? guardedTask.scheduleValue;
+        const timezone = updateFields.timezone ?? guardedTask.timezone;
+        if (isLocalScheduleType(scheduleType) && scheduleValue && timezone) {
+          updateFields.steps = normalizeScheduleTriggerStepsJson(guardedTask.steps, {
+            scheduleType,
+            scheduleValue,
+            timezone,
+          });
+        }
+      }
 
       const updated = await deps.scheduler.updateTask(task_id, updateFields);
       if (!updated) {

@@ -582,6 +582,57 @@ describe("handleManageScheduledTasks — update", () => {
     });
   });
 
+  it("syncs stored schedule trigger metadata when only schedule fields are updated", async () => {
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(
+        makeTask({
+          scheduleType: "cron",
+          scheduleValue: "*/5 * * * *",
+          timezone: "UTC",
+          steps: JSON.stringify([
+            {
+              id: "trigger",
+              type: "trigger",
+              label: "Every 5 minutes",
+              icon: "clock",
+              position: { x: 0, y: 0 },
+              triggerConfig: {
+                type: "schedule",
+                scheduleType: "cron",
+                scheduleValue: "*/5 * * * *",
+                timezone: "UTC",
+              },
+            },
+            {
+              id: "agent1",
+              type: "agent",
+              label: "Check inbox",
+              icon: "sketch-ai",
+              position: { x: 0, y: 100 },
+            },
+          ]),
+        }),
+      ),
+    });
+
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "task-1", schedule_value: "*/10 * * * *" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    const updateFields = (scheduler.updateTask as ReturnType<typeof vi.fn>).mock.calls[0][1] as { steps: string };
+    const stepsJson = JSON.parse(updateFields.steps);
+    expect(stepsJson[0].label).toBe("Every 10 minutes");
+    expect(stepsJson[0].triggerConfig).toEqual(
+      expect.objectContaining({
+        type: "schedule",
+        scheduleType: "cron",
+        scheduleValue: "*/10 * * * *",
+        timezone: "UTC",
+      }),
+    );
+  });
+
   it("normalizes schedule fields when updating steps to a Canvas-managed trigger", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
