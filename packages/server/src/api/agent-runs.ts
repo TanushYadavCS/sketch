@@ -218,6 +218,8 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
               message: parsed.data.message,
             });
           }
+          const deliveryTarget =
+            parsed.data.target.platform === "whatsapp" ? target.whatsapp_number : target.slack_user_id;
 
           const userMessage = buildSketchContext({
             messages: [],
@@ -237,6 +239,13 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             workspaceDir,
             platform: parsed.data.target.platform,
             contextType: "dm",
+            taskContext: {
+              platform: parsed.data.target.platform,
+              contextType: "dm",
+              deliveryTarget: deliveryTarget ?? target.id,
+              createdBy: requester.id,
+              creatorTimezone: requester.timezone,
+            },
           } as RunAgentParams);
 
           if (parsed.data.deliveryMode === "target" && result.trace.finalText && deps.sendDm) {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.0/schema.json",
   "files": {
-    "ignore": ["**/data/**", "**/dist/**"]
+    "ignore": ["**/data/**", "**/dist/**", "**/.codex/**"]
   },
   "organizeImports": { "enabled": true },
   "linter": {

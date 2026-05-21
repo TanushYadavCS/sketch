@@ -107,7 +107,7 @@ async function seedIndexedFile(db: Kysely<DB>, id: string, configId: string) {
 
 async function seedPendingRow(
   db: Kysely<DB>,
-  opts: { triggeredBy: string; evidenceFileIds: string[] },
+  opts: { triggeredBy: string; evidenceFileIds: string[]; lastSeenAt?: string },
 ): Promise<string> {
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -123,7 +123,7 @@ async function seedPendingRow(
       candidate_reason: "token-superset",
       candidate_generated_at: now,
       first_seen_at: now,
-      last_seen_at: now,
+      last_seen_at: opts.lastSeenAt ?? now,
       occurrence_count: 1,
       status: "pending",
       triggered_by_user_id: opts.triggeredBy,
@@ -307,6 +307,30 @@ describe("entity-review routes — owner-scope & auth-before-mutation", () => {
     expect(body.rows.map((r) => r.id)).toEqual([okId]);
     // total must match visible rows for the non-admin owner (not the raw pending count).
     expect(body.total).toBe(1);
+  });
+
+  it("non-admin list applies owner visibility before count and pagination", async () => {
+    await seedIndexedFile(db, "file-mine", "config-owner");
+    await seedIndexedFile(db, "file-theirs", "config-other");
+
+    for (let i = 0; i < 201; i++) {
+      await seedPendingRow(db, {
+        triggeredBy: ownerId,
+        evidenceFileIds: ["file-mine", "file-theirs"],
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+      });
+    }
+    const visibleId = await seedPendingRow(db, {
+      triggeredBy: ownerId,
+      evidenceFileIds: ["file-mine"],
+      lastSeenAt: "2025-01-01T00:00:00.000Z",
+    });
+
+    const res = await app.request("/api/entity-review?limit=1", { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: Array<{ id: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.rows.map((r) => r.id)).toEqual([visibleId]);
   });
 
   it("403 carries code=OWNER_SCOPE_DENIED in body", async () => {

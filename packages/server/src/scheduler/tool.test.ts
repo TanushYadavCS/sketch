@@ -34,6 +34,7 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     edges: null,
     outputTarget: null,
     outputPlatform: null,
+    outputMode: "deliver",
     ...overrides,
   };
 }
