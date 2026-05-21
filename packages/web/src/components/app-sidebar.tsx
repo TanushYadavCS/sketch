@@ -2,7 +2,6 @@
  * App sidebar — navigation, branding, and user actions.
  * Follows the designer's sidebar structure with Phosphor icons.
  */
-import { SidebarReviewCount } from "@/components/sidebar-review-count";
 import { api } from "@/lib/api";
 import {
   ArrowSquareOutIcon,
@@ -18,7 +17,6 @@ import {
   MoonIcon,
   SignOutIcon,
   SunIcon,
-  UserCircleCheckIcon,
   UsersThreeIcon,
 } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
@@ -65,12 +63,6 @@ interface NavItem {
 const allPrimaryNav: NavItem[] = [
   { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
-  {
-    label: "Review entities",
-    icon: <UserCircleCheckIcon size={18} />,
-    href: "/review-entities",
-    experimentalOnly: true,
-  },
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
   { label: "Automations", icon: <CalendarDotsIcon size={18} />, href: "/scheduled-tasks" },
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
@@ -161,7 +153,6 @@ export function AppSidebar({
                   >
                     {item.icon}
                     <span className="flex-1">{item.label}</span>
-                    {item.href === "/review-entities" ? <SidebarReviewCount enabled={experimentalEnabled} /> : null}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}

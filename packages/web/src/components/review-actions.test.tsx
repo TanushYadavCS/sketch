@@ -1,10 +1,8 @@
 /**
  * Isolated tests for <ReviewActions>.
  *
- * End-to-end behaviour is also covered by the page tests in
- * routes/review-entities/index.test.tsx (the page mounts this component).
  * These tests pin the extracted component's own surface — the resolve
- * mutations and the new onResolved callback — so refactors inside the
+ * mutations and the onResolved callback — so refactors inside the
  * component can't silently regress without breaking a colocated test.
  */
 import { server } from "@/test/msw";
