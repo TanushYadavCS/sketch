@@ -93,6 +93,11 @@ function sourceFromType(sourceType: string): string | null {
   return null;
 }
 
+function entityEmail(entity: EntityListItem | null): string | null {
+  const value = entity?.metadata?.email;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function entityContext(entity: EntityListItem): string | null {
   const m = entity.metadata;
   if (!m) return null;
@@ -615,7 +620,7 @@ function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onC
   });
 
   const { data: mentionsData, isLoading: isLoadingMentions } = useQuery({
-    queryKey: ["entity-mentions", entityId],
+    queryKey: ["entity-mentions", entityId, { limit: 50 }],
     queryFn: () => api.entities.mentions(entityId as string, { limit: 50 }),
     enabled: !!entityData,
   });
@@ -931,7 +936,7 @@ function ReconcileBody({
   });
 
   const { data: candidateMentionsData } = useQuery({
-    queryKey: ["entity-mentions", activeCandidateId],
+    queryKey: ["entity-mentions", activeCandidateId, { limit: 20 }],
     queryFn: () => api.entities.mentions(activeCandidateId as string, { limit: 20 }),
     enabled: !!activeCandidateId,
   });
@@ -1088,6 +1093,7 @@ function CandidateView({
   onReject: () => void;
 }) {
   const sectionTitle = isPickedPreview ? "Picked — confirm to merge" : "Suggested existing";
+  const email = entityEmail(candidateEntity) ?? (isPickedPreview ? null : row.candidate?.email);
   return (
     <div
       className={`flex min-h-0 flex-col rounded-lg border bg-muted/20 ${
@@ -1111,9 +1117,7 @@ function CandidateView({
                 {humanSourceType(candidateEntity.sourceType)}
               </Badge>
             ) : null}
-            {row.candidate?.email ? (
-              <span className="text-[11px] text-muted-foreground">{row.candidate.email}</span>
-            ) : null}
+            {email ? <span className="text-[11px] text-muted-foreground">{email}</span> : null}
             {row.candidate_reason && !isPickedPreview ? (
               <span className="text-[11px] text-muted-foreground">· {row.candidate_reason}</span>
             ) : null}
