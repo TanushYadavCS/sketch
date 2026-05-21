@@ -9,9 +9,11 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import { type Entity, type EntityLookup, proposeEntity } from "../entities/propose";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
@@ -179,9 +181,15 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 
     // Pre-load entities for linking (avoids per-item queries)
     const allEntities = await db.selectFrom("entities").selectAll().execute();
-    const personEntities = allEntities.filter((e) => e.source_type === "person");
-    const personBySourceRef = new Map<string, (typeof personEntities)[0]>();
-    const personByNameLower = new Map<string, (typeof personEntities)[0]>();
+    const personEntities: Entity[] = allEntities.filter((e) => e.source_type === "person");
+    const personBySourceRef = new Map<string, Entity>();
+    const personByNameLower = new Map<string, Entity>();
+    // Ambiguity-preserving lookup keyed by normalizeName(entity.name). Used by
+    // proposeEntity's fuzzy ranker so multi-candidate matches (e.g. two
+    // "Simran Suri" rows) trigger a queue-with-NULL-candidate instead of
+    // collapsing to a single match. A plain Map silently overwrites and
+    // misfires on this case.
+    const personEntitiesByNormalizedName = new Map<string, Entity[]>();
     // Ambiguity-aware lookup keyed by normalizeName: name → { email, entityId }.
     // Covers canonical name AND aliases (alias-confirmation persists merges
     // there). Conflicting values on the same key drop the key — single
@@ -189,6 +197,10 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
     const personEmailByName = createAmbiguityAwareMap<string, { email: string; entityId: string }>();
     for (const p of personEntities) {
       personByNameLower.set(p.name.toLowerCase(), p);
+      const normKey = normalizeName(p.name);
+      const bucket = personEntitiesByNormalizedName.get(normKey);
+      if (bucket) bucket.push(p);
+      else personEntitiesByNormalizedName.set(normKey, [p]);
       const email = readPersonEmail(p.metadata);
       if (!email) continue;
       const value = { email, entityId: p.id };
@@ -241,6 +253,68 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       if (entityHit) return { email: entityHit.email, entityId: entityHit.entityId, source: "entities" };
       return null;
     };
+
+    const reviewRepo = createEntityReviewRepo(db);
+
+    /**
+     * Lookup contract for proposeEntity. Uses the in-memory preloads so the
+     * hot Fireflies attendee path doesn't issue per-attendee queries.
+     */
+    const entityLookup: EntityLookup = {
+      getByNormalizedName: (normalized) => personEntitiesByNormalizedName.get(normalized) ?? [],
+      listByType: (entityType) => (entityType === "person" ? personEntities : []),
+    };
+
+    const proposeDeps = {
+      entityRepo,
+      reviewRepo,
+      lookup: entityLookup,
+      readEmail: (e: Entity) => readPersonEmail(e.metadata),
+    };
+
+    /**
+     * Keep the in-memory person maps current after a proposeEntity call
+     * materializes a new (or refreshed) entity. Without this, two attendees
+     * with the same name in one sync would both hit the empty-lookup path
+     * and create duplicate entities.
+     */
+    function registerPersonEntity(entity: Entity) {
+      personByNameLower.set(entity.name.toLowerCase(), entity);
+      const normKey = normalizeName(entity.name);
+      const bucket = personEntitiesByNormalizedName.get(normKey);
+      if (bucket) {
+        if (!bucket.some((b) => b.id === entity.id)) bucket.push(entity);
+      } else {
+        personEntitiesByNormalizedName.set(normKey, [entity]);
+      }
+      if (!personEntities.some((p) => p.id === entity.id)) {
+        personEntities.push(entity);
+      }
+    }
+
+    const connectorType = config.connector_type;
+    const triggeredByUserId = config.created_by;
+
+    async function seedAttendeePerson(
+      attendee: { name?: string; email?: string },
+      providerFileId: string,
+      indexedFileId: string,
+    ): Promise<void> {
+      if (!attendee.name) return;
+      const result = await proposeEntity(proposeDeps, {
+        name: attendee.name,
+        email: attendee.email ?? null,
+        entityType: "person",
+        subtype: "external",
+        source: connectorType,
+        sourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
+        evidence: [{ indexedFileId }],
+        triggeredByUserId,
+      });
+      if (result.kind === "created" || result.kind === "linked") {
+        registerPersonEntity(result.entity);
+      }
+    }
 
     for await (const item of connector.sync({
       credentials,
@@ -338,17 +412,12 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           // Idempotent — re-seed person entities so that fixes to attendee
           // resolution (e.g. better name→email matching) flow through to
           // already-synced items on a cursor reset. Mirrors the post-transaction
-          // block in the change branch.
+          // block in the change branch. Routed through proposeEntity so a
+          // re-walk also bumps occurrence_count / seen_at on any pending
+          // review queue row covering this attendee.
           if (item.attendees) {
             for (const a of item.attendees) {
-              if (!a.name) continue;
-              await entityRepo.upsertPersonEntity({
-                name: a.name,
-                email: a.email,
-                subtype: "external",
-                source: config.connector_type,
-                sourceId: `${item.providerFileId}:${a.email ?? a.name}`,
-              });
+              await seedAttendeePerson(a, item.providerFileId, existing.id);
             }
           }
 
@@ -422,17 +491,13 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 
         // Seed person entities from connector-supplied attendees.
         // Skip entries without a name — accessEmails already covers ACL,
-        // and email-as-name rows poison the entity register.
+        // and email-as-name rows poison the entity register. proposeEntity
+        // decides whether the seed becomes a linked entity, a fresh one,
+        // or a row in the review queue (for fuzzy-collisions on name-only
+        // attendees).
         if (item.attendees) {
           for (const a of item.attendees) {
-            if (!a.name) continue;
-            await entityRepo.upsertPersonEntity({
-              name: a.name,
-              email: a.email,
-              subtype: "external",
-              source: config.connector_type,
-              sourceId: `${item.providerFileId}:${a.email ?? a.name}`,
-            });
+            await seedAttendeePerson(a, item.providerFileId, itemResult.id);
           }
         }
 

@@ -387,6 +387,47 @@ export interface EntityCandidatesTable {
   updated_at: string;
 }
 
+export interface EntityReviewQueueTable {
+  id: string;
+  proposed_name: string;
+  normalized_name: string;
+  entity_type: string;
+  proposed_email: string | null;
+  candidate_entity_id: string | null;
+  candidate_score: number | null;
+  candidate_reason: string | null;
+  candidate_generated_at: string | null;
+  first_seen_at: Generated<string>;
+  last_seen_at: Generated<string>;
+  occurrence_count: Generated<number>;
+  status: Generated<string>;
+  triggered_by_user_id: string;
+  review_started_at: string | null;
+  review_started_by: string | null;
+  backfill_cursor: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolved_entity_id: string | null;
+}
+
+export interface EntityReviewEvidenceTable {
+  id: string;
+  review_id: string;
+  indexed_file_id: string;
+  source: string;
+  note: string | null;
+  seen_at: Generated<string>;
+}
+
+export interface EntityAliasRejectionsTable {
+  id: string;
+  entity_id: string;
+  rejected_name: string;
+  normalized_rejected_name: string;
+  rejected_by: string;
+  rejected_at: Generated<string>;
+}
+
 export interface DB {
   users: UsersTable;
   channels: ChannelsTable;
@@ -421,4 +462,7 @@ export interface DB {
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;
   entity_candidates: EntityCandidatesTable;
+  entity_review_queue: EntityReviewQueueTable;
+  entity_review_evidence: EntityReviewEvidenceTable;
+  entity_alias_rejections: EntityAliasRejectionsTable;
 }

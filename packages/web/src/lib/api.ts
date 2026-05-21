@@ -1038,7 +1038,14 @@ export const api = {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
     },
     reset(categories: string[]) {
-      return request<{ message: string; entitiesDeleted: number; candidatesCleared: number }>("/api/entities/reset", {
+      return request<{
+        message: string;
+        entitiesDeleted: number;
+        candidatesCleared: number;
+        reviewQueueCleared: number;
+        reviewEvidenceCleared: number;
+        rejectionsCleared: number;
+      }>("/api/entities/reset", {
         method: "POST",
         body: JSON.stringify({ categories }),
       });

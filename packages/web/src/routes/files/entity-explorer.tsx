@@ -153,7 +153,18 @@ export function EntityExplorer() {
   const resetMutation = useMutation({
     mutationFn: (categories: string[]) => api.entities.reset(categories),
     onSuccess: (result) => {
-      toast.success(`Deleted ${result.entitiesDeleted} entities.`);
+      // Surface review-queue clears alongside entities so the user sees the
+      // full scope of the reset — important after ECR-01 since otherwise a
+      // freshly-reset graph can still show pending review rows from before.
+      const extras: string[] = [];
+      if (result.reviewQueueCleared > 0) {
+        extras.push(`${result.reviewQueueCleared} pending review${result.reviewQueueCleared === 1 ? "" : "s"}`);
+      }
+      if (result.rejectionsCleared > 0) {
+        extras.push(`${result.rejectionsCleared} rejection${result.rejectionsCleared === 1 ? "" : "s"}`);
+      }
+      const tail = extras.length > 0 ? ` (also cleared ${extras.join(" and ")})` : "";
+      toast.success(`Deleted ${result.entitiesDeleted} entities${tail}.`);
       setShowResetDialog(false);
       queryClient.invalidateQueries({ queryKey: ["entities"] });
     },
