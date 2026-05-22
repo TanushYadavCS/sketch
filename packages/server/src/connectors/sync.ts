@@ -15,6 +15,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Entity, type EntityLookup, proposeEntity } from "../entities/propose";
+import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
@@ -114,6 +115,18 @@ function parseAliases(aliases: string | null): string[] {
  * Run a sync for a single connector config.
  */
 export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string, logger: Logger): Promise<SyncResult> {
+  if (isRecreateActive()) {
+    logger.info({ connectorId: connectorConfigId }, "Skipping connector sync during entity recreate");
+    return {
+      itemsProcessed: 0,
+      itemsCreated: 0,
+      itemsUpdated: 0,
+      itemsArchived: 0,
+      newCursor: null,
+      errors: [],
+    };
+  }
+
   const repo = createConnectorRepository(db);
   const entityRepo = createEntityRepository(db);
   const factRepo = createIndexedFileFactRepository(db);
@@ -810,6 +823,11 @@ async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Pr
  * Called on a schedule (e.g., every 30 minutes).
  */
 export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSchedulerDeps): Promise<void> {
+  if (isRecreateActive()) {
+    logger.info("Skipping scheduled sync during entity recreate");
+    return;
+  }
+
   const repo = createConnectorRepository(db);
 
   // Auto-recover any connector stuck in `syncing` past the staleness threshold —

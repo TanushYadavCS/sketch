@@ -17,6 +17,7 @@ import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { entityRoutes } from "./api/entities";
+import { entityRecreateRoutes } from "./api/entity-recreate";
 import { healthRoutes } from "./api/health";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
@@ -281,6 +282,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
 
   app.route("/api/usage", usageRoutes(db));
+  if (config.EXPERIMENTAL_FLAG) {
+    app.route("/api/entities/recreate", entityRecreateRoutes(db, logger));
+  }
   app.route("/api/entities", entityRoutes(db));
   if (config.EXPERIMENTAL_FLAG) {
     app.route("/api/entity-review", entityReviewRoutes(db));
