@@ -98,7 +98,7 @@ function workflowMetadata(task: ScheduledTaskRow, summary?: { runCount: number; 
     scheduleType: task.schedule_type,
     scheduleValue: task.schedule_value,
     timezone: task.timezone,
-    sessionMode: task.session_mode,
+    sessionMode: "fresh",
     nextRunAt: task.next_run_at,
     lastRunAt: task.last_run_at,
     createdBy: task.created_by,
@@ -138,12 +138,7 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
     return {
       delivery,
       sendMessage: async (text: string) => {
-        if (
-          task.context_type === "channel" &&
-          task.session_mode !== "fresh" &&
-          task.thread_ts &&
-          outputTarget === task.delivery_target
-        ) {
+        if (task.context_type === "channel" && task.thread_ts && outputTarget === task.delivery_target) {
           const messageRef = await slack.postThreadReply(outputTarget, task.thread_ts, text);
           delivery.threadId = task.thread_ts;
           delivery.messageRef = messageRef;

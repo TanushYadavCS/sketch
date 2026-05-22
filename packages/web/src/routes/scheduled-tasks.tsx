@@ -904,7 +904,6 @@ function LoadingSkeleton() {
 }
 
 function formatSessionMode(sessionMode: ScheduledTaskListItem["sessionMode"]) {
-  if (sessionMode === "chat") return "Chat";
-  if (sessionMode === "persistent") return "Persistent";
+  void sessionMode;
   return "Fresh";
 }

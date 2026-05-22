@@ -163,14 +163,9 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
       "IANA timezone (e.g. 'America/New_York', 'Asia/Kolkata'). Leave empty in the common case — the user's timezone (shown in <time>) is used automatically. Only set this when the user explicitly names a different timezone for the task.",
     ),
   session_mode: z
-    .enum(["fresh", "persistent", "chat"])
+    .enum(["fresh"])
     .optional()
-    .describe(
-      `Controls memory across runs. Usually omit this (smart defaults apply).
-- 'fresh': no memory, each run starts clean
-- 'persistent': task remembers its own previous runs, isolated from user chat
-- 'chat': continues the user's conversation session`,
-    ),
+    .describe("Scheduled automations currently support only 'fresh': no memory, each run starts clean."),
   task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun."),
   title: z.string().optional().describe("Human-readable name. Required for multi-step automations."),
   description: z.string().optional().describe("Description of what this automation does."),
@@ -261,6 +256,8 @@ export async function handleManageScheduledTasks(
 
   const BROKER_REQUIRED_MSG =
     "Error: Action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.";
+  const FRESH_SESSION_ONLY_MSG =
+    "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
 
   /** Returns an error response if any action step is present but no broker-capable
    *  provider is configured. Returns null when validation passes (no action steps,
@@ -287,6 +284,10 @@ export async function handleManageScheduledTasks(
       return text("Error: task not found.");
     }
     guardedTask = task;
+  }
+
+  if (params.session_mode !== undefined && params.session_mode !== "fresh") {
+    return text(FRESH_SESSION_ONLY_MSG);
   }
 
   switch (action) {
@@ -417,22 +418,7 @@ export async function handleManageScheduledTasks(
         }
       }
 
-      let sessionMode = params.session_mode;
-      if (!sessionMode) {
-        if (ctx.contextType === "dm") {
-          sessionMode = "chat";
-        } else if (ctx.contextType === "channel" && ctx.threadTs) {
-          sessionMode = "chat";
-        } else {
-          sessionMode = "fresh";
-        }
-      }
-
-      if (sessionMode === "chat" && ctx.contextType === "channel" && !ctx.threadTs) {
-        return text(
-          "Error: 'chat' session mode is not available for top-level channel messages (no thread to continue). Use 'fresh' or 'persistent' instead.",
-        );
-      }
+      const sessionMode = "fresh";
 
       // Strip content from steps (stored separately in automation_step_content)
       const steps = params.steps as NonNullable<typeof params.steps>;
@@ -655,7 +641,7 @@ export async function handleManageScheduledTasks(
           getScheduledTaskQueueKey(guardedTask) === activeQueueKey
         ) {
           await deps.scheduler.enqueueTaskById(task_id);
-          return text(`Automation ${task_id} queued to run after this chat turn completes.`);
+          return text(`Automation ${task_id} test run queued and will post back here shortly.`);
         }
 
         const result = await deps.scheduler.executeTaskById(task_id);

@@ -615,7 +615,7 @@ describe("executeTask() delivery routing", () => {
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
   });
 
-  it("Slack channel + chat + threadTs: sendMessage calls postThreadReply", async () => {
+  it("Slack channel + fresh + threadTs: sendMessage calls postThreadReply", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -624,7 +624,7 @@ describe("executeTask() delivery routing", () => {
       platform: "slack",
       context_type: "channel",
       delivery_target: "C_CHANNEL1",
-      session_mode: "chat",
+      session_mode: "fresh",
       thread_ts: "1234567890.000100",
     });
 
@@ -640,7 +640,7 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
-  it("Slack channel + chat + threadTs + output target: sendMessage posts a top-level message", async () => {
+  it("Slack channel + fresh + threadTs + output target: sendMessage posts a top-level message", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -650,7 +650,7 @@ describe("executeTask() delivery routing", () => {
       context_type: "channel",
       delivery_target: "C_CHANNEL1",
       output_target: "C_OUTPUT",
-      session_mode: "chat",
+      session_mode: "fresh",
       thread_ts: "1234567890.000100",
     });
 
@@ -731,7 +731,7 @@ describe("executeTask() queue key derivation", () => {
     expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
-  it("uses task-{id} as queue key for persistent mode (isolated)", async () => {
+  it("uses task-{id} as queue key for legacy persistent mode rows", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -750,7 +750,7 @@ describe("executeTask() queue key derivation", () => {
     expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
-  it("uses conversation queue key for chat mode (sequential with user)", async () => {
+  it("uses task-{id} as queue key for legacy chat mode rows", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -765,7 +765,7 @@ describe("executeTask() queue key derivation", () => {
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    expect(getQueueSpy).toHaveBeenCalledWith("U_CREATOR");
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
   it("uses task-{id} as queue key for WhatsApp group + fresh (isolated)", async () => {
@@ -785,7 +785,7 @@ describe("executeTask() queue key derivation", () => {
     expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
-  it("uses the active WhatsApp group queue key for chat mode", async () => {
+  it("uses task-{id} as queue key for legacy WhatsApp chat mode rows", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");
     const deps = buildDeps(db, { queueManager });
@@ -800,7 +800,7 @@ describe("executeTask() queue key derivation", () => {
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    expect(getQueueSpy).toHaveBeenCalledWith("wa-group-987654321@g.us");
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 });
 
@@ -915,6 +915,48 @@ describe("executeTaskById() queueing", () => {
 
     releaseRun?.();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  });
+
+  it("enqueueTaskById returns immediately when a legacy chat-mode Slack thread task queue is already running", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    let releaseFirst: (() => void) | undefined;
+    let callCount = 0;
+
+    executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+      lastExecuteAutomationParams = params;
+      callCount += 1;
+      const runNumber = callCount;
+      if (runNumber === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return { runId: `run-${runNumber}`, status: "completed", finalOutput: null, stepOutputs: {} };
+    });
+
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({
+      ...baseTaskFields,
+      context_type: "channel",
+      delivery_target: "C0ARCAF5G4F",
+      thread_ts: "1778913948.627689",
+      session_mode: "chat",
+    });
+
+    const activeRun = scheduler.executeTaskById(row.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(1);
+
+    await expect(scheduler.enqueueTaskById(row.id)).resolves.toBeUndefined();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(1);
+
+    releaseFirst?.();
+    await activeRun;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(callCount).toBe(2);
   });
 });
 

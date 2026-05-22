@@ -3,10 +3,8 @@
  *
  * On startup it loads all active tasks from the DB and creates live croner instances for each.
  * On each fire it enqueues an agent run through QueueManager using the same runAgent pipeline
- * used by Slack and WhatsApp message handlers. Session modes:
- *   - fresh: fully ephemeral, no session resume or save
- *   - persistent: dedicated session keyed to "task-{id}", accumulates context across runs
- *   - chat: resumes the actual user/thread session (for DMs and Slack threads)
+ * used by Slack and WhatsApp message handlers. Scheduled tasks always run with
+ * fresh session state so automations cannot re-enter a live chat queue.
  *
  * Workspace keys follow the same conventions used elsewhere:
  *   DM -> userId, Slack channel -> "channel-{id}", WhatsApp group -> "wa-group-{jid}"
@@ -248,12 +246,7 @@ export class TaskScheduler {
       }
 
       const outputTarget = task.output_target ?? task.delivery_target;
-      if (
-        task.context_type === "channel" &&
-        task.session_mode !== "fresh" &&
-        task.thread_ts &&
-        outputTarget === task.delivery_target
-      ) {
+      if (task.context_type === "channel" && task.thread_ts && outputTarget === task.delivery_target) {
         const threadTs = task.thread_ts;
         return async (text) => {
           await slack.postThreadReply(outputTarget, threadTs, text);
@@ -288,7 +281,7 @@ export class TaskScheduler {
     scheduleType: "cron" | "interval" | "once" | "external";
     scheduleValue: string;
     timezone?: string;
-    sessionMode?: "fresh" | "persistent" | "chat";
+    sessionMode?: "fresh";
     createdBy?: string | null;
     title?: string | null;
     description?: string | null;
@@ -307,7 +300,7 @@ export class TaskScheduler {
       schedule_type: params.scheduleType,
       schedule_value: params.scheduleValue,
       timezone: params.timezone ?? "UTC",
-      session_mode: params.sessionMode ?? "fresh",
+      session_mode: "fresh",
       created_by: params.createdBy ?? null,
       status: "active",
       next_run_at: null,
@@ -362,7 +355,7 @@ export class TaskScheduler {
     if (params.scheduleType !== undefined) fields.schedule_type = params.scheduleType;
     if (params.scheduleValue !== undefined) fields.schedule_value = params.scheduleValue;
     if (params.timezone !== undefined) fields.timezone = params.timezone;
-    if (params.sessionMode !== undefined) fields.session_mode = params.sessionMode;
+    if (params.sessionMode !== undefined) fields.session_mode = "fresh";
     if (params.title !== undefined) fields.title = params.title;
     if (params.description !== undefined) fields.description = params.description;
     if (params.steps !== undefined) fields.steps = params.steps;
@@ -429,7 +422,7 @@ export class TaskScheduler {
       scheduleType: row.schedule_type as "cron" | "interval" | "once" | "external",
       scheduleValue: row.schedule_value,
       timezone: row.timezone,
-      sessionMode: row.session_mode as "fresh" | "persistent" | "chat",
+      sessionMode: "fresh",
       nextRunAt: row.next_run_at,
       lastRunAt: row.last_run_at,
       status: row.status as "active" | "paused" | "completed",
