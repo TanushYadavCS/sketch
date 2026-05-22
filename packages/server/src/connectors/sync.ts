@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -115,6 +116,7 @@ function parseAliases(aliases: string | null): string[] {
 export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string, logger: Logger): Promise<SyncResult> {
   const repo = createConnectorRepository(db);
   const entityRepo = createEntityRepository(db);
+  const factRepo = createIndexedFileFactRepository(db);
   const userRepo = createUserRepository(db);
   const config = await repo.findConfigById(connectorConfigId);
 
@@ -329,6 +331,18 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       indexedFileId: string,
     ): Promise<void> {
       if (!attendee.name) return;
+      await factRepo.upsertFact({
+        indexedFileId,
+        source: connectorType,
+        factType: "attendee",
+        relation: "attended",
+        subjectName: attendee.name,
+        subjectEmail: attendee.email ?? null,
+        subjectSource: connectorType,
+        subjectSourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
+        contextSnippet: `Attended ${providerFileId}`,
+        raw: { providerFileId, attendee },
+      });
       const result = await proposeEntity(proposeDeps, {
         name: attendee.name,
         email: attendee.email ?? null,
@@ -352,11 +366,30 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       ownerEmail,
       resolveNameToEmail,
       onEntitySeed: async (seed) => {
+        await factRepo.upsertFact({
+          source: seed.source,
+          factType: "structural_seed",
+          relation: "seeded",
+          subjectName: seed.name,
+          subjectSource: seed.source,
+          subjectSourceId: seed.sourceId,
+          raw: seed,
+        });
         const entity = await entityRepo.upsertEntityFromTool(seed);
         // Keep in-memory maps current so items yielded later can link to this entity
         entityBySourceRef.set(`${seed.source}:${seed.sourceId}`, entity);
       },
       onPersonSeed: async (seed) => {
+        await factRepo.upsertFact({
+          source: seed.source,
+          factType: "person_seed",
+          relation: "seeded",
+          subjectName: seed.name,
+          subjectEmail: seed.email ?? null,
+          subjectSource: seed.source,
+          subjectSourceId: seed.sourceId,
+          raw: seed,
+        });
         const entity = await entityRepo.upsertPersonEntity(seed);
         // Keep in-memory person maps current so assignee linking works within the same sync
         personByNameLower.set(entity.name.toLowerCase(), entity);
@@ -407,10 +440,40 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
             await repo.syncFileAccessEmails(existing.id, item.accessEmails);
           }
 
+          const promotable = connector.promotableFileTypes ?? [];
+          if (item.fileType && promotable.includes(item.fileType)) {
+            await factRepo.upsertFact({
+              indexedFileId: existing.id,
+              source: connectorType,
+              factType: "structural_seed",
+              relation: "seeded",
+              subjectName: item.fileName,
+              subjectSource: connectorType,
+              subjectSourceId: item.providerFileId,
+              contextSnippet: item.sourcePath,
+              raw: {
+                providerFileId: item.providerFileId,
+                providerUrl: item.providerUrl,
+                fileType: item.fileType,
+                sourcePath: item.sourcePath,
+              },
+            });
+          }
+
           // Link parent entities on skipped items (they may have been
           // seeded after the item was first created). Check existence to avoid duplicates.
           if (item.parentEntities && item.parentEntities.length > 0) {
             for (const parent of item.parentEntities) {
+              await factRepo.upsertFact({
+                indexedFileId: existing.id,
+                source: connectorType,
+                factType: "parent_entity",
+                relation: "mentioned",
+                subjectSource: parent.source,
+                subjectSourceId: parent.sourceId,
+                contextSnippet: parent.contextSnippet ?? null,
+                raw: { providerFileId: item.providerFileId, parent },
+              });
               let entity = entityBySourceRef.get(`${parent.source}:${parent.sourceId}`);
               if (!entity) {
                 const found = await entityRepo.getEntityBySourceRef(parent.source, parent.sourceId);
@@ -441,6 +504,26 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           if (item.attendees) {
             for (const a of item.attendees) {
               await seedAttendeePerson(a, item.providerFileId, existing.id);
+            }
+          }
+
+          if (item.assignees && item.assignees.length > 0) {
+            for (const assignee of item.assignees) {
+              const sourceRefKey = connector.assigneeSourceRefKey
+                ? connector.assigneeSourceRefKey(assignee.name)
+                : `${config.connector_type}:user:${assignee.name}`;
+              await factRepo.upsertFact({
+                indexedFileId: existing.id,
+                source: connectorType,
+                factType: "assignee",
+                relation: "assigned",
+                subjectName: assignee.name,
+                subjectEmail: assignee.email ?? null,
+                subjectSource: sourceRefKey.split(":")[0] ?? connectorType,
+                subjectSourceId: sourceRefKey.split(":").slice(1).join(":") || assignee.name,
+                contextSnippet: `Assigned to ${assignee.name}`,
+                raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
+              });
             }
           }
 
@@ -501,6 +584,22 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
         // Promote items to entities based on connector's promotableFileTypes
         const promotable = connector.promotableFileTypes ?? [];
         if (item.fileType && promotable.includes(item.fileType)) {
+          await factRepo.upsertFact({
+            indexedFileId: itemResult.id,
+            source: connectorType,
+            factType: "structural_seed",
+            relation: "seeded",
+            subjectName: item.fileName,
+            subjectSource: connectorType,
+            subjectSourceId: item.providerFileId,
+            contextSnippet: item.sourcePath,
+            raw: {
+              providerFileId: item.providerFileId,
+              providerUrl: item.providerUrl,
+              fileType: item.fileType,
+              sourcePath: item.sourcePath,
+            },
+          });
           await entityRepo.upsertEntityFromTool({
             name: item.fileName,
             sourceType: `${config.connector_type}_${item.fileType}`,
@@ -529,6 +628,18 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
             const sourceRefKey = connector.assigneeSourceRefKey
               ? connector.assigneeSourceRefKey(assignee.name)
               : `${config.connector_type}:user:${assignee.name}`;
+            await factRepo.upsertFact({
+              indexedFileId: itemResult.id,
+              source: connectorType,
+              factType: "assignee",
+              relation: "assigned",
+              subjectName: assignee.name,
+              subjectEmail: assignee.email ?? null,
+              subjectSource: sourceRefKey.split(":")[0] ?? connectorType,
+              subjectSourceId: sourceRefKey.split(":").slice(1).join(":") || assignee.name,
+              contextSnippet: `Assigned to ${assignee.name}`,
+              raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
+            });
             const entity = personBySourceRef.get(sourceRefKey) ?? personByNameLower.get(assignee.name.toLowerCase());
             if (entity) {
               await entityRepo.createMention({
@@ -546,6 +657,16 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
         // Link files to parent structural entities (folders, spaces, drives)
         if (item.parentEntities && item.parentEntities.length > 0) {
           for (const parent of item.parentEntities) {
+            await factRepo.upsertFact({
+              indexedFileId: itemResult.id,
+              source: connectorType,
+              factType: "parent_entity",
+              relation: "mentioned",
+              subjectSource: parent.source,
+              subjectSourceId: parent.sourceId,
+              contextSnippet: parent.contextSnippet ?? null,
+              raw: { providerFileId: item.providerFileId, parent },
+            });
             // Try cached lookup first; fall back to DB (entities may have been
             // seeded during this sync via onEntitySeed, after the cache was built)
             let entity = entityBySourceRef.get(`${parent.source}:${parent.sourceId}`);
