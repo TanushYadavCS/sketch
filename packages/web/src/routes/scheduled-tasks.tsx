@@ -436,6 +436,7 @@ function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; is
       <dl className="grid gap-4 text-sm sm:grid-cols-2">
         <DetailItem label="Target" value={`${task.targetKindLabel} \u00b7 ${targetLabel}`} />
         <DetailItem label="Type" value={canvasManaged ? "Trigger-based" : "Scheduled"} />
+        <DetailItem label="Output" value={task.outputMode === "silent" ? "Silent" : "Send final output"} />
         <DetailItem label={canvasManaged ? "Trigger" : "Schedule"} value={getTriggerDetail(task)} />
         {canvasManaged ? null : <DetailItem label="Timezone" value={task.timezone} />}
         <DetailItem label="Session mode" value={formatSessionMode(task.sessionMode)} />

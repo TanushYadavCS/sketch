@@ -124,6 +124,54 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    /**
+     * Append a name to entity.aliases (JSON string array) if it's not already
+     * present (case-insensitive on the stored alias values). No-op when the
+     * alias is already present. Used by ECR-02's Confirm flow (alias-append
+     * on the resolved target) and the Reject flow's self-alias step. The
+     * aliases column is stored as a JSON string, not jsonb — read, parse,
+     * mutate, stringify, write. Touches `updated_at`.
+     */
+    async appendAlias(entityId: string, aliasName: string) {
+      const trimmed = aliasName.trim();
+      if (!trimmed) return;
+      const row = await db.selectFrom("entities").select(["aliases"]).where("id", "=", entityId).executeTakeFirst();
+      if (!row) return;
+      const aliases: string[] = row.aliases ? JSON.parse(row.aliases) : [];
+      if (aliases.some((a) => a.toLowerCase() === trimmed.toLowerCase())) return;
+      aliases.push(trimmed);
+      await db
+        .updateTable("entities")
+        .set({ aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
+        .where("id", "=", entityId)
+        .execute();
+    },
+
+    /**
+     * Write `email` into entity.metadata.email if metadata.email is currently
+     * absent or empty. No-op if metadata.email is already set — the existing
+     * value is the source of truth, this helper does not overwrite. Used by
+     * ECR-02's Confirm-time held-email materialization. Email lives inside
+     * the `metadata` JSON column (see upsertPersonEntity above); this helper
+     * does a read-modify-write rather than reaching into dialect-specific
+     * `json_set` / `jsonb_set` so the same code path works on SQLite and
+     * Postgres.
+     */
+    async attachEmailIfAbsent(entityId: string, email: string) {
+      const trimmed = email.trim();
+      if (!trimmed) return;
+      const row = await db.selectFrom("entities").select(["metadata"]).where("id", "=", entityId).executeTakeFirst();
+      if (!row) return;
+      const meta: Record<string, unknown> = row.metadata ? JSON.parse(row.metadata) : {};
+      if (typeof meta.email === "string" && meta.email.length > 0) return;
+      meta.email = trimmed;
+      await db
+        .updateTable("entities")
+        .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
+        .where("id", "=", entityId)
+        .execute();
+    },
+
     // ── Source Refs ──
 
     async upsertSourceRef(data: { entityId: string; source: string; sourceId: string; sourceUrl?: string }) {

@@ -1,7 +1,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { up } from "./055-scheduled-tasks-fresh-session-only";
+import { up } from "./059-scheduled-tasks-fresh-session-only";
 
 interface TestDB {
   scheduled_tasks: {
@@ -10,7 +10,7 @@ interface TestDB {
   };
 }
 
-describe("055-scheduled-tasks-fresh-session-only migration", () => {
+describe("059-scheduled-tasks-fresh-session-only migration", () => {
   let db: Kysely<TestDB>;
 
   beforeEach(async () => {

@@ -179,6 +179,10 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
     .describe("Connections between workflow steps (optional in Phase 1)."),
   output_target: z.string().optional().describe("Channel/DM to send final output to."),
   output_platform: z.enum(["slack", "whatsapp"]).optional(),
+  output_mode: z
+    .enum(["deliver", "silent"])
+    .optional()
+    .describe("Use 'silent' to record successful runs without sending final output to Slack or WhatsApp."),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
   step_id: z.string().optional().describe("Step ID for updateStepContent action."),
   step_content: z.string().optional().describe("New prompt or script content for updateStepContent action."),
@@ -201,6 +205,7 @@ type ManageScheduledTasksParams = {
   edges?: { id: string; from: string; to: string }[];
   output_target?: string;
   output_platform?: "slack" | "whatsapp";
+  output_mode?: "deliver" | "silent";
   run_id?: string;
   step_id?: string;
   step_content?: string;
@@ -461,6 +466,7 @@ export async function handleManageScheduledTasks(
         edges: params.edges ? JSON.stringify(params.edges) : null,
         outputTarget: params.output_target,
         outputPlatform: params.output_platform,
+        outputMode: params.output_mode,
       });
 
       // Store step content
@@ -515,6 +521,7 @@ export async function handleManageScheduledTasks(
       if (params.description !== undefined) updateFields.description = params.description;
       if (params.output_target !== undefined) updateFields.outputTarget = params.output_target;
       if (params.output_platform !== undefined) updateFields.outputPlatform = params.output_platform;
+      if (params.output_mode !== undefined) updateFields.outputMode = params.output_mode;
 
       // Handle steps update
       if (params.steps) {

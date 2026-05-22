@@ -32,6 +32,7 @@ export function createAutomationRunsRepository(db: Kysely<DB>) {
           trigger_data: data.triggerData ? JSON.stringify(data.triggerData) : null,
           status: "running",
           step_outputs: "{}",
+          started_at: new Date().toISOString(),
         })
         .execute();
       return id;

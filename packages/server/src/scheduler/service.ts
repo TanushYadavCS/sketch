@@ -163,7 +163,7 @@ export class TaskScheduler {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const sendMessage = this.getSendMessage(task);
 
-    if (!sendMessage) {
+    if (!sendMessage && task.output_mode !== "silent") {
       throw new Error(`Delivery target for task ${task.id} is unavailable`);
     }
 
@@ -182,7 +182,7 @@ export class TaskScheduler {
       buildMcpServers: this.deps.buildMcpServers,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
-      sendMessage,
+      sendMessage: sendMessage ?? undefined,
     });
 
     const now = new Date().toISOString();
@@ -289,6 +289,7 @@ export class TaskScheduler {
     edges?: string | null;
     outputTarget?: string | null;
     outputPlatform?: string | null;
+    outputMode?: "deliver" | "silent";
   }): Promise<ScheduledTask> {
     const row = await this.repo.add({
       id: randomUUID(),
@@ -310,6 +311,7 @@ export class TaskScheduler {
       edges: params.edges ?? null,
       output_target: params.outputTarget ?? null,
       output_platform: params.outputPlatform ?? null,
+      output_mode: params.outputMode ?? "deliver",
     });
 
     try {
@@ -362,6 +364,7 @@ export class TaskScheduler {
     if (params.edges !== undefined) fields.edges = params.edges;
     if (params.outputTarget !== undefined) fields.output_target = params.outputTarget;
     if (params.outputPlatform !== undefined) fields.output_platform = params.outputPlatform;
+    if (params.outputMode !== undefined) fields.output_mode = params.outputMode;
 
     const row = await this.repo.update(id, fields);
     if (!row) return null;
@@ -434,6 +437,7 @@ export class TaskScheduler {
       edges: row.edges,
       outputTarget: row.output_target,
       outputPlatform: row.output_platform,
+      outputMode: row.output_mode === "silent" ? "silent" : "deliver",
     };
   }
 }

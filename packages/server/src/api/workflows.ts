@@ -18,12 +18,35 @@ import type { WhatsAppBot } from "../whatsapp/bot";
 import { executeAutomation } from "../workflows/runtime";
 
 const deliveryModeSchema = z.enum(["silent", "target"]).default("silent");
+const responseModeSchema = z.enum(["sse", "json"]).default("sse");
+const workflowRunSourceSchema = z.enum(["external-api", "canvas"]).default("external-api");
+const nullableCanvasMetadataStringSchema = z.preprocess(
+  (value) => (value === null ? undefined : value),
+  z.string().min(1).optional(),
+);
 
-const workflowRunSchema = z.object({
-  requesterUserId: z.string().min(1),
-  triggerData: z.unknown().optional(),
-  deliveryMode: deliveryModeSchema,
-});
+const workflowRunSchema = z
+  .object({
+    requesterUserId: z.string().min(1).optional(),
+    triggerData: z.unknown().optional(),
+    deliveryMode: deliveryModeSchema,
+    responseMode: responseModeSchema,
+    source: workflowRunSourceSchema,
+    canvasWorkflowId: nullableCanvasMetadataStringSchema,
+    canvasTriggerNodeId: nullableCanvasMetadataStringSchema,
+    canvasActionNodeId: nullableCanvasMetadataStringSchema,
+    canvasRunId: nullableCanvasMetadataStringSchema,
+    triggerComponentKey: nullableCanvasMetadataStringSchema,
+  })
+  .superRefine((value, ctx) => {
+    if (value.source === "external-api" && !value.requesterUserId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requesterUserId"],
+        message: "requesterUserId is required for external-api workflow runs",
+      });
+    }
+  });
 
 interface WorkflowRouteDeps {
   db: Kysely<DB>;
@@ -95,6 +118,7 @@ function workflowMetadata(task: ScheduledTaskRow, summary?: { runCount: number; 
     deliveryTarget: task.delivery_target,
     outputTarget: task.output_target,
     outputPlatform: task.output_platform,
+    outputMode: task.output_mode === "silent" ? "silent" : "deliver",
     scheduleType: task.schedule_type,
     scheduleValue: task.schedule_value,
     timezone: task.timezone,
@@ -128,6 +152,13 @@ function assertActiveWorkflow(task: ScheduledTaskRow | undefined): ScheduledTask
 }
 
 function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
+  if (task.output_mode === "silent") {
+    return {
+      delivery: { mode: "silent" },
+      sendMessage: undefined,
+    };
+  }
+
   if (task.platform === "slack") {
     const slack = deps.getSlack?.() ?? null;
     if (!slack) {
@@ -169,6 +200,102 @@ function finalOutputSummary(value: unknown): string | null {
   return typeof value === "string" ? value.slice(0, 200) : JSON.stringify(value).slice(0, 200);
 }
 
+type WorkflowRunRequest = z.infer<typeof workflowRunSchema>;
+
+interface ExecuteWorkflowRunParams {
+  workflowId: string;
+  task: ScheduledTaskRow;
+  triggerData: unknown;
+  parsed: WorkflowRunRequest;
+  deps: WorkflowRouteDeps;
+  runsRepo: ReturnType<typeof createAutomationRunsRepository>;
+  stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
+  loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
+  onEvent?: Parameters<typeof executeAutomation>[0]["onEvent"];
+}
+
+async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
+  const { workflowId, task, triggerData, parsed, deps, runsRepo, stepContentRepo, loadIntegrationProvider, onEvent } =
+    params;
+  const delivery =
+    parsed.deliveryMode === "target"
+      ? createDelivery(task, deps)
+      : { delivery: { mode: "silent" }, sendMessage: undefined };
+
+  const result = await executeAutomation({
+    task,
+    triggerData,
+    db: deps.db,
+    logger: deps.logger,
+    config: deps.config,
+    runsRepo,
+    stepContentRepo,
+    loadIntegrationProvider,
+    listAgentEnvForRuntime: deps.listAgentEnvForRuntime,
+    userRepo: deps.users,
+    runAgent: deps.runAgent,
+    buildMcpServers: deps.buildMcpServers,
+    inboxMessagesRepo: deps.inboxMessagesRepo,
+    sendDm: deps.sendDm,
+    sendMessage: delivery.sendMessage,
+    onEvent,
+  });
+
+  return {
+    ok: result.status === "completed",
+    workflowId,
+    runId: result.runId,
+    status: result.status,
+    finalOutput: result.finalOutput,
+    finalOutputSummary: finalOutputSummary(result.finalOutput),
+    stepOutputs: result.stepOutputs,
+    delivery: delivery.delivery,
+  };
+}
+
+async function resolveRequesterId(
+  parsed: WorkflowRunRequest,
+  task: ScheduledTaskRow,
+  users: ReturnType<typeof createUserRepository>,
+): Promise<string> {
+  const requesterUserId = parsed.requesterUserId ?? (parsed.source === "canvas" ? task.created_by : undefined);
+  if (!requesterUserId) {
+    throw new WorkflowApiError("REQUESTER_NOT_FOUND", "Workflow requester could not be resolved", 404);
+  }
+
+  const requester = await users.findById(requesterUserId);
+  if (!requester) {
+    throw new WorkflowApiError("REQUESTER_NOT_FOUND", "Requester user not found", 404);
+  }
+
+  return requester.id;
+}
+
+function buildCanvasMetadata(parsed: WorkflowRunRequest) {
+  if (parsed.source !== "canvas") return undefined;
+
+  const canvas = {
+    workflowId: parsed.canvasWorkflowId,
+    triggerNodeId: parsed.canvasTriggerNodeId,
+    actionNodeId: parsed.canvasActionNodeId,
+    runId: parsed.canvasRunId,
+    triggerComponentKey: parsed.triggerComponentKey,
+  };
+  const compact = Object.fromEntries(Object.entries(canvas).filter(([, value]) => value !== undefined));
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
+
+function buildTriggerData(parsed: WorkflowRunRequest, requesterUserId: string) {
+  const canvas = buildCanvasMetadata(parsed);
+  return {
+    source: parsed.source,
+    requesterUserId,
+    requestedAt: new Date().toISOString(),
+    ...(canvas ? { canvas } : {}),
+    data: parsed.triggerData ?? null,
+  };
+}
+
 export function workflowRoutes(deps: WorkflowRouteDeps) {
   const routes = new Hono();
   const tasks = createScheduledTaskRepository(deps.db);
@@ -191,84 +318,67 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
       return c.json(errorBody("VALIDATION_ERROR", message), 400);
     }
 
-    const requester = await deps.users.findById(parsed.data.requesterUserId);
-    if (!requester) {
-      return c.json(errorBody("REQUESTER_NOT_FOUND", "Requester user not found"), 404);
-    }
-
     let task: ScheduledTaskRow;
     try {
       task = assertActiveWorkflow(await tasks.getById(workflowId));
+      const requesterUserId = await resolveRequesterId(parsed.data, task, deps.users);
+      const triggerData = buildTriggerData(parsed.data, requesterUserId);
+
+      if (parsed.data.responseMode === "json") {
+        const response = await executeWorkflowRun({
+          workflowId,
+          task,
+          triggerData,
+          parsed: parsed.data,
+          deps,
+          runsRepo,
+          stepContentRepo,
+          loadIntegrationProvider,
+        });
+        return c.json(response);
+      }
+
+      return streamSSE(c, async (stream) => {
+        const writeEvent = async (event: string, data: unknown) => {
+          if (stream.aborted) return;
+          await stream.writeSSE({ event, data: JSON.stringify(data) });
+        };
+
+        try {
+          const response = await executeWorkflowRun({
+            workflowId,
+            task,
+            triggerData,
+            parsed: parsed.data,
+            deps,
+            runsRepo,
+            stepContentRepo,
+            loadIntegrationProvider,
+            onEvent: async (event) => {
+              if (event.type === "completed") return;
+              const { type, ...data } = event;
+              await writeEvent(type, data);
+            },
+          });
+
+          await writeEvent("completed", response);
+        } catch (err) {
+          if (stream.aborted) return;
+          if (err instanceof WorkflowApiError) {
+            await writeEvent("error", errorBody(err.code, err.message));
+            return;
+          }
+          deps.logger.warn({ err, workflowId }, "Workflow invoke stream failed");
+          const message = err instanceof Error ? err.message : "Workflow run failed";
+          await writeEvent("error", errorBody("RUN_FAILED", message));
+        }
+      });
     } catch (err) {
       if (err instanceof WorkflowApiError) {
         return c.json(errorBody(err.code, err.message), err.status);
       }
       throw err;
     }
-
-    const triggerData = {
-      source: "external-api",
-      requesterUserId: requester.id,
-      requestedAt: new Date().toISOString(),
-      data: parsed.data.triggerData ?? null,
-    };
-
-    return streamSSE(c, async (stream) => {
-      const writeEvent = async (event: string, data: unknown) => {
-        if (stream.aborted) return;
-        await stream.writeSSE({ event, data: JSON.stringify(data) });
-      };
-
-      try {
-        const delivery =
-          parsed.data.deliveryMode === "target"
-            ? createDelivery(task, deps)
-            : { delivery: { mode: "silent" }, sendMessage: undefined };
-
-        const result = await executeAutomation({
-          task,
-          triggerData,
-          db: deps.db,
-          logger: deps.logger,
-          config: deps.config,
-          runsRepo,
-          stepContentRepo,
-          loadIntegrationProvider,
-          listAgentEnvForRuntime: deps.listAgentEnvForRuntime,
-          userRepo: deps.users,
-          runAgent: deps.runAgent,
-          buildMcpServers: deps.buildMcpServers,
-          inboxMessagesRepo: deps.inboxMessagesRepo,
-          sendDm: deps.sendDm,
-          sendMessage: delivery.sendMessage,
-          onEvent: async (event) => {
-            if (event.type === "completed") return;
-            const { type, ...data } = event;
-            await writeEvent(type, data);
-          },
-        });
-
-        await writeEvent("completed", {
-          ok: result.status === "completed",
-          workflowId,
-          runId: result.runId,
-          status: result.status,
-          finalOutput: result.finalOutput,
-          finalOutputSummary: finalOutputSummary(result.finalOutput),
-          stepOutputs: result.stepOutputs,
-          delivery: delivery.delivery,
-        });
-      } catch (err) {
-        if (stream.aborted) return;
-        if (err instanceof WorkflowApiError) {
-          await writeEvent("error", errorBody(err.code, err.message));
-          return;
-        }
-        deps.logger.warn({ err, workflowId }, "Workflow invoke stream failed");
-        const message = err instanceof Error ? err.message : "Workflow run failed";
-        await writeEvent("error", errorBody("RUN_FAILED", message));
-      }
-    });
   });
 
   routes.get("/:workflowId/runs/:runId", async (c) => {

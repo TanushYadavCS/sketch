@@ -59,6 +59,7 @@ function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTas
     triggerConfig: null,
     outputTarget: null,
     outputPlatform: null,
+    outputMode: "deliver",
     lastRunStatus: null,
     runCount: 0,
     ...overrides,

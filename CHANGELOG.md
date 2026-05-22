@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.29.0] -- 2026-05-21
+
+- Workflows: add authenticated Canvas-triggered Sketch workflow invocation support, including requester attribution, Canvas workflow metadata, silent output mode, normalized run timestamps, and Canvas-managed trigger display in scheduled tasks.
+- Managed auth: add the system API key ensure endpoint so the management plane can provision tenant-level Sketch credentials for Canvas without user-scoped setup.
+- Entity review: add the Entity Creation Review queue for Fireflies attendee ambiguity, with backend confirm/reject flows, alias/rejection handling, evidence replay, and inline review from Files -> Entities.
+- Scheduling: keep scheduled trigger labels and trigger configs fresh when an automation's interval, cron expression, or timezone changes.
+- Reliability: pass task context into agent run targets, clarify delivery target handling, and allow brokered Canvas CLI commands needed by generated workflow automations.
+
 ## [0.28.2] -- 2026-05-17
 
 - Fix(scheduling): run prompt-created scheduled automations through the full Sketch runtime by default, including legacy agent steps without an explicit mode, so shared agent environment variables and normal Sketch tools are available to cron runs.
