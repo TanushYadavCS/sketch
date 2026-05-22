@@ -129,6 +129,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "file_type",
       "content_category",
       "content",
+      "content_hash",
       "source",
       "source_path",
       "mime_type",
@@ -194,6 +195,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   contentCategory: file.content_category,
                   source: file.source_path?.split("/")[0] ?? "unknown",
                   sourcePath: file.source_path,
+                  contentHash: file.content_hash,
+                  connectorConfigId: file.connector_config_id,
                   sourceCreatedAt: file.source_created_at,
                   sourceUpdatedAt: file.source_updated_at,
                 },
@@ -313,6 +316,8 @@ async function enrichTextDocument(
     file_name: string;
     content: string;
     content_category: string;
+    content_hash: string | null;
+    connector_config_id: string;
     source_path: string | null;
     source_created_at: string | null;
     source_updated_at: string | null;
@@ -377,6 +382,8 @@ async function enrichTextDocument(
           contentCategory: file.content_category,
           source: file.source_path?.split("/")[0] ?? "unknown",
           sourcePath: file.source_path,
+          contentHash: file.content_hash,
+          connectorConfigId: file.connector_config_id,
           sourceCreatedAt: file.source_created_at,
           sourceUpdatedAt: file.source_updated_at,
         },
@@ -502,6 +509,45 @@ export function matchesAsWord(content: string, name: string): boolean {
   return new RegExp(`\\b${escapeRegex(name)}\\b`).test(content);
 }
 
+export async function linkEntitiesByDeterministicMatch(db: Kysely<DB>, logger: Logger): Promise<EnrichmentResult> {
+  const result: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
+  const files = await db
+    .selectFrom("indexed_files")
+    .select(["id", "content"])
+    .where("is_archived", "=", 0)
+    .where("content", "is not", null)
+    .execute();
+
+  for (const file of files) {
+    try {
+      const chunks = await db
+        .selectFrom("document_chunks")
+        .select(["chunk_index", "content", "token_count"])
+        .where("indexed_file_id", "=", file.id)
+        .orderBy("chunk_index", "asc")
+        .execute();
+      await linkEntitiesDeterministic(
+        db,
+        file.id,
+        file.content ?? "",
+        chunks.map((chunk) => ({
+          index: chunk.chunk_index,
+          content: chunk.content,
+          tokenCount: chunk.token_count ?? 0,
+        })),
+      );
+      result.filesProcessed++;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ err, fileId: file.id }, "Deterministic entity linking failed");
+      result.errors.push({ fileId: file.id, error: message });
+      result.filesFailed++;
+    }
+  }
+
+  return result;
+}
+
 async function linkEntitiesDeterministic(
   db: Kysely<DB>,
   fileId: string,
@@ -510,11 +556,12 @@ async function linkEntitiesDeterministic(
 ): Promise<void> {
   const entityRepo = createEntityRepository(db);
 
-  // Clear existing mentions for this file (re-linking on re-enrichment).
-  // Note: `deleteMentionsForFile` preserves EXTRACTED rows by construction —
-  // see the repo method's docstring. Re-running enrichment never destroys
-  // fact-derived mentions.
-  await entityRepo.deleteMentionsForFile(fileId);
+  await db
+    .deleteFrom("entity_mentions")
+    .where("indexed_file_id", "=", fileId)
+    .where("source", "=", "deterministic_substring")
+    .where("confidence", "!=", "EXTRACTED")
+    .execute();
 
   // Get all confirmed entities
   const allEntities = await entityRepo.getEntitiesByStatus("confirmed");
@@ -548,7 +595,7 @@ async function linkEntitiesDeterministic(
         chunkIndex: chunkIndex >= 0 ? chunkIndex : null,
         contextSnippet: chunkIndex >= 0 ? chunks[chunkIndex].content.slice(0, 300) : null,
         confidence: "INFERRED",
-        source: "llm_extraction",
+        source: "deterministic_substring",
         relation: "mentioned",
       });
       await entityRepo.updateHotness(entity.id);

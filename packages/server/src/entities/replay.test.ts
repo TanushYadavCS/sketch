@@ -210,6 +210,52 @@ describe("replaySourceFacts", () => {
     expect(mentions[0].context_snippet).toBe("Attended meeting-1");
   });
 
+  it("materializes LLM extraction facts as INFERRED mentions", async () => {
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: ATTENDED_FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Jane Doe",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash-1:llm-extraction-v1:Jane Doe",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Jane Doe",
+        type: "person",
+        variations: ["Jane"],
+      },
+    });
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("fact_type", "=", "llm_extracted")
+      .executeTakeFirstOrThrow();
+    const deps = await buildMaterializeDeps(db);
+
+    const result = await materializeFromFact(deps, fact);
+
+    expect(result.kind).toBe("entity_created");
+    const mention = await db
+      .selectFrom("entity_mentions")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .select(["entity_mentions.confidence", "entity_mentions.source", "entity_mentions.relation", "entities.name"])
+      .where("entity_mentions.indexed_file_id", "=", ATTENDED_FILE_ID)
+      .where("entities.name", "=", "Jane Doe")
+      .executeTakeFirstOrThrow();
+    expect(mention).toMatchObject({
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+      name: "Jane Doe",
+    });
+  });
+
   it("returns skipped_missing_owner when a proposal fact has no recoverable owner", async () => {
     await db.deleteFrom("indexed_file_facts").execute();
     await db.deleteFrom("entities").execute();
@@ -394,7 +440,7 @@ describe("recreateEntityGraph", () => {
     await db.destroy();
   });
 
-  it("runs the full reset → replay → enrichment chain idempotently", async () => {
+  it("runs the full reset → fact materialization → deterministic linking chain idempotently", async () => {
     const first = await recreateEntityGraph({
       db,
       logger: createTestLogger(),
@@ -548,12 +594,6 @@ describe("recreateEntityGraph", () => {
   });
 
   it("does not run provider download enrichment during recreate", async () => {
-    // We can't directly assert on the runEnrichment call, but we can assert
-    // that the recreate path never imports a download helper — runEnrichment's
-    // image branch hits the `if (!downloadImage)` short-circuit, marking image
-    // files skipped. To exercise this, insert an image file and verify the
-    // enrichment loop marks it `skipped` rather than failing on a missing
-    // download helper.
     const now = new Date().toISOString();
     await db
       .insertInto("indexed_files")
@@ -569,6 +609,7 @@ describe("recreateEntityGraph", () => {
         is_archived: 0,
         synced_at: now,
         mime_type: "image/png",
+        embedding_status: "pending",
       })
       .execute();
 
@@ -580,23 +621,15 @@ describe("recreateEntityGraph", () => {
       skipLlm: true,
     });
 
-    // The image row must reach a terminal status without runEnrichment crashing
-    // for a missing downloadImage helper. enrichImage short-circuits on the
-    // missing helper and the outer loop marks the file done — that's fine.
-    // The assertion that matters: no `failed` status (which is what would
-    // surface if recreate had tried to call the provider).
     const image = await db
       .selectFrom("indexed_files")
       .selectAll()
       .where("id", "=", "image-1")
       .executeTakeFirstOrThrow();
-    expect(["done", "skipped"]).toContain(image.embedding_status);
+    expect(image.embedding_status).toBe("pending");
   });
 
-  it("skipLlm runs deterministic enrichment only", async () => {
-    // With skipLlm=true and no gemini key in settings, enrichment must
-    // still complete and leave the file with embedding_status='done' or
-    // 'skipped' (no `failed`, since no LLM call is attempted).
+  it("skipLlm remains accepted and does not mutate file enrichment statuses", async () => {
     const summary = await recreateEntityGraph({
       db,
       logger: createTestLogger(),
@@ -612,7 +645,7 @@ describe("recreateEntityGraph", () => {
       .where("is_archived", "=", 0)
       .execute();
     for (const f of files) {
-      expect(["done", "skipped"]).toContain(f.embedding_status);
+      expect(f.embedding_status).toBe("pending");
     }
   });
 });

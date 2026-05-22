@@ -1,7 +1,11 @@
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
-import { type EntityMentionRelation, createEntityRepository } from "../db/repositories/entities";
+import {
+  type EntityMentionConfidence,
+  type EntityMentionRelation,
+  createEntityRepository,
+} from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
@@ -55,12 +59,14 @@ const FACT_REPLAY_ORDER = [
   "assignee",
   "author",
   "parent_entity",
+  "llm_extracted",
 ] as const;
 
 const PERSON_FACT_RELATION = {
   attendee: "attended",
   assignee: "assigned",
   author: "authored",
+  llm_extracted: "mentioned",
 } as const;
 
 function readJsonObject(raw: string | null): Record<string, unknown> {
@@ -199,7 +205,12 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "person_seed") {
     return materializePersonSeed(deps, fact);
   }
-  if (fact.fact_type === "attendee" || fact.fact_type === "assignee" || fact.fact_type === "author") {
+  if (
+    fact.fact_type === "attendee" ||
+    fact.fact_type === "assignee" ||
+    fact.fact_type === "author" ||
+    fact.fact_type === "llm_extracted"
+  ) {
     return materializePersonFact(deps, fact);
   }
   if (fact.fact_type === "parent_entity") {
@@ -397,6 +408,8 @@ async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFac
   }
   const factType = fact.fact_type as keyof typeof PERSON_FACT_RELATION;
   const relation = PERSON_FACT_RELATION[factType];
+  const confidence = fact.fact_type === "llm_extracted" ? "INFERRED" : "EXTRACTED";
+  const mentionSource = fact.fact_type === "llm_extracted" ? "llm_extraction" : `${fact.source}_${fact.fact_type}`;
   const subtype = fact.subject_email ? "external" : "external";
 
   let entity: EntityRow | null = null;
@@ -452,7 +465,8 @@ async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFac
     entityId: entity.id,
     indexedFileId: fact.indexed_file_id,
     contextSnippet: fact.context_snippet ?? null,
-    source: `${fact.source}_${fact.fact_type}`,
+    confidence,
+    source: mentionSource,
     relation,
   });
   return { kind: resultKind, entity, mentionWritten: true };
@@ -478,6 +492,7 @@ async function materializeParentEntity(deps: MaterializeDeps, fact: IndexedFileF
     entityId: entity.id,
     indexedFileId: fact.indexed_file_id,
     contextSnippet: fact.context_snippet ?? null,
+    confidence: "EXTRACTED",
     source: `${fact.source}_parent_entity`,
     relation: "mentioned",
   });
@@ -490,30 +505,33 @@ async function createMentionFromFact(
     entityId: string;
     indexedFileId: string;
     contextSnippet: string | null;
+    confidence: EntityMentionConfidence;
     source: string;
     relation: EntityMentionRelation;
   },
 ): Promise<void> {
   const now = new Date().toISOString();
-  await deps.db
-    .updateTable("entity_mentions")
-    .set({
-      context_snippet: data.contextSnippet,
-      confidence: "EXTRACTED",
-      source: data.source,
-      mentioned_at: now,
-    })
-    .where("entity_id", "=", data.entityId)
-    .where("indexed_file_id", "=", data.indexedFileId)
-    .where("relation", "=", data.relation)
-    .where("confidence", "!=", "EXTRACTED")
-    .execute();
+  if (data.confidence === "EXTRACTED") {
+    await deps.db
+      .updateTable("entity_mentions")
+      .set({
+        context_snippet: data.contextSnippet,
+        confidence: "EXTRACTED",
+        source: data.source,
+        mentioned_at: now,
+      })
+      .where("entity_id", "=", data.entityId)
+      .where("indexed_file_id", "=", data.indexedFileId)
+      .where("relation", "=", data.relation)
+      .where("confidence", "!=", "EXTRACTED")
+      .execute();
+  }
 
   await deps.entityRepo.createMention({
     entityId: data.entityId,
     indexedFileId: data.indexedFileId,
     contextSnippet: data.contextSnippet,
-    confidence: "EXTRACTED",
+    confidence: data.confidence,
     source: data.source,
     relation: data.relation,
   });

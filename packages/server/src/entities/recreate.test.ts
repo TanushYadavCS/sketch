@@ -147,7 +147,7 @@ describe("resetDerivedEntityData", () => {
     });
   }
 
-  it("deletes derived graph data, including alias rejections, and keeps raw facts/files", async () => {
+  it("deletes derived graph data, including alias rejections, and keeps raw facts/content outputs", async () => {
     await seedGraph();
 
     const summary = await resetDerivedEntityData(db, createTestLogger());
@@ -155,19 +155,23 @@ describe("resetDerivedEntityData", () => {
     expect(summary.deleted.entities).toBe(1);
     expect(summary.deleted.entity_alias_rejections).toBe(1);
     expect(summary.deleted.entity_review_queue).toBe(1);
-    expect(summary.filesMarkedPending).toBe(1);
+    expect(summary.filesMarkedPending).toBe(0);
+    expect(summary.factsMarkedUnmaterialized).toBe(1);
     expect(summary.warnings.join(" ")).toContain("alias rejections will be deleted");
 
     await expect(db.selectFrom("entities").selectAll().execute()).resolves.toHaveLength(0);
     await expect(db.selectFrom("entity_alias_rejections").selectAll().execute()).resolves.toHaveLength(0);
     await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);
     await expect(db.selectFrom("indexed_file_facts").selectAll().execute()).resolves.toHaveLength(1);
+    await expect(
+      db.selectFrom("document_chunks").selectAll().where("indexed_file_id", "=", "file-1").execute(),
+    ).resolves.toHaveLength(1);
 
     const file = await db.selectFrom("indexed_files").selectAll().where("id", "=", "file-1").executeTakeFirstOrThrow();
-    expect(file.embedding_status).toBe("pending");
-    expect(file.summary_status).toBe("pending");
-    expect(file.enrichment_status).toBe("raw");
-    expect(file.summary).toBeNull();
+    expect(file.embedding_status).toBe("done");
+    expect(file.summary_status).toBe("done");
+    expect(file.enrichment_status).toBe("enriched");
+    expect(file.summary).toBe("generated summary");
     expect(file.context_note).toBe("keep me");
 
     const archived = await db
@@ -188,6 +192,7 @@ describe("resetDerivedEntityData", () => {
 
     expect(summary.dryRun).toBe(true);
     expect(summary.deleted.entities).toBe(1);
+    expect(summary.factsMarkedUnmaterialized).toBe(1);
     await expect(db.selectFrom("entities").selectAll().execute()).resolves.toHaveLength(1);
     const file = await db.selectFrom("indexed_files").selectAll().where("id", "=", "file-1").executeTakeFirstOrThrow();
     expect(file.embedding_status).toBe("done");

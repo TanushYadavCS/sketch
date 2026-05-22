@@ -1,11 +1,10 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { createEmbeddingProvider } from "../connectors/embeddings";
-import { type EnrichmentResult, isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
+import { type EnrichmentResult, isEnrichmentActive, linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { DB } from "../db/schema";
-import { type ReplayFactsSummary, replaySourceFacts } from "./materialize";
+import { type MaterializeFactsSummary, materializeUnmaterializedFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
 
 export type { ReplayFactsSummary } from "./materialize";
@@ -14,6 +13,7 @@ export interface ResetSummary {
   dryRun: boolean;
   deleted: Record<string, number>;
   filesMarkedPending: number;
+  factsMarkedUnmaterialized: number;
   warnings: string[];
 }
 
@@ -30,10 +30,6 @@ const DERIVED_TABLES = [
   "entity_mentions",
   "entity_source_refs",
   "entities",
-  "chunk_embeddings",
-  "file_embeddings",
-  "document_chunks",
-  "document_timeframes",
 ] as const;
 
 function isMissingTableError(err: unknown): boolean {
@@ -65,25 +61,20 @@ async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
   }
 }
 
-async function getPendingFileCount(db: Kysely<DB>): Promise<number> {
+async function countActiveFacts(db: Kysely<DB>): Promise<number> {
   const row = await db
-    .selectFrom("indexed_files")
+    .selectFrom("indexed_file_facts")
     .select(db.fn.countAll<number>().as("count"))
-    .where("is_archived", "=", 0)
+    .where("deleted_at", "is", null)
     .executeTakeFirst();
   return Number(row?.count ?? 0);
 }
 
-async function markFilesPending(db: Kysely<DB>): Promise<number> {
+async function clearMaterializedFlags(db: Kysely<DB>): Promise<number> {
   const result = await db
-    .updateTable("indexed_files")
-    .set({
-      embedding_status: "pending",
-      summary_status: "pending",
-      enrichment_status: "raw",
-      summary: null,
-    })
-    .where("is_archived", "=", 0)
+    .updateTable("indexed_file_facts")
+    .set({ materialized_at: null })
+    .where("deleted_at", "is", null)
     .executeTakeFirst();
   return Number(result.numUpdatedRows ?? 0);
 }
@@ -149,10 +140,10 @@ export async function resetDerivedEntityData(
     deleted[table] = await countTable(db, table);
   }
 
-  const filesMarkedPending = await getPendingFileCount(db);
+  const factsMarkedUnmaterialized = await countActiveFacts(db);
   const filesWithoutSourceFacts = await countFilesWithoutSourceFacts(db);
   const warnings = [
-    `${deleted.entities ?? 0} entities will be deleted and recreated from durable facts/enrichment.`,
+    `${deleted.entities ?? 0} entities will be deleted and recreated from durable facts.`,
     `${deleted.entity_review_queue ?? 0} review-queue rows will be deleted.`,
     `${deleted.entity_alias_rejections ?? 0} alias rejections will be deleted; rejected aliases may be re-proposed after recreate.`,
   ];
@@ -163,7 +154,7 @@ export async function resetDerivedEntityData(
   }
 
   if (opts.dryRun) {
-    return { dryRun: true, deleted, filesMarkedPending, warnings };
+    return { dryRun: true, deleted, filesMarkedPending: 0, factsMarkedUnmaterialized, warnings };
   }
 
   return opts.lockAlreadyHeld
@@ -172,12 +163,12 @@ export async function resetDerivedEntityData(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase 3 — Reset → replay → enrichment loop.
+// Phase 3 — Reset → materialize facts → deterministic substring linking.
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface RecreateSummary {
   reset: ResetSummary;
-  replay: ReplayFactsSummary;
+  replay: MaterializeFactsSummary;
   enrichmentIterations: number;
   enrichment: EnrichmentResult;
 }
@@ -192,9 +183,7 @@ export interface RecreateDeps {
    */
   maxIterations?: number;
   /**
-   * Skip the LLM-driven enrichment path. Implemented by passing
-   * `geminiApiKey: null` to `runEnrichment`, which short-circuits
-   * `smartEnrichFile` and runs the deterministic path only.
+   * Deprecated: recreate no longer calls LLM enrichment.
    */
   skipLlm?: boolean;
   /**
@@ -209,26 +198,8 @@ export interface RecreateDeps {
   lockAlreadyHeld?: boolean;
 }
 
-const DEFAULT_MAX_ITERATIONS = 20;
-
-async function countPendingEnrichmentFiles(db: Kysely<DB>): Promise<number> {
-  const row = await db
-    .selectFrom("indexed_files")
-    .select(db.fn.countAll<number>().as("count"))
-    .where("is_archived", "=", 0)
-    .where((eb) =>
-      eb.or([
-        eb("embedding_status", "in", ["pending", "failed"]),
-        eb.and([eb("embedding_status", "=", "done"), eb("summary_status", "in", ["pending", "failed"])]),
-      ]),
-    )
-    .executeTakeFirst();
-  return Number(row?.count ?? 0);
-}
-
 export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateSummary> {
   const { db, logger } = deps;
-  const maxIterations = deps.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
   const run = async () => {
     const reset = deps.skipReset
@@ -236,13 +207,14 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
           dryRun: false,
           deleted: {},
           filesMarkedPending: 0,
+          factsMarkedUnmaterialized: 0,
           warnings: ["Reset skipped — caller invoked /reset separately."],
         }
       : await resetDerivedEntityDataInner(db, logger);
 
     await seedTeamDirectoryEntities(db, logger);
 
-    const replay = await replaySourceFacts(db, logger);
+    const replay = await materializeUnmaterializedFacts(db, logger);
 
     if (deps.skipEnrichment) {
       return {
@@ -253,41 +225,11 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
       };
     }
 
-    const settings = await db
-      .selectFrom("settings")
-      .select(["gemini_api_key"])
-      .where("id", "=", "default")
-      .executeTakeFirst();
-
-    const effectiveKey = deps.skipLlm ? null : (settings?.gemini_api_key ?? null);
-    const embeddingProvider = effectiveKey
-      ? createEmbeddingProvider({ provider: "gemini", apiKey: effectiveKey })
-      : null;
-
-    let aggregated: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
-    let iterations = 0;
-
-    while (iterations < maxIterations) {
-      const pending = await countPendingEnrichmentFiles(db);
-      if (pending === 0) break;
-      iterations++;
-      // No `downloadImage` — recreate must not pull bytes from connector APIs.
-      const result = await runEnrichment({
-        db,
-        logger: logger.child({ component: "recreate-enrichment", iteration: iterations }),
-        embeddingProvider,
-        geminiApiKey: effectiveKey,
-      });
-      aggregated = {
-        filesProcessed: aggregated.filesProcessed + result.filesProcessed,
-        filesSkipped: aggregated.filesSkipped + result.filesSkipped,
-        filesFailed: aggregated.filesFailed + result.filesFailed,
-        errors: [...aggregated.errors, ...result.errors],
-      };
-      if (result.filesProcessed === 0 && result.filesSkipped === 0 && result.filesFailed === 0) break;
-    }
-
-    return { reset, replay, enrichmentIterations: iterations, enrichment: aggregated };
+    const deterministic = await linkEntitiesByDeterministicMatch(
+      db,
+      logger.child({ component: "recreate-deterministic-linking" }),
+    );
+    return { reset, replay, enrichmentIterations: 1, enrichment: deterministic };
   };
 
   return deps.lockAlreadyHeld ? run() : withRecreateLock(run);
@@ -300,10 +242,10 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
 async function resetDerivedEntityDataInner(db: Kysely<DB>, logger: Logger): Promise<ResetSummary> {
   const deleted: Record<string, number> = {};
   for (const table of DERIVED_TABLES) deleted[table] = await countTable(db, table);
-  const filesMarkedPending = await getPendingFileCount(db);
+  const factsMarkedUnmaterialized = await countActiveFacts(db);
   const filesWithoutSourceFacts = await countFilesWithoutSourceFacts(db);
   const warnings = [
-    `${deleted.entities ?? 0} entities will be deleted and recreated from durable facts/enrichment.`,
+    `${deleted.entities ?? 0} entities will be deleted and recreated from durable facts.`,
     `${deleted.entity_review_queue ?? 0} review-queue rows will be deleted.`,
     `${deleted.entity_alias_rejections ?? 0} alias rejections will be deleted; rejected aliases may be re-proposed after recreate.`,
   ];
@@ -314,10 +256,20 @@ async function resetDerivedEntityDataInner(db: Kysely<DB>, logger: Logger): Prom
   }
 
   const appliedDeleted: Record<string, number> = {};
+  let appliedFactsMarkedUnmaterialized = 0;
   await db.transaction().execute(async (trx) => {
     for (const table of DERIVED_TABLES) appliedDeleted[table] = await deleteTable(trx, table);
-    await markFilesPending(trx);
+    appliedFactsMarkedUnmaterialized = await clearMaterializedFlags(trx);
   });
-  logger.warn({ deleted: appliedDeleted, filesMarkedPending }, "Derived entity data reset");
-  return { dryRun: false, deleted: appliedDeleted, filesMarkedPending, warnings };
+  logger.warn(
+    { deleted: appliedDeleted, factsMarkedUnmaterialized: appliedFactsMarkedUnmaterialized },
+    "Derived entity data reset",
+  );
+  return {
+    dryRun: false,
+    deleted: appliedDeleted,
+    filesMarkedPending: 0,
+    factsMarkedUnmaterialized: appliedFactsMarkedUnmaterialized,
+    warnings,
+  };
 }

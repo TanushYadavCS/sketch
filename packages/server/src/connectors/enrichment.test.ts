@@ -311,6 +311,33 @@ describe("runEnrichment — claim semantics", () => {
     expect(result.filesProcessed).toBe(1);
     expect(await getStatus(fileId)).toBe("done");
   });
+
+  it("deterministic relinking preserves LLM extraction mentions", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "Jane Doe discussed the launch plan.");
+    await setStatus(fileId, "pending");
+    const entity = await createEntityRepository(db).upsertEntity({
+      name: "Jane Doe",
+      sourceType: "person",
+      status: "confirmed",
+    });
+    await createEntityRepository(db).createMention({
+      entityId: entity.id,
+      indexedFileId: fileId,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+
+    await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    expect(mentions).toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+  });
 });
 
 describe("matchesAsWord — word-boundary entity name matching", () => {

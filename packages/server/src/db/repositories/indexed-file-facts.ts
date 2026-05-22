@@ -9,7 +9,8 @@ export type IndexedFileFactType =
   | "author"
   | "parent_entity"
   | "structural_seed"
-  | "person_seed";
+  | "person_seed"
+  | "llm_extracted";
 
 export type IndexedFileFactRelation = "attended" | "assigned" | "authored" | "mentioned" | "seeded";
 
@@ -45,6 +46,7 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
     input.factType,
     input.relation,
     input.indexedFileId ?? "",
+    input.factType === "llm_extracted" ? (input.contentHash ?? "") : "",
     input.subjectSource ?? "",
     input.subjectSourceId ?? "",
     normalizeEmail(input.subjectEmail),
@@ -110,6 +112,10 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   } else if (input.factType === "person_seed") {
     if (!hasString(raw, "source") && !hasString(raw, "subtype")) {
       throw new Error("person_seed facts require raw source identity or subtype metadata");
+    }
+  } else if (input.factType === "llm_extracted") {
+    if (!hasString(raw, "contentHash") || !hasString(raw, "promptVersion")) {
+      throw new Error("llm_extracted facts require raw.contentHash and raw.promptVersion");
     }
   }
 

@@ -14,7 +14,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
-import { handleCandidates } from "./smart-enrichment";
+import { handleCandidates, smartEnrichFile } from "./smart-enrichment";
 
 async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
   await db
@@ -173,5 +173,75 @@ describe("handleCandidates — stale seen_file_ids", () => {
     expect(storedIds).not.toContain(ghostFileId);
     expect(storedIds).toContain(liveFileId);
     expect(storedIds).toContain(secondLiveFileId);
+  });
+});
+
+describe("smartEnrichFile — LLM extraction facts", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("persists extracted mentions as LLM facts and materializes inferred mentions", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "Jane Doe discussed the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return [{ mention: "Jane Doe", type: "person", variations: ["Jane"] }] as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      {
+        db,
+        logger: createTestLogger(),
+        generator,
+        embeddingProvider: null,
+      },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "Jane Doe discussed the launch plan.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-v1",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "source", "content_hash", "materialized_at"])
+      .where("indexed_file_id", "=", fileId)
+      .executeTakeFirstOrThrow();
+    expect(fact).toMatchObject({
+      fact_type: "llm_extracted",
+      source: "llm_extraction",
+      content_hash: "hash-v1",
+    });
+    expect(fact.materialized_at).not.toBeNull();
+
+    const mention = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation"])
+      .where("indexed_file_id", "=", fileId)
+      .executeTakeFirstOrThrow();
+    expect(mention).toEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
   });
 });
