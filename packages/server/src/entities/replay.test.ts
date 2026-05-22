@@ -4,7 +4,8 @@ import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { recreateEntityGraph, replaySourceFacts } from "./recreate";
+import { buildMaterializeDeps, materializeFromFact, replaySourceFacts } from "./materialize";
+import { recreateEntityGraph } from "./recreate";
 
 const ATTENDED_FILE_ID = "file-1";
 const TEST_USER_ID = "user-1";
@@ -140,8 +141,92 @@ describe("replaySourceFacts", () => {
     await db.destroy();
   });
 
+  it("materializes a single person fact through materializeFromFact", async () => {
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("fact_type", "=", "attendee")
+      .executeTakeFirstOrThrow();
+    const deps = await buildMaterializeDeps(db);
+
+    const result = await materializeFromFact(deps, fact);
+
+    expect(result.kind).toBe("entity_created");
+    if (result.kind === "entity_created") {
+      expect(result.mentionWritten).toBe(true);
+      expect(result.entity.name).toBe("Saurabh CanvasX");
+    }
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("indexed_file_id", "=", ATTENDED_FILE_ID)
+      .where("relation", "=", "attended")
+      .execute();
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0].confidence).toBe("EXTRACTED");
+  });
+
+  it("upgrades existing INFERRED mentions when a durable fact replays", async () => {
+    const entity = await createEntityRepository(db).upsertPersonEntity({
+      name: "Saurabh CanvasX",
+      email: "saurabh@canvasx.ai",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "meeting-1:saurabh@canvasx.ai",
+    });
+    await createEntityRepository(db).createMention({
+      entityId: entity.id,
+      indexedFileId: ATTENDED_FILE_ID,
+      contextSnippet: "LLM guessed attendee",
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "attended",
+    });
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("fact_type", "=", "attendee")
+      .executeTakeFirstOrThrow();
+    const deps = await buildMaterializeDeps(db);
+
+    const result = await materializeFromFact(deps, fact);
+
+    expect(result.kind).toBe("entity_linked");
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("entity_id", "=", entity.id)
+      .where("indexed_file_id", "=", ATTENDED_FILE_ID)
+      .where("relation", "=", "attended")
+      .execute();
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0].confidence).toBe("EXTRACTED");
+    expect(mentions[0].source).toBe("fireflies_attendee");
+    expect(mentions[0].context_snippet).toBe("Attended meeting-1");
+  });
+
+  it("returns skipped_missing_owner when a proposal fact has no recoverable owner", async () => {
+    await db.deleteFrom("indexed_file_facts").execute();
+    await db.deleteFrom("entities").execute();
+    await createIndexedFileFactRepository(db).upsertFact({
+      source: "manual",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Ownerless Person",
+      subjectSource: "manual",
+      subjectSourceId: "person-ownerless",
+    });
+    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    const deps = await buildMaterializeDeps(db);
+
+    const result = await materializeFromFact(deps, fact);
+
+    expect(result).toEqual({ kind: "skipped_missing_owner", reason: "missing_fact_owner" });
+    await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);
+  });
+
   it("creates entities, source refs, and EXTRACTED mentions from facts", async () => {
-    const summary = await replaySourceFacts(db, createTestLogger(), { triggeredByUserId: TEST_USER_ID });
+    const summary = await replaySourceFacts(db, createTestLogger());
 
     expect(summary.factsRead).toBe(5);
     expect(summary.entitiesCreated).toBeGreaterThanOrEqual(1);
@@ -171,7 +256,7 @@ describe("replaySourceFacts", () => {
   });
 
   it("is idempotent — running twice writes zero new rows on the second pass", async () => {
-    await replaySourceFacts(db, createTestLogger(), { triggeredByUserId: TEST_USER_ID });
+    await replaySourceFacts(db, createTestLogger());
 
     const snapshot = async () => ({
       entities: (await db.selectFrom("entities").selectAll().execute()).length,
@@ -183,7 +268,7 @@ describe("replaySourceFacts", () => {
     });
 
     const before = await snapshot();
-    await replaySourceFacts(db, createTestLogger(), { triggeredByUserId: TEST_USER_ID });
+    await replaySourceFacts(db, createTestLogger());
     const after = await snapshot();
 
     expect(after).toEqual(before);
@@ -201,7 +286,7 @@ describe("replaySourceFacts", () => {
       contextSnippet: "In missing DB",
     });
 
-    const summary = await replaySourceFacts(db, createTestLogger(), { triggeredByUserId: TEST_USER_ID });
+    const summary = await replaySourceFacts(db, createTestLogger());
 
     expect(summary.skipped).toBeGreaterThanOrEqual(1);
     const mentions = await db
@@ -240,7 +325,7 @@ describe("replaySourceFacts", () => {
       },
     });
 
-    const summary = await replaySourceFacts(db, createTestLogger(), { triggeredByUserId: TEST_USER_ID });
+    const summary = await replaySourceFacts(db, createTestLogger());
 
     expect(summary.queued).toBe(1);
     await expect(
