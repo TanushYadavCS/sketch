@@ -60,6 +60,7 @@ import * as m057 from "./migrations/057-entity-review-queue";
 import * as m058 from "./migrations/058-entity-mentions-unique";
 import * as m059 from "./migrations/059-mention-provenance";
 import * as m060 from "./migrations/060-indexed-file-facts";
+import * as m061 from "./migrations/061-fact-materialization-state";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -124,6 +125,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "058-entity-mentions-unique": m058,
           "059-mention-provenance": m059,
           "060-indexed-file-facts": m060,
+          "061-fact-materialization-state": m061,
         };
       },
     },

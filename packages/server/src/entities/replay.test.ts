@@ -4,7 +4,12 @@ import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { buildMaterializeDeps, materializeFromFact, replaySourceFacts } from "./materialize";
+import {
+  buildMaterializeDeps,
+  materializeFromFact,
+  materializeUnmaterializedFacts,
+  replaySourceFacts,
+} from "./materialize";
 import { recreateEntityGraph } from "./recreate";
 
 const ATTENDED_FILE_ID = "file-1";
@@ -332,6 +337,48 @@ describe("replaySourceFacts", () => {
       db.selectFrom("entity_mentions").selectAll().where("relation", "=", "assigned").execute(),
     ).resolves.toHaveLength(0);
     await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(1);
+  });
+
+  it("runs a follow-up materialization pass for concurrent callers", async () => {
+    await db.deleteFrom("indexed_file_facts").execute();
+    const repo = createIndexedFileFactRepository(db);
+    for (let i = 0; i < 1000; i++) {
+      await repo.upsertFact({
+        source: "manual",
+        factType: "person_seed",
+        relation: "seeded",
+        subjectName: `Queued Person ${i}`,
+        subjectEmail: `queued-${i}@example.com`,
+        subjectSource: "manual",
+        subjectSourceId: `queued-${i}`,
+        raw: { subtype: "external" },
+      });
+    }
+
+    const first = materializeUnmaterializedFacts(db, createTestLogger());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await repo.upsertFact({
+      source: "manual",
+      factType: "person_seed",
+      relation: "seeded",
+      subjectName: "Late Person",
+      subjectEmail: "late@example.com",
+      subjectSource: "manual",
+      subjectSourceId: "late",
+      raw: { subtype: "external" },
+    });
+    const second = materializeUnmaterializedFacts(db, createTestLogger());
+
+    await first;
+    const followUp = await second;
+
+    expect(followUp.factsRead).toBeGreaterThanOrEqual(1);
+    const late = await db
+      .selectFrom("indexed_file_facts")
+      .select("materialized_at")
+      .where("subject_source_id", "=", "late")
+      .executeTakeFirstOrThrow();
+    expect(late.materialized_at).not.toBeNull();
   });
 });
 

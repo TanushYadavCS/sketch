@@ -67,4 +67,63 @@ describe("createIndexedFileFactRepository", () => {
     const rows = await db.selectFrom("indexed_file_facts").select(["subject_email"]).execute();
     expect(rows).toEqual([{ subject_email: "saurabh@canvasx.ai" }]);
   });
+
+  it("stores owner state and resets materialization markers when a fact reappears", async () => {
+    const repo = createIndexedFileFactRepository(db);
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-1",
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: "{}",
+        created_by: "user-1",
+      })
+      .execute();
+
+    await repo.upsertFact({
+      connectorConfigId: "connector-1",
+      createdByUserId: "user-1",
+      lastSeenSyncRunId: "run-1",
+      contentHash: "hash-1",
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Saurabh",
+      subjectSource: "fireflies",
+      subjectSourceId: "meeting-1:saurabh",
+      raw: { providerFileId: "meeting-1", attendee: { name: "Saurabh" } },
+    });
+    const first = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    await db
+      .updateTable("indexed_file_facts")
+      .set({ materialized_at: "2026-01-01T00:00:00.000Z", deleted_at: "2026-01-02T00:00:00.000Z" })
+      .where("id", "=", first.id)
+      .execute();
+
+    await repo.upsertFact({
+      connectorConfigId: "connector-1",
+      createdByUserId: "user-1",
+      lastSeenSyncRunId: "run-2",
+      contentHash: "hash-2",
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Saurabh",
+      subjectSource: "fireflies",
+      subjectSourceId: "meeting-1:saurabh",
+      raw: { providerFileId: "meeting-1", attendee: { name: "Saurabh" } },
+    });
+
+    const rows = await db.selectFrom("indexed_file_facts").selectAll().execute();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      connector_config_id: "connector-1",
+      created_by_user_id: "user-1",
+      last_seen_sync_run_id: "run-2",
+      content_hash: "hash-2",
+      materialized_at: null,
+      deleted_at: null,
+    });
+  });
 });

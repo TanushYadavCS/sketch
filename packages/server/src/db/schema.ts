@@ -434,6 +434,8 @@ export interface EntityAliasRejectionsTable {
 export interface IndexedFileFactsTable {
   id: string;
   indexed_file_id: string | null;
+  connector_config_id: string | null;
+  created_by_user_id: string | null;
   source: string;
   fact_type: string;
   relation: string;
@@ -444,6 +446,10 @@ export interface IndexedFileFactsTable {
   context_snippet: string | null;
   raw: string | null;
   fact_key: string;
+  last_seen_sync_run_id: string | null;
+  deleted_at: string | null;
+  content_hash: string | null;
+  materialized_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

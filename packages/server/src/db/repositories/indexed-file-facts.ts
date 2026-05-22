@@ -15,6 +15,10 @@ export type IndexedFileFactRelation = "attended" | "assigned" | "authored" | "me
 
 export interface UpsertIndexedFileFactInput {
   indexedFileId?: string | null;
+  connectorConfigId?: string | null;
+  createdByUserId?: string | null;
+  lastSeenSyncRunId?: string | null;
+  contentHash?: string | null;
   source: string;
   factType: IndexedFileFactType;
   relation: IndexedFileFactRelation;
@@ -35,6 +39,21 @@ function normalizeEmail(email: string | null | undefined): string {
 }
 
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
+  const parts = [
+    input.connectorConfigId ?? "",
+    input.source,
+    input.factType,
+    input.relation,
+    input.indexedFileId ?? "",
+    input.subjectSource ?? "",
+    input.subjectSourceId ?? "",
+    normalizeEmail(input.subjectEmail),
+    normalizeName(input.subjectName),
+  ];
+  return createHash("sha256").update(parts.join("|")).digest("hex");
+}
+
+function buildLegacyIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
   const parts = [
     input.source,
     input.factType,
@@ -93,32 +112,81 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       const now = new Date().toISOString();
       const subjectEmail = normalizeEmail(input.subjectEmail) || null;
       const raw = validateRaw(input);
+      const factKey = buildIndexedFileFactKey(input);
+      const legacyFactKey = buildLegacyIndexedFileFactKey(input);
+      const values = {
+        indexed_file_id: input.indexedFileId ?? null,
+        connector_config_id: input.connectorConfigId ?? null,
+        created_by_user_id: input.createdByUserId ?? null,
+        source: input.source,
+        fact_type: input.factType,
+        relation: input.relation,
+        subject_name: input.subjectName?.trim() || null,
+        subject_email: subjectEmail,
+        subject_source: input.subjectSource ?? null,
+        subject_source_id: input.subjectSourceId ?? null,
+        context_snippet: input.contextSnippet ?? null,
+        raw,
+        fact_key: factKey,
+        last_seen_sync_run_id: input.lastSeenSyncRunId ?? null,
+        deleted_at: null,
+        content_hash: input.contentHash ?? null,
+        materialized_at: null,
+        updated_at: now,
+      };
+
+      if (legacyFactKey !== factKey) {
+        const existing = await db
+          .selectFrom("indexed_file_facts")
+          .select("id")
+          .where("fact_key", "=", legacyFactKey)
+          .executeTakeFirst();
+        if (existing) {
+          await db.updateTable("indexed_file_facts").set(values).where("id", "=", existing.id).execute();
+          return;
+        }
+      }
+
       await db
         .insertInto("indexed_file_facts")
         .values({
           id: randomUUID(),
-          indexed_file_id: input.indexedFileId ?? null,
-          source: input.source,
-          fact_type: input.factType,
-          relation: input.relation,
-          subject_name: input.subjectName?.trim() || null,
-          subject_email: subjectEmail,
-          subject_source: input.subjectSource ?? null,
-          subject_source_id: input.subjectSourceId ?? null,
-          context_snippet: input.contextSnippet ?? null,
-          raw,
-          fact_key: buildIndexedFileFactKey(input),
-          updated_at: now,
+          ...values,
         })
         .onConflict((oc) =>
           oc.column("fact_key").doUpdateSet({
-            subject_name: input.subjectName?.trim() || null,
-            subject_email: subjectEmail,
-            context_snippet: input.contextSnippet ?? null,
-            raw,
-            updated_at: now,
+            ...values,
           }),
         )
+        .execute();
+    },
+
+    async tombstoneStaleFactsForConnector(connectorConfigId: string, syncRunId: string): Promise<string[]> {
+      const stale = await db
+        .selectFrom("indexed_file_facts")
+        .select("indexed_file_id")
+        .where("connector_config_id", "=", connectorConfigId)
+        .where("deleted_at", "is", null)
+        .where((eb) => eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", syncRunId)]))
+        .execute();
+      const now = new Date().toISOString();
+      await db
+        .updateTable("indexed_file_facts")
+        .set({ deleted_at: now, materialized_at: null, updated_at: now })
+        .where("connector_config_id", "=", connectorConfigId)
+        .where("deleted_at", "is", null)
+        .where((eb) => eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", syncRunId)]))
+        .execute();
+      return [...new Set(stale.map((row) => row.indexed_file_id).filter((id): id is string => Boolean(id)))];
+    },
+
+    async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {
+      if (indexedFileIds.length === 0) return;
+      await db
+        .updateTable("indexed_file_facts")
+        .set({ materialized_at: null, updated_at: new Date().toISOString() })
+        .where("indexed_file_id", "in", indexedFileIds)
+        .where("deleted_at", "is", null)
         .execute();
     },
   };

@@ -640,6 +640,22 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
     const bob = persons.find((p) => p.name === "Bob Chen");
     expect(bob?.metadata && JSON.parse(bob.metadata).email).toBe("rchen@acme.com");
+
+    const facts = await db.selectFrom("indexed_file_facts").selectAll().execute();
+    expect(facts).toHaveLength(2);
+    expect(facts.every((fact) => fact.created_by_user_id === "admin")).toBe(true);
+    expect(facts.every((fact) => fact.connector_config_id === "connector-attendees-test")).toBe(true);
+    expect(facts.every((fact) => fact.materialized_at !== null)).toBe(true);
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .orderBy("source", "asc")
+      .execute();
+    expect(mentions).toEqual([
+      { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
+      { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
+    ]);
   });
 });
 
