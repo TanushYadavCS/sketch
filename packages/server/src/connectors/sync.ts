@@ -425,12 +425,16 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                   .select("id")
                   .where("entity_id", "=", entity.id)
                   .where("indexed_file_id", "=", existing.id)
+                  .where("relation", "=", "mentioned")
                   .executeTakeFirst();
                 if (!exists) {
                   await entityRepo.createMention({
                     entityId: entity.id,
                     indexedFileId: existing.id,
                     contextSnippet: parent.contextSnippet ?? null,
+                    confidence: "EXTRACTED",
+                    source: "parent_entity",
+                    relation: "mentioned",
                   });
                 }
               }
@@ -540,6 +544,9 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                 entityId: entity.id,
                 indexedFileId: itemResult.id,
                 contextSnippet: `Assigned to ${assignee.name}`,
+                confidence: "EXTRACTED",
+                source: "assignee",
+                relation: "assigned",
               });
             }
           }
@@ -563,6 +570,9 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                 entityId: entity.id,
                 indexedFileId: itemResult.id,
                 contextSnippet: parent.contextSnippet ?? null,
+                confidence: "EXTRACTED",
+                source: "parent_entity",
+                relation: "mentioned",
               });
             }
           }

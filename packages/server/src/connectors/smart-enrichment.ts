@@ -270,6 +270,9 @@ export async function handleCandidates(
           await entityRepo.createMention({
             entityId: entity.id,
             indexedFileId: seenFileId,
+            confidence: "INFERRED",
+            source: "llm_extraction",
+            relation: "mentioned",
           });
         }
         if (liveFileIds.length < seenFileIds.length) {
@@ -447,7 +450,13 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
 
   await entityRepo.deleteMentionsForFile(file.id);
   for (const entity of allMatched) {
-    await entityRepo.createMention({ entityId: entity.entityId, indexedFileId: file.id });
+    await entityRepo.createMention({
+      entityId: entity.entityId,
+      indexedFileId: file.id,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
     await entityRepo.updateHotness(entity.entityId);
   }
 
