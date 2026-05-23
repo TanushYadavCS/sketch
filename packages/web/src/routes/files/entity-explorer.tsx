@@ -130,6 +130,7 @@ export function EntityExplorer() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showResetDialog, setShowResetDialog] = useState(false);
   const [resetCategories, setResetCategories] = useState<Set<string>>(new Set(["connectors", "ai"]));
+  const [resetRunAfter, setResetRunAfter] = useState(false);
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("company");
 
@@ -154,9 +155,21 @@ export function EntityExplorer() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  const pollResetJob = async (jobId: string) => {
+    for (let i = 0; i < 300; i++) {
+      try {
+        const job = await api.entities.resetJob(jobId);
+        if (job.phase === "done" || job.phase === "failed") return job;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return null;
+  };
+
   const resetMutation = useMutation({
-    mutationFn: (categories: string[]) => api.entities.reset(categories),
-    onSuccess: (result) => {
+    mutationFn: ({ categories, runAfter }: { categories: string[]; runAfter: boolean }) =>
+      api.entities.reset(categories, runAfter ? { runAfter: true, confirm: "RESET_AND_RECREATE" } : undefined),
+    onSuccess: async (result) => {
       const extras: string[] = [];
       if (result.reviewQueueCleared > 0) {
         extras.push(`${result.reviewQueueCleared} pending review${result.reviewQueueCleared === 1 ? "" : "s"}`);
@@ -165,8 +178,26 @@ export function EntityExplorer() {
         extras.push(`${result.rejectionsCleared} rejection${result.rejectionsCleared === 1 ? "" : "s"}`);
       }
       const tail = extras.length > 0 ? ` (also cleared ${extras.join(" and ")})` : "";
-      toast.success(`Deleted ${result.entitiesDeleted} entities${tail}.`);
-      setShowResetDialog(false);
+
+      if (result.job) {
+        toast.success(`Deleted ${result.entitiesDeleted} entities${tail}. Rebuilding…`);
+        setShowResetDialog(false);
+        const finished = await pollResetJob(result.job.id);
+        if (finished?.phase === "done") {
+          toast.success("Entity graph rebuilt.");
+        } else if (finished?.phase === "failed") {
+          toast.error(`Rebuild failed: ${finished.error ?? "unknown error"}`);
+        }
+      } else {
+        const factHint =
+          result.factsMarkedUnmaterialized > 0
+            ? ` Run sync or click "Reset & recreate" to rebuild ${result.factsMarkedUnmaterialized} fact${
+                result.factsMarkedUnmaterialized === 1 ? "" : "s"
+              }.`
+            : "";
+        toast.success(`Deleted ${result.entitiesDeleted} entities${tail}.${factHint}`);
+        setShowResetDialog(false);
+      }
       queryClient.invalidateQueries({ queryKey: ["entities"] });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -277,14 +308,25 @@ export function EntityExplorer() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
                 onClick={() => {
                   setResetCategories(new Set(["connectors", "ai"]));
+                  setResetRunAfter(true);
                   setShowResetDialog(true);
                 }}
               >
                 <TrashIcon size={14} className="mr-1.5" />
-                Reset Entities...
+                Reset & recreate...
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => {
+                  setResetCategories(new Set(["connectors", "ai"]));
+                  setResetRunAfter(false);
+                  setShowResetDialog(true);
+                }}
+              >
+                <TrashIcon size={14} className="mr-1.5" />
+                Reset entities...
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -415,10 +457,11 @@ export function EntityExplorer() {
       <AlertDialog open={showResetDialog} onOpenChange={setShowResetDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Reset entities</AlertDialogTitle>
+            <AlertDialogTitle>{resetRunAfter ? "Reset & recreate" : "Reset entities"}</AlertDialogTitle>
             <AlertDialogDescription>
-              Select which entity categories to delete. Their mentions, source refs, and candidates will also be
-              removed.
+              {resetRunAfter
+                ? "Delete the selected entity categories and rebuild them from durable facts. Manual entities are preserved unless checked."
+                : "Select which entity categories to delete. Their mentions, source refs, and candidates will also be removed. Facts are re-flagged so the next sync or recreate run rebuilds them."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-2 py-2">
@@ -462,11 +505,21 @@ export function EntityExplorer() {
           <AlertDialogFooter>
             <AlertDialogCancel disabled={resetMutation.isPending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => resetMutation.mutate([...resetCategories])}
-              disabled={resetMutation.isPending || resetCategories.size === 0}
+              onClick={() => resetMutation.mutate({ categories: [...resetCategories], runAfter: resetRunAfter })}
+              disabled={
+                resetMutation.isPending ||
+                resetCategories.size === 0 ||
+                (resetRunAfter && resetCategories.size === 1 && resetCategories.has("manual"))
+              }
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {resetMutation.isPending ? "Deleting..." : `Delete${resetCategories.size === 3 ? " All" : ""}`}
+              {resetMutation.isPending
+                ? resetRunAfter
+                  ? "Rebuilding..."
+                  : "Deleting..."
+                : resetRunAfter
+                  ? "Reset & recreate"
+                  : `Delete${resetCategories.size === 3 ? " All" : ""}`}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
