@@ -586,10 +586,11 @@ describe("POST /api/entities/resets", () => {
     const snapshotA = await snapshot();
 
     // Threshold + type fidelity assertions on the initial build.
+    // Ordering matches the snapshot query (source_type then name).
     expect(snapshotA.entities).toEqual([
       { name: "Acme Corp", source_type: "company" },
-      { name: "Apollo", source_type: "project" },
       { name: "Sarah Chen", source_type: "person" },
+      { name: "Apollo", source_type: "project" },
     ]);
     expect(snapshotA.entities.some((e) => e.name === "OneOff")).toBe(false);
 
