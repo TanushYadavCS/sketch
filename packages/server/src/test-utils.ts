@@ -81,6 +81,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     MAX_FILE_SIZE_MB: 20,
     MAX_UPLOAD_SIZE_MB: 50,
     EXPERIMENTAL_FLAG: false,
+    LLM_PROMOTION_THRESHOLD: 2,
     DATA_DIR: "./data",
     CLAUDE_CONFIG_DIR: join(tmpdir(), "test-claude"),
     SKETCH_CONFIG_DIR: join(tmpdir(), "test-sketch"),

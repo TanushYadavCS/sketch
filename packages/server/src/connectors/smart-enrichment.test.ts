@@ -191,9 +191,11 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     }
   });
 
-  it("persists extracted mentions as LLM facts and materializes inferred mentions", async () => {
-    const fileId = randomUUID();
-    await seedFile(db, fileId);
+  it("persists LLM facts on first sighting, defers materialization, and promotes once threshold reached", async () => {
+    const firstFileId = randomUUID();
+    const secondFileId = randomUUID();
+    await seedFile(db, firstFileId);
+    await seedFile(db, secondFileId);
     const generator = {
       generate: async () => "Jane Doe discussed the launch plan.",
       generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
@@ -204,44 +206,56 @@ describe("smartEnrichFile — LLM extraction facts", () => {
       },
     } as GeminiGenerator;
 
+    const fileBody = (id: string, hash: string) => ({
+      id,
+      fileName: `${id}.txt`,
+      content: "Jane Doe discussed the launch plan.",
+      contentCategory: "document",
+      source: "google_drive",
+      sourcePath: "/",
+      contentHash: hash,
+      connectorConfigId: "conn-smart",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+
     await smartEnrichFile(
-      {
-        db,
-        logger: createTestLogger(),
-        generator,
-        embeddingProvider: null,
-      },
-      {
-        id: fileId,
-        fileName: `${fileId}.txt`,
-        content: "Jane Doe discussed the launch plan.",
-        contentCategory: "document",
-        source: "google_drive",
-        sourcePath: "/",
-        contentHash: "hash-v1",
-        connectorConfigId: "conn-smart",
-        sourceCreatedAt: null,
-        sourceUpdatedAt: null,
-      },
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      fileBody(firstFileId, "hash-1"),
     );
 
-    const fact = await db
+    const firstFact = await db
       .selectFrom("indexed_file_facts")
-      .select(["fact_type", "source", "content_hash", "materialized_at"])
-      .where("indexed_file_id", "=", fileId)
+      .selectAll()
+      .where("indexed_file_id", "=", firstFileId)
       .executeTakeFirstOrThrow();
-    expect(fact).toMatchObject({
-      fact_type: "llm_extracted",
-      source: "llm_extraction",
-      content_hash: "hash-v1",
-    });
-    expect(fact.materialized_at).not.toBeNull();
-
-    const mention = await db
+    expect(firstFact.fact_type).toBe("llm_extracted");
+    // Below threshold (1 file < 2): fact stays unmaterialized for retry.
+    expect(firstFact.materialized_at).toBeNull();
+    const noMentionsYet = await db
       .selectFrom("entity_mentions")
-      .select(["source", "confidence", "relation"])
-      .where("indexed_file_id", "=", fileId)
-      .executeTakeFirstOrThrow();
-    expect(mention).toEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+      .selectAll()
+      .where("indexed_file_id", "=", firstFileId)
+      .execute();
+    expect(noMentionsYet).toHaveLength(0);
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      fileBody(secondFileId, "hash-2"),
+    );
+
+    const factsAfter = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("fact_type", "=", "llm_extracted")
+      .execute();
+    expect(factsAfter.every((f) => f.materialized_at !== null)).toBe(true);
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation", "indexed_file_id"])
+      .execute();
+    expect(mentions.length).toBeGreaterThanOrEqual(2);
+    expect(mentions.every((m) => m.source === "llm_extraction" && m.confidence === "INFERRED")).toBe(true);
   });
 });

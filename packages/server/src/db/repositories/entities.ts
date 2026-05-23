@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
 import { isPg } from "../dialect";
-import type { DB } from "../schema";
+import type { DB, EntitiesTable } from "../schema";
 
 export interface UpsertEntityData {
   name: string;
@@ -483,6 +484,63 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
 
       return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    },
+
+    /**
+     * Narrow upsert for LLM-extracted non-person entities. Keys by
+     * (normalizeName(name), source_type) with case-insensitive comparison
+     * done client-side so the same path works on SQLite and Postgres.
+     * Returns whether the row was newly created so materialization summaries
+     * don't count updates as new entities.
+     */
+    async upsertLlmExtractedEntity(
+      data: UpsertEntityData,
+    ): Promise<{ entity: Selectable<EntitiesTable>; created: boolean }> {
+      const targetKey = normalizeName(data.name);
+      const candidates = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", data.sourceType)
+        .execute();
+      const match = candidates.find((c) => normalizeName(c.name) === targetKey);
+
+      if (match) {
+        const now = new Date().toISOString();
+        await db
+          .updateTable("entities")
+          .set({
+            aliases: data.aliases ? JSON.stringify(data.aliases) : match.aliases,
+            metadata: data.metadata ? JSON.stringify(data.metadata) : match.metadata,
+            status: data.status ?? match.status,
+            updated_at: now,
+          })
+          .where("id", "=", match.id)
+          .execute();
+        const fresh = await db.selectFrom("entities").selectAll().where("id", "=", match.id).executeTakeFirstOrThrow();
+        return { entity: fresh, created: false };
+      }
+
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      await db
+        .insertInto("entities")
+        .values({
+          id,
+          name: data.name,
+          source_type: data.sourceType,
+          subtype: data.subtype ?? null,
+          aliases: data.aliases ? JSON.stringify(data.aliases) : null,
+          metadata: data.metadata ? JSON.stringify(data.metadata) : null,
+          source_ref_id: null,
+          status: data.status ?? "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+
+      const entity = await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return { entity, created: true };
     },
 
     async upsertPersonEntity(data: UpsertPersonEntityData) {

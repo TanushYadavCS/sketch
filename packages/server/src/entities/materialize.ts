@@ -7,8 +7,38 @@ import {
   createEntityRepository,
 } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
+
+const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
+let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
+
+/**
+ * Set the default `llmPromotionThreshold` used by entry points
+ * (`materializeUnmaterializedFacts`, `replaySourceFacts`,
+ * `buildMaterializeDeps`) when the caller doesn't pass one. Production
+ * callers should invoke this once at boot with `config.LLM_PROMOTION_THRESHOLD`.
+ */
+export function configureMaterializeDefaults(opts: { llmPromotionThreshold?: number }): void {
+  if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
+    configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
+  }
+}
+
+const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team"] as const;
+type NonPersonMentionType = (typeof NON_PERSON_MENTION_TYPES)[number];
+type MentionType = "person" | NonPersonMentionType;
+
+function normalizeMentionType(raw: unknown): MentionType | null {
+  if (typeof raw !== "string") return null;
+  const lowered = raw.trim().toLowerCase();
+  if (lowered === "person") return "person";
+  if ((NON_PERSON_MENTION_TYPES as readonly string[]).includes(lowered)) {
+    return lowered as NonPersonMentionType;
+  }
+  return null;
+}
 
 export interface ReplayFactsSummary {
   factsRead: number;
@@ -22,6 +52,7 @@ export interface ReplayFactsSummary {
 export interface MaterializeFactsSummary extends ReplayFactsSummary {
   materialized: number;
   deferred: number;
+  deferredBelowThreshold: number;
 }
 
 type EntityRow = Selectable<EntitiesTable>;
@@ -42,6 +73,7 @@ export interface MaterializeDeps {
   index: LookupIndex;
   readEmail: (entity: Entity) => string | null;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
+  llmPromotionThreshold: number;
 }
 
 export type MaterializeResult =
@@ -50,6 +82,7 @@ export type MaterializeResult =
   | { kind: "queued"; reviewId: string }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
+  | { kind: "deferred_below_threshold"; reason: string }
   | { kind: "skipped"; reason: string };
 
 const FACT_REPLAY_ORDER = [
@@ -157,10 +190,21 @@ function registerPerson(index: LookupIndex, entity: EntityRow): void {
   }
 }
 
-export async function buildMaterializeDeps(db: Kysely<DB>): Promise<MaterializeDeps> {
+export interface BuildMaterializeDepsOptions {
+  llmPromotionThreshold?: number;
+}
+
+export async function buildMaterializeDeps(
+  db: Kysely<DB>,
+  opts: BuildMaterializeDepsOptions = {},
+): Promise<MaterializeDeps> {
   const entityRepo = createEntityRepository(db);
   const reviewRepo = createEntityReviewRepo(db);
   const index = await buildLookupIndex(db);
+  const llmPromotionThreshold =
+    typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
+      ? Math.floor(opts.llmPromotionThreshold)
+      : configuredLlmPromotionThreshold;
 
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
@@ -181,6 +225,7 @@ export async function buildMaterializeDeps(db: Kysely<DB>): Promise<MaterializeD
     reviewRepo,
     lookup,
     index,
+    llmPromotionThreshold,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     resolveOwner: (fact: IndexedFileFactRow) => {
       if (fact.created_by_user_id) return fact.created_by_user_id;
@@ -205,12 +250,10 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "person_seed") {
     return materializePersonSeed(deps, fact);
   }
-  if (
-    fact.fact_type === "attendee" ||
-    fact.fact_type === "assignee" ||
-    fact.fact_type === "author" ||
-    fact.fact_type === "llm_extracted"
-  ) {
+  if (fact.fact_type === "llm_extracted") {
+    return materializeLlmExtractedFact(deps, fact);
+  }
+  if (fact.fact_type === "attendee" || fact.fact_type === "assignee" || fact.fact_type === "author") {
     return materializePersonFact(deps, fact);
   }
   if (fact.fact_type === "parent_entity") {
@@ -234,12 +277,24 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     summary.queued++;
     return;
   }
-  if (result.kind === "skipped" || result.kind === "skipped_missing_owner") {
+  if (
+    result.kind === "skipped" ||
+    result.kind === "skipped_missing_owner" ||
+    result.kind === "deferred_below_threshold"
+  ) {
     summary.skipped++;
   }
 }
 
-export async function replaySourceFacts(db: Kysely<DB>, logger: Logger): Promise<ReplayFactsSummary> {
+export interface ReplaySourceFactsOptions {
+  llmPromotionThreshold?: number;
+}
+
+export async function replaySourceFacts(
+  db: Kysely<DB>,
+  logger: Logger,
+  opts: ReplaySourceFactsOptions = {},
+): Promise<ReplayFactsSummary> {
   const summary: ReplayFactsSummary = {
     factsRead: 0,
     entitiesCreated: 0,
@@ -249,7 +304,7 @@ export async function replaySourceFacts(db: Kysely<DB>, logger: Logger): Promise
     skipped: 0,
   };
 
-  const deps = await buildMaterializeDeps(db);
+  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
     .filter((f) => orderRank.has(f.fact_type))
@@ -273,8 +328,17 @@ export async function replaySourceFacts(db: Kysely<DB>, logger: Logger): Promise
 
 let materializeQueue: Promise<void> = Promise.resolve();
 
-export async function materializeUnmaterializedFacts(db: Kysely<DB>, logger: Logger): Promise<MaterializeFactsSummary> {
-  const run = materializeQueue.then(() => materializeUnmaterializedFactsInner(db, logger));
+export interface MaterializeUnmaterializedOptions {
+  llmPromotionThreshold?: number;
+  factTypes?: IndexedFileFactType[];
+}
+
+export async function materializeUnmaterializedFacts(
+  db: Kysely<DB>,
+  logger: Logger,
+  opts: MaterializeUnmaterializedOptions = {},
+): Promise<MaterializeFactsSummary> {
+  const run = materializeQueue.then(() => materializeUnmaterializedFactsInner(db, logger, opts));
   materializeQueue = run.then(
     () => undefined,
     () => undefined,
@@ -282,7 +346,11 @@ export async function materializeUnmaterializedFacts(db: Kysely<DB>, logger: Log
   return run;
 }
 
-async function materializeUnmaterializedFactsInner(db: Kysely<DB>, logger: Logger): Promise<MaterializeFactsSummary> {
+async function materializeUnmaterializedFactsInner(
+  db: Kysely<DB>,
+  logger: Logger,
+  opts: MaterializeUnmaterializedOptions,
+): Promise<MaterializeFactsSummary> {
   const summary: MaterializeFactsSummary = {
     factsRead: 0,
     entitiesCreated: 0,
@@ -292,18 +360,20 @@ async function materializeUnmaterializedFactsInner(db: Kysely<DB>, logger: Logge
     skipped: 0,
     materialized: 0,
     deferred: 0,
+    deferredBelowThreshold: 0,
   };
 
-  const deps = await buildMaterializeDeps(db);
+  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
-  const facts = (
-    await db
-      .selectFrom("indexed_file_facts")
-      .selectAll()
-      .where("deleted_at", "is", null)
-      .where("materialized_at", "is", null)
-      .execute()
-  ).sort(
+  let factsQuery = db
+    .selectFrom("indexed_file_facts")
+    .selectAll()
+    .where("deleted_at", "is", null)
+    .where("materialized_at", "is", null);
+  if (opts.factTypes && opts.factTypes.length > 0) {
+    factsQuery = factsQuery.where("fact_type", "in", opts.factTypes);
+  }
+  const facts = (await factsQuery.execute()).sort(
     (a, b) =>
       (orderRank.get(a.fact_type) ?? Number.MAX_SAFE_INTEGER) - (orderRank.get(b.fact_type) ?? Number.MAX_SAFE_INTEGER),
   );
@@ -314,6 +384,9 @@ async function materializeUnmaterializedFactsInner(db: Kysely<DB>, logger: Logge
     try {
       const result = await materializeFromFact(deps, fact);
       accumulate(summary, result);
+      if (result.kind === "deferred_below_threshold") {
+        summary.deferredBelowThreshold++;
+      }
       if (shouldMarkMaterialized(result)) {
         await db
           .updateTable("indexed_file_facts")
@@ -345,8 +418,13 @@ function shouldMarkMaterialized(result: MaterializeResult): boolean {
     return true;
   }
   if (result.kind === "skipped_missing_owner") return false;
+  if (result.kind === "deferred_below_threshold") return false;
   if (result.kind === "skipped") {
-    return result.reason !== "missing_parent_seed" && result.reason !== "unknown_fact_type";
+    return (
+      result.reason !== "missing_parent_seed" &&
+      result.reason !== "unknown_fact_type" &&
+      result.reason !== "missing_or_invalid_mention_type"
+    );
   }
   return false;
 }
@@ -400,6 +478,95 @@ async function materializePersonSeed(deps: MaterializeDeps, fact: IndexedFileFac
   deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
   registerPerson(deps.index, entity);
   return { kind: "structural", entity };
+}
+
+async function countActiveLlmFilesForName(
+  db: Kysely<DB>,
+  normalized: string,
+  mentionType: MentionType,
+): Promise<number> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["indexed_file_id", "subject_name", "raw"])
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .execute();
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row.indexed_file_id || !row.subject_name) continue;
+    if (normalizeName(row.subject_name) !== normalized) continue;
+    const raw = readJsonObject(row.raw);
+    if (normalizeMentionType(raw.type) !== mentionType) continue;
+    seen.add(row.indexed_file_id);
+  }
+  return seen.size;
+}
+
+async function materializeLlmExtractedFact(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+): Promise<MaterializeResult> {
+  if (!fact.subject_name) {
+    return { kind: "skipped", reason: "missing_llm_subject" };
+  }
+  const raw = readJsonObject(fact.raw);
+  const mentionType = normalizeMentionType(raw.type);
+  if (!mentionType) {
+    return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
+  }
+
+  const normalized = normalizeName(fact.subject_name);
+  if (!normalized) {
+    return { kind: "skipped", reason: "missing_llm_subject" };
+  }
+  const fileCount = await countActiveLlmFilesForName(deps.db, normalized, mentionType);
+  if (fileCount < deps.llmPromotionThreshold) {
+    return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
+  }
+
+  if (mentionType === "person") {
+    return materializePersonFact(deps, fact);
+  }
+  return materializeNonPersonLlmEntity(deps, fact, mentionType);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+async function materializeNonPersonLlmEntity(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+  sourceType: NonPersonMentionType,
+): Promise<MaterializeResult> {
+  const raw = readJsonObject(fact.raw);
+  const variations = Array.isArray(raw.variations) ? raw.variations.filter(isString) : [];
+
+  const { entity, created } = await deps.entityRepo.upsertLlmExtractedEntity({
+    name: fact.subject_name as string,
+    sourceType,
+    aliases: variations,
+    metadata: { origin: "ai" },
+    status: "confirmed",
+  });
+
+  if (!fact.indexed_file_id) {
+    return { kind: created ? "entity_created" : "entity_linked", entity, mentionWritten: false };
+  }
+  await createMentionFromFact(deps, {
+    entityId: entity.id,
+    indexedFileId: fact.indexed_file_id,
+    contextSnippet: fact.context_snippet ?? null,
+    confidence: "INFERRED",
+    source: "llm_extraction",
+    relation: "mentioned",
+  });
+  return {
+    kind: created ? "entity_created" : "entity_linked",
+    entity,
+    mentionWritten: true,
+  };
 }
 
 async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {

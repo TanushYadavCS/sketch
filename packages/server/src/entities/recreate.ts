@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { type EnrichmentResult, isEnrichmentActive, linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
+import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { type MaterializeFactsSummary, materializeUnmaterializedFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
@@ -196,6 +197,16 @@ export interface RecreateDeps {
    */
   skipReset?: boolean;
   lockAlreadyHeld?: boolean;
+  /**
+   * Threshold passed to the materializer for `llm_extracted` promotion.
+   * Production callers should pass `config.LLM_PROMOTION_THRESHOLD`.
+   */
+  llmPromotionThreshold?: number;
+  /**
+   * Restrict the materialize replay to a subset of fact types. Used by
+   * category reset+rebuild to avoid replaying unrelated pending facts.
+   */
+  materializeFactTypes?: IndexedFileFactType[];
 }
 
 export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateSummary> {
@@ -214,7 +225,12 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
 
     await seedTeamDirectoryEntities(db, logger);
 
-    const replay = await materializeUnmaterializedFacts(db, logger);
+    await seedTeamDirectoryEntities(db, logger);
+
+    const replay = await materializeUnmaterializedFacts(db, logger, {
+      llmPromotionThreshold: deps.llmPromotionThreshold,
+      factTypes: deps.materializeFactTypes,
+    });
 
     if (deps.skipEnrichment) {
       return {

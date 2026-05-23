@@ -210,7 +210,7 @@ describe("replaySourceFacts", () => {
     expect(mentions[0].context_snippet).toBe("Attended meeting-1");
   });
 
-  it("materializes LLM extraction facts as INFERRED mentions", async () => {
+  it("materializes LLM extraction facts as INFERRED mentions once threshold reached", async () => {
     await createIndexedFileFactRepository(db).upsertFact({
       indexedFileId: ATTENDED_FILE_ID,
       connectorConfigId: CONNECTOR_ID,
@@ -221,10 +221,10 @@ describe("replaySourceFacts", () => {
       relation: "mentioned",
       subjectName: "Jane Doe",
       subjectSource: "llm_extraction",
-      subjectSourceId: "file-1:hash-1:llm-extraction-v1:Jane Doe",
+      subjectSourceId: "file-1:hash-1:llm-extraction-v2:Jane Doe",
       raw: {
         contentHash: "hash-1",
-        promptVersion: "llm-extraction-v1",
+        promptVersion: "llm-extraction-v2",
         model: "gemini",
         mention: "Jane Doe",
         type: "person",
@@ -236,7 +236,7 @@ describe("replaySourceFacts", () => {
       .selectAll()
       .where("fact_type", "=", "llm_extracted")
       .executeTakeFirstOrThrow();
-    const deps = await buildMaterializeDeps(db);
+    const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: 1 });
 
     const result = await materializeFromFact(deps, fact);
 
