@@ -30,6 +30,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
+import { type MaterializeResult, buildMaterializeDeps, materializeFromFact } from "./materialize";
 
 type Entity = Selectable<EntitiesTable>;
 
@@ -137,6 +138,40 @@ function readEmail(metadata: string | null): string | null {
   }
 }
 
+function readJsonObject(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeEntityMatchName(entityType: string, name: string): string {
+  if (entityType !== "product") return normalizeName(name);
+  return normalizeName(
+    name
+      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+      .replace(/[-_]+/g, " "),
+  );
+}
+
+function shouldMarkHeldFactMaterialized(result: MaterializeResult): boolean {
+  if (result.kind === "entity_created" || result.kind === "entity_linked" || result.kind === "structural") return true;
+  if (result.kind === "queued" || result.kind === "queued_held") return false;
+  if (result.kind === "skipped_missing_owner" || result.kind === "deferred_below_threshold") return false;
+  if (result.kind === "skipped") {
+    return (
+      result.reason !== "missing_parent_seed" &&
+      result.reason !== "unknown_fact_type" &&
+      result.reason !== "missing_or_invalid_mention_type"
+    );
+  }
+  return false;
+}
+
 async function fetchRow(ctx: ResolveTxnCtx, reviewId: string): Promise<QueueRow> {
   const row = await ctx.repo.getById(reviewId);
   if (!row) throw new ResolveError("ROW_NOT_FOUND", `queue row ${reviewId} not found`);
@@ -239,10 +274,41 @@ async function materializeEvidence(
 ): Promise<void> {
   const targetEmail = target.source_type === "person" ? readEmail(target.metadata) : null;
   for (const ev of evidence) {
+    if (ev.source === "llm_extraction") continue;
     if (targetEmail) {
       await ensureFileAccess(ctx, ev.indexed_file_id, targetEmail);
     }
     await insertHeldMention(ctx, target.id, ev.indexed_file_id, ev.source, confidence);
+  }
+}
+
+async function rematerializeHeldLlmEvidence(ctx: ResolveTxnCtx, row: QueueRow, evidence: EvidenceRow[]): Promise<void> {
+  const llmEvidence = evidence.filter((ev) => ev.source === "llm_extraction");
+  if (llmEvidence.length === 0) return;
+  const deps = await buildMaterializeDeps(ctx.db);
+  const fileIds = [...new Set(llmEvidence.map((ev) => ev.indexed_file_id))];
+  const facts = await ctx.db
+    .selectFrom("indexed_file_facts")
+    .selectAll()
+    .where("indexed_file_id", "in", fileIds)
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .execute();
+
+  for (const fact of facts) {
+    if (!fact.subject_name) continue;
+    if (normalizeEntityMatchName(row.entity_type, fact.subject_name) !== row.normalized_name) continue;
+    const raw = readJsonObject(fact.raw);
+    if (raw.type !== row.entity_type) continue;
+    const result = await materializeFromFact(deps, fact);
+    if (shouldMarkHeldFactMaterialized(result)) {
+      await ctx.db
+        .updateTable("indexed_file_facts")
+        .set({ materialized_at: ctx.now })
+        .where("id", "=", fact.id)
+        .where("materialized_at", "is", null)
+        .execute();
+    }
   }
 }
 
@@ -466,6 +532,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
 
     // 6. Held-mention materialization + ACL backfill.
     await materializeEvidence(trxCtx, target, evidence, "confirmed");
+    await rematerializeHeldLlmEvidence(trxCtx, row, evidence);
 
     // Held-email path. Rare in v1 (no caller currently populates proposed_email),
     // but column exists so handle it here.
@@ -645,6 +712,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
 
     // 4. Held-mention materialization + ACL backfill (confidence='inferred').
     await materializeEvidence(trxCtx, target, evidence, "inferred");
+    await rematerializeHeldLlmEvidence(trxCtx, row, evidence);
 
     // 5. Sticky rejection.
     if (row.candidate_entity_id) {

@@ -61,7 +61,7 @@ type EntityRow = Selectable<EntitiesTable>;
 export type IndexedFileFactRow = Selectable<IndexedFileFactsTable>;
 
 export interface LookupIndex {
-  personEntities: EntityRow[];
+  entitiesByType: Map<ProposeEntityType, EntityRow[]>;
   byNormalizedName: Map<string, EntityRow[]>;
   byNormalizedAlias: Map<string, EntityRow[]>;
   bySourceRef: Map<string, EntityRow>;
@@ -83,6 +83,7 @@ export type MaterializeResult =
   | { kind: "entity_created"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
   | { kind: "entity_linked"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
   | { kind: "queued"; reviewId: string }
+  | { kind: "queued_held"; reviewId: string; reason: "llm_ambiguous" | "non_person_collision" }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
@@ -137,19 +138,34 @@ function parseAliasesString(aliases: string | null): string[] {
   return [];
 }
 
+function normalizeEntityMatchName(entityType: string, name: string): string {
+  if (entityType !== "product") return normalizeName(name);
+  return normalizeName(
+    name
+      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+      .replace(/[-_]+/g, " "),
+  );
+}
+
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const personEntities = await db.selectFrom("entities").selectAll().where("source_type", "=", "person").execute();
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team"];
+  const entities = await db.selectFrom("entities").selectAll().where("source_type", "in", supportedTypes).execute();
+  const entitiesByType = new Map<ProposeEntityType, EntityRow[]>();
+  for (const t of supportedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, EntityRow[]>();
   const byNormalizedAlias = new Map<string, EntityRow[]>();
-  for (const e of personEntities) {
-    const nameKey = normalizeName(e.name);
+  for (const e of entities) {
+    const entityType = e.source_type as ProposeEntityType;
+    entitiesByType.get(entityType)?.push(e);
+    const nameKey = normalizeEntityMatchName(entityType, e.name);
     if (nameKey) {
       const bucket = byNormalizedName.get(nameKey);
       if (bucket) bucket.push(e);
       else byNormalizedName.set(nameKey, [e]);
     }
     for (const alias of parseAliasesString(e.aliases)) {
-      const aliasKey = normalizeName(alias);
+      const aliasKey = normalizeEntityMatchName(entityType, alias);
       if (!aliasKey) continue;
       const bucket = byNormalizedAlias.get(aliasKey);
       if (bucket) bucket.push(e);
@@ -167,12 +183,14 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   for (const row of sourceRefs) {
     bySourceRef.set(`${row.source}:${row.source_id}`, row as unknown as EntityRow);
   }
-  return { personEntities, byNormalizedName, byNormalizedAlias, bySourceRef };
+  return { entitiesByType, byNormalizedName, byNormalizedAlias, bySourceRef };
 }
 
-function registerPerson(index: LookupIndex, entity: EntityRow): void {
-  if (!index.personEntities.some((p) => p.id === entity.id)) index.personEntities.push(entity);
-  const nameKey = normalizeName(entity.name);
+function registerEntity(index: LookupIndex, entity: EntityRow): void {
+  const entityType = entity.source_type as ProposeEntityType;
+  const typeBucket = index.entitiesByType.get(entityType);
+  if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
+  const nameKey = normalizeEntityMatchName(entityType, entity.name);
   if (nameKey) {
     const bucket = index.byNormalizedName.get(nameKey);
     if (bucket) {
@@ -182,7 +200,7 @@ function registerPerson(index: LookupIndex, entity: EntityRow): void {
     }
   }
   for (const alias of parseAliasesString(entity.aliases)) {
-    const aliasKey = normalizeName(alias);
+    const aliasKey = normalizeEntityMatchName(entityType, alias);
     if (!aliasKey) continue;
     const bucket = index.byNormalizedAlias.get(aliasKey);
     if (bucket) {
@@ -213,7 +231,7 @@ export async function buildMaterializeDeps(
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
     getByAlias: (n) => index.byNormalizedAlias.get(n) ?? [],
-    listByType: (t: ProposeEntityType) => (t === "person" ? index.personEntities : []),
+    listByType: (t: ProposeEntityType) => index.entitiesByType.get(t) ?? [],
   };
 
   const fileToConnector = new Map<string, string>();
@@ -279,6 +297,10 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     return;
   }
   if (result.kind === "queued") {
+    summary.queued++;
+    return;
+  }
+  if (result.kind === "queued_held") {
     summary.queued++;
     return;
   }
@@ -481,7 +503,7 @@ async function materializePersonSeed(deps: MaterializeDeps, fact: IndexedFileFac
     sourceId: fact.subject_source_id,
   })) as unknown as EntityRow;
   deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
-  registerPerson(deps.index, entity);
+  registerEntity(deps.index, entity);
   await inferAffiliationFromEmail(
     { db: deps.db, domainsRepo: deps.domainsRepo },
     {
@@ -509,9 +531,9 @@ async function countActiveLlmFilesForName(
   const seen = new Set<string>();
   for (const row of rows) {
     if (!row.indexed_file_id || !row.subject_name) continue;
-    if (normalizeName(row.subject_name) !== normalized) continue;
     const raw = readJsonObject(row.raw);
     if (normalizeMentionType(raw.type) !== mentionType) continue;
+    if (normalizeEntityMatchName(mentionType, row.subject_name) !== normalized) continue;
     seen.add(row.indexed_file_id);
   }
   return seen.size;
@@ -530,7 +552,7 @@ async function materializeLlmExtractedFact(
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }
 
-  const normalized = normalizeName(fact.subject_name);
+  const normalized = normalizeEntityMatchName(mentionType, fact.subject_name);
   if (!normalized) {
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
@@ -556,14 +578,38 @@ async function materializeNonPersonLlmEntity(
 ): Promise<MaterializeResult> {
   const raw = readJsonObject(fact.raw);
   const variations = Array.isArray(raw.variations) ? raw.variations.filter(isString) : [];
+  const triggeredByUserId = deps.resolveOwner(fact);
+  if (!triggeredByUserId) {
+    return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
+  }
 
-  const { entity, created } = await deps.entityRepo.upsertLlmExtractedEntity({
-    name: fact.subject_name as string,
-    sourceType,
-    aliases: variations,
-    metadata: { origin: "ai" },
-    status: "confirmed",
-  });
+  const result = await proposeEntity(
+    {
+      entityRepo: deps.entityRepo,
+      reviewRepo: deps.reviewRepo,
+      lookup: deps.lookup,
+      readEmail: deps.readEmail,
+    },
+    {
+      name: fact.subject_name as string,
+      entityType: sourceType,
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: fact.subject_source_id ?? `${fact.indexed_file_id ?? "no-file"}:${fact.subject_name}`,
+      evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
+      triggeredByUserId,
+      aliases: variations,
+      metadata: { origin: "ai" },
+    },
+  );
+
+  if (result.kind === "queued") {
+    return { kind: "queued_held", reviewId: result.reviewId, reason: "non_person_collision" };
+  }
+
+  const entity = result.entity as unknown as EntityRow;
+  const created = result.kind === "created";
+  registerEntity(deps.index, entity);
 
   if (!fact.indexed_file_id) {
     return { kind: created ? "entity_created" : "entity_linked", entity, mentionWritten: false };
@@ -631,11 +677,14 @@ async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFac
       },
     );
     if (result.kind === "queued") {
+      if (fact.fact_type === "llm_extracted") {
+        return { kind: "queued_held", reviewId: result.reviewId, reason: "llm_ambiguous" };
+      }
       return { kind: "queued", reviewId: result.reviewId };
     }
     entity = result.entity as unknown as EntityRow;
     resultKind = result.kind === "created" ? "entity_created" : "entity_linked";
-    registerPerson(deps.index, entity);
+    registerEntity(deps.index, entity);
     if (fact.subject_source && fact.subject_source_id) {
       deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
     }

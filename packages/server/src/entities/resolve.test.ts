@@ -13,8 +13,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
-import { createTestDb } from "../test-utils";
+import { createTestDb, createTestLogger } from "../test-utils";
+import { materializeUnmaterializedFacts } from "./materialize";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 import { ResolveError, confirmReview, rejectReview } from "./resolve";
 
@@ -38,7 +40,7 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
         const aliases: string[] = e.aliases ? JSON.parse(e.aliases) : [];
         return aliases.some((a) => normalizeName(a) === n);
       }),
-    listByType: () => getList(),
+    listByType: (t) => getList().filter((e) => e.source_type === t),
   };
 }
 
@@ -121,6 +123,30 @@ async function queuePendingRow(
   return result.reviewId;
 }
 
+async function upsertLlmFact(db: Kysely<DB>, fileId: string, name: string, type: string) {
+  const repo = createIndexedFileFactRepository(db);
+  await repo.upsertFact({
+    indexedFileId: fileId,
+    connectorConfigId: "config-test",
+    createdByUserId: USER_ID,
+    contentHash: `hash-${fileId}`,
+    source: "llm_extraction",
+    factType: "llm_extracted",
+    relation: "mentioned",
+    subjectName: name,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${fileId}:hash-${fileId}:llm-extraction-v2:${name}`,
+    raw: {
+      contentHash: `hash-${fileId}`,
+      promptVersion: "llm-extraction-v2",
+      model: "gemini",
+      mention: name,
+      type,
+      variations: [],
+    },
+  });
+}
+
 describe("confirmReview", () => {
   let db: Kysely<DB>;
   let entityRepo: ReturnType<typeof createEntityRepository>;
@@ -188,6 +214,34 @@ describe("confirmReview", () => {
     expect(finalRow?.status).toBe("confirmed");
     expect(finalRow?.resolved_entity_id).toBe(target.id);
     expect(finalRow?.resolved_by).toBe(USER_ID);
+  });
+
+  it("rematerializes held LLM non-person facts after confirm", async () => {
+    const target = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await seedIndexedFile(db, "file-llm-1", { source: "google_drive" });
+    await seedIndexedFile(db, "file-llm-2", { source: "google_drive" });
+    await upsertLlmFact(db, "file-llm-1", "Canvas", "company");
+    await upsertLlmFact(db, "file-llm-2", "Canvas", "company");
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 2 });
+    const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(row.candidate_entity_id).toBe(target.id);
+    if (!row.candidate_generated_at) throw new Error("missing candidate_generated_at");
+
+    await confirmReview({ db, userId: USER_ID }, row.id, {
+      candidateGeneratedAt: row.candidate_generated_at,
+    });
+
+    const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", target.id).execute();
+    expect(mentions.map((m) => m.indexed_file_id).sort()).toEqual(["file-llm-1", "file-llm-2"]);
+    expect(mentions.every((m) => m.source === "llm_extraction")).toBe(true);
+    const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
+    expect(facts.every((f) => f.materialized_at !== null)).toBe(true);
   });
 
   it("409 on candidate_generated_at drift", async () => {

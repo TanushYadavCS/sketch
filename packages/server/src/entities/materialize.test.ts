@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
@@ -213,5 +214,33 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
     const entities = await db.selectFrom("entities").selectAll().where("source_type", "=", "company").execute();
     expect(entities).toHaveLength(1);
+  });
+
+  it("holds non-person LLM collisions in review without materializing mentions", async () => {
+    await seedFiles(db, 2);
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await upsertLlmFact(db, "file-1", "Canvas", "company");
+    await upsertLlmFact(db, "file-2", "Canvas", "company");
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 2 });
+
+    expect(summary.entitiesCreated).toBe(0);
+    expect(summary.queued).toBe(2);
+    expect(summary.materialized).toBe(0);
+    expect(summary.deferred).toBe(2);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.entity_type).toBe("company");
+    expect(queue.proposed_name).toBe("Canvas");
+    expect(queue.candidate_reason).toBe("token-superset");
+    const mentions = await db.selectFrom("entity_mentions").selectAll().execute();
+    expect(mentions).toHaveLength(0);
+    const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
+    expect(facts.every((f) => f.materialized_at === null)).toBe(true);
   });
 });
