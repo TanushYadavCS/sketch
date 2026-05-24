@@ -21,6 +21,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { recreateEntityGraph } from "./recreate";
+import { confirmReview } from "./resolve";
 
 const ADMIN_ID = "admin-elp02";
 const CONNECTOR_ID = "cfg-elp02";
@@ -321,6 +322,76 @@ describe("ELP-02: affiliation inference", () => {
       .where("domain", "=", "charlie.com")
       .executeTakeFirst();
     expect(corporateDomain).toBeUndefined();
+
+    const link = await db.selectFrom("entity_review_domain_candidates").selectAll().executeTakeFirstOrThrow();
+    const review = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", link.review_id)
+      .executeTakeFirstOrThrow();
+    expect(review.entity_type).toBe("company");
+    expect(review.status).toBe("pending");
+    expect(link.domain_candidate_id).toBe(candidate.id);
+  });
+
+  it("confirming queued domain promotion finalizes domain, works_at edges, mentions, and candidate", async () => {
+    const domainsRepo = createEntityDomainsRepository(db);
+    const entityRepo = createEntityRepository(db);
+    const company = await entityRepo.upsertEntity({
+      name: "Charlie Health",
+      sourceType: "company",
+      status: "confirmed",
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const fileId = await seedFile(db, `file-confirm-charlie-${i}`);
+      const person = await entityRepo.upsertPersonEntity({
+        name: `Confirm Charlie Person ${i}`,
+        email: `confirm${i}@charlie.com`,
+        subtype: "external",
+        source: "fireflies",
+        sourceId: `confirm-charlie-${i}`,
+      });
+      await inferAffiliationFromEmail(
+        { db, domainsRepo },
+        { personEntityId: person.id, email: `confirm${i}@charlie.com`, evidenceFileId: fileId },
+      );
+    }
+
+    await sweepDomainPromotions(db, createTestLogger());
+    const review = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    if (!review.candidate_generated_at) throw new Error("missing candidate_generated_at");
+
+    await confirmReview({ db, userId: ADMIN_ID }, review.id, { candidateGeneratedAt: review.candidate_generated_at });
+
+    const candidate = await db
+      .selectFrom("entity_candidates")
+      .selectAll()
+      .where("domain", "=", "charlie.com")
+      .executeTakeFirstOrThrow();
+    expect(candidate.promoted_entity_id).toBe(company.id);
+
+    const domain = await db
+      .selectFrom("entity_domains")
+      .selectAll()
+      .where("domain", "=", "charlie.com")
+      .executeTakeFirstOrThrow();
+    expect(domain.entity_id).toBe(company.id);
+
+    const worksAt = await db
+      .selectFrom("entity_relationships")
+      .selectAll()
+      .where("target_entity_id", "=", company.id)
+      .where("relationship_type", "=", "works_at")
+      .execute();
+    expect(worksAt).toHaveLength(3);
+
+    const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", company.id).execute();
+    expect(mentions.map((m) => m.indexed_file_id).sort()).toEqual([
+      "file-confirm-charlie-0",
+      "file-confirm-charlie-1",
+      "file-confirm-charlie-2",
+    ]);
   });
 
   it("recreate replays facts and triggers threshold promotion identically to live sync", async () => {

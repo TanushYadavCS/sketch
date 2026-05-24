@@ -30,6 +30,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
+import { finalizeLinkedDomainCandidates } from "./domain-promotion";
 import { type MaterializeResult, buildMaterializeDeps, materializeFromFact } from "./materialize";
 
 type Entity = Selectable<EntitiesTable>;
@@ -550,6 +551,10 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
       );
     }
 
+    if (row.entity_type === "company") {
+      await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
+    }
+
     // Pick-different: write rejection against original candidate so it isn't re-suggested.
     if (pickedDifferent && row.candidate_entity_id) {
       await trxCtx.repo.addRejection({
@@ -728,6 +733,10 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
         rejectedName: row.proposed_name,
         rejectedBy: trxCtx.userId,
       });
+    }
+
+    if (row.entity_type === "company") {
+      await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
 
     // 6. Mark resolved.

@@ -461,6 +461,12 @@ export interface EntityReviewEvidenceTable {
   seen_at: Generated<string>;
 }
 
+export interface EntityReviewDomainCandidatesTable {
+  review_id: string;
+  domain_candidate_id: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityAliasRejectionsTable {
   id: string;
   entity_id: string;
@@ -529,6 +535,7 @@ export interface DB {
   entity_candidates: EntityCandidatesTable;
   entity_review_queue: EntityReviewQueueTable;
   entity_review_evidence: EntityReviewEvidenceTable;
+  entity_review_domain_candidates: EntityReviewDomainCandidatesTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
   entity_domains: EntityDomainsTable;
