@@ -166,4 +166,34 @@ describe("entity recreate routes", () => {
     expect(run.status).toBe(202);
     await waitForInactive(app, adminCookie);
   });
+
+  it("split run rechecks sync blockers after reset", async () => {
+    await seedGraph(db);
+
+    const reset = await app.request("/api/entities/recreate/reset", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "RESET_AND_RECREATE" }),
+    });
+    expect(reset.status).toBe(200);
+
+    await db.updateTable("connector_configs").set({ sync_status: "syncing" }).where("id", "=", "cfg").execute();
+    const blocked = await app.request("/api/entities/recreate/run", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ skipLlm: true }),
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toMatchObject({ error: { code: "SYNC_ACTIVE" } });
+    expect(isRecreateActive()).toBe(true);
+
+    await db.updateTable("connector_configs").set({ sync_status: "pending" }).where("id", "=", "cfg").execute();
+    const run = await app.request("/api/entities/recreate/run", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ skipLlm: true }),
+    });
+    expect(run.status).toBe(202);
+    await waitForInactive(app, adminCookie);
+  });
 });

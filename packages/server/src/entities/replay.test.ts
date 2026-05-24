@@ -390,6 +390,28 @@ describe("recreateEntityGraph", () => {
     expect(second.replay.factsRead).toBe(5);
   });
 
+  it("reseeds team directory entities during recreate", async () => {
+    await recreateEntityGraph({
+      db,
+      logger: createTestLogger(),
+      triggeredByUserId: TEST_USER_ID,
+      skipEnrichment: true,
+    });
+
+    const entity = await db.selectFrom("entities").selectAll().where("name", "=", "Admin").executeTakeFirstOrThrow();
+    expect(entity.source_type).toBe("person");
+    expect(entity.subtype).toBe("internal");
+
+    const sourceRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("entity_id", "=", entity.id)
+      .where("source", "=", "team")
+      .where("source_id", "=", TEST_USER_ID)
+      .executeTakeFirst();
+    expect(sourceRef).toBeTruthy();
+  });
+
   it("does not pass downloadImage into enrichment (no provider downloads)", async () => {
     // We can't directly assert on the runEnrichment call, but we can assert
     // that the recreate path never imports a download helper — runEnrichment's

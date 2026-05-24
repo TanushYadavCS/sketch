@@ -39,6 +39,29 @@ export function getSyncProgress(): SyncProgress[] {
   return [...activeSyncs.values()];
 }
 
+export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger): Promise<number> {
+  try {
+    const entityRepo = createEntityRepository(db);
+    const users = await db.selectFrom("users").selectAll().execute();
+    for (const user of users) {
+      await entityRepo.upsertPersonEntity({
+        name: user.name,
+        email: user.email ?? undefined,
+        subtype: "internal",
+        source: "team",
+        sourceId: user.id,
+      });
+    }
+    if (users.length > 0) {
+      logger.debug({ count: users.length }, "Team directory entities seeded");
+    }
+    return users.length;
+  } catch (err) {
+    logger.error({ err }, "Failed to seed team directory entities");
+    return 0;
+  }
+}
+
 /**
  * Extract a useful error message from fetch/network errors.
  * Node.js fetch errors bury the real cause (ECONNREFUSED, ETIMEDOUT, etc.)
@@ -846,25 +869,7 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   logger.info({ connectorCount: configs.length }, "Starting scheduled sync run");
 
-  // Seed person entities from team directory (users table)
-  try {
-    const entityRepo = createEntityRepository(db);
-    const users = await db.selectFrom("users").selectAll().execute();
-    for (const user of users) {
-      await entityRepo.upsertPersonEntity({
-        name: user.name,
-        email: user.email ?? undefined,
-        subtype: "internal",
-        source: "team",
-        sourceId: user.id,
-      });
-    }
-    if (users.length > 0) {
-      logger.debug({ count: users.length }, "Team directory entities seeded");
-    }
-  } catch (err) {
-    logger.error({ err }, "Failed to seed team directory entities");
-  }
+  await seedTeamDirectoryEntities(db, logger);
 
   await runWithConcurrency(configs, SYNC_CONCURRENCY, async (config) => {
     try {

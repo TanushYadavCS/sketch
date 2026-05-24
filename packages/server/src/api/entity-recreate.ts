@@ -115,10 +115,8 @@ export function entityRecreateRoutes(db: Kysely<DB>, logger: Logger) {
     if (currentJob && currentJob.phase !== "reset_done") {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Recreate job already active" } }, 409);
     }
-    if (!currentJob) {
-      const conflict = await getRecreateConflict(db);
-      if (conflict) return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
-    }
+    const conflict = await getRecreateConflict(db, { ignoreActiveRecreate: currentJob?.phase === "reset_done" });
+    if (conflict) return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
 
     const triggeredByUserId = (c.get("sub") as string | undefined) ?? null;
     if (!triggeredByUserId) {

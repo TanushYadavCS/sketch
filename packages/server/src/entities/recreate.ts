@@ -3,7 +3,7 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { type EnrichmentResult, isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
-import { getSyncProgress } from "../connectors/sync";
+import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { DB } from "../db/schema";
 import { type ReplayFactsSummary, replaySourceFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
@@ -107,8 +107,11 @@ async function countFilesWithoutSourceFacts(db: Kysely<DB>): Promise<number> {
   }
 }
 
-export async function getRecreateConflict(db: Kysely<DB>): Promise<RecreateConflict | null> {
-  if (isRecreateActive()) {
+export async function getRecreateConflict(
+  db: Kysely<DB>,
+  opts: { ignoreActiveRecreate?: boolean } = {},
+): Promise<RecreateConflict | null> {
+  if (!opts.ignoreActiveRecreate && isRecreateActive()) {
     return { code: "RECREATE_ACTIVE", message: "Entity recreate is already active" };
   }
   if (isEnrichmentActive()) {
@@ -236,6 +239,8 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
           warnings: ["Reset skipped — caller invoked /reset separately."],
         }
       : await resetDerivedEntityDataInner(db, logger);
+
+    await seedTeamDirectoryEntities(db, logger);
 
     const replay = await replaySourceFacts(db, logger);
 
