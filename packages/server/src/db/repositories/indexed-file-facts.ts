@@ -30,6 +30,10 @@ function normalizeName(name: string | null | undefined): string {
   return (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function normalizeEmail(email: string | null | undefined): string {
+  return (email ?? "").trim().toLowerCase();
+}
+
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
   const parts = [
     input.source,
@@ -37,7 +41,7 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
     input.relation,
     input.indexedFileId ?? "",
     input.subjectSourceId ?? "",
-    input.subjectEmail?.toLowerCase() ?? "",
+    normalizeEmail(input.subjectEmail),
     normalizeName(input.subjectName),
   ];
   return createHash("sha256").update(parts.join("|")).digest("hex");
@@ -87,7 +91,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
   return {
     async upsertFact(input: UpsertIndexedFileFactInput): Promise<void> {
       const now = new Date().toISOString();
-      const subjectEmail = input.subjectEmail?.trim().toLowerCase() || null;
+      const subjectEmail = normalizeEmail(input.subjectEmail) || null;
       const raw = validateRaw(input);
       await db
         .insertInto("indexed_file_facts")
