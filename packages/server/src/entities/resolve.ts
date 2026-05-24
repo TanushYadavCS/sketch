@@ -26,8 +26,10 @@ import {
   type EntityMentionRelation,
   createEntityRepository,
 } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
+import { inferAffiliationFromEmail } from "./affiliations";
 
 type Entity = Selectable<EntitiesTable>;
 
@@ -469,6 +471,16 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     // but column exists so handle it here.
     if (row.proposed_email && row.entity_type === "person") {
       await trxCtx.entityRepo.attachEmailIfAbsent(target.id, row.proposed_email);
+      const evidenceFileId = evidence.find((e) => e.indexed_file_id)?.indexed_file_id ?? null;
+      await inferAffiliationFromEmail(
+        { db: trxCtx.db, domainsRepo: createEntityDomainsRepository(trxCtx.db) },
+        {
+          personEntityId: target.id,
+          email: row.proposed_email,
+          evidenceFileId,
+          firstObservedByUserId: trxCtx.userId,
+        },
+      );
     }
 
     // Pick-different: write rejection against original candidate so it isn't re-suggested.

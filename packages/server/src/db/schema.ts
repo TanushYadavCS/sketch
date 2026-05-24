@@ -388,6 +388,45 @@ export interface EntityCandidatesTable {
   promoted_entity_id: string | null;
   created_at: string;
   updated_at: string;
+  domain: string | null;
+  proposed_company_name: string | null;
+  first_observed_by_user_id: string | null;
+  observed_person_entity_ids: string | null;
+  evidence_file_ids: string | null;
+}
+
+export interface EntityDomainsTable {
+  id: string;
+  entity_id: string | null;
+  domain: string;
+  kind: string;
+  is_primary: number;
+  confidence: number;
+  source: string;
+  created_at: Generated<string>;
+}
+
+export interface EntityRelationshipsTable {
+  id: string;
+  source_entity_id: string;
+  target_entity_id: string;
+  relationship_type: string;
+  confidence: string;
+  confidence_score: number;
+  source: string;
+  valid_from: Generated<string>;
+  valid_to: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface EntityRelationshipEvidenceTable {
+  id: string;
+  relationship_id: string;
+  indexed_file_id: string;
+  chunk_index: Generated<number>;
+  note: string | null;
+  created_at: Generated<string>;
 }
 
 export interface EntityReviewQueueTable {
@@ -492,4 +531,7 @@ export interface DB {
   entity_review_evidence: EntityReviewEvidenceTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
+  entity_domains: EntityDomainsTable;
+  entity_relationships: EntityRelationshipsTable;
+  entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }

@@ -6,9 +6,11 @@ import {
   type EntityMentionRelation,
   createEntityRepository,
 } from "../db/repositories/entities";
+import { type EntityDomainsRepository, createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
+import { inferAffiliationFromEmail } from "./affiliations";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
@@ -69,6 +71,7 @@ export interface MaterializeDeps {
   db: Kysely<DB>;
   entityRepo: ReturnType<typeof createEntityRepository>;
   reviewRepo: ReturnType<typeof createEntityReviewRepo>;
+  domainsRepo: EntityDomainsRepository;
   lookup: EntityLookup;
   index: LookupIndex;
   readEmail: (entity: Entity) => string | null;
@@ -200,6 +203,7 @@ export async function buildMaterializeDeps(
 ): Promise<MaterializeDeps> {
   const entityRepo = createEntityRepository(db);
   const reviewRepo = createEntityReviewRepo(db);
+  const domainsRepo = createEntityDomainsRepository(db);
   const index = await buildLookupIndex(db);
   const llmPromotionThreshold =
     typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
@@ -223,6 +227,7 @@ export async function buildMaterializeDeps(
     db,
     entityRepo,
     reviewRepo,
+    domainsRepo,
     lookup,
     index,
     llmPromotionThreshold,
@@ -477,6 +482,15 @@ async function materializePersonSeed(deps: MaterializeDeps, fact: IndexedFileFac
   })) as unknown as EntityRow;
   deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
   registerPerson(deps.index, entity);
+  await inferAffiliationFromEmail(
+    { db: deps.db, domainsRepo: deps.domainsRepo },
+    {
+      personEntityId: entity.id,
+      email: fact.subject_email,
+      evidenceFileId: fact.indexed_file_id,
+      firstObservedByUserId: fact.created_by_user_id,
+    },
+  );
   return { kind: "structural", entity };
 }
 
@@ -625,6 +639,18 @@ async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFac
     if (fact.subject_source && fact.subject_source_id) {
       deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
     }
+  }
+
+  if (entity && fact.subject_email) {
+    await inferAffiliationFromEmail(
+      { db: deps.db, domainsRepo: deps.domainsRepo },
+      {
+        personEntityId: entity.id,
+        email: fact.subject_email,
+        evidenceFileId: fact.indexed_file_id,
+        firstObservedByUserId: fact.created_by_user_id,
+      },
+    );
   }
 
   if (!entity || !fact.indexed_file_id) return { kind: resultKind, entity, mentionWritten: false };

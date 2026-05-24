@@ -15,6 +15,7 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import {
   type UpsertIndexedFileFactInput,
   buildIndexedFileFactKey,
@@ -24,12 +25,30 @@ import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
+import { normalizeName } from "./name-normalize";
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */
 const MAX_CONTENT_CHARS = 32000;
 
 /** Minimum files a candidate must appear in before auto-promotion. */
 const CANDIDATE_PROMOTION_THRESHOLD = 2;
+
+/**
+ * Minimum distinct people sharing an email domain before a
+ * `domain_observation` candidate gets auto-promoted to a real company entity.
+ *
+ * Set to 1 because the realistic sales motion here is single-person prospect
+ * calls (Calendly demos, intro calls) — anything higher leaves 90% of demo
+ * clients invisible to the graph. The false-positive floor is held by two
+ * orthogonal filters that run BEFORE this counter ever increments:
+ *   - personal/shared seed (gmail.com, outlook.com, slack.com, …)
+ *   - role-account local-parts (hello@, info@, support@, …) — see
+ *     `inferAffiliationFromEmail`
+ * Fuzzy-name collisions still pause for ECR-05 review, so an LLM-extracted
+ * company entity that conflicts with a new domain-derived name stays pending
+ * instead of forking.
+ */
+export const DOMAIN_PROMOTION_THRESHOLD = 1;
 
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
@@ -325,6 +344,179 @@ export async function handleCandidates(
   }
 
   return promoted;
+}
+
+// ── Domain Promotion Sweep ───────────────────────────────────────────────
+
+export interface DomainSweepResult {
+  scanned: number;
+  promoted: number;
+  linkedExisting: number;
+  pendingFuzzy: number;
+  worksAtCreated: number;
+}
+
+function parseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+/**
+ * Decide whether a proposed company name fuzzy-collides with any existing
+ * `company` entity. Substring overlap in either direction counts; this is
+ * the same threshold ECR-05 will use to route through `proposeEntity`.
+ *
+ * Returns `null` if no collision. Returns the colliding entity id (for logs)
+ * otherwise — callers must NOT auto-link to it; that decision is ECR-05's.
+ */
+async function findCompanyNameCollision(db: Kysely<DB>, proposedName: string): Promise<string | null> {
+  const normalized = normalizeName(proposedName);
+  if (!normalized) return null;
+  const companies = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases"])
+    .where("source_type", "=", "company")
+    .execute();
+  for (const c of companies) {
+    const candidateKeys = [c.name, ...(c.aliases ? (JSON.parse(c.aliases) as string[]) : [])];
+    for (const key of candidateKeys) {
+      const norm = normalizeName(key);
+      if (!norm) continue;
+      if (norm === normalized) return c.id;
+      if (norm.includes(normalized) || normalized.includes(norm)) return c.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Sweep `entity_candidates(type='domain_observation')` for rows above
+ * `DOMAIN_PROMOTION_THRESHOLD` and either link them to an existing corporate
+ * domain, auto-create a collision-free company, or leave them pending for
+ * ECR-05. Idempotent: re-running on already-promoted candidates is a no-op
+ * because `promoted_entity_id` is filtered out.
+ *
+ * Called from both live sync (`runConnectorSync`) and recreate
+ * (`recreateEntityGraph`) so reset → replay produces the same graph shape
+ * as a live sync that crossed the threshold organically.
+ */
+export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Promise<DomainSweepResult> {
+  const result: DomainSweepResult = {
+    scanned: 0,
+    promoted: 0,
+    linkedExisting: 0,
+    pendingFuzzy: 0,
+    worksAtCreated: 0,
+  };
+
+  const entityRepo = createEntityRepository(db);
+  const domainsRepo = createEntityDomainsRepository(db);
+
+  const candidates = await db
+    .selectFrom("entity_candidates")
+    .selectAll()
+    .where("type", "=", "domain_observation")
+    .where("promoted_entity_id", "is", null)
+    .where("seen_count", ">=", DOMAIN_PROMOTION_THRESHOLD)
+    .execute();
+
+  result.scanned = candidates.length;
+
+  for (const candidate of candidates) {
+    const domain = candidate.domain;
+    const proposedName = candidate.proposed_company_name ?? candidate.name;
+    if (!domain || !proposedName) continue;
+    const observedPeople = parseStringArray(candidate.observed_person_entity_ids);
+    const evidenceFiles = parseStringArray(candidate.evidence_file_ids);
+    const firstEvidenceFile = evidenceFiles[0] ?? null;
+
+    let companyEntityId: string | null = null;
+
+    const existingCorporate = await db
+      .selectFrom("entity_domains")
+      .select(["entity_id"])
+      .where("domain", "=", domain)
+      .where("kind", "=", "corporate")
+      .where("entity_id", "is not", null)
+      .executeTakeFirst();
+
+    if (existingCorporate?.entity_id) {
+      companyEntityId = existingCorporate.entity_id;
+      result.linkedExisting++;
+    } else {
+      const collision = await findCompanyNameCollision(db, proposedName);
+      if (collision) {
+        logger.info(
+          { domain, proposedName, collidingEntityId: collision },
+          "Domain candidate paused on fuzzy collision (pending ECR-05)",
+        );
+        result.pendingFuzzy++;
+        continue;
+      }
+      const company = await entityRepo.upsertEntity({
+        name: proposedName,
+        sourceType: "company",
+        metadata: { origin: "domain_promotion", domain },
+        status: "confirmed",
+      });
+      companyEntityId = company.id;
+      await domainsRepo.upsertDomain({
+        entityId: company.id,
+        domain,
+        kind: "corporate",
+        source: "observed",
+        confidence: 0.9,
+        isPrimary: true,
+      });
+      result.promoted++;
+      logger.info({ domain, proposedName, companyEntityId: company.id }, "Promoted domain candidate to company");
+    }
+
+    for (const personId of observedPeople) {
+      const relationshipId = await domainsRepo.upsertWorksAt({
+        personEntityId: personId,
+        companyEntityId,
+        confidence: "INFERRED",
+        confidenceScore: 0.9,
+        source: "email_domain",
+      });
+      if (firstEvidenceFile) {
+        await domainsRepo.addEvidence(relationshipId, firstEvidenceFile, -1, `domain_promotion:${domain}`);
+      }
+      result.worksAtCreated++;
+    }
+
+    // Mention timeline: write entity_mentions for the company on every
+    // evidence file so the drawer shows real context. Without this the
+    // drawer renders "No mentions yet" even when the works_at graph is
+    // healthy — the UI reads entity_mentions, not entity_relationships.
+    for (const fileId of evidenceFiles) {
+      await entityRepo.createMention({
+        entityId: companyEntityId,
+        indexedFileId: fileId,
+        confidence: "INFERRED",
+        source: "email_domain",
+        relation: "mentioned",
+      });
+    }
+
+    await db
+      .updateTable("entity_candidates")
+      .set({ promoted_entity_id: companyEntityId, updated_at: new Date().toISOString() })
+      .where("id", "=", candidate.id)
+      .execute();
+  }
+
+  if (result.scanned > 0) {
+    logger.info({ result }, "Domain promotion sweep complete");
+  }
+  return result;
 }
 
 // ── Summary Generation ───────────────────────────────────────────────────
