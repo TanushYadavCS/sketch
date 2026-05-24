@@ -14,6 +14,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData, matchesAsWord, runEnrichment } from "./enrichment";
@@ -328,6 +329,25 @@ describe("runEnrichment — claim semantics", () => {
       source: "llm_extraction",
       relation: "mentioned",
     });
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: fileId,
+      connectorConfigId: "conn-1",
+      contentHash: "hash",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Jane Doe",
+      subjectSource: "llm_extraction",
+      subjectSourceId: `${fileId}:hash:Jane Doe`,
+      raw: {
+        contentHash: "hash",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Jane Doe",
+        type: "person",
+        variations: [],
+      },
+    });
 
     await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
 
@@ -337,6 +357,38 @@ describe("runEnrichment — claim semantics", () => {
       .where("indexed_file_id", "=", fileId)
       .execute();
     expect(mentions).toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+  });
+
+  it("deterministic relinking removes legacy llm_extraction mentions without backing facts", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "Jane Doe discussed the launch plan.");
+    await setStatus(fileId, "pending");
+    const entity = await createEntityRepository(db).upsertEntity({
+      name: "Jane Doe",
+      sourceType: "person",
+      status: "confirmed",
+    });
+    await createEntityRepository(db).createMention({
+      entityId: entity.id,
+      indexedFileId: fileId,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+
+    await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    expect(mentions).not.toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+    expect(mentions).toContainEqual({
+      source: "deterministic_substring",
+      confidence: "INFERRED",
+      relation: "mentioned",
+    });
   });
 });
 
