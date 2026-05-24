@@ -53,6 +53,24 @@ export async function up<DB>(db: Kysely<DB>): Promise<void> {
 
 export async function down<DB>(db: Kysely<DB>): Promise<void> {
   await db.schema.dropIndex("uq_entity_mentions_entity_file_relation").ifExists().execute();
+
+  const duplicates = await sql<{ entity_id: string; indexed_file_id: string; cnt: number }>`
+    SELECT entity_id, indexed_file_id, COUNT(*) AS cnt
+      FROM entity_mentions
+     GROUP BY entity_id, indexed_file_id
+    HAVING COUNT(*) > 1
+     LIMIT 5
+  `.execute(db);
+
+  if (duplicates.rows.length > 0) {
+    const sample = duplicates.rows
+      .map((r) => `(entity_id=${r.entity_id}, indexed_file_id=${r.indexed_file_id}, count=${r.cnt})`)
+      .join("; ");
+    throw new Error(
+      `migration 059-mention-provenance down: duplicate (entity_id, indexed_file_id) rows found in entity_mentions. Sample: ${sample}. Dedupe relation-specific rows before re-running migration.`,
+    );
+  }
+
   await db.schema
     .createIndex("idx_entity_mentions_entity_file_unique")
     .on("entity_mentions")

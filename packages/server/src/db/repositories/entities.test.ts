@@ -89,6 +89,43 @@ describe("createEntityRepository createMention", () => {
     });
   });
 
+  it("promotes inferred mentions when an extracted fact arrives for the same relation", async () => {
+    const entity = await repo.upsertPersonEntity({
+      name: "Beetu",
+      email: "beetu@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:beetu",
+    });
+
+    await repo.createMention({
+      entityId: entity.id,
+      indexedFileId: "file-1",
+      contextSnippet: "Beetu appears in body text",
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+    await repo.createMention({
+      entityId: entity.id,
+      indexedFileId: "file-1",
+      contextSnippet: "Parent folder",
+      confidence: "EXTRACTED",
+      source: "parent_entity",
+      relation: "mentioned",
+    });
+
+    const rows = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", entity.id).execute();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      indexed_file_id: "file-1",
+      context_snippet: "Parent folder",
+      confidence: "EXTRACTED",
+      source: "parent_entity",
+      relation: "mentioned",
+    });
+  });
+
   it("allows distinct relations for the same entity and file", async () => {
     const entity = await repo.upsertPersonEntity({
       name: "Beetu",

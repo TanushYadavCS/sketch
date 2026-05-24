@@ -229,21 +229,33 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Mentions ──
 
     async createMention(data: CreateMentionData) {
-      await db
-        .insertInto("entity_mentions")
-        .values({
-          id: randomUUID(),
-          entity_id: data.entityId,
-          indexed_file_id: data.indexedFileId,
-          chunk_index: data.chunkIndex ?? null,
-          context_snippet: data.contextSnippet ?? null,
-          confidence: data.confidence,
-          source: data.source,
-          relation: data.relation,
-          mentioned_at: new Date().toISOString(),
-        })
-        .onConflict((oc) => oc.columns(["entity_id", "indexed_file_id", "relation"]).doNothing())
-        .execute();
+      let insert = db.insertInto("entity_mentions").values({
+        id: randomUUID(),
+        entity_id: data.entityId,
+        indexed_file_id: data.indexedFileId,
+        chunk_index: data.chunkIndex ?? null,
+        context_snippet: data.contextSnippet ?? null,
+        confidence: data.confidence,
+        source: data.source,
+        relation: data.relation,
+        mentioned_at: new Date().toISOString(),
+      });
+
+      if (data.confidence === "EXTRACTED") {
+        insert = insert.onConflict((oc) =>
+          oc.columns(["entity_id", "indexed_file_id", "relation"]).doUpdateSet({
+            chunk_index: data.chunkIndex ?? null,
+            context_snippet: data.contextSnippet ?? null,
+            confidence: data.confidence,
+            source: data.source,
+            mentioned_at: new Date().toISOString(),
+          }),
+        );
+      } else {
+        insert = insert.onConflict((oc) => oc.columns(["entity_id", "indexed_file_id", "relation"]).doNothing());
+      }
+
+      await insert.execute();
     },
 
     async getMentionsForEntity(entityId: string, opts?: { limit?: number; since?: string }) {

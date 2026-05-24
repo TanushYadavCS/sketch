@@ -146,4 +146,29 @@ describe("059-mention-provenance", () => {
       "migration 059-mention-provenance: duplicate (entity_id, indexed_file_id, relation) rows found",
     );
   });
+
+  it("aborts down migration when relation-specific rows cannot fit the legacy unique index", async () => {
+    await createMentionTable(db);
+    await migration.up(db);
+    await sql`
+      INSERT INTO entity_mentions (
+        id,
+        entity_id,
+        indexed_file_id,
+        chunk_index,
+        context_snippet,
+        confidence,
+        source,
+        relation,
+        mentioned_at
+      )
+      VALUES
+        ('m-1', 'e-1', 'f-1', NULL, NULL, 'EXTRACTED', 'assignee', 'assigned', '2026-01-01T00:00:00.000Z'),
+        ('m-2', 'e-1', 'f-1', NULL, NULL, 'EXTRACTED', 'parent_entity', 'mentioned', '2026-01-01T00:00:00.000Z')
+    `.execute(db);
+
+    await expect(migration.down(db)).rejects.toThrow(
+      "migration 059-mention-provenance down: duplicate (entity_id, indexed_file_id) rows found",
+    );
+  });
 });

@@ -420,23 +420,14 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                 }
               }
               if (entity) {
-                const exists = await db
-                  .selectFrom("entity_mentions")
-                  .select("id")
-                  .where("entity_id", "=", entity.id)
-                  .where("indexed_file_id", "=", existing.id)
-                  .where("relation", "=", "mentioned")
-                  .executeTakeFirst();
-                if (!exists) {
-                  await entityRepo.createMention({
-                    entityId: entity.id,
-                    indexedFileId: existing.id,
-                    contextSnippet: parent.contextSnippet ?? null,
-                    confidence: "EXTRACTED",
-                    source: "parent_entity",
-                    relation: "mentioned",
-                  });
-                }
+                await entityRepo.createMention({
+                  entityId: entity.id,
+                  indexedFileId: existing.id,
+                  contextSnippet: parent.contextSnippet ?? null,
+                  confidence: "EXTRACTED",
+                  source: "parent_entity",
+                  relation: "mentioned",
+                });
               }
             }
           }
