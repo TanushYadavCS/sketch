@@ -288,7 +288,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000);
+  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
 
   const slackAdapterDeps = {
     db,

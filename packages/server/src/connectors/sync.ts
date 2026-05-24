@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import type { Config } from "../config";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
@@ -159,7 +160,12 @@ function parseAliases(aliases: string | null): string[] {
 /**
  * Run a sync for a single connector config.
  */
-export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string, logger: Logger): Promise<SyncResult> {
+export async function runConnectorSync(
+  db: Kysely<DB>,
+  connectorConfigId: string,
+  logger: Logger,
+  appConfig?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">,
+): Promise<SyncResult> {
   if (isRecreateActive()) {
     logger.info({ connectorId: connectorConfigId }, "Skipping connector sync during entity recreate");
     return {
@@ -641,14 +647,37 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
     }
 
     if (!config.sync_cursor && seenProviderFileIds.size > 0) {
-      result.itemsArchived = await repo.archiveStaleFiles(config.id, seenProviderFileIds);
-      if (result.itemsArchived > 0) {
-        await entityRepo.archiveEntitiesForArchivedFiles();
-      }
-      const affectedFactFiles = await factRepo.tombstoneStaleFactsForConnector(config.id, syncRunId);
-      if (affectedFactFiles.length > 0) {
-        await deleteMaterializedFactMentions(db, connectorType, affectedFactFiles);
-        await factRepo.clearMaterializedAtForActiveFacts(affectedFactFiles);
+      const reconcileResult = await factRepo.reconcileStaleFacts(
+        { kind: "connector", connectorConfigId: config.id, syncRunId },
+        null,
+        {
+          force: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
+          maxDeletionRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
+        },
+      );
+
+      if (reconcileResult.skipped) {
+        syncLogger.warn(
+          {
+            connectorConfigId: config.id,
+            activeBefore: reconcileResult.activeBefore,
+            wouldTombstone: reconcileResult.wouldTombstone,
+            ratio: reconcileResult.skipped.ratio,
+            threshold: reconcileResult.skipped.threshold,
+            override: "SYNC_ALLOW_LARGE_RECONCILE=true",
+          },
+          "Stale-fact reconcile skipped: delta exceeds threshold",
+        );
+      } else {
+        result.itemsArchived = await repo.archiveStaleFiles(config.id, seenProviderFileIds);
+        if (result.itemsArchived > 0) {
+          await entityRepo.archiveEntitiesForArchivedFiles();
+        }
+
+        if (reconcileResult.affectedIndexedFileIds.length > 0) {
+          await deleteMaterializedFactMentions(db, connectorType, reconcileResult.affectedIndexedFileIds);
+          await factRepo.clearMaterializedAtForActiveFacts(reconcileResult.affectedIndexedFileIds);
+        }
       }
     }
 
@@ -702,6 +731,7 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
+  appConfig?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">;
 }
 
 /**
@@ -777,7 +807,7 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   await runWithConcurrency(configs, SYNC_CONCURRENCY, async (config) => {
     try {
-      await runConnectorSync(db, config.id, logger);
+      await runConnectorSync(db, config.id, logger, deps?.appConfig);
     } catch (err) {
       logger.error({ err, connectorId: config.id }, "Scheduled sync failed for connector");
     }

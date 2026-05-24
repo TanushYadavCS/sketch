@@ -580,24 +580,10 @@ async function reconcileLlmExtractionFacts(
     await factRepo.upsertFact(input);
   }
 
-  let tombstone = db
-    .updateTable("indexed_file_facts")
-    .set({ deleted_at: new Date().toISOString(), materialized_at: null, updated_at: new Date().toISOString() })
-    .where("indexed_file_id", "=", file.id)
-    .where("source", "=", "llm_extraction")
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null);
-  tombstone =
-    emittedKeys.length > 0
-      ? tombstone.where((eb) =>
-          eb.or([
-            eb("content_hash", "!=", contentHash),
-            eb("content_hash", "is", null),
-            eb("fact_key", "not in", emittedKeys),
-          ]),
-        )
-      : tombstone;
-  await tombstone.execute();
+  await factRepo.reconcileStaleFacts(
+    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
+    new Set(emittedKeys),
+  );
 
   await db
     .deleteFrom("entity_mentions")

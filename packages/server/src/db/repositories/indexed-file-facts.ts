@@ -31,6 +31,23 @@ export interface UpsertIndexedFileFactInput {
   raw?: IndexedFileFactRaw;
 }
 
+export type ReconcileScope =
+  | { kind: "connector"; connectorConfigId: string; syncRunId: string }
+  | { kind: "file"; indexedFileId: string; source: string; factType: string };
+
+export interface ReconcileOptions {
+  maxDeletionRatio?: number;
+  force?: boolean;
+}
+
+export interface ReconcileResult {
+  activeBefore: number;
+  wouldTombstone: number;
+  tombstoned: number;
+  affectedIndexedFileIds: string[];
+  skipped?: { reason: "delta_exceeds_threshold"; ratio: number; threshold: number };
+}
+
 function normalizeName(name: string | null | undefined): string {
   return (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -177,23 +194,141 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    async tombstoneStaleFactsForConnector(connectorConfigId: string, syncRunId: string): Promise<string[]> {
-      const stale = await db
-        .selectFrom("indexed_file_facts")
-        .select("indexed_file_id")
-        .where("connector_config_id", "=", connectorConfigId)
-        .where("deleted_at", "is", null)
-        .where((eb) => eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", syncRunId)]))
-        .execute();
+    async reconcileStaleFacts(
+      scope: ReconcileScope,
+      seenFactKeys: Set<string> | null,
+      opts: ReconcileOptions = {},
+    ): Promise<ReconcileResult> {
+      const threshold = opts.maxDeletionRatio ?? (scope.kind === "connector" ? 0.5 : Number.POSITIVE_INFINITY);
+      const countActive =
+        scope.kind === "connector"
+          ? await db
+              .selectFrom("indexed_file_facts")
+              .select(db.fn.countAll<number>().as("count"))
+              .where("connector_config_id", "=", scope.connectorConfigId)
+              .where("deleted_at", "is", null)
+              .executeTakeFirst()
+          : await db
+              .selectFrom("indexed_file_facts")
+              .select(db.fn.countAll<number>().as("count"))
+              .where("indexed_file_id", "=", scope.indexedFileId)
+              .where("source", "=", scope.source)
+              .where("fact_type", "=", scope.factType)
+              .where("deleted_at", "is", null)
+              .executeTakeFirst();
+      const activeBefore = Number(countActive?.count ?? 0);
+
+      const countStale =
+        scope.kind === "connector"
+          ? await db
+              .selectFrom("indexed_file_facts")
+              .select(db.fn.countAll<number>().as("count"))
+              .where("connector_config_id", "=", scope.connectorConfigId)
+              .where("deleted_at", "is", null)
+              .where((eb) =>
+                eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", scope.syncRunId)]),
+              )
+              .executeTakeFirst()
+          : seenFactKeys && seenFactKeys.size > 0
+            ? await db
+                .selectFrom("indexed_file_facts")
+                .select(db.fn.countAll<number>().as("count"))
+                .where("indexed_file_id", "=", scope.indexedFileId)
+                .where("source", "=", scope.source)
+                .where("fact_type", "=", scope.factType)
+                .where("deleted_at", "is", null)
+                .where("fact_key", "not in", [...seenFactKeys])
+                .executeTakeFirst()
+            : await db
+                .selectFrom("indexed_file_facts")
+                .select(db.fn.countAll<number>().as("count"))
+                .where("indexed_file_id", "=", scope.indexedFileId)
+                .where("source", "=", scope.source)
+                .where("fact_type", "=", scope.factType)
+                .where("deleted_at", "is", null)
+                .executeTakeFirst();
+
+      const wouldTombstone = Number(countStale?.count ?? 0);
+      const ratio = activeBefore > 0 ? wouldTombstone / activeBefore : 0;
+      if (!opts.force && activeBefore > 0 && ratio > threshold) {
+        return {
+          activeBefore,
+          wouldTombstone,
+          tombstoned: 0,
+          affectedIndexedFileIds: [],
+          skipped: { reason: "delta_exceeds_threshold", ratio, threshold },
+        };
+      }
+
+      const stale =
+        scope.kind === "connector"
+          ? await db
+              .selectFrom("indexed_file_facts")
+              .select("indexed_file_id")
+              .where("connector_config_id", "=", scope.connectorConfigId)
+              .where("deleted_at", "is", null)
+              .where((eb) =>
+                eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", scope.syncRunId)]),
+              )
+              .execute()
+          : seenFactKeys && seenFactKeys.size > 0
+            ? await db
+                .selectFrom("indexed_file_facts")
+                .select("indexed_file_id")
+                .where("indexed_file_id", "=", scope.indexedFileId)
+                .where("source", "=", scope.source)
+                .where("fact_type", "=", scope.factType)
+                .where("deleted_at", "is", null)
+                .where("fact_key", "not in", [...seenFactKeys])
+                .execute()
+            : await db
+                .selectFrom("indexed_file_facts")
+                .select("indexed_file_id")
+                .where("indexed_file_id", "=", scope.indexedFileId)
+                .where("source", "=", scope.source)
+                .where("fact_type", "=", scope.factType)
+                .where("deleted_at", "is", null)
+                .execute();
+
       const now = new Date().toISOString();
-      await db
-        .updateTable("indexed_file_facts")
-        .set({ deleted_at: now, materialized_at: null, updated_at: now })
-        .where("connector_config_id", "=", connectorConfigId)
-        .where("deleted_at", "is", null)
-        .where((eb) => eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", syncRunId)]))
-        .execute();
-      return [...new Set(stale.map((row) => row.indexed_file_id).filter((id): id is string => Boolean(id)))];
+      const updateResult =
+        scope.kind === "connector"
+          ? await db
+              .updateTable("indexed_file_facts")
+              .set({ deleted_at: now, materialized_at: null, updated_at: now })
+              .where("connector_config_id", "=", scope.connectorConfigId)
+              .where("deleted_at", "is", null)
+              .where((eb) =>
+                eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", scope.syncRunId)]),
+              )
+              .executeTakeFirst()
+          : seenFactKeys && seenFactKeys.size > 0
+            ? await db
+                .updateTable("indexed_file_facts")
+                .set({ deleted_at: now, materialized_at: null, updated_at: now })
+                .where("indexed_file_id", "=", scope.indexedFileId)
+                .where("source", "=", scope.source)
+                .where("fact_type", "=", scope.factType)
+                .where("deleted_at", "is", null)
+                .where("fact_key", "not in", [...seenFactKeys])
+                .executeTakeFirst()
+            : await db
+                .updateTable("indexed_file_facts")
+                .set({ deleted_at: now, materialized_at: null, updated_at: now })
+                .where("indexed_file_id", "=", scope.indexedFileId)
+                .where("source", "=", scope.source)
+                .where("fact_type", "=", scope.factType)
+                .where("deleted_at", "is", null)
+                .executeTakeFirst();
+
+      return {
+        activeBefore,
+        wouldTombstone,
+        tombstoned: Number(updateResult.numUpdatedRows ?? 0),
+        affectedIndexedFileIds: [
+          ...new Set(stale.map((row) => row.indexed_file_id).filter((id): id is string => Boolean(id))),
+        ],
+      };
     },
 
     async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {
