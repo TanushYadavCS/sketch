@@ -10,9 +10,21 @@ export type IndexedFileFactType =
   | "parent_entity"
   | "structural_seed"
   | "person_seed"
-  | "llm_extracted";
+  | "llm_extracted"
+  | "llm_relation";
 
-export type IndexedFileFactRelation = "attended" | "assigned" | "authored" | "mentioned" | "seeded";
+export type IndexedFileFactRelation =
+  | "attended"
+  | "assigned"
+  | "authored"
+  | "mentioned"
+  | "seeded"
+  | "works_at"
+  | "leads"
+  | "contributes_to"
+  | "builds"
+  | "part_of"
+  | "partner_of";
 
 export interface UpsertIndexedFileFactInput {
   indexedFileId?: string | null;
@@ -56,6 +68,20 @@ function normalizeEmail(email: string | null | undefined): string {
   return (email ?? "").trim().toLowerCase();
 }
 
+function rawString(input: UpsertIndexedFileFactInput, key: string): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const value = raw?.[key];
+  return typeof value === "string" ? normalizeName(value) : "";
+}
+
+function rawEndpoint(input: UpsertIndexedFileFactInput, key: "source" | "target", field: "name" | "type"): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const endpoint = raw?.[key];
+  if (!isRecord(endpoint)) return "";
+  const value = endpoint[field];
+  return typeof value === "string" ? normalizeName(value) : "";
+}
+
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
   const parts = [
     input.connectorConfigId ?? "",
@@ -69,6 +95,15 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
     normalizeEmail(input.subjectEmail),
     normalizeName(input.subjectName),
   ];
+  if (input.factType === "llm_relation") {
+    parts.push(
+      rawString(input, "relationType"),
+      rawEndpoint(input, "source", "name"),
+      rawEndpoint(input, "source", "type"),
+      rawEndpoint(input, "target", "name"),
+      rawEndpoint(input, "target", "type"),
+    );
+  }
   return createHash("sha256").update(parts.join("|")).digest("hex");
 }
 
@@ -133,6 +168,28 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   } else if (input.factType === "llm_extracted") {
     if (!hasString(raw, "contentHash") || !hasString(raw, "promptVersion")) {
       throw new Error("llm_extracted facts require raw.contentHash and raw.promptVersion");
+    }
+  } else if (input.factType === "llm_relation") {
+    if (
+      !hasString(raw, "contentHash") ||
+      !hasString(raw, "promptVersion") ||
+      !hasString(raw, "relationType") ||
+      !isRecord(raw.source) ||
+      !isRecord(raw.target)
+    ) {
+      throw new Error(
+        "llm_relation facts require raw.contentHash, raw.promptVersion, relationType, source, and target",
+      );
+    }
+    const source = raw.source as Record<string, unknown>;
+    const target = raw.target as Record<string, unknown>;
+    if (
+      !hasString(source, "name") ||
+      !hasString(source, "type") ||
+      !hasString(target, "name") ||
+      !hasString(target, "type")
+    ) {
+      throw new Error("llm_relation endpoints require name and type");
     }
   }
 

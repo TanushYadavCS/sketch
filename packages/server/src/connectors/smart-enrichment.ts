@@ -64,6 +64,25 @@ interface ExtractedMention {
   variations: string[];
 }
 
+interface ExtractedRelationEndpoint {
+  name: string;
+  type: string;
+  variations?: string[];
+}
+
+interface ExtractedRelation {
+  type: string;
+  source: ExtractedRelationEndpoint;
+  target: ExtractedRelationEndpoint;
+  confidence: number;
+  context?: string;
+}
+
+interface EntityExtractionResult {
+  mentions: ExtractedMention[];
+  relations: ExtractedRelation[];
+}
+
 interface MatchedEntity {
   entityId: string;
   name: string;
@@ -105,7 +124,7 @@ export async function extractEntities(
   file: FileContext,
   orgContext?: { orgName?: string; description?: string; industry?: string } | null,
   knownEntities?: Array<{ name: string; type: string; description?: string }>,
-): Promise<ExtractedMention[]> {
+): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
   const orgSection = orgContext?.description
@@ -144,24 +163,52 @@ DO NOT extract:
 
 For each entity, provide the primary name, type, and name variations.
 
-Return a JSON array:
-[
-  { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"] },
-  { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"] }
-]
+Also extract direct relationships only when the text explicitly supports them.
+
+Valid relationship types:
+- "works_at": person -> company
+- "leads": person -> project | product | team
+- "contributes_to": person -> project | product
+- "builds": company -> product
+- "part_of": project -> project, product -> product, team -> company
+- "partner_of": company -> company
+
+Return one JSON object:
+{
+  "mentions": [
+    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"] },
+    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"] }
+  ],
+  "relations": [
+    {
+      "type": "leads",
+      "source": { "name": "Sarah Chen", "type": "person", "variations": ["Sarah"] },
+      "target": { "name": "Project Atlas", "type": "project", "variations": ["Atlas"] },
+      "confidence": 0.92,
+      "context": "Sarah Chen leads Project Atlas"
+    }
+  ]
+}
 
 Valid types: "person", "project", "company", "product", "team"
 
-If no notable entities are found, return an empty array: []
+If no notable entities or relations are found, return { "mentions": [], "relations": [] }.
 
 <content>
 ${truncatedContent}
 </content>`;
 
-  return generator.generateJSON<ExtractedMention[]>(prompt, {
+  const parsed = await generator.generateJSON<ExtractedMention[] | EntityExtractionResult>(prompt, {
     maxTokens: 4096,
     label: `extractEntities:${file.id}`,
   });
+  if (Array.isArray(parsed)) {
+    return { mentions: parsed, relations: [] };
+  }
+  return {
+    mentions: Array.isArray(parsed.mentions) ? parsed.mentions : [],
+    relations: Array.isArray(parsed.relations) ? parsed.relations : [],
+  };
 }
 
 /**
@@ -457,21 +504,27 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   logger.info(fileMeta, "smartEnrichFile: start");
 
   const t0 = Date.now();
-  let mentions: ExtractedMention[];
+  let extraction: EntityExtractionResult;
   try {
-    mentions = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
+    extraction = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
     throw err;
   }
   logger.info(
-    { fileId: file.id, stage: "extractEntities", mentionCount: mentions.length, durationMs: Date.now() - t0 },
+    {
+      fileId: file.id,
+      stage: "extractEntities",
+      mentionCount: extraction.mentions.length,
+      relationCount: extraction.relations.length,
+      durationMs: Date.now() - t0,
+    },
     "smartEnrichFile: stage done",
   );
 
-  await reconcileLlmExtractionFacts(deps, file, mentions);
+  await reconcileLlmExtractionFacts(deps, file, extraction);
 
-  const { matched, unmatched } = await matchEntities(db, mentions);
+  const { matched, unmatched } = await matchEntities(db, extraction.mentions);
   const allMatched = matched.map((m) => m.entity);
   logger.debug(
     { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length },
@@ -562,7 +615,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
 async function reconcileLlmExtractionFacts(
   deps: SmartEnrichmentDeps,
   file: FileContext,
-  mentions: ExtractedMention[],
+  extraction: EntityExtractionResult,
 ): Promise<void> {
   const { db } = deps;
   const factRepo = createIndexedFileFactRepository(db);
@@ -572,9 +625,10 @@ async function reconcileLlmExtractionFacts(
     .where("id", "=", file.connectorConfigId)
     .executeTakeFirst();
   const contentHash = file.contentHash ?? `missing-content-hash:${file.id}`;
-  const emittedKeys: string[] = [];
+  const emittedMentionKeys: string[] = [];
+  const emittedRelationKeys: string[] = [];
 
-  for (const mention of mentions) {
+  for (const mention of extraction.mentions) {
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
     const input: UpsertIndexedFileFactInput = {
       indexedFileId: file.id,
@@ -597,13 +651,24 @@ async function reconcileLlmExtractionFacts(
         variations: mention.variations,
       },
     };
-    emittedKeys.push(buildIndexedFileFactKey(input));
+    emittedMentionKeys.push(buildIndexedFileFactKey(input));
+    await factRepo.upsertFact(input);
+  }
+
+  for (const relation of extraction.relations) {
+    const input = buildRelationFactInput({ file, ownerUserId: owner?.created_by ?? null, contentHash, relation });
+    if (!input) continue;
+    emittedRelationKeys.push(buildIndexedFileFactKey(input));
     await factRepo.upsertFact(input);
   }
 
   await factRepo.reconcileStaleFacts(
     { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
-    new Set(emittedKeys),
+    new Set(emittedMentionKeys),
+  );
+  await factRepo.reconcileStaleFacts(
+    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
+    new Set(emittedRelationKeys),
   );
 
   await db
@@ -614,6 +679,63 @@ async function reconcileLlmExtractionFacts(
     .execute();
 
   await materializeUnmaterializedFacts(db, deps.logger);
+}
+
+const RELATION_TYPES = ["works_at", "leads", "contributes_to", "builds", "part_of", "partner_of"] as const;
+
+function normalizeRelationType(raw: string): (typeof RELATION_TYPES)[number] | null {
+  const normalized = raw.trim().toLowerCase();
+  return (RELATION_TYPES as readonly string[]).includes(normalized)
+    ? (normalized as (typeof RELATION_TYPES)[number])
+    : null;
+}
+
+function buildRelationFactInput(input: {
+  file: FileContext;
+  ownerUserId: string | null;
+  contentHash: string;
+  relation: ExtractedRelation;
+}): UpsertIndexedFileFactInput | null {
+  const relationType = normalizeRelationType(input.relation.type);
+  if (!relationType || input.relation.confidence < 0.85) return null;
+  const sourceName = input.relation.source.name?.trim();
+  const targetName = input.relation.target.name?.trim();
+  if (!sourceName || !targetName) return null;
+  const sourceType = input.relation.source.type?.trim().toLowerCase();
+  const targetType = input.relation.target.type?.trim().toLowerCase();
+  if (!sourceType || !targetType) return null;
+
+  return {
+    indexedFileId: input.file.id,
+    connectorConfigId: input.file.connectorConfigId,
+    createdByUserId: input.ownerUserId,
+    contentHash: input.contentHash,
+    source: "llm_extraction",
+    factType: "llm_relation",
+    relation: relationType,
+    subjectName: sourceName,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${input.file.id}:${input.contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${relationType}:${sourceName}:${targetName}`,
+    contextSnippet: input.relation.context ?? null,
+    raw: {
+      contentHash: input.contentHash,
+      promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+      model: "gemini",
+      relationType,
+      confidence: input.relation.confidence,
+      context: input.relation.context,
+      source: {
+        name: sourceName,
+        type: sourceType,
+        variations: input.relation.source.variations ?? [],
+      },
+      target: {
+        name: targetName,
+        type: targetType,
+        variations: input.relation.target.variations ?? [],
+      },
+    },
+  };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

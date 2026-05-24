@@ -156,6 +156,16 @@ export type IndexedFileFactRaw =
       variations: string[];
     }
   | {
+      contentHash: string;
+      promptVersion: string;
+      model: string;
+      relationType: string;
+      confidence: number;
+      context?: string;
+      source: { name: string; type: string; variations: string[] };
+      target: { name: string; type: string; variations: string[] };
+    }
+  | {
       providerFileId: string;
       providerUrl?: string | null;
       fileType: string;

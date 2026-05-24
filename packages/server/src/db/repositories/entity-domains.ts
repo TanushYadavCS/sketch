@@ -6,6 +6,7 @@ import type { DB, EntitiesTable } from "../schema";
 
 export type DomainKind = "corporate" | "personal" | "shared";
 export type RelationshipConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type EntityRelationshipType = "works_at" | "leads" | "contributes_to" | "builds" | "part_of" | "partner_of";
 
 export interface UpsertDomainInput {
   entityId: string | null;
@@ -31,6 +32,16 @@ export interface UpsertDomainObservationInput {
   observedPersonEntityId: string;
   evidenceFileId: string;
   firstObservedByUserId?: string | null;
+}
+
+export interface UpsertRelationshipInput {
+  sourceEntityId: string;
+  targetEntityId: string;
+  relationshipType: EntityRelationshipType;
+  confidence: RelationshipConfidence;
+  confidenceScore: number;
+  source: string;
+  validFrom?: string;
 }
 
 /**
@@ -76,6 +87,35 @@ function parseJsonArray(raw: string | null): string[] {
 }
 
 export function createEntityDomainsRepository(db: Kysely<DB>) {
+  async function upsertRelationship(input: UpsertRelationshipInput): Promise<string> {
+    const validFrom = input.validFrom ?? "";
+    const id = randomUUID();
+    const greatest = isPg(db)
+      ? sql`GREATEST(entity_relationships.confidence_score, EXCLUDED.confidence_score)`
+      : sql`max(entity_relationships.confidence_score, EXCLUDED.confidence_score)`;
+    await sql`
+      INSERT INTO entity_relationships
+        (id, source_entity_id, target_entity_id, relationship_type, confidence, confidence_score, source, valid_from, valid_to, created_at, updated_at)
+      VALUES
+        (${id}, ${input.sourceEntityId}, ${input.targetEntityId}, ${input.relationshipType}, ${input.confidence}, ${input.confidenceScore}, ${input.source}, ${validFrom}, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
+      DO UPDATE SET
+        confidence = EXCLUDED.confidence,
+        confidence_score = ${greatest},
+        source = EXCLUDED.source,
+        updated_at = CURRENT_TIMESTAMP
+    `.execute(db);
+    const row = await db
+      .selectFrom("entity_relationships")
+      .select("id")
+      .where("source_entity_id", "=", input.sourceEntityId)
+      .where("target_entity_id", "=", input.targetEntityId)
+      .where("relationship_type", "=", input.relationshipType)
+      .where("valid_from", "=", validFrom)
+      .executeTakeFirstOrThrow();
+    return row.id;
+  }
+
   return {
     normalizeEmailDomain,
 
@@ -135,33 +175,18 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    upsertRelationship,
+
     async upsertWorksAt(input: UpsertWorksAtInput): Promise<string> {
-      const validFrom = input.validFrom ?? "";
-      const id = randomUUID();
-      const greatest = isPg(db)
-        ? sql`GREATEST(entity_relationships.confidence_score, EXCLUDED.confidence_score)`
-        : sql`max(entity_relationships.confidence_score, EXCLUDED.confidence_score)`;
-      await sql`
-        INSERT INTO entity_relationships
-          (id, source_entity_id, target_entity_id, relationship_type, confidence, confidence_score, source, valid_from, valid_to, created_at, updated_at)
-        VALUES
-          (${id}, ${input.personEntityId}, ${input.companyEntityId}, 'works_at', ${input.confidence}, ${input.confidenceScore}, ${input.source}, ${validFrom}, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
-        DO UPDATE SET
-          confidence = EXCLUDED.confidence,
-          confidence_score = ${greatest},
-          source = EXCLUDED.source,
-          updated_at = CURRENT_TIMESTAMP
-      `.execute(db);
-      const row = await db
-        .selectFrom("entity_relationships")
-        .select("id")
-        .where("source_entity_id", "=", input.personEntityId)
-        .where("target_entity_id", "=", input.companyEntityId)
-        .where("relationship_type", "=", "works_at")
-        .where("valid_from", "=", validFrom)
-        .executeTakeFirstOrThrow();
-      return row.id;
+      return upsertRelationship({
+        sourceEntityId: input.personEntityId,
+        targetEntityId: input.companyEntityId,
+        relationshipType: "works_at",
+        confidence: input.confidence,
+        confidenceScore: input.confidenceScore,
+        source: input.source,
+        validFrom: input.validFrom,
+      });
     },
 
     async addEvidence(

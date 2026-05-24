@@ -6,7 +6,11 @@ import {
   type EntityMentionRelation,
   createEntityRepository,
 } from "../db/repositories/entities";
-import { type EntityDomainsRepository, createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import {
+  type EntityDomainsRepository,
+  type EntityRelationshipType,
+  createEntityDomainsRepository,
+} from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
@@ -31,6 +35,7 @@ export function configureMaterializeDefaults(opts: { llmPromotionThreshold?: num
 const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team"] as const;
 type NonPersonMentionType = (typeof NON_PERSON_MENTION_TYPES)[number];
 type MentionType = "person" | NonPersonMentionType;
+const RELATION_TYPES = ["works_at", "leads", "contributes_to", "builds", "part_of", "partner_of"] as const;
 
 function normalizeMentionType(raw: unknown): MentionType | null {
   if (typeof raw !== "string") return null;
@@ -83,7 +88,8 @@ export type MaterializeResult =
   | { kind: "entity_created"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
   | { kind: "entity_linked"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
   | { kind: "queued"; reviewId: string }
-  | { kind: "queued_held"; reviewId: string; reason: "llm_ambiguous" | "non_person_collision" }
+  | { kind: "queued_held"; reviewId: string; reason: "llm_ambiguous" | "non_person_collision" | "relation_endpoint" }
+  | { kind: "relationship_materialized"; entitiesCreated: number; entitiesLinked: number; mentionsWritten: number }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
@@ -97,6 +103,7 @@ const FACT_REPLAY_ORDER = [
   "author",
   "parent_entity",
   "llm_extracted",
+  "llm_relation",
 ] as const;
 
 const PERSON_FACT_RELATION = {
@@ -276,6 +283,9 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "llm_extracted") {
     return materializeLlmExtractedFact(deps, fact);
   }
+  if (fact.fact_type === "llm_relation") {
+    return materializeLlmRelationFact(deps, fact);
+  }
   if (fact.fact_type === "attendee" || fact.fact_type === "assignee" || fact.fact_type === "author") {
     return materializePersonFact(deps, fact);
   }
@@ -302,6 +312,12 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
   }
   if (result.kind === "queued_held") {
     summary.queued++;
+    return;
+  }
+  if (result.kind === "relationship_materialized") {
+    summary.entitiesCreated += result.entitiesCreated;
+    summary.entitiesLinked += result.entitiesLinked;
+    summary.mentionsWritten += result.mentionsWritten;
     return;
   }
   if (
@@ -440,6 +456,7 @@ function shouldMarkMaterialized(result: MaterializeResult): boolean {
     result.kind === "entity_created" ||
     result.kind === "entity_linked" ||
     result.kind === "queued" ||
+    result.kind === "relationship_materialized" ||
     result.kind === "structural"
   ) {
     return true;
@@ -565,6 +582,166 @@ async function materializeLlmExtractedFact(
     return materializePersonFact(deps, fact);
   }
   return materializeNonPersonLlmEntity(deps, fact, mentionType);
+}
+
+interface RelationEndpoint {
+  name: string;
+  type: MentionType;
+  variations: string[];
+}
+
+function normalizeRelationType(raw: unknown): EntityRelationshipType | null {
+  if (typeof raw !== "string") return null;
+  const lowered = raw.trim().toLowerCase();
+  return (RELATION_TYPES as readonly string[]).includes(lowered) ? (lowered as EntityRelationshipType) : null;
+}
+
+function readRelationEndpoint(raw: Record<string, unknown>, key: "source" | "target"): RelationEndpoint | null {
+  const endpoint = raw[key];
+  if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) return null;
+  const record = endpoint as Record<string, unknown>;
+  if (typeof record.name !== "string") return null;
+  const type = normalizeMentionType(record.type);
+  if (!type) return null;
+  const variations = Array.isArray(record.variations) ? record.variations.filter(isString) : [];
+  return { name: record.name, type, variations };
+}
+
+function relationDirectionAllowed(
+  relationType: EntityRelationshipType,
+  sourceType: MentionType,
+  targetType: MentionType,
+): boolean {
+  if (relationType === "works_at") return sourceType === "person" && targetType === "company";
+  if (relationType === "leads") {
+    return sourceType === "person" && (targetType === "project" || targetType === "product" || targetType === "team");
+  }
+  if (relationType === "contributes_to") {
+    return sourceType === "person" && (targetType === "project" || targetType === "product");
+  }
+  if (relationType === "builds") return sourceType === "company" && targetType === "product";
+  if (relationType === "part_of") {
+    return (
+      (sourceType === "project" && targetType === "project") ||
+      (sourceType === "product" && targetType === "product") ||
+      (sourceType === "team" && targetType === "company")
+    );
+  }
+  return sourceType === "company" && targetType === "company";
+}
+
+async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
+  const raw = readJsonObject(fact.raw);
+  const relationType = normalizeRelationType(raw.relationType ?? fact.relation);
+  const source = readRelationEndpoint(raw, "source");
+  const target = readRelationEndpoint(raw, "target");
+  const confidenceScore = typeof raw.confidence === "number" ? raw.confidence : 0;
+  if (!relationType || !source || !target) return { kind: "skipped", reason: "invalid_llm_relation" };
+  if (confidenceScore < 0.85) return { kind: "skipped", reason: "low_confidence_relation" };
+  if (!relationDirectionAllowed(relationType, source.type, target.type)) {
+    return { kind: "skipped", reason: "invalid_relation_direction" };
+  }
+  const triggeredByUserId = deps.resolveOwner(fact);
+  if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
+
+  const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source");
+  if (sourceResult.kind === "queued_held") return sourceResult;
+  const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target");
+  if (targetResult.kind === "queued_held") return targetResult;
+  if (sourceResult.entity.id === targetResult.entity.id) return { kind: "skipped", reason: "self_relation" };
+
+  let relationshipsWritten = 0;
+  const relationshipId = await deps.domainsRepo.upsertRelationship({
+    sourceEntityId: sourceResult.entity.id,
+    targetEntityId: targetResult.entity.id,
+    relationshipType: relationType,
+    confidence: "EXTRACTED",
+    confidenceScore,
+    source: "llm_extraction",
+  });
+  relationshipsWritten++;
+  if (fact.indexed_file_id) {
+    await deps.domainsRepo.addEvidence(relationshipId, fact.indexed_file_id, -1, `llm_relation:${relationType}`);
+  }
+  if (relationType === "partner_of") {
+    const reverseId = await deps.domainsRepo.upsertRelationship({
+      sourceEntityId: targetResult.entity.id,
+      targetEntityId: sourceResult.entity.id,
+      relationshipType: relationType,
+      confidence: "EXTRACTED",
+      confidenceScore,
+      source: "llm_extraction",
+    });
+    relationshipsWritten++;
+    if (fact.indexed_file_id) {
+      await deps.domainsRepo.addEvidence(reverseId, fact.indexed_file_id, -1, `llm_relation:${relationType}`);
+    }
+  }
+
+  let mentionsWritten = 0;
+  if (fact.indexed_file_id) {
+    await createMentionFromFact(deps, {
+      entityId: sourceResult.entity.id,
+      indexedFileId: fact.indexed_file_id,
+      contextSnippet: fact.context_snippet ?? null,
+      confidence: "EXTRACTED",
+      source: "llm_relation",
+      relation: "mentioned",
+    });
+    await createMentionFromFact(deps, {
+      entityId: targetResult.entity.id,
+      indexedFileId: fact.indexed_file_id,
+      contextSnippet: fact.context_snippet ?? null,
+      confidence: "EXTRACTED",
+      source: "llm_relation",
+      relation: "mentioned",
+    });
+    mentionsWritten = 2;
+  }
+
+  return {
+    kind: "relationship_materialized",
+    entitiesCreated: Number(sourceResult.created) + Number(targetResult.created),
+    entitiesLinked: Number(!sourceResult.created) + Number(!targetResult.created),
+    mentionsWritten,
+  };
+}
+
+async function materializeRelationEndpoint(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+  endpoint: RelationEndpoint,
+  triggeredByUserId: string,
+  role: "source" | "target",
+): Promise<
+  | { kind: "resolved"; entity: EntityRow; created: boolean }
+  | { kind: "queued_held"; reviewId: string; reason: "relation_endpoint" }
+> {
+  const result = await proposeEntity(
+    {
+      entityRepo: deps.entityRepo,
+      reviewRepo: deps.reviewRepo,
+      lookup: deps.lookup,
+      readEmail: deps.readEmail,
+    },
+    {
+      name: endpoint.name,
+      entityType: endpoint.type,
+      subtype: "external",
+      source: "llm_relation",
+      sourceId: `${fact.indexed_file_id ?? "no-file"}:${fact.content_hash ?? "no-hash"}:${role}:${endpoint.name}`,
+      evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
+      triggeredByUserId,
+      aliases: endpoint.variations,
+      metadata: { origin: "ai", relationEndpoint: true },
+    },
+  );
+  if (result.kind === "queued") {
+    return { kind: "queued_held", reviewId: result.reviewId, reason: "relation_endpoint" };
+  }
+  const entity = result.entity as unknown as EntityRow;
+  registerEntity(deps.index, entity);
+  return { kind: "resolved", entity, created: result.kind === "created" };
 }
 
 function isString(value: unknown): value is string {

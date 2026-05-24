@@ -259,6 +259,82 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     expect(mentions.every((m) => m.source === "llm_extraction" && m.confidence === "INFERRED")).toBe(true);
   });
 
+  it("persists high-confidence relation facts and drops low-confidence relation outputs", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "Sarah Chen leads Project Atlas.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "Sarah Chen", type: "person", variations: ["Sarah"] },
+              { mention: "Project Atlas", type: "project", variations: ["Atlas"] },
+              { mention: "Low Confidence Product", type: "product", variations: [] },
+            ],
+            relations: [
+              {
+                type: "leads",
+                source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
+                target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },
+                confidence: 0.93,
+                context: "Sarah Chen leads Project Atlas.",
+              },
+              {
+                type: "builds",
+                source: { name: "Acme", type: "company", variations: [] },
+                target: { name: "Low Confidence Product", type: "product", variations: [] },
+                confidence: 0.72,
+                context: "Maybe Acme builds Low Confidence Product.",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "Sarah Chen leads Project Atlas.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-relations",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "relation", "subject_name", "materialized_at"])
+      .where("indexed_file_id", "=", fileId)
+      .orderBy("fact_type")
+      .execute();
+    expect(facts.filter((f) => f.fact_type === "llm_relation")).toHaveLength(1);
+    expect(facts.find((f) => f.fact_type === "llm_relation")).toMatchObject({
+      relation: "leads",
+      subject_name: "Sarah Chen",
+    });
+
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as source_name", "target.name as target_name"])
+      .executeTakeFirstOrThrow();
+    expect(relationship).toEqual({
+      relationship_type: "leads",
+      source_name: "Sarah Chen",
+      target_name: "Project Atlas",
+    });
+  });
+
   it("preserves prior LLM facts when extractEntities throws", async () => {
     // Regression guard: smartEnrichFile re-throws on Gemini failure, so the
     // file-scope reconcile must never run with an empty mention set. If a

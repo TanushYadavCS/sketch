@@ -593,6 +593,59 @@ describe("recreateEntityGraph", () => {
     ]);
   });
 
+  it("rebuilds typed LLM relationships from facts during recreate", async () => {
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: ATTENDED_FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "llm_relation",
+      relation: "leads",
+      subjectName: "Sarah Chen",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash-1:llm-extraction-v2:leads:Sarah Chen:Project Atlas",
+      contextSnippet: "Sarah Chen leads Project Atlas.",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v2",
+        model: "gemini",
+        relationType: "leads",
+        confidence: 0.92,
+        context: "Sarah Chen leads Project Atlas.",
+        source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
+        target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },
+      },
+    });
+
+    const first = await recreateEntityGraph({
+      db,
+      logger: createTestLogger(),
+      triggeredByUserId: TEST_USER_ID,
+      skipEnrichment: true,
+    });
+    const second = await recreateEntityGraph({
+      db,
+      logger: createTestLogger(),
+      triggeredByUserId: TEST_USER_ID,
+      skipEnrichment: true,
+    });
+
+    expect(first.replay.factsRead).toBe(6);
+    expect(second.replay.factsRead).toBe(6);
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as source_name", "target.name as target_name"])
+      .execute();
+    expect(relationships).toContainEqual({
+      relationship_type: "leads",
+      source_name: "Sarah Chen",
+      target_name: "Project Atlas",
+    });
+  });
+
   it("does not run provider download enrichment during recreate", async () => {
     const now = new Date().toISOString();
     await db

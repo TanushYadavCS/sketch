@@ -85,6 +85,50 @@ async function upsertLlmFact(
   });
 }
 
+async function upsertLlmRelationFact(
+  db: Kysely<DB>,
+  input: {
+    fileId: string;
+    relationType: "works_at" | "leads" | "contributes_to" | "builds" | "part_of" | "partner_of";
+    source: { name: string; type: string; variations?: string[] };
+    target: { name: string; type: string; variations?: string[] };
+    confidence?: number;
+  },
+) {
+  const repo = createIndexedFileFactRepository(db);
+  await repo.upsertFact({
+    indexedFileId: input.fileId,
+    connectorConfigId: CONNECTOR_ID,
+    createdByUserId: ADMIN_ID,
+    contentHash: `hash-${input.fileId}`,
+    source: "llm_extraction",
+    factType: "llm_relation",
+    relation: input.relationType,
+    subjectName: input.source.name,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${input.fileId}:hash-${input.fileId}:llm-extraction-v2:${input.relationType}:${input.source.name}:${input.target.name}`,
+    contextSnippet: `${input.source.name} ${input.relationType} ${input.target.name}`,
+    raw: {
+      contentHash: `hash-${input.fileId}`,
+      promptVersion: "llm-extraction-v2",
+      model: "gemini",
+      relationType: input.relationType,
+      confidence: input.confidence ?? 0.91,
+      context: `${input.source.name} ${input.relationType} ${input.target.name}`,
+      source: {
+        name: input.source.name,
+        type: input.source.type,
+        variations: input.source.variations ?? [],
+      },
+      target: {
+        name: input.target.name,
+        type: input.target.type,
+        variations: input.target.variations ?? [],
+      },
+    },
+  });
+}
+
 describe("materializeFromFact — llm_extracted threshold + type fidelity", () => {
   let db: Kysely<DB>;
 
@@ -242,5 +286,95 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(mentions).toHaveLength(0);
     const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
     expect(facts.every((f) => f.materialized_at === null)).toBe(true);
+  });
+});
+
+describe("materializeFromFact — llm_relation typed edges", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("materializes relation endpoints immediately and writes extracted relationship evidence", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "leads",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+
+    expect(summary.entitiesCreated).toBe(2);
+    expect(summary.materialized).toBe(1);
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select([
+        "entity_relationships.relationship_type",
+        "entity_relationships.confidence",
+        "entity_relationships.confidence_score",
+        "source.name as source_name",
+        "target.name as target_name",
+      ])
+      .executeTakeFirstOrThrow();
+    expect(relationship).toMatchObject({
+      relationship_type: "leads",
+      confidence: "EXTRACTED",
+      confidence_score: 0.91,
+      source_name: "Sarah Chen",
+      target_name: "Project Atlas",
+    });
+    const evidence = await db.selectFrom("entity_relationship_evidence").selectAll().execute();
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].indexed_file_id).toBe("file-1");
+  });
+
+  it("writes partner_of symmetrically and idempotently", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "partner_of",
+      source: { name: "Acme", type: "company" },
+      target: { name: "Globex", type: "company" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+    await db.updateTable("indexed_file_facts").set({ materialized_at: null }).execute();
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as source_name", "target.name as target_name", "entity_relationships.relationship_type"])
+      .orderBy("source.name")
+      .execute();
+    expect(relationships).toEqual([
+      { source_name: "Acme", target_name: "Globex", relationship_type: "partner_of" },
+      { source_name: "Globex", target_name: "Acme", relationship_type: "partner_of" },
+    ]);
+  });
+
+  it("skips invalid relation directions without creating edges", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "builds",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Project Atlas", type: "project" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.entitiesCreated).toBe(0);
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
   });
 });
