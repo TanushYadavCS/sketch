@@ -426,6 +426,8 @@ export interface EntityRelationshipEvidenceTable {
   indexed_file_id: string;
   chunk_index: Generated<number>;
   note: string | null;
+  source_fact_id: string | null;
+  evidence_key: Generated<string>;
   created_at: Generated<string>;
 }
 

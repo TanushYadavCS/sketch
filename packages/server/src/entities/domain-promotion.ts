@@ -103,7 +103,11 @@ export async function finalizeDomainPromotion(
       source: "email_domain",
     });
     for (const fileId of input.evidenceFileIds) {
-      await domainsRepo.addEvidence(relationshipId, fileId, -1, `domain_promotion:${input.domain}`);
+      await domainsRepo.addEvidence({
+        relationshipId,
+        indexedFileId: fileId,
+        note: `domain_promotion:${input.domain}`,
+      });
     }
   }
 

@@ -44,6 +44,14 @@ export interface UpsertRelationshipInput {
   validFrom?: string;
 }
 
+export interface AddRelationshipEvidenceInput {
+  relationshipId: string;
+  indexedFileId: string;
+  chunkIndex?: number;
+  note?: string | null;
+  sourceFactId?: string | null;
+}
+
 /**
  * Lowercase + trim the part after `@`. Returns null for malformed input.
  * Subdomains are conservative: `mail.acme.com` only normalizes to `acme.com`
@@ -189,23 +197,46 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
       });
     },
 
-    async addEvidence(
-      relationshipId: string,
-      indexedFileId: string,
-      chunkIndex = -1,
-      note: string | null = null,
-    ): Promise<void> {
+    async addEvidence(input: AddRelationshipEvidenceInput): Promise<void> {
+      const chunkIndex = input.chunkIndex ?? -1;
+      const note = input.note ?? null;
+      const evidenceKey = input.sourceFactId
+        ? `fact:${input.sourceFactId}`
+        : `note:${input.relationshipId}:${input.indexedFileId}:${chunkIndex}:${note ?? ""}`;
       await db
         .insertInto("entity_relationship_evidence")
         .values({
           id: randomUUID(),
-          relationship_id: relationshipId,
-          indexed_file_id: indexedFileId,
+          relationship_id: input.relationshipId,
+          indexed_file_id: input.indexedFileId,
           chunk_index: chunkIndex,
+          source_fact_id: input.sourceFactId ?? null,
+          evidence_key: evidenceKey,
           note,
         })
-        .onConflict((oc) => oc.columns(["relationship_id", "indexed_file_id", "chunk_index"]).doNothing())
+        .onConflict((oc) =>
+          oc.columns(["relationship_id", "evidence_key"]).doUpdateSet({
+            note,
+          }),
+        )
         .execute();
+    },
+
+    async deleteEvidenceForSourceFacts(sourceFactIds: string[]): Promise<number> {
+      if (sourceFactIds.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_relationship_evidence")
+        .where("source_fact_id", "in", sourceFactIds)
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async cleanupEmptyRelationships(): Promise<number> {
+      const result = await db
+        .deleteFrom("entity_relationships")
+        .where("id", "not in", db.selectFrom("entity_relationship_evidence").select("relationship_id").distinct())
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
     },
 
     async upsertDomainObservation(input: UpsertDomainObservationInput): Promise<void> {

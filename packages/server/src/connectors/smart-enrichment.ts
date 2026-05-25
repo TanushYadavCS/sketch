@@ -26,7 +26,11 @@ export {
   type DomainSweepResult,
   sweepDomainPromotions,
 } from "../entities/domain-promotion";
-import { materializeUnmaterializedFacts } from "../entities/materialize";
+import {
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeUnmaterializedFacts,
+} from "../entities/materialize";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
@@ -62,6 +66,7 @@ interface ExtractedMention {
   mention: string;
   type: string;
   variations: string[];
+  confidence?: number;
 }
 
 interface ExtractedRelationEndpoint {
@@ -161,7 +166,7 @@ DO NOT extract:
 - Countries, currencies, or generic locations (India, INR, US)
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
 
-For each entity, provide the primary name, type, and name variations.
+For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 
 Also extract direct relationships only when the text explicitly supports them.
 
@@ -176,8 +181,8 @@ Valid relationship types:
 Return one JSON object:
 {
   "mentions": [
-    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"] },
-    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"] }
+    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }
   ],
   "relations": [
     {
@@ -649,6 +654,7 @@ async function reconcileLlmExtractionFacts(
         mention: mention.mention,
         type: mention.type,
         variations: mention.variations,
+        confidence: typeof mention.confidence === "number" ? mention.confidence : 0.7,
       },
     };
     emittedMentionKeys.push(buildIndexedFileFactKey(input));
@@ -656,20 +662,31 @@ async function reconcileLlmExtractionFacts(
   }
 
   for (const relation of extraction.relations) {
-    const input = buildRelationFactInput({ file, ownerUserId: owner?.created_by ?? null, contentHash, relation });
+    const input = buildRelationFactInput({
+      file,
+      ownerUserId: owner?.created_by ?? null,
+      contentHash,
+      relation,
+      mentions: extraction.mentions,
+    });
     if (!input) continue;
     emittedRelationKeys.push(buildIndexedFileFactKey(input));
     await factRepo.upsertFact(input);
   }
 
-  await factRepo.reconcileStaleFacts(
+  const mentionReconcile = await factRepo.reconcileStaleFacts(
     { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
     new Set(emittedMentionKeys),
   );
-  await factRepo.reconcileStaleFacts(
+  const relationReconcile = await factRepo.reconcileStaleFacts(
     { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
     new Set(emittedRelationKeys),
   );
+  await cleanupRelationshipEvidenceForFacts(db, [
+    ...mentionReconcile.tombstonedFactIds,
+    ...relationReconcile.tombstonedFactIds,
+  ]);
+  await cleanupEmptyRelationships(db);
 
   await db
     .deleteFrom("entity_mentions")
@@ -695,6 +712,7 @@ function buildRelationFactInput(input: {
   ownerUserId: string | null;
   contentHash: string;
   relation: ExtractedRelation;
+  mentions: ExtractedMention[];
 }): UpsertIndexedFileFactInput | null {
   const relationType = normalizeRelationType(input.relation.type);
   if (!relationType || input.relation.confidence < 0.85) return null;
@@ -704,6 +722,9 @@ function buildRelationFactInput(input: {
   const sourceType = input.relation.source.type?.trim().toLowerCase();
   const targetType = input.relation.target.type?.trim().toLowerCase();
   if (!sourceType || !targetType) return null;
+  const sourceConfidence = findMentionConfidence(input.mentions, input.relation.source);
+  const targetConfidence = findMentionConfidence(input.mentions, input.relation.target);
+  if (sourceConfidence < 0.8 || targetConfidence < 0.8) return null;
 
   return {
     indexedFileId: input.file.id,
@@ -723,6 +744,8 @@ function buildRelationFactInput(input: {
       model: "gemini",
       relationType,
       confidence: input.relation.confidence,
+      sourceConfidence,
+      targetConfidence,
       context: input.relation.context,
       source: {
         name: sourceName,
@@ -736,6 +759,16 @@ function buildRelationFactInput(input: {
       },
     },
   };
+}
+
+function findMentionConfidence(mentions: ExtractedMention[], endpoint: ExtractedRelationEndpoint): number {
+  const names = [endpoint.name, ...(endpoint.variations ?? [])].map(normalizeName).filter((name) => name.length > 0);
+  for (const mention of mentions) {
+    const mentionNames = [mention.mention, ...mention.variations].map(normalizeName);
+    if (!names.some((name) => mentionNames.includes(name))) continue;
+    return typeof mention.confidence === "number" ? mention.confidence : 0.7;
+  }
+  return 0;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

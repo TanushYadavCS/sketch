@@ -57,6 +57,7 @@ export interface ReconcileResult {
   wouldTombstone: number;
   tombstoned: number;
   affectedIndexedFileIds: string[];
+  tombstonedFactIds: string[];
   skipped?: { reason: "delta_exceeds_threshold"; ratio: number; threshold: number };
 }
 
@@ -313,6 +314,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
           wouldTombstone,
           tombstoned: 0,
           affectedIndexedFileIds: [],
+          tombstonedFactIds: [],
           skipped: { reason: "delta_exceeds_threshold", ratio, threshold },
         };
       }
@@ -321,7 +323,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         scope.kind === "connector"
           ? await db
               .selectFrom("indexed_file_facts")
-              .select("indexed_file_id")
+              .select(["id", "indexed_file_id"])
               .where("connector_config_id", "=", scope.connectorConfigId)
               .where("deleted_at", "is", null)
               .where((eb) =>
@@ -331,7 +333,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
           : seenFactKeys && seenFactKeys.size > 0
             ? await db
                 .selectFrom("indexed_file_facts")
-                .select("indexed_file_id")
+                .select(["id", "indexed_file_id"])
                 .where("indexed_file_id", "=", scope.indexedFileId)
                 .where("source", "=", scope.source)
                 .where("fact_type", "=", scope.factType)
@@ -340,7 +342,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
                 .execute()
             : await db
                 .selectFrom("indexed_file_facts")
-                .select("indexed_file_id")
+                .select(["id", "indexed_file_id"])
                 .where("indexed_file_id", "=", scope.indexedFileId)
                 .where("source", "=", scope.source)
                 .where("fact_type", "=", scope.factType)
@@ -385,6 +387,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         affectedIndexedFileIds: [
           ...new Set(stale.map((row) => row.indexed_file_id).filter((id): id is string => Boolean(id))),
         ],
+        tombstonedFactIds: stale.map((row) => row.id),
       };
     },
 
@@ -396,6 +399,37 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         .where("indexed_file_id", "in", indexedFileIds)
         .where("deleted_at", "is", null)
         .execute();
+    },
+
+    async findUnmaterializedRelationFactsByEndpointName(names: string[], limit: number) {
+      const normalizedNames = new Set(names.map(normalizeName).filter((name) => name.length > 0));
+      if (normalizedNames.size === 0 || limit <= 0) return [];
+      const facts = await db
+        .selectFrom("indexed_file_facts")
+        .selectAll()
+        .where("fact_type", "=", "llm_relation")
+        .where("materialized_at", "is", null)
+        .where("deleted_at", "is", null)
+        .execute();
+      const matched = [];
+      for (const fact of facts) {
+        if (!fact.raw) continue;
+        let raw: unknown;
+        try {
+          raw = JSON.parse(fact.raw);
+        } catch {
+          continue;
+        }
+        if (!isRecord(raw)) continue;
+        const source = raw.source;
+        const target = raw.target;
+        const sourceName = isRecord(source) && typeof source.name === "string" ? normalizeName(source.name) : "";
+        const targetName = isRecord(target) && typeof target.name === "string" ? normalizeName(target.name) : "";
+        if (!normalizedNames.has(sourceName) && !normalizedNames.has(targetName)) continue;
+        matched.push(fact);
+        if (matched.length >= limit) return matched;
+      }
+      return matched;
     },
   };
 }

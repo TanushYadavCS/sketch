@@ -40,7 +40,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(61);
+    expect(rows.rows).toHaveLength(62);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -98,6 +98,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[58]).toBe("063-entity-domains-seed");
     expect(names[59]).toBe("064-entity-domains-reserved-seed");
     expect(names[60]).toBe("065-entity-review-domain-candidates");
+    expect(names[61]).toBe("066-relation-evidence-fact-link");
   });
 
   it("creates the users table", async () => {
@@ -134,6 +135,22 @@ describe("runMigrations — full sequence", () => {
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
+  });
+
+  it("creates fact-aware relationship evidence columns and unique index", async () => {
+    await runMigrations(db);
+
+    const columns = await sql<{ name: string }>`
+      PRAGMA table_info(entity_relationship_evidence)
+    `.execute(db);
+    expect(columns.rows.map((row) => row.name)).toEqual(expect.arrayContaining(["source_fact_id", "evidence_key"]));
+
+    const indexes = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type='index' AND tbl_name='entity_relationship_evidence'
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toContain("idx_entity_relationship_evidence_key");
+    expect(indexes.rows.map((row) => row.name)).not.toContain("entity_relationship_evidence_unique");
   });
 
   it("creates user_provider_identities table", async () => {
@@ -203,7 +220,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(61);
+    expect(rows.rows).toHaveLength(62);
   });
 });
 
@@ -235,6 +252,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(61);
+    expect(rows.rows).toHaveLength(62);
   });
 });

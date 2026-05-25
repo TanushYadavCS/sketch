@@ -389,6 +389,14 @@ export async function materializeUnmaterializedFacts(
   return run;
 }
 
+export async function cleanupRelationshipEvidenceForFacts(db: Kysely<DB>, sourceFactIds: string[]): Promise<number> {
+  return createEntityDomainsRepository(db).deleteEvidenceForSourceFacts(sourceFactIds);
+}
+
+export async function cleanupEmptyRelationships(db: Kysely<DB>): Promise<number> {
+  return createEntityDomainsRepository(db).cleanupEmptyRelationships();
+}
+
 async function materializeUnmaterializedFactsInner(
   db: Kysely<DB>,
   logger: Logger,
@@ -447,11 +455,12 @@ async function materializeUnmaterializedFactsInner(
     }
   }
 
+  await cleanupEmptyRelationships(db);
   logger.info({ summary }, "Source-fact materialization complete");
   return summary;
 }
 
-function shouldMarkMaterialized(result: MaterializeResult): boolean {
+export function shouldMarkMaterialized(result: MaterializeResult): boolean {
   if (
     result.kind === "entity_created" ||
     result.kind === "entity_linked" ||
@@ -636,8 +645,13 @@ async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFi
   const source = readRelationEndpoint(raw, "source");
   const target = readRelationEndpoint(raw, "target");
   const confidenceScore = typeof raw.confidence === "number" ? raw.confidence : 0;
+  const sourceConfidence = typeof raw.sourceConfidence === "number" ? raw.sourceConfidence : 0;
+  const targetConfidence = typeof raw.targetConfidence === "number" ? raw.targetConfidence : 0;
   if (!relationType || !source || !target) return { kind: "skipped", reason: "invalid_llm_relation" };
   if (confidenceScore < 0.85) return { kind: "skipped", reason: "low_confidence_relation" };
+  if (sourceConfidence < 0.8 || targetConfidence < 0.8) {
+    return { kind: "skipped", reason: "low_endpoint_confidence" };
+  }
   if (!relationDirectionAllowed(relationType, source.type, target.type)) {
     return { kind: "skipped", reason: "invalid_relation_direction" };
   }
@@ -661,7 +675,13 @@ async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFi
   });
   relationshipsWritten++;
   if (fact.indexed_file_id) {
-    await deps.domainsRepo.addEvidence(relationshipId, fact.indexed_file_id, -1, `llm_relation:${relationType}`);
+    await deps.domainsRepo.addEvidence({
+      relationshipId,
+      indexedFileId: fact.indexed_file_id,
+      chunkIndex: 0,
+      note: `llm_relation:${relationType}`,
+      sourceFactId: fact.id,
+    });
   }
   if (relationType === "partner_of") {
     const reverseId = await deps.domainsRepo.upsertRelationship({
@@ -674,7 +694,13 @@ async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFi
     });
     relationshipsWritten++;
     if (fact.indexed_file_id) {
-      await deps.domainsRepo.addEvidence(reverseId, fact.indexed_file_id, -1, `llm_relation:${relationType}`);
+      await deps.domainsRepo.addEvidence({
+        relationshipId: reverseId,
+        indexedFileId: fact.indexed_file_id,
+        chunkIndex: 0,
+        note: `llm_relation:${relationType}`,
+        sourceFactId: fact.id,
+      });
     }
   }
 

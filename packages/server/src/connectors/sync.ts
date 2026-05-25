@@ -17,7 +17,11 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
-import { materializeUnmaterializedFacts } from "../entities/materialize";
+import {
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeUnmaterializedFacts,
+} from "../entities/materialize";
 import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
@@ -687,6 +691,9 @@ export async function runConnectorSync(
         if (result.itemsArchived > 0) {
           await entityRepo.archiveEntitiesForArchivedFiles();
         }
+
+        await cleanupRelationshipEvidenceForFacts(db, reconcileResult.tombstonedFactIds);
+        await cleanupEmptyRelationships(db);
 
         if (reconcileResult.affectedIndexedFileIds.length > 0) {
           await deleteMaterializedFactMentions(db, connectorType, reconcileResult.affectedIndexedFileIds);

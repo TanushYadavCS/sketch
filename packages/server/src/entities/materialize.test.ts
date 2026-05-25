@@ -1,10 +1,17 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { buildMaterializeDeps, materializeFromFact, materializeUnmaterializedFacts } from "./materialize";
+import {
+  buildMaterializeDeps,
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeFromFact,
+  materializeUnmaterializedFacts,
+} from "./materialize";
 
 const ADMIN_ID = "admin-1";
 const CONNECTOR_ID = "cfg";
@@ -93,6 +100,8 @@ async function upsertLlmRelationFact(
     source: { name: string; type: string; variations?: string[] };
     target: { name: string; type: string; variations?: string[] };
     confidence?: number;
+    sourceConfidence?: number;
+    targetConfidence?: number;
   },
 ) {
   const repo = createIndexedFileFactRepository(db);
@@ -114,6 +123,8 @@ async function upsertLlmRelationFact(
       model: "gemini",
       relationType: input.relationType,
       confidence: input.confidence ?? 0.91,
+      sourceConfidence: input.sourceConfidence ?? 0.9,
+      targetConfidence: input.targetConfidence ?? 0.9,
       context: `${input.source.name} ${input.relationType} ${input.target.name}`,
       source: {
         name: input.source.name,
@@ -361,6 +372,115 @@ describe("materializeFromFact — llm_relation typed edges", () => {
       { source_name: "Acme", target_name: "Globex", relationship_type: "partner_of" },
       { source_name: "Globex", target_name: "Acme", relationship_type: "partner_of" },
     ]);
+  });
+
+  it("keeps domain and LLM evidence as separate rows for the same relationship and file", async () => {
+    await seedFiles(db, 1);
+    const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
+    const person = await entityRepo.upsertPersonEntity({
+      name: "Sarah Chen",
+      email: "sarah@canvas.example",
+      subtype: "external",
+      source: "google_drive",
+      sourceId: "person:sarah",
+    });
+    const company = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      status: "confirmed",
+    });
+    const relationshipId = await domainsRepo.upsertWorksAt({
+      personEntityId: person.id,
+      companyEntityId: company.id,
+      confidence: "INFERRED",
+      confidenceScore: 0.9,
+      source: "email_domain",
+    });
+    await domainsRepo.addEvidence({
+      relationshipId,
+      indexedFileId: "file-1",
+      note: "email_domain:canvas.example",
+    });
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "works_at",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Canvas Labs", type: "company" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+
+    const evidence = await db
+      .selectFrom("entity_relationship_evidence")
+      .select(["indexed_file_id", "source_fact_id", "evidence_key", "note"])
+      .where("relationship_id", "=", relationshipId)
+      .orderBy("source_fact_id")
+      .execute();
+    expect(evidence).toHaveLength(2);
+    expect(evidence.map((row) => row.indexed_file_id)).toEqual(["file-1", "file-1"]);
+    expect(evidence.some((row) => row.source_fact_id === null && row.evidence_key.startsWith("note:"))).toBe(true);
+    expect(evidence.some((row) => row.source_fact_id !== null && row.evidence_key.startsWith("fact:"))).toBe(true);
+  });
+
+  it("skips relations whose endpoint mentions are below the confidence floor", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "leads",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Project Atlas", type: "project" },
+      sourceConfidence: 0.7,
+      targetConfidence: 0.92,
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.entitiesCreated).toBe(0);
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
+    expect(await db.selectFrom("entity_relationship_evidence").selectAll().execute()).toHaveLength(0);
+    expect(await db.selectFrom("entity_mentions").selectAll().execute()).toHaveLength(0);
+  });
+
+  it("removes relationships that lose their last source-fact evidence row", async () => {
+    await seedFiles(db, 2);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "leads",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Project Atlas", type: "project" },
+    });
+    await upsertLlmRelationFact(db, {
+      fileId: "file-2",
+      relationType: "leads",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Project Atlas", type: "project" },
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+
+    const facts = await db.selectFrom("indexed_file_facts").selectAll().orderBy("indexed_file_id").execute();
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(1);
+    expect(await db.selectFrom("entity_relationship_evidence").selectAll().execute()).toHaveLength(2);
+
+    await db
+      .updateTable("indexed_file_facts")
+      .set({ deleted_at: new Date().toISOString(), materialized_at: null })
+      .where("id", "=", facts[0].id)
+      .execute();
+    await cleanupRelationshipEvidenceForFacts(db, [facts[0].id]);
+    await cleanupEmptyRelationships(db);
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(1);
+    expect(await db.selectFrom("entity_relationship_evidence").selectAll().execute()).toHaveLength(1);
+
+    await db
+      .updateTable("indexed_file_facts")
+      .set({ deleted_at: new Date().toISOString(), materialized_at: null })
+      .where("id", "=", facts[1].id)
+      .execute();
+    await cleanupRelationshipEvidenceForFacts(db, [facts[1].id]);
+    await cleanupEmptyRelationships(db);
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
+    expect(await db.selectFrom("entity_relationship_evidence").selectAll().execute()).toHaveLength(0);
   });
 
   it("skips invalid relation directions without creating edges", async () => {

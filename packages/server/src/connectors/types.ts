@@ -154,6 +154,7 @@ export type IndexedFileFactRaw =
       mention: string;
       type: string;
       variations: string[];
+      confidence?: number;
     }
   | {
       contentHash: string;
@@ -161,6 +162,8 @@ export type IndexedFileFactRaw =
       model: string;
       relationType: string;
       confidence: number;
+      sourceConfidence?: number;
+      targetConfidence?: number;
       context?: string;
       source: { name: string; type: string; variations: string[] };
       target: { name: string; type: string; variations: string[] };

@@ -97,7 +97,11 @@ export async function inferAffiliationFromEmail(deps: AffiliationDeps, input: In
       source: "email_domain",
     });
     if (input.evidenceFileId) {
-      await deps.domainsRepo.addEvidence(relationshipId, input.evidenceFileId, -1, `email_domain:${domain}`);
+      await deps.domainsRepo.addEvidence({
+        relationshipId,
+        indexedFileId: input.evidenceFileId,
+        note: `email_domain:${domain}`,
+      });
       // Mention timeline: surface the company on the same file the person
       // appears in. UI reads entity_mentions, not entity_relationships, so
       // without this an inferred company looks empty in the drawer.

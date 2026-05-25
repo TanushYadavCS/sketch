@@ -612,6 +612,8 @@ describe("recreateEntityGraph", () => {
         model: "gemini",
         relationType: "leads",
         confidence: 0.92,
+        sourceConfidence: 0.9,
+        targetConfidence: 0.9,
         context: "Sarah Chen leads Project Atlas.",
         source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
         target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },

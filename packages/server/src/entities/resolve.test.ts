@@ -147,6 +147,49 @@ async function upsertLlmFact(db: Kysely<DB>, fileId: string, name: string, type:
   });
 }
 
+async function upsertLlmRelationFact(
+  db: Kysely<DB>,
+  input: {
+    fileId: string;
+    relationType: "works_at" | "leads" | "contributes_to" | "builds" | "part_of" | "partner_of";
+    source: { name: string; type: string; variations?: string[] };
+    target: { name: string; type: string; variations?: string[] };
+  },
+) {
+  const repo = createIndexedFileFactRepository(db);
+  await repo.upsertFact({
+    indexedFileId: input.fileId,
+    connectorConfigId: "config-test",
+    createdByUserId: USER_ID,
+    contentHash: `hash-${input.fileId}`,
+    source: "llm_extraction",
+    factType: "llm_relation",
+    relation: input.relationType,
+    subjectName: input.source.name,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${input.fileId}:hash-${input.fileId}:llm-extraction-v2:${input.relationType}:${input.source.name}:${input.target.name}`,
+    raw: {
+      contentHash: `hash-${input.fileId}`,
+      promptVersion: "llm-extraction-v2",
+      model: "gemini",
+      relationType: input.relationType,
+      confidence: 0.91,
+      sourceConfidence: 0.9,
+      targetConfidence: 0.9,
+      source: {
+        name: input.source.name,
+        type: input.source.type,
+        variations: input.source.variations ?? [],
+      },
+      target: {
+        name: input.target.name,
+        type: input.target.type,
+        variations: input.target.variations ?? [],
+      },
+    },
+  });
+}
+
 describe("confirmReview", () => {
   let db: Kysely<DB>;
   let entityRepo: ReturnType<typeof createEntityRepository>;
@@ -242,6 +285,46 @@ describe("confirmReview", () => {
     expect(mentions.every((m) => m.source === "llm_extraction")).toBe(true);
     const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
     expect(facts.every((f) => f.materialized_at !== null)).toBe(true);
+  });
+
+  it("revives deferred relation facts after confirming a queued endpoint", async () => {
+    const target = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await seedIndexedFile(db, "file-relation", { source: "google_drive" });
+    await upsertLlmRelationFact(db, {
+      fileId: "file-relation",
+      relationType: "works_at",
+      source: { name: "Sarah Chen", type: "person" },
+      target: { name: "Canvas", type: "company" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+    const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(row.candidate_entity_id).toBe(target.id);
+    if (!row.candidate_generated_at) throw new Error("missing candidate_generated_at");
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
+
+    await confirmReview({ db, userId: USER_ID, logger: createTestLogger() }, row.id, {
+      candidateGeneratedAt: row.candidate_generated_at,
+    });
+
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as source_name", "target.name as target_name", "entity_relationships.relationship_type"])
+      .executeTakeFirstOrThrow();
+    expect(relationship).toEqual({
+      source_name: "Sarah Chen",
+      target_name: "Canvas Labs",
+      relationship_type: "works_at",
+    });
+    const fact = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).executeTakeFirstOrThrow();
+    expect(fact.materialized_at).not.toBeNull();
   });
 
   it("409 on candidate_generated_at drift", async () => {

@@ -268,9 +268,9 @@ describe("smartEnrichFile — LLM extraction facts", () => {
         if (opts?.label?.startsWith("extractEntities")) {
           return {
             mentions: [
-              { mention: "Sarah Chen", type: "person", variations: ["Sarah"] },
-              { mention: "Project Atlas", type: "project", variations: ["Atlas"] },
-              { mention: "Low Confidence Product", type: "product", variations: [] },
+              { mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.94 },
+              { mention: "Project Atlas", type: "project", variations: ["Atlas"], confidence: 0.91 },
+              { mention: "Low Confidence Product", type: "product", variations: [], confidence: 0.9 },
             ],
             relations: [
               {
