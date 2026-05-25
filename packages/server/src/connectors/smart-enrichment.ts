@@ -27,10 +27,13 @@ export {
   sweepDomainPromotions,
 } from "../entities/domain-promotion";
 import {
+  buildMaterializeDeps,
   cleanupEmptyRelationships,
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
 } from "../entities/materialize";
+import { type ProposeEntityType, proposeEntity } from "../entities/propose";
+import { validateLearnedFact, validateLlmMention } from "../entities/validators";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 import { normalizeName } from "./name-normalize";
@@ -59,6 +62,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
 const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v2";
+const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -330,13 +334,43 @@ export async function handleCandidates(
 
       // Promote if threshold met
       if (newCount >= CANDIDATE_PROMOTION_THRESHOLD) {
-        const entity = await entityRepo.upsertEntity({
-          name: mention.mention,
-          sourceType: mention.type,
-          aliases: mention.variations,
-          metadata: { origin: "ai" },
-          status: "confirmed",
-        });
+        if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) continue;
+        const owner = await db
+          .selectFrom("indexed_files")
+          .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
+          .select("connector_configs.created_by")
+          .where("indexed_files.id", "=", fileId)
+          .executeTakeFirst();
+        const materializeDeps = await buildMaterializeDeps(db);
+        const proposal = await proposeEntity(
+          {
+            entityRepo: materializeDeps.entityRepo,
+            reviewRepo: materializeDeps.reviewRepo,
+            lookup: materializeDeps.lookup,
+            readEmail: materializeDeps.readEmail,
+          },
+          {
+            name: mention.mention,
+            entityType: mention.type as ProposeEntityType,
+            subtype: "external",
+            source: "llm_extraction",
+            sourceId: `candidate:${existing.id}`,
+            evidence: seenFileIds.map((indexedFileId) => ({ indexedFileId })),
+            triggeredByUserId: owner?.created_by ?? "system",
+            aliases: mention.variations,
+            metadata: { origin: "ai" },
+          },
+        );
+
+        if (proposal.kind === "queued") {
+          logger.info(
+            { entityName: mention.mention, reviewId: proposal.reviewId },
+            "Queued entity candidate promotion",
+          );
+          continue;
+        }
+
+        const entity = proposal.entity;
 
         await db
           .updateTable("entity_candidates")
@@ -603,11 +637,21 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     const metadata = parseEntityMetadata(entity.metadata);
     const existingFacts = metadata.learned_facts ?? [];
 
-    const newFacts = facts.map((f) => ({
-      fact: f.fact,
-      source_file_id: file.id,
-      learned_at: new Date().toISOString().split("T")[0],
-    }));
+    const newFacts = facts
+      .filter((f) => {
+        const validation = validateLearnedFact(f.fact);
+        if (!validation.ok) {
+          logger.info({ fileId: file.id, entityId, reason: validation.reason }, "Dropped invalid learned fact");
+          return false;
+        }
+        return true;
+      })
+      .map((f) => ({
+        fact: f.fact,
+        source_file_id: file.id,
+        learned_at: new Date().toISOString().split("T")[0],
+      }));
+    if (newFacts.length === 0) continue;
 
     metadata.learned_facts = [...existingFacts, ...newFacts];
 
@@ -635,6 +679,19 @@ async function reconcileLlmExtractionFacts(
 
   for (const mention of extraction.mentions) {
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+    const validation = validateLlmMention({
+      displayName: mention.mention,
+      aliases: mention.variations,
+      fileContent: file.content,
+      source: "llm_extraction",
+    });
+    if (!validation.ok) {
+      deps.logger.info(
+        { fileId: file.id, displayName: mention.mention, reason: validation.reason },
+        "Dropped invalid LLM mention",
+      );
+      continue;
+    }
     const input: UpsertIndexedFileFactInput = {
       indexedFileId: file.id,
       connectorConfigId: file.connectorConfigId,

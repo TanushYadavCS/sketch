@@ -48,7 +48,9 @@ export interface ProposeInput {
   triggeredByUserId: string;
   aliases?: string[];
   metadata?: Record<string, unknown>;
+  evidenceDomain?: string | null;
   precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
+  skipFuzzy?: boolean;
 }
 
 export type ProposeResult =
@@ -79,6 +81,8 @@ export type EntityLookup = {
   getByAlias?(normalized: string): Entity[];
   /** All entities of the given type (used for prefix/token-superset scan). */
   listByType(entityType: ProposeEntityType): Entity[];
+  /** Company ids associated with a normalized corporate domain. */
+  getCompanyIdsByDomain?(domain: string): string[];
 };
 
 export interface ProposeDeps {
@@ -133,6 +137,12 @@ function isTokenSupersetOrSubset(a: string[], b: string[]): boolean {
   const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
   const longerSet = new Set(longer);
   return shorter.every((t) => longerSet.has(t));
+}
+
+function hasTokenOverlap(a: string[], b: string[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  const bSet = new Set(b);
+  return a.some((token) => bSet.has(token));
 }
 
 /**
@@ -334,6 +344,32 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     );
   }
 
+  if (input.entityType === "company" && input.evidenceDomain) {
+    const domain = input.evidenceDomain.trim().toLowerCase();
+    const companyIds = new Set(deps.lookup.getCompanyIdsByDomain?.(domain) ?? []);
+    if (companyIds.size > 0) {
+      const proposedTokens = tokenize(normalizeMatchName(input.entityType, input.name));
+      const domainMatches = deps.lookup
+        .listByType("company")
+        .filter((entity) => companyIds.has(entity.id))
+        .filter((entity) => hasTokenOverlap(proposedTokens, tokenize(normalizeMatchName("company", entity.name))));
+
+      if (domainMatches.length === 1) {
+        const { entity } = await persistEntity(deps, input, domainMatches[0]);
+        return { kind: "linked", entity };
+      }
+      if (domainMatches.length > 1) {
+        return queueProposal(
+          deps,
+          input,
+          normalized,
+          domainMatches.map((entity) => ({ entity, score: 1, reason: "exact-ambiguous" })),
+          "exact-ambiguous",
+        );
+      }
+    }
+  }
+
   if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
     let ranked = input.precomputedCandidates.map((c) => ({
       entity: c.entity,
@@ -349,6 +385,11 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     if (ranked.length > 0) {
       return queueProposal(deps, input, normalized, ranked, "llm-ambiguous");
     }
+  }
+
+  if (input.skipFuzzy) {
+    const { entity } = await persistEntity(deps, input);
+    return { kind: "created", entity };
   }
 
   // 4) Fuzzy-rank against same-type entities.

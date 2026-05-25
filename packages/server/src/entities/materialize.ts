@@ -16,6 +16,7 @@ import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts"
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
+import { type RankedCandidate, rankPersonLlmMention } from "./rank";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
@@ -71,6 +72,7 @@ export interface LookupIndex {
   byNormalizedName: Map<string, EntityRow[]>;
   byNormalizedAlias: Map<string, EntityRow[]>;
   bySourceRef: Map<string, EntityRow>;
+  companyIdsByDomain: Map<string, string[]>;
 }
 
 export interface MaterializeDeps {
@@ -197,7 +199,21 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   for (const row of sourceRefs) {
     bySourceRef.set(`${row.source}:${row.source_id}`, row as unknown as EntityRow);
   }
-  return { entitiesByType, byNormalizedName, byNormalizedAlias, bySourceRef };
+  const domainRows = await db
+    .selectFrom("entity_domains")
+    .select(["domain", "entity_id"])
+    .where("kind", "=", "corporate")
+    .where("entity_id", "is not", null)
+    .execute();
+  const companyIdsByDomain = new Map<string, string[]>();
+  for (const row of domainRows) {
+    if (!row.entity_id) continue;
+    const domain = row.domain.toLowerCase();
+    const bucket = companyIdsByDomain.get(domain);
+    if (bucket) bucket.push(row.entity_id);
+    else companyIdsByDomain.set(domain, [row.entity_id]);
+  }
+  return { entitiesByType, byNormalizedName, byNormalizedAlias, bySourceRef, companyIdsByDomain };
 }
 
 function registerEntity(index: LookupIndex, entity: EntityRow): void {
@@ -246,6 +262,7 @@ export async function buildMaterializeDeps(
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
     getByAlias: (n) => index.byNormalizedAlias.get(n) ?? [],
     listByType: (t: ProposeEntityType) => index.entitiesByType.get(t) ?? [],
+    getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
   };
 
   const fileToConnector = new Map<string, string>();
@@ -602,7 +619,6 @@ async function materializeLlmExtractedFact(
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }
-
   const normalized = normalizeEntityMatchName(mentionType, fact.subject_name);
   if (!normalized) {
     return { kind: "skipped", reason: "missing_llm_subject" };
@@ -769,6 +785,7 @@ async function materializeRelationEndpoint(
   | { kind: "resolved"; entity: EntityRow; created: boolean }
   | { kind: "queued_held"; reviewId: string; reason: "relation_endpoint" }
 > {
+  const raw = readJsonObject(fact.raw);
   const result = await proposeEntity(
     {
       entityRepo: deps.entityRepo,
@@ -786,6 +803,7 @@ async function materializeRelationEndpoint(
       triggeredByUserId,
       aliases: endpoint.variations,
       metadata: { origin: "ai", relationEndpoint: true },
+      evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
     },
   );
   if (result.kind === "queued") {
@@ -829,6 +847,7 @@ async function materializeNonPersonLlmEntity(
       triggeredByUserId,
       aliases: variations,
       metadata: { origin: "ai" },
+      evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
     },
   );
 
@@ -856,6 +875,64 @@ async function materializeNonPersonLlmEntity(
     entity,
     mentionWritten: true,
   };
+}
+
+async function buildPersonRankerContext(
+  deps: MaterializeDeps,
+  indexedFileId: string | null,
+): Promise<{
+  fileId: string;
+  extractedPersons: Array<{ entityId: string }>;
+  extractedCompanies: Array<{ entityId: string; domain?: string }>;
+  contextCompanies: Array<{ entityId: string }>;
+}> {
+  if (!indexedFileId) {
+    return { fileId: "", extractedPersons: [], extractedCompanies: [], contextCompanies: [] };
+  }
+  const mentions = await deps.db
+    .selectFrom("entity_mentions")
+    .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+    .select(["entity_mentions.entity_id", "entity_mentions.confidence", "entities.source_type"])
+    .where("entity_mentions.indexed_file_id", "=", indexedFileId)
+    .execute();
+
+  const extractedPersons = mentions
+    .filter((row) => row.source_type === "person" && row.confidence === "EXTRACTED")
+    .map((row) => ({ entityId: row.entity_id }));
+  const extractedCompanyIds = mentions
+    .filter((row) => row.source_type === "company" && row.confidence === "EXTRACTED")
+    .map((row) => row.entity_id);
+  const contextCompanies = mentions
+    .filter((row) => row.source_type === "company")
+    .map((row) => ({ entityId: row.entity_id }));
+  const domainRows =
+    extractedCompanyIds.length > 0
+      ? await deps.db
+          .selectFrom("entity_domains")
+          .select(["entity_id", "domain"])
+          .where("entity_id", "in", extractedCompanyIds)
+          .execute()
+      : [];
+  const domainsByEntity = new Map(domainRows.map((row) => [row.entity_id, row.domain]));
+
+  return {
+    fileId: indexedFileId,
+    extractedPersons,
+    extractedCompanies: extractedCompanyIds.map((entityId) => ({ entityId, domain: domainsByEntity.get(entityId) })),
+    contextCompanies,
+  };
+}
+
+async function loadWorksAtCompanies(deps: MaterializeDeps, personEntityIds: string[]): Promise<Map<string, string>> {
+  if (personEntityIds.length === 0) return new Map();
+  const rows = await deps.db
+    .selectFrom("entity_relationships")
+    .select(["source_entity_id", "target_entity_id"])
+    .where("relationship_type", "=", "works_at")
+    .where("source_entity_id", "in", personEntityIds)
+    .where("valid_to", "is", null)
+    .execute();
+  return new Map(rows.map((row) => [row.source_entity_id, row.target_entity_id]));
 }
 
 async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
@@ -887,35 +964,70 @@ async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFac
       return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
     }
 
-    const result = await proposeEntity(
-      {
-        entityRepo: deps.entityRepo,
-        reviewRepo: deps.reviewRepo,
-        lookup: deps.lookup,
-        readEmail: deps.readEmail,
-      },
-      {
-        name: fact.subject_name,
-        email: fact.subject_email ?? null,
-        entityType: "person",
-        subtype,
-        source,
-        sourceId,
-        evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
-        triggeredByUserId,
-      },
-    );
-    if (result.kind === "queued") {
-      if (fact.fact_type === "llm_extracted") {
-        return { kind: "queued_held", reviewId: result.reviewId, reason: "llm_ambiguous" };
+    const raw = readJsonObject(fact.raw);
+    const variations = Array.isArray(raw.variations) ? raw.variations.filter(isString) : [];
+    let precomputedCandidates: RankedCandidate[] | undefined;
+    let skipFuzzy = false;
+
+    if (fact.fact_type === "llm_extracted") {
+      const candidates = deps.lookup.listByType("person");
+      const context = await buildPersonRankerContext(deps, fact.indexed_file_id);
+      const worksAtByPerson = await loadWorksAtCompanies(
+        deps,
+        candidates.map((candidate) => candidate.id),
+      );
+      const decision = rankPersonLlmMention(
+        { name: fact.subject_name, aliases: variations, entityType: "person" },
+        candidates,
+        context,
+        (entityId) => worksAtByPerson.get(entityId) ?? null,
+      );
+      if (decision.kind === "confident_match") {
+        entity = decision.entity as unknown as EntityRow;
+        resultKind = "entity_linked";
+      } else if (decision.kind === "ambiguous_existing") {
+        return { kind: "skipped", reason: "llm_ambiguous_existing" };
+      } else if (decision.kind === "ambiguous_new_entity") {
+        precomputedCandidates = decision.candidates;
+      } else if (decision.kind === "confident_no_match") {
+        skipFuzzy = true;
       }
-      return { kind: "queued", reviewId: result.reviewId };
     }
-    entity = result.entity as unknown as EntityRow;
-    resultKind = result.kind === "created" ? "entity_created" : "entity_linked";
-    registerEntity(deps.index, entity);
-    if (fact.subject_source && fact.subject_source_id) {
-      deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
+
+    if (!entity) {
+      const result = await proposeEntity(
+        {
+          entityRepo: deps.entityRepo,
+          reviewRepo: deps.reviewRepo,
+          lookup: deps.lookup,
+          readEmail: deps.readEmail,
+        },
+        {
+          name: fact.subject_name,
+          email: fact.subject_email ?? null,
+          entityType: "person",
+          subtype,
+          source,
+          sourceId,
+          evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
+          triggeredByUserId,
+          aliases: variations,
+          precomputedCandidates,
+          skipFuzzy,
+        },
+      );
+      if (result.kind === "queued") {
+        if (fact.fact_type === "llm_extracted") {
+          return { kind: "queued_held", reviewId: result.reviewId, reason: "llm_ambiguous" };
+        }
+        return { kind: "queued", reviewId: result.reviewId };
+      }
+      entity = result.entity as unknown as EntityRow;
+      resultKind = result.kind === "created" ? "entity_created" : "entity_linked";
+      registerEntity(deps.index, entity);
+      if (fact.subject_source && fact.subject_source_id) {
+        deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
+      }
     }
   }
 
