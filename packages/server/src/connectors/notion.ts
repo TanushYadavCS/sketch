@@ -297,6 +297,14 @@ function makeNotionRequests() {
 type NotionGetFn = ReturnType<typeof makeNotionRequests>["notionGet"];
 type NotionPostFn = ReturnType<typeof makeNotionRequests>["notionPost"];
 
+interface NotionAuthor {
+  name?: string;
+  email?: string;
+  sourceId?: string;
+}
+
+type NotionUserCache = Map<string, NotionAuthor>;
+
 function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -538,6 +546,7 @@ interface PageInfo {
   url: string;
   lastEditedTime: string;
   createdTime: string;
+  createdById: string | null;
 }
 
 /**
@@ -778,10 +787,11 @@ export function createNotionConnector(): Connector {
       const token = getAccessToken(credentials);
       const since = cursor ?? null;
       const allowedRootPages = (scopeConfig.rootPages as string[] | undefined) ?? [];
+      const userCache: NotionUserCache = new Map();
 
       // ── Phase 1: Seed workspace members ──
       logger.info("Phase 1: Discovering workspace members");
-      await seedWorkspaceMembers(token, logger, notionGet, onPersonSeed);
+      await seedWorkspaceMembers(token, logger, notionGet, onPersonSeed, userCache);
 
       // ── Phase 2: Build page hierarchy map ──
       // Don't seed entities yet — seed after scope filtering to avoid out-of-scope entities
@@ -832,11 +842,12 @@ export function createNotionConnector(): Connector {
         onPersonSeed,
         indexedDbPageIds,
         allowedRootPages,
+        userCache,
       );
 
       // ── Phase 4: Sync standalone pages ──
       logger.info("Phase 4: Syncing standalone pages");
-      yield* syncStandalonePages(token, since, logger, notionGet, hierarchyMap, indexedDbPageIds);
+      yield* syncStandalonePages(token, since, logger, notionGet, hierarchyMap, indexedDbPageIds, userCache);
     },
 
     async getCursor() {
@@ -874,9 +885,8 @@ async function seedWorkspaceMembers(
   logger: Logger,
   notionGet: NotionGetFn,
   onPersonSeed?: PersonEntitySeedCallback,
+  userCache?: NotionUserCache,
 ): Promise<void> {
-  if (!onPersonSeed) return;
-
   let startCursor: string | undefined;
   let hasMore = true;
   let count = 0;
@@ -895,6 +905,15 @@ async function seedWorkspaceMembers(
 
       for (const user of response.results) {
         if (user.type !== "person" || !user.name) continue;
+        userCache?.set(user.id, {
+          name: user.name,
+          email: user.person?.email,
+          sourceId: `user:${user.id}`,
+        });
+        if (!onPersonSeed) {
+          count++;
+          continue;
+        }
         await onPersonSeed({
           name: user.name,
           email: user.person?.email,
@@ -914,6 +933,37 @@ async function seedWorkspaceMembers(
   }
 
   logger.info({ count }, "Workspace members seeded");
+}
+
+async function resolveNotionAuthor(
+  userId: string | null | undefined,
+  token: string,
+  notionGet: NotionGetFn,
+  userCache: NotionUserCache,
+): Promise<NotionAuthor | null> {
+  if (!userId) return null;
+  const cached = userCache.get(userId);
+  if (cached) return cached;
+
+  let user: {
+    id: string;
+    name?: string;
+    type?: string;
+    person?: { email?: string };
+  };
+  try {
+    user = (await notionGet(`/users/${userId}`, token)) as typeof user;
+  } catch {
+    return null;
+  }
+  if (user.type !== "person" && !user.name && !user.person?.email) return null;
+  const author = {
+    name: user.name,
+    email: user.person?.email,
+    sourceId: `user:${user.id}`,
+  };
+  userCache.set(user.id, author);
+  return author;
 }
 
 // ── Phase 2: Hierarchy map ──────────────────────────────────────────────────
@@ -947,6 +997,7 @@ async function buildHierarchyMap(
       if (page.archived || page.in_trash) continue;
 
       const parent = page.parent as { type: string; page_id?: string; database_id?: string; block_id?: string };
+      const createdBy = page.created_by as { id?: string } | undefined;
       const properties = page.properties as Record<string, { type: string; [key: string]: unknown }>;
       const title = extractPageTitle(properties);
       const pageId = page.id as string;
@@ -966,6 +1017,7 @@ async function buildHierarchyMap(
         url: page.url as string,
         lastEditedTime: page.last_edited_time as string,
         createdTime: page.created_time as string,
+        createdById: createdBy?.id ?? null,
       });
     }
 
@@ -1008,6 +1060,7 @@ async function* syncDatabases(
   onPersonSeed?: PersonEntitySeedCallback,
   indexedDbPageIds?: Set<string>,
   allowedRootPages?: string[],
+  userCache?: NotionUserCache,
 ): AsyncGenerator<SyncedItem> {
   let startCursor: string | undefined;
   let hasMore = true;
@@ -1067,6 +1120,8 @@ async function* syncDatabases(
       const dbId = db.id as string;
       const url = db.url as string;
       const dbProperties = db.properties as Record<string, { type: string; name: string }>;
+      const dbCreatedBy = db.created_by as { id?: string } | undefined;
+      const dbAuthor = await resolveNotionAuthor(dbCreatedBy?.id, token, notionGet, userCache ?? new Map());
 
       // Seed database as entity — skip generic names (they're still indexed as files)
       const isGenericName = GENERIC_DB_NAMES.has((title || "").trim().toLowerCase());
@@ -1128,6 +1183,9 @@ async function* syncDatabases(
         sourceCreatedAt: (db.created_time as string) ?? null,
         sourceUpdatedAt: lastEdited ?? null,
         parentEntities: dbParentEntities.length > 0 ? dbParentEntities : undefined,
+        authorEmail: dbAuthor?.email,
+        authorName: dbAuthor?.name,
+        authorSourceId: dbAuthor?.sourceId,
       };
 
       // If content-collection, index individual rows that have block content
@@ -1144,6 +1202,7 @@ async function* syncDatabases(
           hierarchyMap,
           onPersonSeed,
           indexedDbPageIds,
+          userCache,
         );
       }
     }
@@ -1197,6 +1256,7 @@ async function* syncContentCollectionRows(
   hierarchyMap: Map<string, PageInfo>,
   onPersonSeed?: PersonEntitySeedCallback,
   indexedDbPageIds?: Set<string>,
+  userCache?: NotionUserCache,
 ): AsyncGenerator<SyncedItem> {
   let startCursor: string | undefined;
   let hasMore = true;
@@ -1227,6 +1287,8 @@ async function* syncContentCollectionRows(
       const url = page.url as string;
       const properties = page.properties as Record<string, { type: string; [key: string]: unknown }>;
       const title = extractPageTitle(properties);
+      const createdBy = page.created_by as { id?: string } | undefined;
+      const author = await resolveNotionAuthor(createdBy?.id, token, notionGet, userCache ?? new Map());
 
       // Fetch block content — skip rows without body
       let lines: string[];
@@ -1286,6 +1348,9 @@ async function* syncContentCollectionRows(
         sourceUpdatedAt: lastEdited ?? null,
         assignees: people.length > 0 ? people.map((p) => ({ name: p.name })) : undefined,
         parentEntities,
+        authorEmail: author?.email,
+        authorName: author?.name,
+        authorSourceId: author?.sourceId,
       };
     }
 
@@ -1307,6 +1372,7 @@ async function* syncStandalonePages(
   notionGet: NotionGetFn,
   hierarchyMap: Map<string, PageInfo>,
   indexedDbPageIds: Set<string>,
+  userCache: NotionUserCache,
 ): AsyncGenerator<SyncedItem> {
   let yielded = 0;
 
@@ -1335,6 +1401,7 @@ async function* syncStandalonePages(
     const content = `${page.title}\n\n${lines.join("\n\n")}`;
     const parentEntities = buildParentEntities(page.id, hierarchyMap);
     const sourcePath = buildSourcePath(page.id, hierarchyMap);
+    const author = await resolveNotionAuthor(page.createdById, token, notionGet, userCache);
 
     yield {
       providerFileId: page.id,
@@ -1348,6 +1415,9 @@ async function* syncStandalonePages(
       sourceCreatedAt: page.createdTime ?? null,
       sourceUpdatedAt: page.lastEditedTime ?? null,
       parentEntities: parentEntities.length > 0 ? parentEntities : undefined,
+      authorEmail: author?.email,
+      authorName: author?.name,
+      authorSourceId: author?.sourceId,
     };
 
     yielded++;

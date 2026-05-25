@@ -89,6 +89,16 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     if (!hasString(raw, "providerFileId") || !isRecord(raw.assignee) || !hasString(raw, "sourceRefKey")) {
       throw new Error("assignee facts require raw.providerFileId, raw.assignee, and raw.sourceRefKey");
     }
+  } else if (input.factType === "author") {
+    if (!hasString(raw, "providerFileId") || !isRecord(raw.author)) {
+      throw new Error("author facts require raw.providerFileId and raw.author");
+    }
+    const author = raw.author as Record<string, unknown>;
+    const email = typeof author.email === "string" ? author.email.trim() : "";
+    const name = typeof author.name === "string" ? author.name.trim() : "";
+    if (!email && !name) {
+      throw new Error("author facts require raw.author.email or raw.author.name");
+    }
   } else if (input.factType === "parent_entity") {
     if (!hasString(raw, "providerFileId") || !isRecord(raw.parent)) {
       throw new Error("parent_entity facts require raw.providerFileId and raw.parent");

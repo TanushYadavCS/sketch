@@ -71,6 +71,7 @@ interface DriveFile {
   size?: string;
   trashed?: boolean;
   permissions?: DrivePermission[];
+  owners?: DriveOwner[];
 }
 
 interface DriveChange {
@@ -89,6 +90,12 @@ interface DrivePermission {
   role: string;
   type: string;
   displayName?: string;
+}
+
+interface DriveOwner {
+  displayName?: string;
+  emailAddress?: string;
+  permissionId?: string;
 }
 
 function assertOAuth(credentials: ConnectorCredentials): asserts credentials is OAuthCredentials {
@@ -313,6 +320,9 @@ export function fileToSyncedItem(
     mimeType: file.mimeType,
     accessScope: access.scope,
     accessEmails: access.emails,
+    authorEmail: file.owners?.find((owner) => owner.emailAddress)?.emailAddress,
+    authorName: file.owners?.find((owner) => owner.emailAddress)?.displayName,
+    authorSourceId: file.owners?.find((owner) => owner.emailAddress)?.permissionId,
   };
 }
 
@@ -689,7 +699,7 @@ async function* syncSharedDrive(accessToken: string, driveId: string, logger: Lo
   const folderCache = new Map<string, string>();
 
   const fields =
-    "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed)";
+    "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, owners(displayName,emailAddress,permissionId))";
 
   let pageToken: string | undefined;
   let totalFiles = 0;
@@ -754,7 +764,7 @@ async function* syncIncrementalDrive(
 
   const folderCache = new Map<string, string>();
   const fields =
-    "nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed))";
+    "nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, owners(displayName,emailAddress,permissionId)))";
 
   let pageToken = startPageToken;
   let totalChanges = 0;
@@ -846,7 +856,7 @@ async function* syncSelectedFolders(
   logger: Logger,
 ): AsyncGenerator<SyncedItem> {
   const fields =
-    "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, permissions(emailAddress, role, type, displayName))";
+    "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, owners(displayName,emailAddress,permissionId), permissions(emailAddress, role, type, displayName))";
 
   const folderCache = new Map<string, string>();
   const visited = new Set<string>();
@@ -900,7 +910,7 @@ async function* syncSelectedFolders(
 /** Sync all accessible files (no folder filter). Resolves folder paths and extracts per-file permissions. */
 async function* syncAllFiles(accessToken: string, logger: Logger): AsyncGenerator<SyncedItem> {
   const fields =
-    "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, permissions(emailAddress, role, type, displayName))";
+    "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, owners(displayName,emailAddress,permissionId), permissions(emailAddress, role, type, displayName))";
 
   const folderCache = new Map<string, string>();
   let pageToken: string | undefined;
@@ -944,7 +954,7 @@ async function* syncIncremental(
   logger: Logger,
 ): AsyncGenerator<SyncedItem> {
   const fields =
-    "nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, permissions(emailAddress, role, type, displayName)))";
+    "nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, owners(displayName,emailAddress,permissionId), permissions(emailAddress, role, type, displayName)))";
 
   const folderCache = new Map<string, string>();
   let pageToken = startPageToken;

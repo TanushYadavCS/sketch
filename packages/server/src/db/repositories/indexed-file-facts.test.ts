@@ -27,6 +27,15 @@ describe("createIndexedFileFactRepository", () => {
         raw: { providerFileId: "meeting-1" } as never,
       }),
     ).rejects.toThrow("attendee facts require raw.providerFileId and raw.attendee");
+
+    await expect(
+      repo.upsertFact({
+        source: "notion",
+        factType: "author",
+        relation: "authored",
+        raw: { providerFileId: "page-1", author: {} },
+      }),
+    ).rejects.toThrow("author facts require raw.author.email or raw.author.name");
   });
 
   it("stores valid raw payloads", async () => {

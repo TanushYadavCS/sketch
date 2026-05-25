@@ -315,6 +315,29 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       });
     }
 
+    async function seedAuthorPerson(
+      author: { name?: string; email?: string; sourceId?: string },
+      providerFileId: string,
+      indexedFileId: string,
+      contentHash: string | null,
+    ): Promise<void> {
+      if (!author.email && !author.name) return;
+      await factRepo.upsertFact({
+        ...factContext,
+        indexedFileId,
+        contentHash,
+        source: connectorType,
+        factType: "author",
+        relation: "authored",
+        subjectName: author.name ?? null,
+        subjectEmail: author.email ?? null,
+        subjectSource: connectorType,
+        subjectSourceId: author.sourceId ?? author.email ?? `${providerFileId}:${author.name}`,
+        contextSnippet: `Authored ${providerFileId}`,
+        raw: { providerFileId, author },
+      });
+    }
+
     for await (const item of connector.sync({
       credentials,
       scopeConfig,
@@ -457,6 +480,15 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
             }
           }
 
+          if (item.authorEmail || item.authorName) {
+            await seedAuthorPerson(
+              { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
+              item.providerFileId,
+              existing.id,
+              item.contentHash,
+            );
+          }
+
           result.itemsProcessed++;
           progress.itemsProcessed = result.itemsProcessed;
           progress.itemsSkipped++;
@@ -560,6 +592,15 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
               raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
             });
           }
+        }
+
+        if (item.authorEmail || item.authorName) {
+          await seedAuthorPerson(
+            { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
+            item.providerFileId,
+            itemResult.id,
+            item.contentHash,
+          );
         }
 
         if (item.parentEntities && item.parentEntities.length > 0) {

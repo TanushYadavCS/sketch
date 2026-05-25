@@ -90,6 +90,9 @@ export interface SyncedItem {
    * with only `email` are ignored — `accessEmails` already covers ACL.
    */
   attendees?: Array<{ name?: string; email?: string }>;
+  authorEmail?: string;
+  authorName?: string;
+  authorSourceId?: string;
   /**
    * Parent structural entities this item belongs to (e.g., ClickUp folder/space,
    * Google Drive folder). Linked via entity_mentions during sync.
@@ -138,6 +141,7 @@ export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>
 export type IndexedFileFactRaw =
   | { providerFileId: string; attendee: { name?: string; email?: string } }
   | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
+  | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }
