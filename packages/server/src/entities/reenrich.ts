@@ -5,6 +5,7 @@ import { createEmbeddingProvider } from "../connectors/embeddings";
 import { type EnrichmentDeps, type EnrichmentResult, MAX_FILES_PER_RUN, runEnrichment } from "../connectors/enrichment";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
+import type { MaterializeProgress } from "./materialize";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "./materialize";
 import { type RecreateSummary, recreateEntityGraph } from "./recreate";
 import { beginRecreateLock, endRecreateLock } from "./recreate-state";
@@ -53,6 +54,12 @@ export interface ReenrichDeps {
   missingFileIds?: string[];
   llmPromotionThreshold?: number;
   onPhase?: (phase: "wiping" | "enriching" | "rebuilding") => void;
+  /**
+   * Fires during enrich and rebuild phases (per-file during enrichment,
+   * per-fact during materialize). The wipe phase reports a single
+   * 0-of-1 → 1-of-1 transition since its batches are coarse.
+   */
+  onProgress?: (progress: MaterializeProgress) => void;
   runEnrichmentImpl?: (deps: EnrichmentDeps) => Promise<EnrichmentResult>;
   recreateEntityGraphImpl?: typeof recreateEntityGraph;
 }
@@ -322,13 +329,23 @@ export async function runEnrichmentForFileBatches(
 ): Promise<EnrichmentResult> {
   const result: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
   const run = deps.runEnrichmentImpl ?? runEnrichment;
+  const totalFiles = fileIds.length;
+  let baseCompleted = 0;
   for (let i = 0; i < fileIds.length; i += MAX_FILES_PER_RUN) {
     const batch = fileIds.slice(i, i + MAX_FILES_PER_RUN);
-    const batchResult = await run({ ...deps, fileIds: batch });
+    const start = baseCompleted;
+    const batchResult = await run({
+      ...deps,
+      fileIds: batch,
+      onProgress: deps.onProgress
+        ? ({ completed }) => deps.onProgress?.({ phase: "enrich", completed: start + completed, total: totalFiles })
+        : undefined,
+    });
     result.filesProcessed += batchResult.filesProcessed;
     result.filesSkipped += batchResult.filesSkipped;
     result.filesFailed += batchResult.filesFailed;
     result.errors.push(...batchResult.errors);
+    baseCompleted += batch.length;
   }
   return result;
 }
@@ -337,6 +354,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
   beginRecreateLock();
   try {
     deps.onPhase?.("wiping");
+    deps.onProgress?.({ phase: "wipe", completed: 0, total: 1 });
     const settings = await deps.db
       .selectFrom("settings")
       .select("gemini_api_key")
@@ -346,6 +364,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
       ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
       : null;
     const wipe = await wipeLlmEnrichmentForFiles(deps.db, deps.logger, deps.fileIds, deps.missingFileIds ?? []);
+    deps.onProgress?.({ phase: "wipe", completed: 1, total: 1 });
     deps.onPhase?.("enriching");
     const enrichment = await runEnrichmentForFileBatches(
       {
@@ -354,6 +373,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         embeddingProvider,
         geminiApiKey: settings?.gemini_api_key,
         runEnrichmentImpl: deps.runEnrichmentImpl,
+        onProgress: deps.onProgress,
       },
       deps.fileIds,
     );
@@ -372,6 +392,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         lockAlreadyHeld: true,
         llmPromotionThreshold: deps.llmPromotionThreshold,
         materializeFactTypes: [...AI_EXTRACTION_FACT_TYPES],
+        onProgress: deps.onProgress,
       });
       summary.recreate = recreate;
     }

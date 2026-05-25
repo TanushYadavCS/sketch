@@ -166,6 +166,14 @@ export const handlers = [
     return HttpResponse.json({ success: true });
   }),
 
+  http.get("/api/entities/resets/jobs", () => {
+    return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
+  }),
+
+  http.get("/api/entities/reenrichments/jobs", () => {
+    return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
+  }),
+
   http.get("/api/auth/session", () => {
     return HttpResponse.json({ authenticated: false });
   }),

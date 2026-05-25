@@ -6,7 +6,7 @@ import { sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
-import { type MaterializeFactsSummary, materializeUnmaterializedFacts } from "./materialize";
+import { type MaterializeFactsSummary, type MaterializeProgress, materializeUnmaterializedFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
 
 export type { ReplayFactsSummary } from "./materialize";
@@ -290,6 +290,11 @@ export interface RecreateDeps {
    * category reset+rebuild to avoid replaying unrelated pending facts.
    */
   materializeFactTypes?: IndexedFileFactType[];
+  /**
+   * Fires during the materialize replay phase so reset+rebuild jobs can
+   * surface live progress on the rebuild banner.
+   */
+  onProgress?: (progress: MaterializeProgress) => void;
 }
 
 export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateSummary> {
@@ -313,6 +318,7 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
     const replay = await materializeUnmaterializedFacts(db, logger, {
       llmPromotionThreshold: deps.llmPromotionThreshold,
       factTypes: deps.materializeFactTypes,
+      onProgress: deps.onProgress,
     });
 
     // Domain promotions run between materialize and deterministic linking so
