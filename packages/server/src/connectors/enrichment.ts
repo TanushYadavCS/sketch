@@ -27,7 +27,7 @@ import { smartEnrichFile } from "./smart-enrichment";
 import { extractDatesFromText } from "./tagging";
 
 /** Max files to enrich per run. Set high — enrichment is now deterministic (no LLM costs). */
-const MAX_FILES_PER_RUN = 5000;
+export const MAX_FILES_PER_RUN = 5000;
 
 /** Minimum entity name length for substring matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
@@ -45,7 +45,7 @@ type DeterministicEntity = {
   aliases: string | null;
 };
 
-interface EnrichmentDeps {
+export interface EnrichmentDeps {
   db: Kysely<DB>;
   logger: Logger;
   embeddingProvider: EmbeddingProvider | null;
