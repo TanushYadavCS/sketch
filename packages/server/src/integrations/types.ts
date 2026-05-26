@@ -25,6 +25,11 @@ export interface IntegrationProvider {
   initiateConnection(userEmail: string, appId: string, callbackUrl: string): Promise<{ redirectUrl: string }>;
   listConnections(userEmail: string): Promise<IntegrationConnection[]>;
   removeConnection(userEmail: string, connectionId: string): Promise<void>;
+  updateConnectionAccess?(
+    userEmail: string,
+    connectionId: string,
+    accessLevel: "personal" | "organization",
+  ): Promise<IntegrationConnection | null>;
   /**
    * Static capability check: does this provider type expose a brokered CLI?
    * Independent of runtime params — used to validate at automation creation time

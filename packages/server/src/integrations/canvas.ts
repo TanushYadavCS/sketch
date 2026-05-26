@@ -8,8 +8,56 @@
  * rather than a credentials object, since the unified table stores them separately.
  */
 import { join } from "node:path";
-import type { IntegrationApp, PageInfo } from "@sketch/shared";
+import type { IntegrationApp, IntegrationConnection, PageInfo } from "@sketch/shared";
 import type { BrokerSpec, IntegrationProvider } from "./types";
+
+type CanvasAccountResponse = {
+  id: string;
+  source?: "canvas_user_secrets" | "pipedream" | string;
+  name?: string;
+  accountName?: string;
+  authType?: "oauth" | "api_key" | string;
+  app?: { name_slug?: string; nameSlug?: string; name?: string; imgSrc?: string };
+  healthy: boolean;
+  dead?: boolean;
+  status?: "active" | "error" | "expired";
+  accessLevel?: "personal" | "organization";
+  ownerUserId?: string;
+  ownerName?: string;
+  isOwnedByViewer?: boolean;
+  canUse?: boolean;
+  canManageAccess?: boolean;
+  canDelete?: boolean;
+  created_at?: string;
+  connectedAt?: string;
+};
+
+function hasCanvasAccessMetadata(account: CanvasAccountResponse): boolean {
+  return (
+    account.accessLevel !== undefined ||
+    account.ownerUserId !== undefined ||
+    account.ownerName !== undefined ||
+    account.isOwnedByViewer !== undefined ||
+    account.canUse !== undefined ||
+    account.canManageAccess !== undefined ||
+    account.canDelete !== undefined
+  );
+}
+
+function getConnectionSource(account: CanvasAccountResponse): string {
+  return account.source ?? (hasCanvasAccessMetadata(account) ? "canvas_user_secrets" : "pipedream");
+}
+
+export class CanvasProviderRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CanvasProviderRequestError";
+  }
+}
 
 export class CanvasProvider implements IntegrationProvider {
   readonly type = "canvas";
@@ -48,6 +96,26 @@ export class CanvasProvider implements IntegrationProvider {
     if (includeContentType) h["Content-Type"] = "application/json";
     if (userEmail) h["X-User-Email"] = userEmail;
     return h;
+  }
+
+  private async parseError(res: Response, fallback: string): Promise<CanvasProviderRequestError> {
+    const body = (await res.json().catch(() => null)) as {
+      error?: string | { code?: string; message?: string };
+      message?: string;
+    } | null;
+    const message = (typeof body?.error === "string" ? body.error : body?.error?.message) ?? body?.message ?? fallback;
+    const code =
+      (typeof body?.error === "object" ? body.error.code : undefined) ??
+      (res.status === 401
+        ? "UNAUTHORIZED"
+        : res.status === 403
+          ? "FORBIDDEN"
+          : res.status === 404
+            ? "NOT_FOUND"
+            : res.status === 400
+              ? "BAD_REQUEST"
+              : "UPSTREAM_ERROR");
+    return new CanvasProviderRequestError(res.status, code, message);
   }
 
   async listApps(
@@ -124,45 +192,50 @@ export class CanvasProvider implements IntegrationProvider {
     return { redirectUrl: connectLinkUrl };
   }
 
-  async listConnections(userEmail: string): Promise<
-    Array<{
-      id: string;
-      providerId: string;
-      appId: string;
-      appName: string;
-      status: "active" | "error" | "expired";
-      createdAt: string;
-    }>
-  > {
+  async listConnections(userEmail: string): Promise<IntegrationConnection[]> {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts`, {
       headers: this.headers(userEmail),
     });
 
     if (!res.ok) {
-      throw new Error(`Canvas listConnections failed: ${res.status} ${res.statusText}`);
+      throw await this.parseError(res, `Canvas listConnections failed: ${res.status} ${res.statusText}`);
     }
 
-    const data = (await res.json()) as {
-      accounts: Array<{
-        id: string;
-        name?: string;
-        app?: { name_slug?: string; nameSlug?: string; name?: string; imgSrc?: string };
-        healthy: boolean;
-        dead: boolean;
-        created_at?: string;
-      }>;
-    };
+    const data = (await res.json()) as { accounts: CanvasAccountResponse[] };
 
-    return (data.accounts ?? []).map((account) => ({
-      id: account.id,
-      providerId: this.providerId,
-      appId: account.app?.nameSlug ?? account.app?.name_slug ?? account.id,
-      appName: account.app?.name ?? account.name ?? "Unknown",
-      icon: account.app?.imgSrc,
-      accountName: account.name,
-      status: account.dead ? "error" : account.healthy ? "active" : "error",
-      createdAt: account.created_at ?? new Date().toISOString(),
-    }));
+    return (data.accounts ?? []).map((account): IntegrationConnection => {
+      const appId = account.app?.nameSlug ?? account.app?.name_slug ?? account.id;
+      const appName = account.app?.name ?? account.name ?? "Unknown";
+      const connectedAt = account.connectedAt ?? account.created_at ?? new Date().toISOString();
+      return {
+        id: account.id,
+        providerId: this.providerId,
+        source: getConnectionSource(account),
+        appId,
+        appName,
+        app: account.app
+          ? {
+              name: appName,
+              nameSlug: appId,
+              imgSrc: account.app.imgSrc,
+            }
+          : undefined,
+        icon: account.app?.imgSrc,
+        accountName: account.accountName ?? account.name,
+        authType: account.authType,
+        healthy: account.healthy,
+        status: account.status ?? (account.dead ? "error" : account.healthy ? "active" : "error"),
+        accessLevel: account.accessLevel,
+        ownerUserId: account.ownerUserId,
+        ownerName: account.ownerName,
+        isOwnedByViewer: account.isOwnedByViewer,
+        canUse: account.canUse,
+        canManageAccess: account.canManageAccess,
+        canDelete: account.canDelete,
+        createdAt: connectedAt,
+        connectedAt,
+      };
+    });
   }
 
   async removeConnection(userEmail: string, connectionId: string): Promise<void> {
@@ -172,7 +245,25 @@ export class CanvasProvider implements IntegrationProvider {
     });
 
     if (!res.ok) {
-      throw new Error(`Canvas removeConnection failed: ${res.status} ${res.statusText}`);
+      throw await this.parseError(res, `Canvas removeConnection failed: ${res.status} ${res.statusText}`);
     }
+  }
+
+  async updateConnectionAccess(
+    userEmail: string,
+    connectionId: string,
+    accessLevel: "personal" | "organization",
+  ): Promise<IntegrationConnection | null> {
+    const res = await fetch(`${this.apiUrl}/api/canvas-accounts/${encodeURIComponent(connectionId)}/access`, {
+      method: "PATCH",
+      headers: this.headers(userEmail),
+      body: JSON.stringify({ accessLevel }),
+    });
+
+    if (!res.ok) {
+      throw await this.parseError(res, `Canvas updateConnectionAccess failed: ${res.status} ${res.statusText}`);
+    }
+
+    return null;
   }
 }

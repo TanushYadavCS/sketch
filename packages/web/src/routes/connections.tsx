@@ -89,6 +89,11 @@ function ConnectionsPage() {
     queryFn: () => api.mcpServers.list(),
   });
 
+  const setupStatusQuery = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.setup.status(),
+  });
+
   const servers = serversQuery.data ?? [];
   const provider = servers.find((s) => s.type != null) ?? null;
 
@@ -197,6 +202,7 @@ function ConnectionsPage() {
                   isLoadingConnections={connectionsQuery.isLoading}
                   onAdd={() => setShowAddIntegrationDialog(true)}
                   providerId={provider.id}
+                  orgName={setupStatusQuery.data?.orgName ?? undefined}
                   onDisconnect={invalidateAll}
                 />
               </>

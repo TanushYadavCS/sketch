@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createUserRepository } from "../db/repositories/users";
+import { CanvasProviderRequestError } from "../integrations/canvas";
 import { createProvider } from "../integrations/factory";
 import { canvasCredentialsSchema } from "../integrations/types";
 
@@ -62,6 +63,10 @@ const connectionTestSchema = z.object({
 const createConnectionSchema = z.object({
   appId: z.string().min(1, "App ID is required"),
   callbackUrl: z.string().url().optional(),
+});
+
+const updateConnectionAccessSchema = z.object({
+  accessLevel: z.enum(["personal", "organization"]),
 });
 
 /**
@@ -391,6 +396,38 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     await provider.removeConnection(userResult.email, connectionId);
     return c.json({ success: true });
+  });
+
+  routes.patch("/:id/connections/:connectionId/access", async (c) => {
+    const resolved = await resolveProvider(c, mcpServers);
+    if (!resolved.ok) return resolved.response;
+    const { row } = resolved;
+
+    const body = await c.req.json();
+    const parsed = updateConnectionAccessSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const userResult = await resolveUserEmail(c, users);
+    if (!userResult.ok) return userResult.response;
+
+    const connectionId = c.req.param("connectionId");
+    const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
+    if (!provider.updateConnectionAccess) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "Provider does not support connection access" } }, 400);
+    }
+
+    try {
+      const connection = await provider.updateConnectionAccess(userResult.email, connectionId, parsed.data.accessLevel);
+      return c.json({ success: true, connection });
+    } catch (err) {
+      if (err instanceof CanvasProviderRequestError) {
+        return c.json({ error: { code: err.code, message: err.message } }, err.status as 400 | 401 | 403 | 404 | 500);
+      }
+      throw err;
+    }
   });
 
   return routes;
