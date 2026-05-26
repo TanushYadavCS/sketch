@@ -277,9 +277,10 @@ export function connectorRoutes(
 
     const viewer = getFileViewer(c);
     const filters = { connectorType: source, category, status, access };
-    const [files, total] = await Promise.all([
+    const [files, total, enrichedTotal] = await Promise.all([
       connectorRepo.listAllFiles({ limit, offset, viewer, ...filters }),
       connectorRepo.countAllFiles({ viewer, ...filters }),
+      connectorRepo.countEnrichedFiles({ viewer, ...filters }),
     ]);
 
     const fileIds = files.map((f) => f.id);
@@ -310,6 +311,7 @@ export function connectorRoutes(
         };
       }),
       total,
+      enrichedTotal,
       hasMore: offset + limit < total,
     });
   });

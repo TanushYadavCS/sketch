@@ -727,6 +727,57 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    /**
+     * Count non-archived files that have a summary, across the same filter
+     * set as `listAllFiles`/`countAllFiles`. Drives the "X enriched" badge
+     * in the Files header — must be filtered globally, not over the page
+     * slice (the prior page-local count silently misreported the global
+     * total whenever the user paged past the first 50 rows).
+     */
+    async countEnrichedFiles(opts: {
+      viewer: FileViewer;
+      connectorType?: string;
+      category?: string;
+      status?: string;
+      access?: string;
+    }) {
+      let query = db
+        .selectFrom("indexed_files")
+        .select(sql`count(*)`.as("count"))
+        .where("indexed_files.is_archived", "=", 0)
+        .where("indexed_files.summary", "is not", null);
+
+      if (opts.connectorType) {
+        query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.category) {
+        query = query.where("indexed_files.content_category", "=", opts.category);
+      }
+      if (opts.status === "pending") {
+        query = query.where((eb) =>
+          eb.or([
+            eb("indexed_files.embedding_status", "in", ["pending", "failed"]),
+            eb("indexed_files.summary_status", "in", ["pending", "failed"]),
+          ]),
+        );
+      } else if (opts.status === "raw") {
+        query = query
+          .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
+          .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
+      }
+      if (opts.access === "restricted") {
+        query = query.where("indexed_files.access_scope_id", "is not", null);
+      } else if (opts.access === "unrestricted") {
+        query = query.where("indexed_files.access_scope_id", "is", null);
+      }
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
+      }
+
+      const result = await query.executeTakeFirstOrThrow();
+      return Number(result.count);
+    },
+
     /** Count non-archived files with optional filters. RBAC-gated for non-admins. */
     async countAllFiles(opts: {
       viewer: FileViewer;
