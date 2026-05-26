@@ -178,7 +178,11 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     );
   }
 
-  const pendingFiles = await query.limit(MAX_FILES_PER_RUN).execute();
+  const pendingFiles = await query
+    .orderBy("source_created_at", "asc")
+    .orderBy("id", "asc")
+    .limit(MAX_FILES_PER_RUN)
+    .execute();
 
   if (pendingFiles.length === 0) {
     logger.debug("No files pending enrichment");
@@ -406,11 +410,7 @@ async function enrichTextDocument(
   if (deps.geminiApiKey && wordCount >= 100) {
     try {
       const generator = createGeminiGenerator(deps.geminiApiKey);
-      const knownEntities = await buildFileScopedKnownEntities(
-        { db, logger },
-        file.id,
-        deps.knownEntities ?? [],
-      );
+      const knownEntities = await buildFileScopedKnownEntities({ db, logger }, file.id, deps.knownEntities ?? []);
       await smartEnrichFile(
         { db, logger, generator, embeddingProvider, orgContext: deps.orgContext, knownEntities },
         {

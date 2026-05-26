@@ -420,3 +420,88 @@ describe("matchesAsWord — word-boundary entity name matching", () => {
     expect(matchesAsWord("invoiced oXbrien yesterday", "o.brien")).toBe(false);
   });
 });
+
+describe("runEnrichment — chronological pending-files order", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("processes pending files in source_created_at ascending order with id as tiebreaker", async () => {
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "conn-order",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const oldest = "f-aaa";
+    const middleEarlier = "f-bbb";
+    const middleLater = "f-ccc";
+    const newest = "f-ddd";
+    const tsOld = "2025-06-01T00:00:00.000Z";
+    const tsMid = "2026-01-15T00:00:00.000Z";
+    const tsNew = "2026-04-01T00:00:00.000Z";
+
+    const insertions = [
+      { id: middleLater, ts: tsMid },
+      { id: newest, ts: tsNew },
+      { id: oldest, ts: tsOld },
+      { id: middleEarlier, ts: tsMid },
+    ];
+    for (const row of insertions) {
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: row.id,
+          connector_config_id: "conn-order",
+          provider_file_id: row.id,
+          file_name: `${row.id}.txt`,
+          file_type: "text",
+          content_category: "document",
+          source: "google_drive",
+          source_path: "My Drive",
+          content: `marker:${row.id} this is a fixture body unique to the file so embedTexts can identify which file is being processed in the loop.`,
+          source_created_at: row.ts,
+          source_updated_at: row.ts,
+          synced_at: new Date().toISOString(),
+        })
+        .execute();
+    }
+
+    const order: string[] = [];
+    const markerRe = /marker:(f-[a-z]+)/;
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: {
+        name: "stub",
+        dimensions: 8,
+        supportsImages: false,
+        async embedTexts(texts: string[]) {
+          for (const text of texts) {
+            const m = text.match(markerRe);
+            if (m && !order.includes(m[1])) order.push(m[1]);
+          }
+          return texts.map(() => new Array(8).fill(0));
+        },
+      },
+    });
+
+    expect(result.filesProcessed).toBe(4);
+    expect(order).toEqual([oldest, middleEarlier, middleLater, newest]);
+  });
+});

@@ -94,7 +94,10 @@ async function seedEntity(
     .execute();
 }
 
-async function seedDomain(db: Kysely<DB>, args: { entityId: string | null; domain: string; kind: string }): Promise<void> {
+async function seedDomain(
+  db: Kysely<DB>,
+  args: { entityId: string | null; domain: string; kind: string },
+): Promise<void> {
   await db
     .insertInto("entity_domains")
     .values({
