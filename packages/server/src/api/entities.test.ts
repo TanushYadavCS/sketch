@@ -1179,3 +1179,251 @@ describe("two-step rebuild flow", () => {
     expect(reenrichWithCategories.status).toBe(400);
   });
 });
+
+describe("Entity drawer routes", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+  let adminId: string;
+  let memberCookie: string;
+  let memberEmail: string;
+
+  const flaggedConfig = createTestConfig({ EXPERIMENTAL_FLAG: true });
+
+  beforeEach(async () => {
+    if (isRecreateActive()) endRecreateLock();
+    db = await createTestDb();
+    const admin = await seedAdmin(db);
+    adminId = admin.id;
+    const member = await seedMember(db);
+    memberEmail = member.email;
+    app = createApp(db, flaggedConfig, { logger });
+    adminCookie = await login(app);
+    memberCookie = await loginAs(app, memberEmail);
+  });
+
+  afterEach(async () => {
+    if (isRecreateActive()) endRecreateLock();
+    try {
+      await db.destroy();
+    } catch {}
+  });
+
+  async function seedEntity(id: string, name: string, sourceType: string, metadata: Record<string, unknown> = {}) {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values({
+        id,
+        name,
+        source_type: sourceType,
+        subtype: null,
+        aliases: null,
+        metadata: JSON.stringify(metadata),
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+        ai_brief: null,
+      })
+      .execute();
+  }
+
+  async function seedRelation(
+    id: string,
+    sourceId: string,
+    targetId: string,
+    type: string,
+    confidence: string,
+    score: number,
+  ) {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id,
+        source_entity_id: sourceId,
+        target_entity_id: targetId,
+        relationship_type: type,
+        confidence,
+        confidence_score: score,
+        source: "llm_relation",
+        valid_from: now,
+        valid_to: null,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+  }
+
+  async function seedFile(id: string, accessScopeId: string | null = null) {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: `cfg-${id}`,
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: `cfg-${id}`,
+        provider_file_id: `pf-${id}`,
+        file_name: `file ${id}`,
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content_hash: `hash-${id}`,
+        is_archived: 0,
+        synced_at: now,
+        access_scope_id: accessScopeId,
+        source_created_at: now,
+        source_updated_at: now,
+      })
+      .execute();
+  }
+
+  async function seedEvidence(id: string, relationshipId: string, fileId: string, chunkIndex = -1) {
+    await db
+      .insertInto("entity_relationship_evidence")
+      .values({
+        id,
+        relationship_id: relationshipId,
+        indexed_file_id: fileId,
+        chunk_index: chunkIndex,
+        note: null,
+        source_fact_id: null,
+        evidence_key: `${relationshipId}:${fileId}:${chunkIndex}`,
+      })
+      .execute();
+  }
+
+  it("GET /api/entities/:id returns profile with deterministic WHAT row", async () => {
+    await seedEntity("e1", "Sarah Chen", "person", { role: "Engineer" });
+    await seedEntity("e2", "Stripe", "company");
+    await seedRelation("r1", "e1", "e2", "works_at", "EXTRACTED", 0.95);
+    await seedFile("f1");
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "m1",
+        entity_id: "e1",
+        indexed_file_id: "f1",
+        chunk_index: 0,
+        context_snippet: "Sarah leads things",
+        confidence: "EXTRACTED",
+        source: "google_drive",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
+
+    const res = await app.request("/api/entities/e1", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entity: {
+        profile: {
+          entityType: string;
+          mentionCount: number;
+          aiBrief: { what: string; signal: string | null; soWhat: string | null };
+        };
+      };
+    };
+    expect(body.entity.profile.entityType).toBe("person");
+    expect(body.entity.profile.mentionCount).toBe(1);
+    expect(body.entity.profile.aiBrief.what).toContain("Person");
+    expect(body.entity.profile.aiBrief.what).toContain("Engineer");
+    expect(body.entity.profile.aiBrief.what).toContain("Stripe");
+    expect(body.entity.profile.aiBrief.signal).toBeNull();
+  });
+
+  it("GET /api/entities/:id/relations partitions outgoing/incoming and pins AMBIGUOUS first", async () => {
+    await seedEntity("e1", "Sarah", "person");
+    await seedEntity("e2", "Atlas", "project");
+    await seedEntity("e3", "Helios", "project");
+    await seedRelation("r-out-1", "e1", "e2", "leads", "EXTRACTED", 0.95);
+    await seedRelation("r-out-2", "e1", "e3", "contributes_to", "AMBIGUOUS", 0.4);
+
+    const res = await app.request("/api/entities/e1/relations", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      outgoing: Array<{ id: string; confidence: string }>;
+      incoming: Array<{ id: string }>;
+      totalCount: number;
+    };
+    expect(body.outgoing[0].confidence).toBe("AMBIGUOUS");
+    expect(body.outgoing[1].confidence).toBe("EXTRACTED");
+    expect(body.incoming).toEqual([]);
+    expect(body.totalCount).toBe(2);
+  });
+
+  it("GET /api/entities/:id/relations is gated by EXPERIMENTAL_FLAG", async () => {
+    const offConfig = createTestConfig({ EXPERIMENTAL_FLAG: false });
+    const offApp = createApp(db, offConfig, { logger });
+    await seedEntity("e1", "Sarah", "person");
+    const offCookie = await login(offApp);
+    const res = await offApp.request("/api/entities/e1/relations", { headers: { Cookie: offCookie } });
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /api/entities/:id/relations/:rid/evidence applies file RBAC (visibleCount < totalCount)", async () => {
+    await seedEntity("e1", "Sarah", "person");
+    await seedEntity("e2", "Atlas", "project");
+    await seedRelation("r1", "e1", "e2", "leads", "EXTRACTED", 0.95);
+
+    const scopeId = "scope-restricted";
+    await db
+      .insertInto("connector_configs")
+      .values({ id: "cfg-scope", connector_type: "google_drive", auth_type: "oauth", credentials: "{}", created_by: adminId })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: scopeId,
+        connector_config_id: "cfg-scope",
+        scope_type: "shared_drive",
+        provider_scope_id: "sd-1",
+        label: "Restricted",
+      })
+      .execute();
+
+    await seedFile("f-public");
+    await seedFile("f-restricted-1", scopeId);
+    await seedFile("f-restricted-2", scopeId);
+    await seedEvidence("ev-1", "r1", "f-public");
+    await seedEvidence("ev-2", "r1", "f-restricted-1");
+    await seedEvidence("ev-3", "r1", "f-restricted-2");
+
+    const res = await app.request("/api/entities/e1/relations/r1/evidence", { headers: { Cookie: memberCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: Array<{ fileId: string }>; visibleCount: number; totalCount: number };
+    expect(body.totalCount).toBe(3);
+    expect(body.visibleCount).toBe(1);
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0].fileId).toBe("f-public");
+  });
+
+  it("GET /api/entities respects includeSystem (default hides clickup_workspace/clickup_space)", async () => {
+    await seedEntity("p1", "Alice", "person");
+    await seedEntity("w1", "Workspace", "clickup_workspace");
+    await seedEntity("s1", "Space", "clickup_space");
+
+    const defaultRes = await app.request("/api/entities", { headers: { Cookie: adminCookie } });
+    const defaultBody = (await defaultRes.json()) as { entities: Array<{ sourceType: string }>; total: number };
+    expect(defaultBody.entities.map((e) => e.sourceType).sort()).toEqual(["person"]);
+    expect(defaultBody.total).toBe(1);
+
+    const includeRes = await app.request("/api/entities?includeSystem=true", { headers: { Cookie: adminCookie } });
+    const includeBody = (await includeRes.json()) as { entities: Array<{ sourceType: string }>; total: number };
+    expect(includeBody.entities.map((e) => e.sourceType).sort()).toEqual(["clickup_space", "clickup_workspace", "person"]);
+    expect(includeBody.total).toBe(3);
+  });
+});

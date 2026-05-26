@@ -1,3 +1,4 @@
+import { EntityUiProvider } from "@/lib/entity-ui";
 import { ThemeProvider } from "@sketch/ui/hooks/use-theme";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type RenderOptions, render } from "@testing-library/react";
@@ -18,7 +19,7 @@ function TestProviders({ children }: { children: ReactNode }) {
   return (
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
-        {children}
+        <EntityUiProvider>{children}</EntityUiProvider>
         <Toaster />
       </QueryClientProvider>
     </ThemeProvider>

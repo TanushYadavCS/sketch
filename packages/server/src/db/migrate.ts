@@ -66,6 +66,7 @@ import * as m063 from "./migrations/063-entity-domains-seed";
 import * as m064 from "./migrations/064-entity-domains-reserved-seed";
 import * as m065 from "./migrations/065-entity-review-domain-candidates";
 import * as m066 from "./migrations/066-relation-evidence-fact-link";
+import * as m067 from "./migrations/067-entities-ai-brief";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -136,6 +137,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "064-entity-domains-reserved-seed": m064,
           "065-entity-review-domain-candidates": m065,
           "066-relation-evidence-fact-link": m066,
+          "067-entities-ai-brief": m067,
         };
       },
     },

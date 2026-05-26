@@ -7,8 +7,10 @@ import type { Config } from "../config";
 import { isPg } from "../db/dialect";
 import { fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRelationshipsRepository, type RelationListEntry } from "../db/repositories/entity-relationships";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
+import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, buildWhatRow, mapSourceTypeToEntityType } from "../entities/profile-facts";
 import type { MaterializeFactsSummary } from "../entities/materialize";
 import {
   type RecreateSummary,
@@ -39,6 +41,38 @@ import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
 const RESET_CONFIRM_TOKEN = "RESET_AND_RECREATE";
 const REENRICH_CONFIRM_TOKEN = "REENRICH";
+
+interface CachedAiBrief {
+  signal: string | null;
+  soWhat: string | null;
+  generatedAt: string | null;
+  inputHash: string | null;
+  stale: boolean;
+}
+
+function parseAiBrief(raw: string | null): CachedAiBrief | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<CachedAiBrief>;
+    return {
+      signal: typeof parsed.signal === "string" ? parsed.signal : null,
+      soWhat: typeof parsed.soWhat === "string" ? parsed.soWhat : null,
+      generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null,
+      inputHash: typeof parsed.inputHash === "string" ? parsed.inputHash : null,
+      stale: parsed.stale === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function countByType(rows: RelationListEntry[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    out[r.relationshipType] = (out[r.relationshipType] ?? 0) + 1;
+  }
+  return out;
+}
 
 type ResetCategory = "manual" | "connectors" | "ai";
 type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
@@ -164,7 +198,22 @@ interface EntityRoutesDeps {
 export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   const routes = new Hono();
   const repo = createEntityRepository(db);
+  const relRepo = createEntityRelationshipsRepository(db);
   const { logger, config } = deps;
+
+  const RELATIONS_LIMIT = 200;
+  const EVIDENCE_LIMIT = 100;
+  const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
+  const relationCompare = (a: RelationListEntry, b: RelationListEntry): number => {
+    const ac = CONFIDENCE_ORDER[a.confidence] ?? 3;
+    const bc = CONFIDENCE_ORDER[b.confidence] ?? 3;
+    if (ac !== bc) return ac - bc;
+    if (a.evidenceCount !== b.evidenceCount) return b.evidenceCount - a.evidenceCount;
+    if (a.confidenceScore !== b.confidenceScore) return b.confidenceScore - a.confidenceScore;
+    const byName = a.other.name.localeCompare(b.other.name);
+    if (byName !== 0) return byName;
+    return a.id.localeCompare(b.id);
+  };
 
   /**
    * GET /api/entities
@@ -217,6 +266,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const sort = c.req.query("sort") ?? "hotness";
     const limit = Math.min(Number(c.req.query("limit")) || 50, 200);
     const offset = Number(c.req.query("offset")) || 0;
+    const includeSystem = c.req.query("includeSystem") === "true";
+    const systemTypes = [...SYSTEM_SOURCE_TYPES];
 
     let query = db
       .selectFrom("entities")
@@ -256,6 +307,13 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       query = query.where("entities.status", "!=", "archived");
     }
 
+    // Hide container/system entities (clickup_workspace, clickup_space) unless
+    // the caller opts in. Explicit type filters always win — deep links and the
+    // "Show system entities" toggle keep working.
+    if (!typeFilter && !includeSystem && systemTypes.length > 0) {
+      query = query.where("entities.source_type", "not in", systemTypes);
+    }
+
     if (sort === "mentions") {
       query = query.orderBy("mention_count", "desc");
     } else if (sort === "name") {
@@ -279,6 +337,9 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
     if (!typeFilter) {
       countQuery = countQuery.where("status", "!=", "archived");
+    }
+    if (!typeFilter && !includeSystem && systemTypes.length > 0) {
+      countQuery = countQuery.where("source_type", "not in", systemTypes);
     }
     const countResult = await countQuery.executeTakeFirst();
 
@@ -875,6 +936,12 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
 
   /**
    * GET /api/entities/:id
+   *
+   * Backwards-compatible: existing callers keep getting `{ entity, sourceRefs }`
+   * with the same field names. The drawer surface receives an additional
+   * `entity.profile` block (aggregates + ai brief) so the open-feel is a single
+   * round-trip. The profile block is always present so the web layer can rely
+   * on it; the experimental flag gates the drawer UI, not the response shape.
    */
   routes.get("/:id", async (c) => {
     const entity = await repo.getEntity(c.req.param("id"));
@@ -882,11 +949,33 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
-    const sourceRefs = await db
-      .selectFrom("entity_source_refs")
-      .selectAll()
-      .where("entity_id", "=", entity.id)
-      .execute();
+    const [sourceRefs, aggregates, relations] = await Promise.all([
+      db.selectFrom("entity_source_refs").selectAll().where("entity_id", "=", entity.id).execute(),
+      repo.getEntityProfileAggregates(entity.id),
+      relRepo.listRelationsForEntity(entity.id, { limit: 10 }),
+    ]);
+
+    const parsedAliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
+    const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
+
+    const cachedBrief = parseAiBrief(entity.ai_brief);
+    const facts: EntityProfileFacts = {
+      entityId: entity.id,
+      name: entity.name,
+      sourceType: entity.source_type,
+      entityType: mapSourceTypeToEntityType(entity.source_type),
+      metadata: parsedMetadata,
+      mentionCount: aggregates.mentionCount,
+      sourceCounts: aggregates.sourceCounts,
+      firstSeenAt: aggregates.firstSeenAt,
+      lastSeenAt: aggregates.lastSeenAt,
+      domainsForCompany: aggregates.domainsForCompany,
+      topRelationships: [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10),
+      incomingCounts: countByType(relations.incoming),
+      outgoingCounts: countByType(relations.outgoing),
+    };
+
+    const what = buildWhatRow(facts);
 
     return c.json({
       entity: {
@@ -894,12 +983,27 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         name: entity.name,
         sourceType: entity.source_type,
         subtype: entity.subtype,
-        aliases: entity.aliases ? JSON.parse(entity.aliases) : [],
-        metadata: entity.metadata ? JSON.parse(entity.metadata) : null,
+        aliases: parsedAliases,
+        metadata: parsedMetadata,
         status: entity.status,
         hotness: entity.hotness,
         createdAt: entity.created_at,
         updatedAt: entity.updated_at,
+        profile: {
+          entityType: facts.entityType,
+          mentionCount: facts.mentionCount,
+          sourceCounts: facts.sourceCounts,
+          firstSeenAt: facts.firstSeenAt,
+          lastSeenAt: facts.lastSeenAt,
+          domainsForCompany: facts.domainsForCompany,
+          aiBrief: {
+            what,
+            signal: cachedBrief?.signal ?? null,
+            soWhat: cachedBrief?.soWhat ?? null,
+            generatedAt: cachedBrief?.generatedAt ?? null,
+            stale: cachedBrief?.stale ?? false,
+          },
+        },
       },
       sourceRefs: sourceRefs.map((r) => ({
         id: r.id,
@@ -909,6 +1013,54 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         lastSeenAt: r.last_seen_at,
       })),
     });
+  });
+
+  /**
+   * GET /api/entities/:id/relations
+   * Drawer Relationships section. Caps each side at 200; sets `truncated`
+   * when more rows exist. Gated by EXPERIMENTAL_FLAG (drawer UI is flagged).
+   */
+  routes.get("/:id/relations", async (c) => {
+    if (!config.EXPERIMENTAL_FLAG) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
+    }
+    const entity = await repo.getEntity(c.req.param("id"));
+    if (!entity) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const result = await relRepo.listRelationsForEntity(entity.id, { limit: RELATIONS_LIMIT });
+    return c.json({
+      outgoing: result.outgoing.sort(relationCompare),
+      incoming: result.incoming.sort(relationCompare),
+      truncated: result.truncated,
+      totalCount: result.totalCount,
+    });
+  });
+
+  /**
+   * GET /api/entities/:id/relations/:rid/evidence
+   * Evidence rows for a single relation, filtered by file-level RBAC.
+   * `visibleCount < totalCount` is the "N more not visible to you" signal —
+   * we expose that hidden evidence exists, not its content (file names and
+   * snippets are filtered out for hidden rows).
+   */
+  routes.get("/:id/relations/:rid/evidence", async (c) => {
+    if (!config.EXPERIMENTAL_FLAG) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
+    }
+    const entityId = c.req.param("id");
+    const relationshipId = c.req.param("rid");
+    const entity = await repo.getEntity(entityId);
+    if (!entity) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const relation = await relRepo.getRelationship(relationshipId);
+    if (!relation || (relation.source_entity_id !== entityId && relation.target_entity_id !== entityId)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Relation not found" } }, 404);
+    }
+    const viewer = getFileViewer(c);
+    const result = await relRepo.listEvidenceForRelation(relationshipId, { limit: EVIDENCE_LIMIT, viewer });
+    return c.json(result);
   });
 
   /**

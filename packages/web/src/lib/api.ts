@@ -318,6 +318,85 @@ export interface EntityListItem {
   updatedAt: string;
 }
 
+export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
+
+export interface EntityProfileAiBrief {
+  what: string;
+  signal: string | null;
+  soWhat: string | null;
+  generatedAt: string | null;
+  stale: boolean;
+}
+
+export interface EntityProfile {
+  entityType: DrawerEntityType;
+  mentionCount: number;
+  sourceCounts: Record<string, number>;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+  aiBrief: EntityProfileAiBrief;
+}
+
+export interface EntityDetail extends EntityListItem {
+  profile: EntityProfile;
+}
+
+export interface EntitySourceRef {
+  id: string;
+  source: string;
+  sourceId: string;
+  sourceUrl: string | null;
+  lastSeenAt: string;
+}
+
+export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+
+export interface EntityRelationView {
+  id: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  relationshipType: string;
+  confidence: string;
+  confidenceScore: number;
+  source: string;
+  validFrom: string | null;
+  validTo: string | null;
+  other: {
+    id: string;
+    name: string;
+    sourceType: string;
+    aliases: string[];
+  };
+  evidenceCount: number;
+  reviewId?: string;
+}
+
+export interface EntityRelationsResponse {
+  outgoing: EntityRelationView[];
+  incoming: EntityRelationView[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export interface EntityRelationEvidenceRow {
+  fileId: string;
+  fileName: string;
+  sourceType: string;
+  occurredAt: string;
+  chunkIndex: number | null;
+  contextSnippet: string | null;
+  sourceFactId: string | null;
+  note: string | null;
+}
+
+export interface EntityRelationEvidenceResponse {
+  rows: EntityRelationEvidenceRow[];
+  visibleCount: number;
+  totalCount: number;
+  truncated: boolean;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1220,15 +1299,15 @@ export const api = {
   entities: {
     get(id: string) {
       return request<{
-        entity: EntityListItem;
-        sourceRefs: Array<{
-          id: string;
-          source: string;
-          sourceId: string;
-          sourceUrl: string | null;
-          lastSeenAt: string;
-        }>;
+        entity: EntityDetail;
+        sourceRefs: EntitySourceRef[];
       }>(`/api/entities/${id}`);
+    },
+    relations(id: string) {
+      return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);
+    },
+    relationEvidence(id: string, relationId: string) {
+      return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();
@@ -1320,7 +1399,15 @@ export const api = {
     remove(id: string) {
       return request<{ success: boolean }>(`/api/entities/${id}`, { method: "DELETE" });
     },
-    list(opts?: { type?: string; source?: string; search?: string; sort?: string; limit?: number; offset?: number }) {
+    list(opts?: {
+      type?: string;
+      source?: string;
+      search?: string;
+      sort?: string;
+      limit?: number;
+      offset?: number;
+      includeSystem?: boolean;
+    }) {
       const params = new URLSearchParams();
       if (opts?.type) params.set("type", opts.type);
       if (opts?.source) params.set("source", opts.source);
@@ -1328,6 +1415,7 @@ export const api = {
       if (opts?.sort) params.set("sort", opts.sort);
       if (opts?.limit) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
+      if (opts?.includeSystem) params.set("includeSystem", "true");
       const qs = params.toString();
       return request<{
         entities: EntityListItem[];
