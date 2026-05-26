@@ -107,7 +107,13 @@ interface SmartEnrichmentDeps {
   embeddingProvider: EmbeddingProvider | null;
   orgContext?: { orgName?: string; description?: string; industry?: string } | null;
   /** Known product/team entities to include in extraction prompt for better matching. */
-  knownEntities?: Array<{ name: string; type: string; description?: string }>;
+  knownEntities?: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }>;
 }
 
 interface FileContext {
@@ -132,7 +138,13 @@ export async function extractEntities(
   generator: GeminiGenerator,
   file: FileContext,
   orgContext?: { orgName?: string; description?: string; industry?: string } | null,
-  knownEntities?: Array<{ name: string; type: string; description?: string }>,
+  knownEntities?: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }>,
 ): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
@@ -140,9 +152,27 @@ export async function extractEntities(
     ? `\nOrganization: ${orgContext.orgName ?? "Unknown"}. ${orgContext.description}${orgContext.industry ? ` (Industry: ${orgContext.industry})` : ""}\n`
     : "";
 
+  const renderKnown = (e: {
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }) => {
+    const parts: string[] = [`- ${e.name} (${e.type})`];
+    if (e.description) parts.push(`: ${e.description}`);
+    const tags: string[] = [];
+    if (typeof e.mentionCount === "number" && e.mentionCount > 0) {
+      tags.push(`${e.mentionCount} recent files`);
+    }
+    if (e.recentlyActive) tags.push("active in last 2 weeks");
+    if (tags.length > 0) parts.push(` · ${tags.join(" · ")}`);
+    return parts.join("");
+  };
+
   const knownSection =
     knownEntities && knownEntities.length > 0
-      ? `\nKnown entities (match these when mentioned):\n${knownEntities.map((e) => `- ${e.name} (${e.type})${e.description ? `: ${e.description}` : ""}`).join("\n")}\n`
+      ? `\nKnown entities likely to appear in this file — match these to mentions instead of creating duplicates, and prefer them as relationship endpoints:\n${knownEntities.map(renderKnown).join("\n")}\n`
       : "";
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.

@@ -53,7 +53,7 @@ const ROLE_ACCOUNT_LOCAL_PARTS = new Set([
   "team",
 ]);
 
-function isRoleAccountEmail(email: string): boolean {
+export function isRoleAccountEmail(email: string): boolean {
   const at = email.lastIndexOf("@");
   if (at <= 0) return false;
   const local = email.slice(0, at).toLowerCase();
