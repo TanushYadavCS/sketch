@@ -121,3 +121,42 @@
 .scrollbar-none::-webkit-scrollbar {
   display: none !important;
 }
+
+@keyframes sketch-icon-thinking {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(1.06);
+  }
+}
+
+@keyframes sketch-text-thinking {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.sketch-icon-thinking {
+  animation: sketch-icon-thinking 1.4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.sketch-text-thinking {
+  animation: sketch-text-thinking 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sketch-icon-thinking,
+  .sketch-text-thinking {
+    animation: none !important;
+    opacity: 0.7;
+  }
+}

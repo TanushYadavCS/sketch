@@ -447,7 +447,79 @@ export interface SkillRecord {
   body: string;
 }
 
+export interface WorkspaceSummary {
+  automations: {
+    total: number;
+    active: number;
+    paused: number;
+    completed: number;
+    running: number;
+    nextRunAt: string | null;
+  };
+  skills: {
+    total: number;
+    yours: number;
+    shared: number;
+  };
+  integrations: {
+    connected: number;
+    appNames: string[];
+  };
+  team: {
+    total: number;
+    humans: number;
+    agents: number;
+  };
+}
+
+export type WebChatMessagePart =
+  | { type: "text"; text: string }
+  | { type: "data-progress"; id: string; data: { lines: string[] } }
+  | {
+      type: "data-file";
+      id: string;
+      data: {
+        name: string;
+        url: string;
+        mediaType: string;
+        sizeBytes?: number;
+      };
+    };
+
+export interface WebChatStoredMessage {
+  id: string;
+  role: "user" | "assistant";
+  parts: WebChatMessagePart[];
+}
+
+export interface WebChatMessagesResponse {
+  messages: WebChatStoredMessage[];
+  updatedAt: string | null;
+}
+
+export interface WebChatConversationSummary {
+  id: string;
+  title: string;
+  channel: "web";
+  updatedAt: string;
+}
+
 export const api = {
+  webChat: {
+    messages(conversationId = "default") {
+      return request<WebChatMessagesResponse>(
+        `/api/web-chat/messages?conversationId=${encodeURIComponent(conversationId)}`,
+      );
+    },
+    conversations() {
+      return request<{ conversations: WebChatConversationSummary[] }>("/api/web-chat/conversations");
+    },
+    removeConversation(conversationId: string) {
+      return request<{ success: boolean }>(`/api/web-chat/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE",
+      });
+    },
+  },
   setup: {
     status() {
       return request<SetupStatus>("/api/setup/status");
@@ -1246,6 +1318,10 @@ export const api = {
     },
   },
   workspace: {
+    summary() {
+      return request<WorkspaceSummary>("/api/workspace/summary");
+    },
+
     // List directory contents
     async listFiles(scope: WorkspaceScope, path: string): Promise<{ files: FileMetadata[] }> {
       const params = new URLSearchParams();
