@@ -84,10 +84,11 @@ describe("buildSystemContext", () => {
   });
 
   describe("memory section", () => {
-    it("includes memory section with persistent memory guidance", () => {
+    it("includes memory section without encouraging unsupported memory claims", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("## Memory");
-      expect(result).toContain("persistent memory across conversations");
+      expect(result).not.toContain("You have persistent memory across conversations");
+      expect(result).toContain("Do not claim to remember past conversations unless");
     });
 
     it("mentions reducing future steering", () => {
