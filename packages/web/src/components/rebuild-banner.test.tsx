@@ -90,12 +90,33 @@ describe("RebuildBanner", () => {
     expect(banner).toHaveTextContent("5 relations written");
   });
 
-  it("calls onRetry with the original request fields when the failure banner's Retry is clicked", async () => {
+  it("calls onRetry with a prefill biased by job kind when the failure banner's Retry is clicked", async () => {
     const onRetry = vi.fn();
     renderWithProviders(<RebuildBanner state={stateWith({ latestJob: failedJob() })} onRetry={onRetry} />);
     const user = userEvent.setup();
     await user.click(screen.getByTestId("rebuild-retry"));
     expect(onRetry).toHaveBeenCalledTimes(1);
-    expect(onRetry.mock.calls[0][0]).toMatchObject({ categories: ["ai"], method: "replay" });
+    // Failed kind was "reset" — retry should default the dialog to the
+    // replay path, not the LLM re-extract path.
+    expect(onRetry.mock.calls[0][0]).toEqual({ preferReextract: false });
+  });
+
+  it("biases retry to re-extract when the failed job was a reenrich", async () => {
+    const onRetry = vi.fn();
+    const job: ActiveRebuildJob = {
+      kind: "reenrich",
+      job: {
+        id: "j-failed-reenrich",
+        phase: "failed",
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        request: { scope: { all: true }, runAfter: true },
+        error: "wipe failed",
+      },
+    };
+    renderWithProviders(<RebuildBanner state={stateWith({ latestJob: job })} onRetry={onRetry} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("rebuild-retry"));
+    expect(onRetry.mock.calls[0][0]).toEqual({ preferReextract: true });
   });
 });

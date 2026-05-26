@@ -174,6 +174,10 @@ export const handlers = [
     return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
   }),
 
+  http.get("/api/entities/rebuilds/jobs", () => {
+    return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
+  }),
+
   http.get("/api/auth/session", () => {
     return HttpResponse.json({ authenticated: false });
   }),

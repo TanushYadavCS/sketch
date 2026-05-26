@@ -144,6 +144,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     throw new ApiRequestError(message, res.status, code, rest);
   }
 
+  // 204 No Content has no body to parse — callers that type the response as
+  // `void` rely on this fast-path.
+  if (res.status === 204) return undefined as T;
+
   return res.json() as Promise<T>;
 }
 
@@ -322,7 +326,9 @@ export type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_fac
 
 export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
 
-export type RebuildJobPhase = ResetJobPhase | ReenrichJobPhase;
+export type RebuildOnlyJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
+
+export type RebuildJobPhase = ResetJobPhase | ReenrichJobPhase | RebuildOnlyJobPhase;
 
 export interface RebuildJobProgress {
   phase: string;
@@ -330,12 +336,14 @@ export interface RebuildJobProgress {
   total: number;
 }
 
-export type RebuildJobKind = "reset" | "reenrich";
+export type RebuildJobKind = "reset" | "reenrich" | "rebuild";
 
 export interface RebuildJobRequest {
   categories?: ResetCategory[];
   scope?: ReenrichScope;
   runAfter?: boolean;
+  wipeLlmFacts?: boolean;
+  pendingRebuildId?: string;
 }
 
 export interface RebuildJob {
@@ -348,6 +356,13 @@ export interface RebuildJob {
   reset?: {
     deleted: Record<string, number>;
     factsMarkedUnmaterialized: number;
+  };
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
+  llmFactsWiped?: {
+    factsTombstoned: number;
+    relationshipEvidenceDeleted: number;
+    relationshipsDeleted: number;
   };
   replay?: {
     factsRead: number;
@@ -383,7 +398,10 @@ export interface RebuildJobsResponse {
 
 export interface ResetSubmitResponse {
   message: string;
-  job?: { id: string; phase: string; startedAt: string };
+  job?: { id: string; phase: string; startedAt: string; pendingRebuildId?: string; pendingRebuildExpiresAt?: string };
+  /** Present only when runAfter=false (two-step flow). */
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
   /** Present only on dry-run. */
   dryRun?: boolean;
   entitiesDeleted?: number;
@@ -392,6 +410,11 @@ export interface ResetSubmitResponse {
   reviewEvidenceCleared?: number;
   rejectionsCleared?: number;
   factsMarkedUnmaterialized?: number;
+}
+
+export interface RebuildSubmitResponse {
+  message: string;
+  job: { id: string; phase: string; startedAt: string };
 }
 
 export interface ReenrichSubmitResponse {
@@ -779,7 +802,7 @@ export const api = {
       if (opts?.status) params.set("status", opts.status);
       if (opts?.access) params.set("access", opts.access);
       const qs = params.toString();
-      return request<{ files: UnifiedFile[]; total: number; hasMore: boolean }>(
+      return request<{ files: UnifiedFile[]; total: number; enrichedTotal: number; hasMore: boolean }>(
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
       );
     },
@@ -1229,7 +1252,10 @@ export const api = {
     deleteTentative() {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
     },
-    reset(categories: string[], opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean }) {
+    reset(
+      categories: string[],
+      opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean; wipeLlmFacts?: boolean },
+    ) {
       return request<ResetSubmitResponse>("/api/entities/resets", {
         method: "POST",
         body: JSON.stringify({
@@ -1237,6 +1263,7 @@ export const api = {
           runAfter: opts?.runAfter ?? false,
           confirm: opts?.confirm,
           dryRun: opts?.dryRun,
+          wipeLlmFacts: opts?.wipeLlmFacts,
         }),
       });
     },
@@ -1246,7 +1273,10 @@ export const api = {
     resetJobs() {
       return request<RebuildJobsResponse>("/api/entities/resets/jobs");
     },
-    reenrich(scope: ReenrichScope, opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean }) {
+    reenrich(
+      scope: ReenrichScope,
+      opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean; pendingRebuildId?: string },
+    ) {
       return request<ReenrichSubmitResponse>("/api/entities/reenrichments", {
         method: "POST",
         body: JSON.stringify({
@@ -1254,6 +1284,7 @@ export const api = {
           runAfter: opts?.runAfter ?? true,
           confirm: opts?.confirm,
           dryRun: opts?.dryRun,
+          pendingRebuildId: opts?.pendingRebuildId,
         }),
       });
     },
@@ -1262,6 +1293,23 @@ export const api = {
     },
     reenrichJobs() {
       return request<RebuildJobsResponse>("/api/entities/reenrichments/jobs");
+    },
+    rebuild(pendingRebuildId: string) {
+      return request<RebuildSubmitResponse>("/api/entities/rebuilds", {
+        method: "POST",
+        body: JSON.stringify({ pendingRebuildId }),
+      });
+    },
+    rebuildJob(id: string) {
+      return request<RebuildJob>(`/api/entities/rebuilds/jobs/${id}`);
+    },
+    rebuildJobs() {
+      return request<RebuildJobsResponse>("/api/entities/rebuilds/jobs");
+    },
+    cancelPendingRebuild(pendingRebuildId: string) {
+      return request<void>(`/api/entities/rebuilds/pending/${pendingRebuildId}`, {
+        method: "DELETE",
+      });
     },
     update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
       return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {

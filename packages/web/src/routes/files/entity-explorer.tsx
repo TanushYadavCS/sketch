@@ -12,8 +12,8 @@ import { ConnectorLogo } from "@/components/connector-logos";
  * rows (no suggested candidate) open directly in chooser mode.
  */
 import { EntityPicker } from "@/components/entity-picker";
+import { GraphRebuildDialog, type GraphRebuildDialogPrefill } from "@/components/graph-rebuild-dialog";
 import { RebuildBanner } from "@/components/rebuild-banner";
-import { RebuildDialog, type RebuildDialogPrefill } from "@/components/rebuild-dialog";
 import { countKey, detailKey, listKey, useReviewMutations } from "@/components/review-actions";
 import { useRebuildJob } from "@/hooks/use-rebuild-job";
 import type { EntityListItem, EntityMention, EntityReviewEvidenceRow, EntityReviewQueueRow } from "@/lib/api";
@@ -122,7 +122,7 @@ export function EntityExplorer() {
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showRebuildDialog, setShowRebuildDialog] = useState(false);
-  const [rebuildPrefill, setRebuildPrefill] = useState<RebuildDialogPrefill | null>(null);
+  const [rebuildPrefill, setRebuildPrefill] = useState<GraphRebuildDialogPrefill | null>(null);
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("company");
 
@@ -424,7 +424,7 @@ export function EntityExplorer() {
         </DialogContent>
       </Dialog>
 
-      <RebuildDialog
+      <GraphRebuildDialog
         open={showRebuildDialog}
         onOpenChange={setShowRebuildDialog}
         prefill={rebuildPrefill}
