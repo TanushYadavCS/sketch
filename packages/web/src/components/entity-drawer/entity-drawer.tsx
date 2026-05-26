@@ -17,13 +17,14 @@ import type {
 } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
-import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, WarningIcon } from "@phosphor-icons/react";
+import { ArrowClockwiseIcon, ArrowLeftIcon, CaretDownIcon, CaretRightIcon, WarningIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { TimelineStrip } from "./timeline-strip";
 
 const CONFIDENCE_LABEL: Record<string, string> = {
   EXTRACTED: "EXTRACTED",
@@ -139,6 +140,8 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
         <IdentityPanel entity={entity} sourceRefs={sourceRefs} accent={accent} />
         <SectionDivider />
         <RelationshipsPanel relations={relationsQuery.data} isLoading={relationsQuery.isLoading} entityId={entity.id} />
+        <SectionDivider />
+        <TimelinePanel entityId={entity.id} />
       </div>
     </>
   );
@@ -193,36 +196,142 @@ function SectionDivider() {
   return <div className="my-5 h-px bg-border" />;
 }
 
+/**
+ * AI Brief — three rows. WHAT renders instantly from the deterministic
+ * server template. SIGNAL and SO WHAT come from a Gemini-backed org-shared
+ * cache; if cold, the drawer fires a refresh and shows a shimmer. Stale
+ * rows show a dot indicator and trigger a background refresh on mount.
+ */
 function AiBriefBlock({ entity, accent }: { entity: EntityDetail; accent: string }) {
+  const queryClient = useQueryClient();
   const { aiBrief } = entity.profile;
+  const [signal, setSignal] = useState<string | null>(aiBrief.signal);
+  const [soWhat, setSoWhat] = useState<string | null>(aiBrief.soWhat);
+  const [stale, setStale] = useState(aiBrief.stale);
+  const [error, setError] = useState<"generation_failed" | "rate_limited" | null>(null);
+  const autoRefreshKeyRef = useRef<string | null>(null);
+
+  const refreshMutation = useMutation({
+    mutationFn: (force: boolean) => api.entities.refreshAiBrief(entity.id, { force }),
+    onSuccess: (data) => {
+      setSignal(data.signal);
+      setSoWhat(data.soWhat);
+      setStale(data.stale);
+      setError(data.error ?? null);
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer", "profile", entity.id] });
+    },
+    onError: () => setError("generation_failed"),
+  });
+
+  const isCold = signal === null && soWhat === null;
+  const autoRefreshKey = `${entity.id}:${aiBrief.generatedAt ?? "cold"}:${aiBrief.stale ? "stale" : "fresh"}`;
+
+  useEffect(() => {
+    setSignal(aiBrief.signal);
+    setSoWhat(aiBrief.soWhat);
+    setStale(aiBrief.stale);
+    setError(null);
+    autoRefreshKeyRef.current = null;
+  }, [aiBrief.signal, aiBrief.soWhat, aiBrief.stale]);
+
+  useEffect(() => {
+    if ((isCold || stale) && !refreshMutation.isPending && autoRefreshKeyRef.current !== autoRefreshKey) {
+      autoRefreshKeyRef.current = autoRefreshKey;
+      refreshMutation.mutate(false);
+    }
+  }, [autoRefreshKey, isCold, stale, refreshMutation.isPending, refreshMutation.mutate]);
+
+  const showShimmer = isCold && refreshMutation.isPending;
+
   return (
     <section aria-label="AI brief" className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
+      <div className="mb-1 flex items-center justify-end gap-2">
+        {stale ? (
+          <span
+            className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400"
+            aria-label="Brief inputs have changed since last generation"
+            title="Refreshing in the background"
+          />
+        ) : null}
+        <button
+          type="button"
+          onClick={() => refreshMutation.mutate(true)}
+          disabled={refreshMutation.isPending}
+          className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-50"
+          aria-label="Refresh AI brief"
+        >
+          <ArrowClockwiseIcon className="h-3 w-3" />
+        </button>
+      </div>
       <BriefRow label="What" value={aiBrief.what} />
-      {/* Signal / So what land in Phase 2; render placeholders until generator wires up. */}
-      <BriefRow label="Signal" value={aiBrief.signal} placeholder="—" muted />
-      <BriefRow label="So what" value={aiBrief.soWhat} placeholder="—" muted />
+      <BriefRow label="Signal" value={signal} loading={showShimmer} />
+      <BriefRow label="So what" value={soWhat} loading={showShimmer} />
+      {error === "generation_failed" && !showShimmer ? (
+        <button
+          type="button"
+          onClick={() => refreshMutation.mutate(true)}
+          className="mt-1 text-[10px] text-muted-foreground hover:text-foreground"
+        >
+          couldn't generate — retry
+        </button>
+      ) : null}
     </section>
   );
 }
 
-function BriefRow({
-  label,
-  value,
-  placeholder,
-  muted,
-}: {
-  label: string;
-  value: string | null;
-  placeholder?: string;
-  muted?: boolean;
-}) {
+function BriefRow({ label, value, loading }: { label: string; value: string | null; loading?: boolean }) {
   return (
     <div className="grid grid-cols-[88px_1fr] items-start gap-3 py-1">
       <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</span>
-      <span className={cn("text-sm leading-snug", muted && "text-muted-foreground")}>
-        {value ?? placeholder ?? "—"}
-      </span>
+      {loading ? (
+        <Skeleton className="h-4 w-4/5" />
+      ) : (
+        <span className={cn("text-sm leading-snug", value === null && "text-muted-foreground")}>{value ?? "—"}</span>
+      )}
     </div>
+  );
+}
+
+interface TimelinePanelProps {
+  entityId: string;
+}
+
+function TimelinePanel({ entityId }: TimelinePanelProps) {
+  const timelineQuery = useQuery({
+    queryKey: ["entity-drawer", "timeline", entityId],
+    queryFn: () => api.entities.timeline(entityId),
+  });
+
+  if (timelineQuery.isLoading) {
+    return (
+      <section aria-label="Timeline">
+        <SectionHeader title="Timeline" />
+        <Skeleton className="h-24 w-full" />
+      </section>
+    );
+  }
+  const groups = timelineQuery.data?.groups ?? [];
+  if (groups.length === 0) {
+    return (
+      <section aria-label="Timeline">
+        <SectionHeader title="Timeline" />
+        <p className="text-xs text-muted-foreground">No file mentions yet.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section aria-label="Timeline">
+      <SectionHeader
+        title="Timeline"
+        hint={
+          timelineQuery.data?.truncated
+            ? `${timelineQuery.data.totalCount}+ shown`
+            : `${timelineQuery.data?.totalCount ?? 0}`
+        }
+      />
+      <TimelineStrip groups={groups} />
+    </section>
   );
 }
 

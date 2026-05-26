@@ -91,6 +91,15 @@ const relationsForSarah = {
   totalCount: 2,
 };
 
+const emptyTimeline = { groups: [], truncated: false, totalCount: 0 };
+const cachedBriefRefresh = {
+  what: SARAH.profile.aiBrief.what,
+  signal: "Cached signal sentence.",
+  soWhat: "Cached so-what sentence.",
+  generatedAt: "2026-05-22T12:00:00.000Z",
+  stale: false,
+};
+
 const handlers = [
   http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
   http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
@@ -117,6 +126,10 @@ const handlers = [
   http.get("/api/entities/e-stripe/relations", () =>
     HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
   ),
+  http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
+  http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
+  http.post("/api/entities/e-sarah/ai-brief/refresh", () => HttpResponse.json(cachedBriefRefresh)),
+  http.post("/api/entities/e-stripe/ai-brief/refresh", () => HttpResponse.json(cachedBriefRefresh)),
 ];
 
 const server = setupServer(...handlers);
@@ -185,5 +198,25 @@ describe("EntityDrawer", () => {
     await user.click(await screen.findByText("leads"));
 
     expect(await screen.findByText("+2 more visible evidence rows")).toBeInTheDocument();
+  });
+
+  it("AI brief lazy-loads Signal/SoWhat when cache is cold (fades shimmer into refresh response)", async () => {
+    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
+    // WHAT renders instantly from the deterministic server template.
+    await screen.findByText(/Person · Engineer at Stripe/);
+    // After the refresh roundtrip resolves, the cached SIGNAL row should appear.
+    await waitFor(() => {
+      expect(screen.getByText("Cached signal sentence.")).toBeInTheDocument();
+      expect(screen.getByText("Cached so-what sentence.")).toBeInTheDocument();
+    });
+  });
+
+  it("Timeline section renders empty state when no mentions exist", async () => {
+    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
+    await screen.findByText(/Person · Engineer at Stripe/);
+    await waitFor(() => {
+      expect(screen.getByText("Timeline")).toBeInTheDocument();
+      expect(screen.getByText(/No file mentions yet/i)).toBeInTheDocument();
+    });
   });
 });
