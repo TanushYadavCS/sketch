@@ -1288,11 +1288,13 @@ export const api = {
     },
   },
   entityReview: {
-    list(opts?: { limit?: number; offset?: number }) {
+    list(opts?: { limit?: number; offset?: number; search?: string }) {
       const params = new URLSearchParams();
       // `limit=0` is a meaningful value (count-only mode) — send it explicitly.
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
+      const search = opts?.search?.trim();
+      if (search) params.set("q", search);
       const qs = params.toString();
       return request<EntityReviewListResponse>(`/api/entity-review${qs ? `?${qs}` : ""}`);
     },

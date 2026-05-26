@@ -28,6 +28,8 @@ import { useState } from "react";
 
 export const LIST_KEY = ["entity-review", "list"] as const;
 export const COUNT_KEY = ["entity-review", "count"] as const;
+export const listKey = (search?: string) => ["entity-review", "list", search ?? ""] as const;
+export const countKey = (search?: string) => ["entity-review", "count", search ?? ""] as const;
 export const detailKey = (id: string) => ["entity-review", "detail", id] as const;
 
 export interface ResolveResult {
@@ -113,15 +115,26 @@ export function useReviewMutations(
 
   const onMutate = async () => {
     await queryClient.cancelQueries({ queryKey: LIST_KEY });
-    const prev = queryClient.getQueryData<EntityReviewListResponse>(LIST_KEY);
-    queryClient.setQueryData<EntityReviewListResponse>(LIST_KEY, (old) =>
+    // The list query is now keyed by search term, so any number of cached
+    // variants may exist. Snapshot all of them and apply the optimistic
+    // remove to every one — rollback restores per-key on error.
+    const prev = queryClient.getQueriesData<EntityReviewListResponse>({ queryKey: LIST_KEY });
+    queryClient.setQueriesData<EntityReviewListResponse>({ queryKey: LIST_KEY }, (old) =>
       old ? { ...old, rows: old.rows.filter((r) => r.id !== row.id), total: Math.max(0, old.total - 1) } : old,
     );
     return { prev };
   };
 
-  const onError = (err: unknown, _vars: unknown, ctx: { prev?: EntityReviewListResponse } | undefined) => {
-    if (ctx?.prev) queryClient.setQueryData(LIST_KEY, ctx.prev);
+  const onError = (
+    err: unknown,
+    _vars: unknown,
+    ctx: { prev?: [readonly unknown[], EntityReviewListResponse | undefined][] } | undefined,
+  ) => {
+    if (ctx?.prev) {
+      for (const [key, data] of ctx.prev) {
+        if (data) queryClient.setQueryData(key, data);
+      }
+    }
     queryClient.invalidateQueries({ queryKey: detailKey(row.id) });
     setErrorCopy(copyForError(err));
   };

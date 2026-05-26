@@ -125,12 +125,13 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     if (status !== "pending") {
       return c.json({ error: { code: "BAD_REQUEST", message: "only status=pending supported in v1" } }, 400);
     }
+    const search = c.req.query("q")?.trim() || undefined;
 
     const repo = createEntityReviewRepo(db);
     const callerIsAdmin = isAdmin(c);
     const callerId = c.get("sub");
 
-    const total = await repo.countPending({ ownerUserId: callerId, isAdmin: callerIsAdmin });
+    const total = await repo.countPending({ ownerUserId: callerId, isAdmin: callerIsAdmin, search });
 
     if (countOnly) {
       return c.json({ rows: [], total });
@@ -141,6 +142,7 @@ export function entityReviewRoutes(db: Kysely<DB>) {
       isAdmin: callerIsAdmin,
       limit,
       offset,
+      search,
     });
 
     // Evidence summary per visible row.
