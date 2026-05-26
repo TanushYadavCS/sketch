@@ -53,6 +53,7 @@ export interface ReenrichDeps {
   fileIds: string[];
   missingFileIds?: string[];
   llmPromotionThreshold?: number;
+  coMentionContributesToThreshold?: number;
   onPhase?: (phase: "wiping" | "enriching" | "rebuilding") => void;
   /**
    * Fires during enrich and rebuild phases (per-file during enrichment,
@@ -391,6 +392,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         skipReset: true,
         lockAlreadyHeld: true,
         llmPromotionThreshold: deps.llmPromotionThreshold,
+        coMentionContributesToThreshold: deps.coMentionContributesToThreshold,
         materializeFactTypes: [...AI_EXTRACTION_FACT_TYPES],
         onProgress: deps.onProgress,
       });

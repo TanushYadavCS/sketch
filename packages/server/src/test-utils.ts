@@ -82,6 +82,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     MAX_UPLOAD_SIZE_MB: 50,
     EXPERIMENTAL_FLAG: false,
     LLM_PROMOTION_THRESHOLD: 2,
+    CO_MENTION_CONTRIBUTES_TO_THRESHOLD: 3,
     SYNC_ALLOW_LARGE_RECONCILE: false,
     SYNC_MAX_RECONCILE_RATIO: 0.5,
     DATA_DIR: "./data",

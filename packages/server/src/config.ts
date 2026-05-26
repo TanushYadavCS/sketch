@@ -30,6 +30,7 @@ export const configSchema = z.object({
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
+  CO_MENTION_CONTRIBUTES_TO_THRESHOLD: z.coerce.number().int().min(2).default(3),
 
   // Sync reconciliation
   SYNC_ALLOW_LARGE_RECONCILE: z

@@ -39,7 +39,9 @@ function syncInBackground(
   db: Kysely<DB>,
   connectorId: string,
   logger: Logger,
-  config?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">,
+  config?: Partial<
+    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+  >,
 ) {
   runConnectorSync(db, connectorId, logger, config).catch((err) => {
     logger.error({ err, connectorId }, "Background sync failed");
@@ -96,7 +98,9 @@ export function connectorRoutes(
   db: Kysely<DB>,
   logger: Logger,
   userRepo?: UserRepo,
-  appConfig?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">,
+  appConfig?: Partial<
+    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+  >,
 ) {
   const routes = new Hono();
 

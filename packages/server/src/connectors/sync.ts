@@ -17,6 +17,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
+import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import {
   cleanupEmptyRelationships,
   cleanupRelationshipEvidenceForFacts,
@@ -182,7 +183,9 @@ export async function runConnectorSync(
   db: Kysely<DB>,
   connectorConfigId: string,
   logger: Logger,
-  appConfig?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">,
+  appConfig?: Partial<
+    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+  >,
 ): Promise<SyncResult> {
   if (isRecreateActive()) {
     logger.info({ connectorId: connectorConfigId }, "Skipping connector sync during entity recreate");
@@ -250,6 +253,7 @@ export async function runConnectorSync(
     };
 
     const seenProviderFileIds = new Set<string>();
+    const affectedIndexedFileIds = new Set<string>();
 
     // Pre-load existing content hashes for this connector to skip unchanged items
     const existingHashes = new Map<string, { id: string; contentHash: string | null }>();
@@ -427,6 +431,7 @@ export async function runConnectorSync(
           // Without this, unchanged files never get linked to a new connector
           // config, breaking connector-scoped counts/listing and orphan logic.
           await repo.linkConnectorFile(config.id, existing.id);
+          affectedIndexedFileIds.add(existing.id);
 
           // Sync ACL even when content is unchanged — permissions may have
           // changed (e.g. attendee removed, scope membership updated).
@@ -566,6 +571,7 @@ export async function runConnectorSync(
         // Entity operations AFTER transaction — entityRepo uses the outer db connection.
         // Calling it inside a transaction deadlocks on better-sqlite3 (single-connection,
         // exclusive write lock).
+        affectedIndexedFileIds.add(itemResult.id);
 
         // Promote items to entities based on connector's promotableFileTypes
         const promotable = connector.promotableFileTypes ?? [];
@@ -696,6 +702,7 @@ export async function runConnectorSync(
         await cleanupEmptyRelationships(db);
 
         if (reconcileResult.affectedIndexedFileIds.length > 0) {
+          for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
           await deleteMaterializedFactMentions(db, connectorType, reconcileResult.affectedIndexedFileIds);
           await factRepo.clearMaterializedAtForActiveFacts(reconcileResult.affectedIndexedFileIds);
         }
@@ -708,6 +715,10 @@ export async function runConnectorSync(
     }
 
     await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));
+    await sweepCoMentionContributesTo(db, syncLogger.child({ component: "co-mention-sweep" }), {
+      scope: { kind: "files", indexedFileIds: [...affectedIndexedFileIds] },
+      threshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+    });
 
     result.newCursor = await connector.getCursor({
       credentials,
@@ -754,7 +765,9 @@ export async function runConnectorSync(
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
-  appConfig?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">;
+  appConfig?: Partial<
+    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+  >;
 }
 
 /**

@@ -362,6 +362,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           missingFileIds: resolved.missingFileIds,
           runAfter,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           onPhase: (phase) => {
             job.phase = phase;
           },
@@ -516,6 +517,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           skipReset: true,
           lockAlreadyHeld: true,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           materializeFactTypes: factTypes.length > 0 ? factTypes : undefined,
           onProgress: (progress) => {
             job.progress = progress;

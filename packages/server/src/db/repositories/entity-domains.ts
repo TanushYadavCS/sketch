@@ -231,6 +231,24 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
       return Number(result.numDeletedRows ?? 0);
     },
 
+    async deleteCoMentionEvidenceForRelationships(
+      relationshipIds: string[],
+      keepEvidenceKeys: Set<string> = new Set(),
+    ): Promise<number> {
+      if (relationshipIds.length === 0) return 0;
+      let query = db
+        .deleteFrom("entity_relationship_evidence")
+        .where("relationship_id", "in", relationshipIds)
+        .where("source_fact_id", "is", null)
+        .where("note", "like", "co_mention:%");
+      const keep = [...keepEvidenceKeys];
+      if (keep.length > 0) {
+        query = query.where("evidence_key", "not in", keep);
+      }
+      const result = await query.executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
     async cleanupEmptyRelationships(): Promise<number> {
       const result = await db
         .deleteFrom("entity_relationships")
