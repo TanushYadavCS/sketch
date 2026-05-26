@@ -61,7 +61,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v2";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v3";
 const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -172,15 +172,20 @@ DO NOT extract:
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 
+Most relationships in a business corpus follow this shape: **Companies** are clients, partners, or vendors → **Initiatives** (projects, products, features) are owned by a company or team → **People** work on those initiatives, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
+
 Also extract direct relationships only when the text explicitly supports them.
 
 Valid relationship types:
-- "works_at": person -> company
+- "works_at": person -> company (the person is employed by the company)
+- "engaged_with": person | team -> company (the person/team is working with or for an external company without being employed by it — vendor, consultancy, or client-engagement context)
 - "leads": person -> project | product | team
 - "contributes_to": person -> project | product
 - "builds": company -> product
 - "part_of": project -> project, product -> product, team -> company
 - "partner_of": company -> company
+
+Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
 
 Return one JSON object:
 {
@@ -755,7 +760,15 @@ async function reconcileLlmExtractionFacts(
   await materializeUnmaterializedFacts(db, deps.logger);
 }
 
-const RELATION_TYPES = ["works_at", "leads", "contributes_to", "builds", "part_of", "partner_of"] as const;
+const RELATION_TYPES = [
+  "works_at",
+  "engaged_with",
+  "leads",
+  "contributes_to",
+  "builds",
+  "part_of",
+  "partner_of",
+] as const;
 
 function normalizeRelationType(raw: string): (typeof RELATION_TYPES)[number] | null {
   const normalized = raw.trim().toLowerCase();

@@ -20,6 +20,7 @@ export type IndexedFileFactRelation =
   | "mentioned"
   | "seeded"
   | "works_at"
+  | "engaged_with"
   | "leads"
   | "contributes_to"
   | "builds"

@@ -6,7 +6,14 @@ import type { DB, EntitiesTable } from "../schema";
 
 export type DomainKind = "corporate" | "personal" | "shared";
 export type RelationshipConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
-export type EntityRelationshipType = "works_at" | "leads" | "contributes_to" | "builds" | "part_of" | "partner_of";
+export type EntityRelationshipType =
+  | "works_at"
+  | "engaged_with"
+  | "leads"
+  | "contributes_to"
+  | "builds"
+  | "part_of"
+  | "partner_of";
 
 export interface UpsertDomainInput {
   entityId: string | null;
