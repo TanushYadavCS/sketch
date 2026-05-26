@@ -32,9 +32,11 @@ import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
+import { webChatRoutes } from "./api/web-chat";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
 import { createWorkspaceApi } from "./api/workspace";
+import { workspaceSummaryRoutes } from "./api/workspace-summary";
 import type { Config } from "./config";
 import {
   type AgentEnvironmentRuntimeContext,
@@ -258,8 +260,29 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         sendDm: deps.sendDm,
       }),
     );
+    app.route(
+      "/api/web-chat",
+      webChatRoutes({
+        db,
+        config,
+        logger,
+        users,
+        settings,
+        inboxMessagesRepo: inboxMessages,
+        runAgent: deps.runAgent,
+        buildMcpServers: deps.buildMcpServers,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
+        scheduler: deps.scheduler as TaskScheduler | undefined,
+        stepContentRepo: deps.stepContentRepo,
+        automationRunsRepo: deps.automationRunsRepo,
+        queueManager: deps.queueManager,
+        getSlack: deps.getSlack,
+        sendDm: deps.sendDm,
+      }),
+    );
   }
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
+  app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
     app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));
