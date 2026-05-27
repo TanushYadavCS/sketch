@@ -10,6 +10,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { IntegrationConnection } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
@@ -190,6 +191,64 @@ function serializeServer(row: {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function hasDisplayOwnerName(connection: IntegrationConnection): boolean {
+  const ownerName = connection.ownerName?.trim();
+  return !!ownerName && !isEmail(ownerName);
+}
+
+function isEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function extractEmails(value?: string): string[] {
+  return value?.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? [];
+}
+
+function extractSecretOwnerId(connectionId: string): string | null {
+  const match = /^secrets:([^:]+):/.exec(connectionId);
+  return match?.[1] ?? null;
+}
+
+async function resolveUserName(users: UserRepo, values: Array<string | null | undefined>): Promise<string | null> {
+  for (const raw of values) {
+    const value = raw?.trim();
+    if (!value) continue;
+    const user = isEmail(value) ? await users.findByEmail(value) : await users.findById(value);
+    if (user?.name) return user.name;
+    if (!isEmail(value)) {
+      const emailUser = await users.findByEmail(value);
+      if (emailUser?.name) return emailUser.name;
+    }
+  }
+  return null;
+}
+
+async function enrichConnectionOwnerNames(
+  connections: IntegrationConnection[],
+  users: UserRepo,
+): Promise<IntegrationConnection[]> {
+  return Promise.all(
+    connections.map(async (connection) => {
+      if (
+        connection.accessLevel !== "organization" ||
+        connection.isOwnedByViewer !== false ||
+        hasDisplayOwnerName(connection)
+      ) {
+        return connection;
+      }
+
+      const ownerName = await resolveUserName(users, [
+        connection.ownerUserId,
+        extractSecretOwnerId(connection.id),
+        connection.ownerName,
+        ...extractEmails(connection.accountName),
+      ]);
+
+      return ownerName ? { ...connection, ownerName } : connection;
+    }),
+  );
 }
 
 export function mcpServerRoutes(
@@ -385,7 +444,8 @@ export function mcpServerRoutes(
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
     const connections = await provider.listConnections(userResult.email);
-    return c.json({ connections });
+    const enrichedConnections = await enrichConnectionOwnerNames(connections, users);
+    return c.json({ connections: enrichedConnections });
   });
 
   routes.delete("/:id/connections/:connectionId", async (c) => {

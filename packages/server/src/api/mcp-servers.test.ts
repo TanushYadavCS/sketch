@@ -735,6 +735,63 @@ describe("MCP Servers API", () => {
       expect(mockProvider.listConnections).toHaveBeenCalledWith("member@test.com");
     });
 
+    it("fills shared connection owner names from Sketch users when Canvas omits them", async () => {
+      await seedAdmin(db);
+      const users = createUserRepository(db);
+      await users.create({
+        name: "Tanush Yadav",
+        email: "tanushyadav87@gmail.com",
+        emailVerified: true,
+      });
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "secrets:owner-1:aimfox:aimfox",
+            providerId: server.id,
+            source: "canvas_user_secrets",
+            appId: "aimfox",
+            appName: "Aimfox",
+            accountName: "tanushyadav87@gmail.com's Aimfox Connection",
+            status: "active",
+            accessLevel: "organization",
+            isOwnedByViewer: false,
+            canManageAccess: false,
+            canDelete: false,
+            createdAt: "2026-05-27T00:00:00Z",
+          },
+        ]),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections`, {
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.connections[0].ownerName).toBe("Tanush Yadav");
+    });
+
     it("returns 404 for non-existent server", async () => {
       await seedAdmin(db);
       const app = createApp(db, config);
