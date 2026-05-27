@@ -886,6 +886,7 @@ export const api = {
         whatsappNumber?: string | null;
         description?: string | null;
         role?: string | null;
+        authRole?: "admin" | "member";
         reportsTo?: string | null;
         allowedTools?: string[] | null;
         slackChannelIds?: string[] | null;
