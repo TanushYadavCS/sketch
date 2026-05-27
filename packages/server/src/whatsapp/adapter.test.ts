@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { downloadWhatsAppMedia } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
 import type { WhatsAppAdapterDeps } from "./adapter";
@@ -839,6 +840,70 @@ describe("whatsapp/adapter", () => {
         "group@g.us",
         expect.objectContaining({ senderName: "DB Alice" }),
       );
+    });
+
+    it("downloads and buffers untagged group audio without running the agent", async () => {
+      const deps = makeDeps();
+      vi.mocked(downloadWhatsAppMedia).mockClear();
+      vi.mocked(downloadWhatsAppMedia).mockResolvedValueOnce({
+        originalName: "voice.ogg",
+        mimeType: "audio/ogg",
+        localPath: "/tmp/test-data/workspaces/wa-group-g1/attachments/voice.ogg",
+        sizeBytes: 100,
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Bob",
+        rawMessage: {},
+        mediaType: "audioMessage",
+        isMentioned: false,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+
+      expect(downloadWhatsAppMedia).toHaveBeenCalledOnce();
+      expect(deps.groupBuffer.append).toHaveBeenCalledWith(
+        "group@g.us",
+        expect.objectContaining({ text: "See attached files." }),
+      );
+      const bufferedMessage = vi.mocked(deps.groupBuffer.append).mock.calls[0]?.[1];
+      expect(bufferedMessage?.attachments).toHaveLength(1);
+      expect(bufferedMessage?.attachments?.[0]).toEqual(expect.objectContaining({ originalName: "voice.ogg" }));
+      expect(bufferedMessage?.attachments?.[0]).not.toHaveProperty("transcription");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("ignores untagged group non-audio media", async () => {
+      const deps = makeDeps();
+      vi.mocked(downloadWhatsAppMedia).mockClear();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Bob",
+        rawMessage: {},
+        mediaType: "imageMessage",
+        isMentioned: false,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+
+      expect(downloadWhatsAppMedia).not.toHaveBeenCalled();
+      const bufferedMessage = vi.mocked(deps.groupBuffer.append).mock.calls[0]?.[1];
+      expect(bufferedMessage).not.toHaveProperty("attachments");
+      expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
     it("runs agent on mention with group metadata in the user message context", async () => {
