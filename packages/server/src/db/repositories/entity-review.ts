@@ -245,10 +245,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       if (search) {
         const pattern = `%${search.toLowerCase()}%`;
         q = q.where((eb) =>
-          eb.or([
-            eb("normalized_name", "like", pattern),
-            eb(sql<string>`LOWER(proposed_name)`, "like", pattern),
-          ]),
+          eb.or([eb("normalized_name", "like", pattern), eb(sql<string>`LOWER(proposed_name)`, "like", pattern)]),
         );
       }
       q = q.orderBy("last_seen_at", "desc").limit(opts.limit);
@@ -288,10 +285,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       if (search) {
         const pattern = `%${search.toLowerCase()}%`;
         q = q.where((eb) =>
-          eb.or([
-            eb("normalized_name", "like", pattern),
-            eb(sql<string>`LOWER(proposed_name)`, "like", pattern),
-          ]),
+          eb.or([eb("normalized_name", "like", pattern), eb(sql<string>`LOWER(proposed_name)`, "like", pattern)]),
         );
       }
       const row = await q.executeTakeFirst();
