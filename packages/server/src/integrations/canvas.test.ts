@@ -134,6 +134,44 @@ describe("CanvasProvider", () => {
     });
   });
 
+  it("omits Canvas accounts the viewer cannot use", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            accounts: [
+              {
+                id: "secrets:owner-1:github:github",
+                source: "canvas_user_secrets",
+                name: "GitHub",
+                app: { name: "GitHub", nameSlug: "github" },
+                healthy: true,
+                accessLevel: "organization",
+                canUse: true,
+              },
+              {
+                id: "secrets:owner-1:linear:linear",
+                source: "canvas_user_secrets",
+                name: "Linear",
+                app: { name: "Linear", nameSlug: "linear" },
+                healthy: true,
+                accessLevel: "personal",
+                canUse: false,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    const connections = await provider.listConnections("priya@example.com");
+
+    expect(connections.map((connection) => connection.appId)).toEqual(["github"]);
+  });
+
   it("does not infer Canvas ownership solely from canonical secret account IDs", async () => {
     vi.stubGlobal(
       "fetch",

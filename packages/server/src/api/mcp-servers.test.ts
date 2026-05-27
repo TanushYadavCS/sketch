@@ -823,6 +823,29 @@ describe("MCP Servers API", () => {
   // --- PATCH /api/mcp-servers/:id/connections/:connectionId/access ---
 
   describe("PATCH /api/mcp-servers/:id/connections/:connectionId/access", () => {
+    it("is not mounted when experimental features are disabled", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: false }));
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/pd-1/access`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ accessLevel: "organization" }),
+      });
+
+      expect(res.status).toBe(404);
+    });
+
     it("forwards the member email and requested access level to the provider", async () => {
       await seedAdmin(db);
       const repo = createMcpServerRepository(db);
@@ -848,7 +871,7 @@ describe("MCP Servers API", () => {
       const { createProvider } = await import("../integrations/factory");
       vi.mocked(createProvider).mockReturnValue(mockProvider);
 
-      const app = createApp(db, config);
+      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }));
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
@@ -899,7 +922,7 @@ describe("MCP Servers API", () => {
       const { createProvider } = await import("../integrations/factory");
       vi.mocked(createProvider).mockReturnValue(mockProvider);
 
-      const app = createApp(db, config);
+      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }));
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(`/api/mcp-servers/${server.id}/connections/pd-1/access`, {

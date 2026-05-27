@@ -259,7 +259,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }),
     );
   }
-  app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
+  app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users, { experimentalFlag: config.EXPERIMENTAL_FLAG }));
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
     app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));

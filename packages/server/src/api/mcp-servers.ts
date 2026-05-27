@@ -192,7 +192,11 @@ function serializeServer(row: {
   };
 }
 
-export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
+export function mcpServerRoutes(
+  mcpServers: McpServerRepo,
+  users: UserRepo,
+  options: { experimentalFlag?: boolean } = {},
+) {
   const routes = new Hono();
 
   // --- MCP Server CRUD (admin-only) ---
@@ -398,37 +402,43 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     return c.json({ success: true });
   });
 
-  routes.patch("/:id/connections/:connectionId/access", async (c) => {
-    const resolved = await resolveProvider(c, mcpServers);
-    if (!resolved.ok) return resolved.response;
-    const { row } = resolved;
+  if (options.experimentalFlag) {
+    routes.patch("/:id/connections/:connectionId/access", async (c) => {
+      const resolved = await resolveProvider(c, mcpServers);
+      if (!resolved.ok) return resolved.response;
+      const { row } = resolved;
 
-    const body = await c.req.json();
-    const parsed = updateConnectionAccessSchema.safeParse(body);
-    if (!parsed.success) {
-      const message = parsed.error.issues[0]?.message ?? "Invalid request";
-      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
-    }
-
-    const userResult = await resolveUserEmail(c, users);
-    if (!userResult.ok) return userResult.response;
-
-    const connectionId = c.req.param("connectionId");
-    const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
-    if (!provider.updateConnectionAccess) {
-      return c.json({ error: { code: "BAD_REQUEST", message: "Provider does not support connection access" } }, 400);
-    }
-
-    try {
-      const connection = await provider.updateConnectionAccess(userResult.email, connectionId, parsed.data.accessLevel);
-      return c.json({ success: true, connection });
-    } catch (err) {
-      if (err instanceof CanvasProviderRequestError) {
-        return c.json({ error: { code: err.code, message: err.message } }, err.status as 400 | 401 | 403 | 404 | 500);
+      const body = await c.req.json();
+      const parsed = updateConnectionAccessSchema.safeParse(body);
+      if (!parsed.success) {
+        const message = parsed.error.issues[0]?.message ?? "Invalid request";
+        return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
       }
-      throw err;
-    }
-  });
+
+      const userResult = await resolveUserEmail(c, users);
+      if (!userResult.ok) return userResult.response;
+
+      const connectionId = c.req.param("connectionId");
+      const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
+      if (!provider.updateConnectionAccess) {
+        return c.json({ error: { code: "BAD_REQUEST", message: "Provider does not support connection access" } }, 400);
+      }
+
+      try {
+        const connection = await provider.updateConnectionAccess(
+          userResult.email,
+          connectionId,
+          parsed.data.accessLevel,
+        );
+        return c.json({ success: true, connection });
+      } catch (err) {
+        if (err instanceof CanvasProviderRequestError) {
+          return c.json({ error: { code: err.code, message: err.message } }, err.status as 400 | 401 | 403 | 404 | 500);
+        }
+        throw err;
+      }
+    });
+  }
 
   return routes;
 }

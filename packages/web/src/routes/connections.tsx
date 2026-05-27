@@ -26,7 +26,7 @@ import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
 import { PlusIcon } from "@phosphor-icons/react";
-import type { AgentEnvironmentVariableRecord, McpServerRecord } from "@sketch/shared";
+import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -69,6 +69,19 @@ function ConnectionsCallback() {
 // ---------------------------------------------------------------------------
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
+
+export function getPersonallyConnectedAppIds(connections: IntegrationConnection[]): Set<string> {
+  return new Set(
+    connections
+      .filter(
+        (connection) =>
+          connection.source !== "canvas_user_secrets" ||
+          connection.accessLevel !== "organization" ||
+          connection.isOwnedByViewer !== false,
+      )
+      .map((connection) => connection.appId),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -312,7 +325,7 @@ function ConnectionsPage() {
           open={showAddIntegrationDialog}
           onOpenChange={setShowAddIntegrationDialog}
           providerId={provider.id}
-          connectedAppIds={new Set(connections.map((c) => c.appId))}
+          connectedAppIds={getPersonallyConnectedAppIds(connections)}
           onSuccess={invalidateAll}
         />
       )}
