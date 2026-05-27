@@ -192,7 +192,7 @@ export async function buildFileScopedKnownEntities(
   for (const anchor of anchors.companies) {
     const adj = await adjacencyForAnchor(deps, anchor.id);
     const initiatives = adj
-      .filter((x) => x.sourceType === "project" || x.sourceType === "product")
+      .filter((x) => x.sourceType === "project" || x.sourceType === "product" || x.sourceType === "feature")
       .slice(0, PER_ANCHOR_INITIATIVE_CAP);
     const teams = adj.filter((x) => x.sourceType === "team").slice(0, PER_ANCHOR_TEAM_CAP);
     for (const x of [...initiatives, ...teams]) {

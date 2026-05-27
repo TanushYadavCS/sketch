@@ -26,7 +26,7 @@ import type { EntitiesTable } from "../db/schema";
 
 export type Entity = Selectable<EntitiesTable>;
 
-export type ProposeEntityType = "person" | "company" | "product" | "project" | "team";
+export type ProposeEntityType = "person" | "company" | "product" | "project" | "feature" | "team";
 export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous";
 
 export interface ProposeInput {
@@ -244,6 +244,41 @@ async function persistEntity(
   return { entity, created: true };
 }
 
+/**
+ * Tie-break among confirmed duplicate candidates so dedup gaps in production
+ * data don't silently stall relation materialization. Production corpora
+ * accumulate near-duplicates ("Oliver Wyman" / "OW" / "Oliverwyman") across
+ * syncs; queueing every cross-duplicate proposal blocks edges until a human
+ * merges them. For non-person types we land the edge on a deterministic
+ * winner and leave the duplicate as a separate data-quality cleanup. Persons
+ * keep the queueing behaviour — two real people can share a name, and the
+ * email fast-path upstream already handles the identity-grade case.
+ *
+ * Returns null to mean "fall through to queue" (person type, no confirmed
+ * candidate, or the rare case where the pool empties under filtering).
+ */
+function pickConfirmedCanonical(candidates: Entity[], input: ProposeInput, lookup: EntityLookup): Entity | null {
+  if (input.entityType === "person") return null;
+  const confirmed = candidates.filter((c) => c.status === "confirmed");
+  if (confirmed.length === 0) return null;
+  if (confirmed.length === 1) return confirmed[0];
+
+  let pool = confirmed;
+  const evidenceDomain = input.evidenceDomain?.trim().toLowerCase();
+  if (evidenceDomain && input.entityType === "company") {
+    const domainIds = new Set(lookup.getCompanyIdsByDomain?.(evidenceDomain) ?? []);
+    if (domainIds.size > 0) {
+      const withDomain = confirmed.filter((c) => domainIds.has(c.id));
+      if (withDomain.length > 0) pool = withDomain;
+    }
+  }
+  return [...pool].sort((a, b) => {
+    if (b.hotness !== a.hotness) return b.hotness - a.hotness;
+    if (a.created_at !== b.created_at) return a.created_at.localeCompare(b.created_at);
+    return a.id.localeCompare(b.id);
+  })[0];
+}
+
 async function queueProposal(
   deps: ProposeDeps,
   input: ProposeInput,
@@ -335,6 +370,11 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     return { kind: "linked", entity };
   }
   if (exactById.size > 1) {
+    const winner = pickConfirmedCanonical([...exactById.values()], input, deps.lookup);
+    if (winner) {
+      const { entity } = await persistEntity(deps, input, winner);
+      return { kind: "linked", entity };
+    }
     return queueProposal(
       deps,
       input,
@@ -359,6 +399,11 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
         return { kind: "linked", entity };
       }
       if (domainMatches.length > 1) {
+        const winner = pickConfirmedCanonical(domainMatches, input, deps.lookup);
+        if (winner) {
+          const { entity } = await persistEntity(deps, input, winner);
+          return { kind: "linked", entity };
+        }
         return queueProposal(
           deps,
           input,

@@ -310,6 +310,99 @@ describe("entity re-enrich", () => {
 
     expect(capturedFactTypes).toEqual(["attendee", "llm_extracted"]);
   });
+
+  it("post-sweep engagement floor catches engaged_with edges that the per-file floor missed (bootstrap state)", async () => {
+    const now = new Date().toISOString();
+
+    await db
+      .updateTable("indexed_files")
+      .set({
+        content: "# OW <> Canvas Standup\n## Action Items\n-\n**Vedant Parikh**\nContinue work (05:00)\n",
+        content_hash: "hash-bootstrap",
+      })
+      .where("id", "=", "file-1")
+      .execute();
+
+    await seedEntity(db, "ent-canvas-rb", "Canvas", "company");
+    await seedEntity(db, "ent-ow-rb", "Oliver Wyman", "company");
+    await seedEntity(db, "ent-vedant-rb", "Vedant Parikh", "person");
+    await db
+      .insertInto("entity_domains")
+      .values([
+        {
+          id: randomUUID(),
+          entity_id: "ent-canvas-rb",
+          domain: "canvasx.ai",
+          kind: "corporate",
+          is_primary: 1,
+          confidence: 1.0,
+          source: "manual",
+        },
+        {
+          id: randomUUID(),
+          entity_id: "ent-ow-rb",
+          domain: "oliverwyman.com",
+          kind: "corporate",
+          is_primary: 1,
+          confidence: 1.0,
+          source: "manual",
+        },
+      ])
+      .execute();
+
+    const factsRepo = createIndexedFileFactRepository(db);
+    await factsRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: "owner",
+      contentHash: "hash-bootstrap",
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Vedant Parikh",
+      subjectEmail: "vedant@canvasx.ai",
+      subjectSource: "fireflies",
+      subjectSourceId: "file-1:vedant@canvasx.ai",
+      raw: { providerFileId: "file-1", attendee: { name: "Vedant Parikh", email: "vedant@canvasx.ai" } },
+    });
+    await factsRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: "owner",
+      contentHash: "hash-bootstrap",
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Ohoud Zitan",
+      subjectEmail: "ohoud@oliverwyman.com",
+      subjectSource: "fireflies",
+      subjectSourceId: "file-1:ohoud@oliverwyman.com",
+      raw: { providerFileId: "file-1", attendee: { name: "Ohoud Zitan", email: "ohoud@oliverwyman.com" } },
+    });
+
+    const summary = await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      llmPromotionThreshold: 1,
+      runEnrichmentImpl: async () => ({ filesProcessed: 1, filesSkipped: 0, filesFailed: 0, errors: [] }),
+    });
+
+    expect(summary.engagementFloor).toBeDefined();
+    expect(summary.engagementFloor?.emitted).toBeGreaterThan(0);
+
+    const edge = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as src", "src.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as tgt", "tgt.id", "entity_relationships.target_entity_id")
+      .select(["src.name as src", "tgt.name as tgt", "entity_relationships.relationship_type as rel"])
+      .where("entity_relationships.relationship_type", "=", "engaged_with")
+      .where("src.name", "=", "Vedant Parikh")
+      .where("tgt.name", "=", "Oliver Wyman")
+      .executeTakeFirst();
+    expect(edge).toBeDefined();
+  });
 });
 
 function emptyRecreateSummary(): RecreateSummary {

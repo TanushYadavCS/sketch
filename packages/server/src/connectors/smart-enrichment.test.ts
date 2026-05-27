@@ -482,8 +482,22 @@ describe("smartEnrichFile — LLM extraction facts", () => {
   });
 });
 
-describe("extractEntities prompt — v3 hierarchy + engaged_with", () => {
-  it("renders the hierarchy paragraph and engaged_with verb in the prompt body", async () => {
+describe("extractEntities prompt — v4 hierarchy + feature + part_of", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("renders the v4 hierarchy paragraph, the feature entity type, and part_of including feature", async () => {
     let capturedPrompt = "";
     const generator = {
       generate: async () => "",
@@ -507,9 +521,132 @@ describe("extractEntities prompt — v3 hierarchy + engaged_with", () => {
     });
 
     expect(capturedPrompt).toContain("Companies");
-    expect(capturedPrompt).toContain("Initiatives");
+    expect(capturedPrompt).toContain("Projects");
+    expect(capturedPrompt).toContain("Features");
     expect(capturedPrompt).toContain("Prefer extracting from the top down");
     expect(capturedPrompt).toContain('"engaged_with"');
     expect(capturedPrompt).toContain("without being employed by it");
+    expect(capturedPrompt).toContain('"feature"');
+    expect(capturedPrompt).toContain("feature -> project | product");
+    expect(capturedPrompt).toContain('"part_of"');
+  });
+
+  it("persists and materializes feature -> part_of -> project end to end", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "OW Tourism Dashboard is the umbrella; Aviation Edge scraper is part of it.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "OW Tourism Dashboard", type: "project", variations: ["OW Dashboard"], confidence: 0.95 },
+              { mention: "Aviation Edge scraper", type: "feature", variations: ["Aviation Edge"], confidence: 0.92 },
+            ],
+            relations: [
+              {
+                type: "part_of",
+                source: { name: "Aviation Edge scraper", type: "feature", variations: ["Aviation Edge"] },
+                target: { name: "OW Tourism Dashboard", type: "project", variations: ["OW Dashboard"] },
+                confidence: 0.9,
+                context: "Aviation Edge scraper is part of OW Tourism Dashboard",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "OW Tourism Dashboard is the umbrella; Aviation Edge scraper is part of it.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-feature-partof",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const feature = await db
+      .selectFrom("entities")
+      .select(["name", "source_type"])
+      .where("name", "=", "Aviation Edge scraper")
+      .executeTakeFirstOrThrow();
+    expect(feature.source_type).toBe("feature");
+
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as src", "target.name as tgt"])
+      .where("entity_relationships.relationship_type", "=", "part_of")
+      .executeTakeFirstOrThrow();
+    expect(relationship).toEqual({
+      relationship_type: "part_of",
+      src: "Aviation Edge scraper",
+      tgt: "OW Tourism Dashboard",
+    });
+  });
+
+  it("rejects part_of in the wrong direction (project -> feature) via direction guard", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "wrong-direction fixture summary.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "OW Tourism Dashboard", type: "project", variations: [], confidence: 0.95 },
+              { mention: "Aviation Edge scraper", type: "feature", variations: [], confidence: 0.92 },
+            ],
+            relations: [
+              {
+                type: "part_of",
+                source: { name: "OW Tourism Dashboard", type: "project", variations: [] },
+                target: { name: "Aviation Edge scraper", type: "feature", variations: [] },
+                confidence: 0.9,
+                context: "wrong direction",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "wrong-direction fixture",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-feature-wrongdir",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const wrongDirEdge = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .selectAll()
+      .where("source.source_type", "=", "project")
+      .where("target.source_type", "=", "feature")
+      .where("entity_relationships.relationship_type", "=", "part_of")
+      .executeTakeFirst();
+    expect(wrongDirEdge).toBeUndefined();
   });
 });
