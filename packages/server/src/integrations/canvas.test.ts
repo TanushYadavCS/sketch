@@ -172,6 +172,56 @@ describe("CanvasProvider", () => {
     expect(connections.map((connection) => connection.appId)).toEqual(["github"]);
   });
 
+  it("omits non-owner personal Canvas accounts even when canUse is incorrectly true", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            accounts: [
+              {
+                id: "secrets:owner-1:github:github",
+                source: "canvas_user_secrets",
+                name: "GitHub",
+                app: { name: "GitHub", nameSlug: "github" },
+                healthy: true,
+                accessLevel: "personal",
+                isOwnedByViewer: false,
+                canUse: true,
+              },
+              {
+                id: "secrets:owner-1:slack:slack",
+                source: "canvas_user_secrets",
+                name: "Slack",
+                app: { name: "Slack", nameSlug: "slack" },
+                healthy: true,
+                accessLevel: "organization",
+                isOwnedByViewer: false,
+                canUse: true,
+              },
+              {
+                id: "secrets:viewer-1:linear:linear",
+                source: "canvas_user_secrets",
+                name: "Linear",
+                app: { name: "Linear", nameSlug: "linear" },
+                healthy: true,
+                accessLevel: "personal",
+                isOwnedByViewer: true,
+                canUse: true,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    const connections = await provider.listConnections("priya@example.com");
+
+    expect(connections.map((connection) => connection.appId)).toEqual(["slack", "linear"]);
+  });
+
   it("does not infer Canvas ownership solely from canonical secret account IDs", async () => {
     vi.stubGlobal(
       "fetch",

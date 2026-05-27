@@ -48,6 +48,18 @@ function getConnectionSource(account: CanvasAccountResponse): string {
   return account.source ?? (hasCanvasAccessMetadata(account) ? "canvas_user_secrets" : "pipedream");
 }
 
+function canUseConnection(account: CanvasAccountResponse): boolean {
+  if (account.canUse === false) return false;
+  if (
+    getConnectionSource(account) === "canvas_user_secrets" &&
+    account.accessLevel === "personal" &&
+    account.isOwnedByViewer === false
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export class CanvasProviderRequestError extends Error {
   constructor(
     readonly status: number,
@@ -203,41 +215,39 @@ export class CanvasProvider implements IntegrationProvider {
 
     const data = (await res.json()) as { accounts: CanvasAccountResponse[] };
 
-    return (data.accounts ?? [])
-      .filter((account) => account.canUse !== false)
-      .map((account): IntegrationConnection => {
-        const appId = account.app?.nameSlug ?? account.app?.name_slug ?? account.id;
-        const appName = account.app?.name ?? account.name ?? "Unknown";
-        const connectedAt = account.connectedAt ?? account.created_at ?? new Date().toISOString();
-        return {
-          id: account.id,
-          providerId: this.providerId,
-          source: getConnectionSource(account),
-          appId,
-          appName,
-          app: account.app
-            ? {
-                name: appName,
-                nameSlug: appId,
-                imgSrc: account.app.imgSrc,
-              }
-            : undefined,
-          icon: account.app?.imgSrc,
-          accountName: account.accountName ?? account.name,
-          authType: account.authType,
-          healthy: account.healthy,
-          status: account.status ?? (account.dead ? "error" : account.healthy ? "active" : "error"),
-          accessLevel: account.accessLevel,
-          ownerUserId: account.ownerUserId,
-          ownerName: account.ownerName,
-          isOwnedByViewer: account.isOwnedByViewer,
-          canUse: account.canUse,
-          canManageAccess: account.canManageAccess,
-          canDelete: account.canDelete,
-          createdAt: connectedAt,
-          connectedAt,
-        };
-      });
+    return (data.accounts ?? []).filter(canUseConnection).map((account): IntegrationConnection => {
+      const appId = account.app?.nameSlug ?? account.app?.name_slug ?? account.id;
+      const appName = account.app?.name ?? account.name ?? "Unknown";
+      const connectedAt = account.connectedAt ?? account.created_at ?? new Date().toISOString();
+      return {
+        id: account.id,
+        providerId: this.providerId,
+        source: getConnectionSource(account),
+        appId,
+        appName,
+        app: account.app
+          ? {
+              name: appName,
+              nameSlug: appId,
+              imgSrc: account.app.imgSrc,
+            }
+          : undefined,
+        icon: account.app?.imgSrc,
+        accountName: account.accountName ?? account.name,
+        authType: account.authType,
+        healthy: account.healthy,
+        status: account.status ?? (account.dead ? "error" : account.healthy ? "active" : "error"),
+        accessLevel: account.accessLevel,
+        ownerUserId: account.ownerUserId,
+        ownerName: account.ownerName,
+        isOwnedByViewer: account.isOwnedByViewer,
+        canUse: account.canUse,
+        canManageAccess: account.canManageAccess,
+        canDelete: account.canDelete,
+        createdAt: connectedAt,
+        connectedAt,
+      };
+    });
   }
 
   async removeConnection(userEmail: string, connectionId: string): Promise<void> {
