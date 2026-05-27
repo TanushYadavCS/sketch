@@ -118,9 +118,14 @@ function ConnectionRow({
   const isCanvasOwned = connection.source === "canvas_user_secrets";
   const canDelete = connection.canDelete !== false;
   const accountLabel = getAccountDisplayName(connection);
+  const ownerDisplayName = getOwnerDisplayName(connection);
   const connectedAt = connection.connectedAt ?? connection.createdAt;
   const isOrgShared = connection.accessLevel === "organization";
-  const metadata = [accountLabel, `Connected ${formatDate(connectedAt)}`].filter(Boolean);
+  const isSharedByAnotherUser = isOrgShared && connection.isOwnedByViewer === false;
+  const metadata = [
+    isSharedByAnotherUser ? `Owned by ${ownerDisplayName}` : accountLabel,
+    `Connected ${formatDate(connectedAt)}`,
+  ].filter(Boolean);
 
   return (
     <div className={`flex items-center gap-4 px-4 py-4 ${isLast ? "" : "border-b border-border"}`}>
@@ -165,52 +170,57 @@ function ConnectionRow({
         </span>
       </div>
 
-      <div className="flex items-center gap-1.5">
-        {isActive ? (
-          <>
-            <span className="size-2 rounded-full bg-success" />
-            <span className="text-xs text-muted-foreground">Active</span>
-          </>
-        ) : (
-          <>
-            <span className="size-2 rounded-full bg-destructive" />
-            <span className="text-xs text-muted-foreground capitalize">{connection.status}</span>
-          </>
-        )}
-      </div>
+      <div className="ml-auto grid shrink-0 grid-cols-[5rem_1.75rem_1.75rem] items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          {isActive ? (
+            <>
+              <span className="size-2 rounded-full bg-success" />
+              <span className="text-xs text-muted-foreground">Active</span>
+            </>
+          ) : (
+            <>
+              <span className="size-2 rounded-full bg-destructive" />
+              <span className="text-xs text-muted-foreground capitalize">{connection.status}</span>
+            </>
+          )}
+        </div>
 
-      <Button
-        variant="ghost"
-        size="icon"
-        className={
-          isCanvasOwned
-            ? "size-7 text-muted-foreground"
-            : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
-        }
-        aria-label={
-          isCanvasOwned ? `Open settings for ${connection.appName}` : `Settings unavailable for ${connection.appName}`
-        }
-        title={
-          isCanvasOwned ? `Open settings for ${connection.appName}` : "Settings are only available for Canvas apps"
-        }
-        onClick={isCanvasOwned ? onOpenSettings : undefined}
-        disabled={!isCanvasOwned}
-      >
-        <GearSixIcon size={14} />
-      </Button>
-
-      {canDelete && (
         <Button
           variant="ghost"
           size="icon"
-          className="size-7 text-muted-foreground hover:text-destructive"
+          className={
+            isCanvasOwned
+              ? "size-7 text-muted-foreground"
+              : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
+          }
+          aria-label={
+            isCanvasOwned ? `Open settings for ${connection.appName}` : `Settings unavailable for ${connection.appName}`
+          }
+          title={
+            isCanvasOwned ? `Open settings for ${connection.appName}` : "Settings are only available for Canvas apps"
+          }
+          onClick={isCanvasOwned ? onOpenSettings : undefined}
+          disabled={!isCanvasOwned}
+        >
+          <GearSixIcon size={14} />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          className={
+            canDelete
+              ? "size-7 text-muted-foreground hover:text-destructive"
+              : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
+          }
           aria-label={`Disconnect ${connection.appName}`}
-          onClick={onDisconnect}
-          disabled={isDisconnecting}
+          title={canDelete ? `Disconnect ${connection.appName}` : "Only the owner can disconnect this app"}
+          onClick={canDelete ? onDisconnect : undefined}
+          disabled={!canDelete || isDisconnecting}
         >
           {isDisconnecting ? <SpinnerGapIcon size={14} className="animate-spin" /> : <TrashIcon size={14} />}
         </Button>
-      )}
+      </div>
     </div>
   );
 }
@@ -281,7 +291,7 @@ function AccessSettingsDialog({
                   <>
                     {accountLabel && <span aria-hidden="true">·</span>}
                     <span>
-                      Connected by: <span className="font-medium text-foreground/80">{ownerDisplayName}</span>
+                      Owned by: <span className="font-medium text-foreground/80">{ownerDisplayName}</span>
                     </span>
                   </>
                 )}
@@ -357,12 +367,9 @@ function formatDate(value: string): string {
 
 function getOwnerDisplayName(connection: IntegrationConnection): string {
   const ownerName = normalizeDisplayName(connection.ownerName);
-  if (ownerName) return ownerName;
+  if (ownerName && !isEmailAddress(ownerName)) return ownerName;
 
   if (connection.isOwnedByViewer === true) return "You";
-
-  const ownerUserId = normalizeDisplayName(connection.ownerUserId);
-  if (ownerUserId?.includes("@")) return ownerUserId;
 
   return "teammate";
 }
@@ -399,4 +406,8 @@ function normalizeDisplayName(value?: string): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
   return /[\p{L}\p{N}]/u.test(trimmed) ? trimmed : null;
+}
+
+function isEmailAddress(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }

@@ -69,12 +69,12 @@ describe("IntegrationsSection", () => {
 
     expect(screen.getByText("Org shared")).toBeInTheDocument();
     expect(screen.queryByText("Personal")).not.toBeInTheDocument();
-    expect(screen.getByText("Engineering GitHub")).toBeInTheDocument();
+    expect(screen.getByText("Owned by Tara")).toBeInTheDocument();
+    expect(screen.queryByText("Engineering GitHub")).not.toBeInTheDocument();
     expect(screen.queryByText("OAuth")).not.toBeInTheDocument();
     expect(screen.queryByText(/Connected by:/)).not.toBeInTheDocument();
-    expect(screen.queryByText("Tara")).not.toBeInTheDocument();
     expect(screen.queryByText("Owner: Tara")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Disconnect GitHub" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Disconnect Notion" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings for Notion" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Settings unavailable for Slack" })).toBeDisabled();
@@ -144,6 +144,32 @@ describe("IntegrationsSection", () => {
     expect(screen.getAllByText("·")).toHaveLength(1);
   });
 
+  it("uses owner display names instead of provider-generated account labels for shared accounts", () => {
+    renderSection([
+      {
+        ...baseConnection,
+        id: "secrets:owner-1:aimfox:aimfox",
+        source: "canvas_user_secrets",
+        appId: "aimfox",
+        appName: "Aimfox",
+        accountName: "tanushyadav87@gmail.com's Aimfox Connection",
+        accessLevel: "organization",
+        ownerName: "Tanush Yadav",
+        ownerUserId: "tanushyadav87@gmail.com",
+        isOwnedByViewer: false,
+        canManageAccess: false,
+        canDelete: false,
+        connectedAt: "2026-05-27T00:00:00Z",
+      },
+    ]);
+
+    expect(screen.getByText("Owned by Tanush Yadav")).toBeInTheDocument();
+    expect(screen.getByText("Connected May 27")).toBeInTheDocument();
+    expect(screen.queryByText(/gmail\.com/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Aimfox Connection/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect Aimfox" })).toBeDisabled();
+  });
+
   it("saves org sharing only for manageable Canvas-owned accounts", async () => {
     const user = userEvent.setup();
     const onDisconnect = vi.fn();
@@ -207,7 +233,7 @@ describe("IntegrationsSection", () => {
     await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(/Connected by:/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Owned by:/)).toBeInTheDocument();
     expect(within(dialog).getAllByText("Tara").length).toBeGreaterThan(0);
     expect(within(dialog).queryByText("Owner: Tara")).not.toBeInTheDocument();
     expect(
@@ -236,7 +262,7 @@ describe("IntegrationsSection", () => {
       },
     ]);
 
-    expect(screen.queryByText(/Connected by:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Owned by:/)).not.toBeInTheDocument();
     expect(screen.queryByText("teammate")).not.toBeInTheDocument();
     expect(screen.queryByText("Owner: .")).not.toBeInTheDocument();
     expect(screen.queryByText(".")).not.toBeInTheDocument();
@@ -244,7 +270,7 @@ describe("IntegrationsSection", () => {
     await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(/Connected by:/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Owned by:/)).toBeInTheDocument();
     expect(within(dialog).getAllByText("teammate").length).toBeGreaterThan(0);
     expect(within(dialog).queryByText("Owner: .")).not.toBeInTheDocument();
     expect(
