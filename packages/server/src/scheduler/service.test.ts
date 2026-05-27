@@ -780,6 +780,26 @@ describe("executeTask() queue key derivation", () => {
     expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
   });
 
+  it("uses task-{id} as queue key for legacy Slack channel-thread chat rows", async () => {
+    const queueManager = new QueueManager();
+    const getQueueSpy = vi.spyOn(queueManager, "getQueue");
+    const deps = buildDeps(db, { queueManager });
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "channel",
+      delivery_target: "C_CHAN",
+      thread_ts: "111.222",
+      session_mode: "chat",
+    });
+    await scheduler.executeTask(row as ScheduledTaskRow);
+
+    expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
+    expect(getQueueSpy).not.toHaveBeenCalledWith("C_CHAN:111.222");
+  });
+
   it("uses task-{id} as queue key for WhatsApp group + fresh (isolated)", async () => {
     const queueManager = new QueueManager();
     const getQueueSpy = vi.spyOn(queueManager, "getQueue");

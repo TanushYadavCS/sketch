@@ -35,6 +35,7 @@ describe("059-scheduled-tasks-fresh-session-only migration", () => {
         { id: "fresh-task", session_mode: "fresh" },
         { id: "chat-task", session_mode: "chat" },
         { id: "persistent-task", session_mode: "persistent" },
+        { id: "unknown-task", session_mode: "task-local" },
       ])
       .execute();
 
@@ -45,6 +46,7 @@ describe("059-scheduled-tasks-fresh-session-only migration", () => {
       { id: "chat-task", session_mode: "fresh" },
       { id: "fresh-task", session_mode: "fresh" },
       { id: "persistent-task", session_mode: "fresh" },
+      { id: "unknown-task", session_mode: "fresh" },
     ]);
   });
 });
