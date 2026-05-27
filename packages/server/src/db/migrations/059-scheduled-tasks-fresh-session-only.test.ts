@@ -1,6 +1,8 @@
+import { PGlite } from "@electric-sql/pglite";
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PGliteDialect } from "../../test-pglite-dialect";
 import { up } from "./059-scheduled-tasks-fresh-session-only";
 
 interface TestDB {
@@ -10,13 +12,26 @@ interface TestDB {
   };
 }
 
-describe("059-scheduled-tasks-fresh-session-only migration", () => {
+describe.each([
+  {
+    name: "SQLite",
+    createDb: () =>
+      new Kysely<TestDB>({
+        dialect: new SqliteDialect({ database: new SQLite(":memory:") }),
+      }),
+  },
+  {
+    name: "Postgres",
+    createDb: () =>
+      new Kysely<TestDB>({
+        dialect: new PGliteDialect({ pglite: new PGlite() }),
+      }),
+  },
+])("059-scheduled-tasks-fresh-session-only migration on $name", ({ createDb }) => {
   let db: Kysely<TestDB>;
 
   beforeEach(async () => {
-    db = new Kysely<TestDB>({
-      dialect: new SqliteDialect({ database: new SQLite(":memory:") }),
-    });
+    db = createDb();
     await db.schema
       .createTable("scheduled_tasks")
       .addColumn("id", "text", (col) => col.primaryKey())
@@ -28,7 +43,7 @@ describe("059-scheduled-tasks-fresh-session-only migration", () => {
     await db.destroy();
   });
 
-  it("normalizes legacy chat and persistent tasks to fresh", async () => {
+  it("normalizes every non-fresh task mode to fresh", async () => {
     await db
       .insertInto("scheduled_tasks")
       .values([
