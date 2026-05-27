@@ -152,6 +152,10 @@ function newRebuildJob(request: RebuildRequest): RebuildJob {
   };
 }
 
+export function _setCurrentResetJobForTests(active: boolean): void {
+  currentResetJob = active ? newResetJob({ categories: ["manual"], runAfter: false }) : null;
+}
+
 interface EntityRoutesDeps {
   logger: Logger;
   config: Config;
@@ -390,6 +394,10 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
     const pendingRebuildId = body.pendingRebuildId;
 
+    if (currentResetJob || currentReenrichJob || currentRebuildJob) {
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Another job is already active" } }, 409);
+    }
+
     const promote = promotePendingRebuild(pendingRebuildId);
     if (promote !== "promoted") {
       return c.json(
@@ -401,13 +409,6 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         },
         409,
       );
-    }
-
-    if (currentResetJob || currentReenrichJob || currentRebuildJob) {
-      // We promoted ourselves into the active slot but another job
-      // already owns its own state; release and bail.
-      endRecreateLock();
-      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Another job is already active" } }, 409);
     }
 
     const job = newRebuildJob({ pendingRebuildId });
@@ -536,12 +537,20 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
 
     // Two-step rebuild: the caller already holds a pending recreate lock from
-    // a prior /resets call. Promote it; only then are the standard sync/
-    // enrichment/in-flight-job conflicts checked (because our own pending
-    // lock would otherwise read as RECREATE_ACTIVE).
+    // a prior /resets call. Check route-local jobs first so a still-running
+    // step-1 reset cannot consume the pending id before it is safe to promote.
     const pendingRebuildId = typeof body.pendingRebuildId === "string" ? body.pendingRebuildId : undefined;
     let lockAlreadyHeld = false;
     if (pendingRebuildId) {
+      if (currentResetJob) {
+        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
+      }
+      if (currentReenrichJob) {
+        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
+      }
+      if (currentRebuildJob) {
+        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
+      }
       const promote = promotePendingRebuild(pendingRebuildId);
       if (promote !== "promoted") {
         return c.json(

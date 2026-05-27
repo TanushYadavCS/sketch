@@ -744,14 +744,21 @@ export function createConnectorRepository(db: Kysely<DB>) {
       let query = db
         .selectFrom("indexed_files")
         .select(sql`count(*)`.as("count"))
-        .where("indexed_files.is_archived", "=", 0)
-        .where("indexed_files.summary", "is not", null);
+        .where("indexed_files.is_archived", "=", 0);
 
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);
+      }
+      if (opts.status === "raw") {
+        query = query
+          .where("indexed_files.summary", "is", null)
+          .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
+          .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
+      } else {
+        query = query.where("indexed_files.summary", "is not", null);
       }
       if (opts.status === "pending") {
         query = query.where((eb) =>
@@ -760,10 +767,6 @@ export function createConnectorRepository(db: Kysely<DB>) {
             eb("indexed_files.summary_status", "in", ["pending", "failed"]),
           ]),
         );
-      } else if (opts.status === "raw") {
-        query = query
-          .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
-          .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
       }
       if (opts.access === "restricted") {
         query = query.where("indexed_files.access_scope_id", "is not", null);

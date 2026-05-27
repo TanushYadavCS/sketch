@@ -6,9 +6,10 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { endRecreateLock, isRecreateActive } from "../entities/recreate-state";
+import { beginPendingRebuild, endRecreateLock, isRecreateActive } from "../entities/recreate-state";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { _setCurrentResetJobForTests } from "./entities";
 
 const config = createTestConfig();
 const logger = createTestLogger();
@@ -928,6 +929,7 @@ describe("two-step rebuild flow", () => {
     expect(typeof pendingRebuildId).toBe("string");
     expect(pendingRebuildId).toBeTruthy();
     const jobId = (reset.json?.job as { id: string }).id;
+
     expect(await waitForResetDone(jobId)).toBe("done");
 
     // A second /resets while the lock is pending must be rejected — sync,
@@ -978,6 +980,28 @@ describe("two-step rebuild flow", () => {
       body: JSON.stringify({ pendingRebuildId }),
     });
     expect(replay.status).toBe(409);
+  });
+
+  it("does not consume a pending rebuild id while a reset job is active", async () => {
+    const pendingRebuildId = randomUUID();
+    beginPendingRebuild({ pendingRebuildId });
+    _setCurrentResetJobForTests(true);
+    try {
+      const earlyPromote = await app.request("/api/entities/rebuilds", {
+        method: "POST",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ pendingRebuildId }),
+      });
+      expect(earlyPromote.status).toBe(409);
+      const stillPending = await app.request("/api/entities/rebuilds/pending", { headers: { Cookie: adminCookie } });
+      expect(stillPending.status).toBe(200);
+      expect(((await stillPending.json()) as { pending: { pendingRebuildId: string } }).pending.pendingRebuildId).toBe(
+        pendingRebuildId,
+      );
+    } finally {
+      _setCurrentResetJobForTests(false);
+      endRecreateLock();
+    }
   });
 
   /**
