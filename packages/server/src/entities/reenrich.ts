@@ -61,6 +61,7 @@ export interface ReenrichDeps {
    * releasing the lock.
    */
   lockAlreadyHeld?: boolean;
+  materializeFactTypes?: IndexedFileFactType[];
   onPhase?: (phase: "wiping" | "enriching" | "rebuilding") => void;
   /**
    * Fires during enrich and rebuild phases (per-file during enrichment,
@@ -450,7 +451,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         lockAlreadyHeld: true,
         llmPromotionThreshold: deps.llmPromotionThreshold,
         coMentionContributesToThreshold: deps.coMentionContributesToThreshold,
-        materializeFactTypes: [...AI_EXTRACTION_FACT_TYPES],
+        materializeFactTypes: deps.materializeFactTypes ?? [...AI_EXTRACTION_FACT_TYPES],
         onProgress: deps.onProgress,
       });
       summary.recreate = recreate;

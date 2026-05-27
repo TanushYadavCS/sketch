@@ -6,8 +6,8 @@
  * that conflation.
  *
  * Three distinct failure modes covered here:
- *   1. /resets is called with all categories + wipeLlmFacts:true and never
- *      receives a `scope` field.
+ *   1. /resets is called with connector/AI categories + wipeLlmFacts:true
+ *      and never receives a `scope` field.
  *   2. /reenrichments receives ONLY scope + pendingRebuildId + confirm,
  *      never a `categories` field — even though the user just chose
  *      "delete categories" on step 1.
@@ -137,7 +137,7 @@ describe("GraphRebuildDialog", () => {
     expect(resetBody.runAfter).toBe(false);
     expect(resetBody.confirm).toBe("RESET_AND_RECREATE");
     expect(resetBody.wipeLlmFacts).toBe(true);
-    expect(resetBody.categories).toEqual(expect.arrayContaining(["manual", "connectors", "ai"]));
+    expect(resetBody.categories).toEqual(["connectors", "ai"]);
     // /resets must never receive a scope field.
     expect(resetBody.scope).toBeUndefined();
 

@@ -37,7 +37,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-const ALL_CATEGORIES: ResetCategory[] = ["manual", "connectors", "ai"];
+const REBUILD_CATEGORIES: ResetCategory[] = ["connectors", "ai"];
 const RESET_POLL_INTERVAL_MS = 300;
 const STEP2_POLL_INTERVAL_MS = 1500;
 
@@ -106,7 +106,7 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
   // ── Step 1 — submit a reset job, poll until done, transition to step 2 ──
   const resetMutation = useMutation({
     mutationFn: (): Promise<ResetSubmitResponse> =>
-      api.entities.reset(ALL_CATEGORIES, {
+      api.entities.reset(REBUILD_CATEGORIES, {
         runAfter: false,
         confirm: "RESET_AND_RECREATE",
         wipeLlmFacts,

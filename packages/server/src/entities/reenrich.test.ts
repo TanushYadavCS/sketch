@@ -5,6 +5,7 @@ import { type EnrichmentDeps, MAX_FILES_PER_RUN } from "../connectors/enrichment
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
+import type { RecreateSummary } from "./recreate";
 import { runEnrichmentForFileBatches, runReenrichJob, wipeLlmEnrichmentForFiles } from "./reenrich";
 
 const logger = createTestLogger();
@@ -290,4 +291,49 @@ describe("entity re-enrich", () => {
       .executeTakeFirst();
     expect(newEntity?.name).toBe("New Person");
   });
+
+  it("uses caller-provided fact types for the rebuild replay", async () => {
+    let capturedFactTypes: string[] | undefined;
+
+    await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      materializeFactTypes: ["attendee", "llm_extracted"],
+      runEnrichmentImpl: async () => ({ filesProcessed: 1, filesSkipped: 0, filesFailed: 0, errors: [] }),
+      recreateEntityGraphImpl: async (deps) => {
+        capturedFactTypes = deps.materializeFactTypes;
+        return emptyRecreateSummary();
+      },
+    });
+
+    expect(capturedFactTypes).toEqual(["attendee", "llm_extracted"]);
+  });
 });
+
+function emptyRecreateSummary(): RecreateSummary {
+  return {
+    reset: {
+      dryRun: false,
+      deleted: {},
+      filesMarkedPending: 0,
+      factsMarkedUnmaterialized: 0,
+      warnings: [],
+    },
+    replay: {
+      factsRead: 0,
+      entitiesCreated: 0,
+      entitiesLinked: 0,
+      queued: 0,
+      mentionsWritten: 0,
+      relationshipsWritten: 0,
+      skipped: 0,
+      materialized: 0,
+      deferred: 0,
+      deferredBelowThreshold: 0,
+    },
+    enrichmentIterations: 0,
+    enrichment: { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] },
+  };
+}

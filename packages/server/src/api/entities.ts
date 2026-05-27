@@ -584,6 +584,9 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
 
     const runAfter = body.runAfter !== false;
+    const materializeFactTypes = lockAlreadyHeld
+      ? Array.from(new Set([...FACT_TYPES_BY_CATEGORY.connectors, ...AI_EXTRACTION_FACT_TYPES]))
+      : undefined;
     const job = newReenrichJob({ scope, runAfter });
     job.phase = "wiping";
     currentReenrichJob = job;
@@ -599,6 +602,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           missingFileIds: resolved.missingFileIds,
           runAfter,
           lockAlreadyHeld,
+          materializeFactTypes,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           onPhase: (phase) => {
@@ -630,7 +634,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         message: "Re-enrich started.",
         files: resolved.fileIds.length,
         missingFileIds: resolved.missingFileIds,
-        factTypes: AI_EXTRACTION_FACT_TYPES,
+        factTypes: materializeFactTypes ?? AI_EXTRACTION_FACT_TYPES,
         job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
       },
       202,
