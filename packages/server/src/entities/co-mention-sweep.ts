@@ -69,7 +69,7 @@ async function queryCoMentionRows(
     .innerJoin("entities as t", "t.id", "tm.entity_id")
     .select(["pm.entity_id as personEntityId", "tm.entity_id as targetEntityId", "pm.indexed_file_id as indexedFileId"])
     .where("p.source_type", "=", "person")
-    .where("t.source_type", "in", ["project", "product", "feature"])
+    .where("t.source_type", "in", ["project", "product"])
     .where("pm.confidence", "=", "EXTRACTED")
     .where("tm.confidence", "=", "EXTRACTED")
     .whereRef("pm.entity_id", "!=", "tm.entity_id");

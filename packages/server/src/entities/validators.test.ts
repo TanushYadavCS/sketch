@@ -26,6 +26,17 @@ describe("validateLlmMention", () => {
     ).toEqual({ ok: false, reason: "short_token_no_boundary" });
   });
 
+  it("rejects removed LLM entity types", () => {
+    expect(
+      validateLlmMention({
+        displayName: "Aviation Edge scraper",
+        entityType: "feature",
+        fileContent: "Aviation Edge scraper was discussed.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: false, reason: "type_removed" });
+  });
+
   it("permits connector extracted facts whose display name is absent", () => {
     expect(
       validateLlmMention({

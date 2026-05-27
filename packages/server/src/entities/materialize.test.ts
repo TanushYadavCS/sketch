@@ -199,12 +199,22 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
 
   it("skips facts with missing/invalid type and leaves them unmaterialized", async () => {
     await seedFiles(db, 1);
-    // Use 'foo' as an invalid type — passes raw validation but fails normalizeMentionType.
     await upsertLlmFact(db, "file-1", "Whatever", "foo");
     const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
     expect(summary.entitiesCreated).toBe(0);
     const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
     expect(fact.materialized_at).toBeNull();
+  });
+
+  it("skips stale feature facts and leaves them unmaterialized", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmFact(db, "file-1", "Aviation Edge scraper", "feature");
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+    expect(summary.entitiesCreated).toBe(0);
+    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    expect(fact.materialized_at).toBeNull();
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    expect(entities).toHaveLength(0);
   });
 
   it("respects configurable threshold (=1 promotes immediately, =3 keeps deferred)", async () => {

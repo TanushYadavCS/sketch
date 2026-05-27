@@ -4,17 +4,19 @@ import type { createEntityRepository } from "../db/repositories/entities";
 
 export type LlmMentionValidationResult =
   | { ok: true }
-  | { ok: false; reason: "name_absent_from_content" | "short_token_no_boundary" };
+  | { ok: false; reason: "name_absent_from_content" | "short_token_no_boundary" | "type_removed" };
 
 export type LearnedFactValidationResult = { ok: true } | { ok: false; reason: "negation" | "hedge" | "placeholder" };
 
 export function validateLlmMention(input: {
   displayName: string;
+  entityType?: string;
   aliases?: string[];
   fileContent: string;
   source: "llm_extraction" | "connector_extracted";
 }): LlmMentionValidationResult {
   if (input.source !== "llm_extraction") return { ok: true };
+  if (input.entityType?.trim().toLowerCase() === "feature") return { ok: false, reason: "type_removed" };
 
   const content = normalizeName(input.fileContent);
   const names = [input.displayName, ...(input.aliases ?? [])]

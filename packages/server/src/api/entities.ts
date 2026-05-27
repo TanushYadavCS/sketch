@@ -535,7 +535,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     });
   });
 
-  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project", "feature"];
+  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
 
   /**
    * GET /api/entities/resets/jobs
