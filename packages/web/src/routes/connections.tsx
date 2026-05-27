@@ -216,6 +216,7 @@ function ConnectionsPage() {
                   onAdd={() => setShowAddIntegrationDialog(true)}
                   providerId={provider.id}
                   orgName={setupStatusQuery.data?.orgName ?? undefined}
+                  accessSettingsEnabled={setupStatusQuery.data?.experimentalFlag === true}
                   onDisconnect={invalidateAll}
                 />
               </>

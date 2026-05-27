@@ -211,16 +211,33 @@ function extractSecretOwnerId(connectionId: string): string | null {
   return match?.[1] ?? null;
 }
 
-async function resolveUserName(users: UserRepo, values: Array<string | null | undefined>): Promise<string | null> {
+async function resolveUserName(
+  users: UserRepo,
+  values: Array<string | null | undefined>,
+  cache: Map<string, string | null>,
+): Promise<string | null> {
   for (const raw of values) {
     const value = raw?.trim();
     if (!value) continue;
+    const cacheKey = `${isEmail(value) ? "email" : "id"}:${value.toLocaleLowerCase()}`;
+    if (cache.has(cacheKey)) {
+      const cached = cache.get(cacheKey);
+      if (cached) return cached;
+      continue;
+    }
     const user = isEmail(value) ? await users.findByEmail(value) : await users.findById(value);
-    if (user?.name) return user.name;
+    if (user?.name) {
+      cache.set(cacheKey, user.name);
+      return user.name;
+    }
     if (!isEmail(value)) {
       const emailUser = await users.findByEmail(value);
-      if (emailUser?.name) return emailUser.name;
+      if (emailUser?.name) {
+        cache.set(cacheKey, emailUser.name);
+        return emailUser.name;
+      }
     }
+    cache.set(cacheKey, null);
   }
   return null;
 }
@@ -229,6 +246,7 @@ async function enrichConnectionOwnerNames(
   connections: IntegrationConnection[],
   users: UserRepo,
 ): Promise<IntegrationConnection[]> {
+  const ownerNameCache = new Map<string, string | null>();
   return Promise.all(
     connections.map(async (connection) => {
       if (
@@ -239,16 +257,33 @@ async function enrichConnectionOwnerNames(
         return connection;
       }
 
-      const ownerName = await resolveUserName(users, [
-        connection.ownerUserId,
-        extractSecretOwnerId(connection.id),
-        connection.ownerName,
-        ...extractEmails(connection.accountName),
-      ]);
+      const ownerName = await resolveUserName(
+        users,
+        [
+          connection.ownerUserId,
+          extractSecretOwnerId(connection.id),
+          connection.ownerName,
+          ...extractEmails(connection.accountName),
+        ],
+        ownerNameCache,
+      );
 
       return ownerName ? { ...connection, ownerName } : connection;
     }),
   );
+}
+
+function isAccessControlledConnection(connection: IntegrationConnection): boolean {
+  return (
+    connection.source === "canvas_user_secrets" ||
+    connection.accessLevel !== undefined ||
+    connection.isOwnedByViewer !== undefined ||
+    connection.canDelete !== undefined
+  );
+}
+
+function canDisconnectConnection(connection: IntegrationConnection): boolean {
+  return connection.canDelete !== false && connection.isOwnedByViewer !== false;
 }
 
 export function mcpServerRoutes(
@@ -458,6 +493,12 @@ export function mcpServerRoutes(
 
     const connectionId = c.req.param("connectionId");
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
+    const connections = await provider.listConnections(userResult.email);
+    const connection = connections.find((item) => item.id === connectionId);
+    if (connection && isAccessControlledConnection(connection) && !canDisconnectConnection(connection)) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Only the owner can disconnect this app" } }, 403);
+    }
+
     await provider.removeConnection(userResult.email, connectionId);
     return c.json({ success: true });
   });

@@ -22,6 +22,7 @@ export function IntegrationsSection({
   isLoadingConnections,
   providerId,
   orgName,
+  accessSettingsEnabled = true,
   onAdd,
   onDisconnect,
 }: {
@@ -29,6 +30,7 @@ export function IntegrationsSection({
   isLoadingConnections: boolean;
   providerId: string;
   orgName?: string;
+  accessSettingsEnabled?: boolean;
   onAdd: () => void;
   onDisconnect: () => void;
 }) {
@@ -85,17 +87,20 @@ export function IntegrationsSection({
               isDisconnecting={disconnectingId === connection.id}
               onDisconnect={() => handleDisconnect(connection.id)}
               onOpenSettings={() => setSettingsConnection(connection)}
+              accessSettingsEnabled={accessSettingsEnabled}
             />
           ))}
         </div>
       )}
-      <AccessSettingsDialog
-        connection={settingsConnection}
-        providerId={providerId}
-        orgName={orgName}
-        onOpenChange={(open) => !open && setSettingsConnection(null)}
-        onSaved={onDisconnect}
-      />
+      {accessSettingsEnabled && (
+        <AccessSettingsDialog
+          connection={settingsConnection}
+          providerId={providerId}
+          orgName={orgName}
+          onOpenChange={(open) => !open && setSettingsConnection(null)}
+          onSaved={onDisconnect}
+        />
+      )}
     </div>
   );
 }
@@ -106,17 +111,19 @@ function ConnectionRow({
   isDisconnecting,
   onDisconnect,
   onOpenSettings,
+  accessSettingsEnabled,
 }: {
   connection: IntegrationConnection;
   isLast: boolean;
   isDisconnecting: boolean;
   onDisconnect: () => void;
   onOpenSettings: () => void;
+  accessSettingsEnabled: boolean;
 }) {
   const isActive = connection.status === "active";
   const abbrev = getAbbreviation(connection.appName);
   const isCanvasOwned = connection.source === "canvas_user_secrets";
-  const canDelete = connection.canDelete !== false;
+  const canDelete = connection.canDelete !== false && connection.isOwnedByViewer !== false;
   const accountLabel = getAccountDisplayName(connection);
   const ownerDisplayName = getOwnerDisplayName(connection);
   const connectedAt = connection.connectedAt ?? connection.createdAt;
@@ -185,25 +192,31 @@ function ConnectionRow({
           )}
         </div>
 
-        <Button
-          variant="ghost"
-          size="icon"
-          className={
-            isCanvasOwned
-              ? "size-7 text-muted-foreground"
-              : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
-          }
-          aria-label={
-            isCanvasOwned ? `Open settings for ${connection.appName}` : `Settings unavailable for ${connection.appName}`
-          }
-          title={
-            isCanvasOwned ? `Open settings for ${connection.appName}` : "Settings are only available for Canvas apps"
-          }
-          onClick={isCanvasOwned ? onOpenSettings : undefined}
-          disabled={!isCanvasOwned}
-        >
-          <GearSixIcon size={14} />
-        </Button>
+        {accessSettingsEnabled ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={
+              isCanvasOwned
+                ? "size-7 text-muted-foreground"
+                : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
+            }
+            aria-label={
+              isCanvasOwned
+                ? `Open settings for ${connection.appName}`
+                : `Settings unavailable for ${connection.appName}`
+            }
+            title={
+              isCanvasOwned ? `Open settings for ${connection.appName}` : "Settings are only available for Canvas apps"
+            }
+            onClick={isCanvasOwned ? onOpenSettings : undefined}
+            disabled={!isCanvasOwned}
+          >
+            <GearSixIcon size={14} />
+          </Button>
+        ) : (
+          <span aria-hidden="true" className="size-7" />
+        )}
 
         <Button
           variant="ghost"
@@ -252,9 +265,10 @@ function AccessSettingsDialog({
   const canManageAccess = connection.canManageAccess === true;
   const desiredAccess = shareWithOrg ? "organization" : "personal";
   const hasChanged = desiredAccess !== (connection.accessLevel ?? "personal");
-  const accountLabel = getAccountDisplayName(connection);
   const ownerDisplayName = getOwnerDisplayName(connection);
   const isOrgShared = connection.accessLevel === "organization";
+  const isSharedByAnotherUser = isOrgShared && connection.isOwnedByViewer === false;
+  const accountLabel = isSharedByAnotherUser ? null : getAccountDisplayName(connection);
   const copy =
     connection.isOwnedByViewer === false
       ? `${ownerDisplayName} shared this connection with the organization. You can use it, but only the owner can manage access or credentials.`

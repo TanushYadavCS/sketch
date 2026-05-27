@@ -15,13 +15,18 @@ const baseConnection = {
   createdAt: "2026-01-01T00:00:00Z",
 } satisfies Partial<IntegrationConnection>;
 
-function renderSection(connections: IntegrationConnection[], onDisconnect = vi.fn()) {
+function renderSection(
+  connections: IntegrationConnection[],
+  onDisconnect = vi.fn(),
+  options: { accessSettingsEnabled?: boolean } = {},
+) {
   return renderWithProviders(
     <IntegrationsSection
       connections={connections}
       isLoadingConnections={false}
       providerId="provider-1"
       orgName="Acme"
+      accessSettingsEnabled={options.accessSettingsEnabled ?? true}
       onAdd={vi.fn()}
       onDisconnect={onDisconnect}
     />,
@@ -170,6 +175,44 @@ describe("IntegrationsSection", () => {
     expect(screen.getByRole("button", { name: "Disconnect Aimfox" })).toBeDisabled();
   });
 
+  it("hides access settings controls when access settings are disabled", () => {
+    renderSection(
+      [
+        {
+          ...baseConnection,
+          id: "secrets:viewer-1:github:github",
+          source: "canvas_user_secrets",
+          accessLevel: "personal",
+          isOwnedByViewer: true,
+          canManageAccess: true,
+          canDelete: true,
+        },
+      ],
+      vi.fn(),
+      { accessSettingsEnabled: false },
+    );
+
+    expect(screen.queryByRole("button", { name: "Open settings for GitHub" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Settings unavailable for GitHub" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeInTheDocument();
+  });
+
+  it("keeps shared accounts non-destructive when Canvas omits canDelete", () => {
+    renderSection([
+      {
+        ...baseConnection,
+        id: "secrets:owner-1:github:github",
+        source: "canvas_user_secrets",
+        accessLevel: "organization",
+        ownerName: "Tara",
+        isOwnedByViewer: false,
+        canManageAccess: false,
+      },
+    ]);
+
+    expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeDisabled();
+  });
+
   it("saves org sharing only for manageable Canvas-owned accounts", async () => {
     const user = userEvent.setup();
     const onDisconnect = vi.fn();
@@ -243,6 +286,34 @@ describe("IntegrationsSection", () => {
     ).toBeInTheDocument();
     expect(within(dialog).getByRole("switch", { name: "Share with organization" })).toBeDisabled();
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("suppresses email-derived shared account labels in the settings dialog", async () => {
+    const user = userEvent.setup();
+
+    renderSection([
+      {
+        ...baseConnection,
+        id: "secrets:owner-1:aimfox:aimfox",
+        source: "canvas_user_secrets",
+        appId: "aimfox",
+        appName: "Aimfox",
+        accountName: "tanushyadav87@gmail.com's Aimfox Connection",
+        accessLevel: "organization",
+        ownerName: "Tanush Yadav",
+        isOwnedByViewer: false,
+        canManageAccess: false,
+        canDelete: false,
+      },
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Open settings for Aimfox" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Owned by:/)).toBeInTheDocument();
+    expect(within(dialog).getAllByText("Tanush Yadav").length).toBeGreaterThan(0);
+    expect(within(dialog).queryByText(/gmail\.com/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/Aimfox Connection/)).not.toBeInTheDocument();
   });
 
   it("does not render separator-only owner names from Canvas", async () => {

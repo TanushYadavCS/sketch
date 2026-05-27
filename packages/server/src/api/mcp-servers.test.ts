@@ -822,7 +822,18 @@ describe("MCP Servers API", () => {
         type: "canvas",
         listApps: vi.fn(),
         initiateConnection: vi.fn(),
-        listConnections: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "conn-1",
+            providerId: server.id,
+            appId: "slack",
+            appName: "Slack",
+            status: "active",
+            canDelete: true,
+            isOwnedByViewer: true,
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
         removeConnection: vi.fn().mockResolvedValue(undefined),
         isBrokerCapable: () => false,
         getBrokerSpec: () => null,
@@ -843,6 +854,56 @@ describe("MCP Servers API", () => {
       const body = await res.json();
       expect(body.success).toBe(true);
       expect(mockProvider.removeConnection).toHaveBeenCalledWith("member@test.com", "conn-1");
+    });
+
+    it("rejects deleting non-owner shared Canvas connections", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "secrets:owner-1:github:github",
+            providerId: server.id,
+            source: "canvas_user_secrets",
+            appId: "github",
+            appName: "GitHub",
+            status: "active",
+            accessLevel: "organization",
+            isOwnedByViewer: false,
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ]),
+        removeConnection: vi.fn().mockResolvedValue(undefined),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/secrets%3Aowner-1%3Agithub%3Agithub`, {
+        method: "DELETE",
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(403);
+
+      const body = await res.json();
+      expect(body.error).toEqual({ code: "FORBIDDEN", message: "Only the owner can disconnect this app" });
+      expect(mockProvider.removeConnection).not.toHaveBeenCalled();
     });
 
     it("returns 404 for non-existent server", async () => {
