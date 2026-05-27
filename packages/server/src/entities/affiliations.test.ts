@@ -458,4 +458,68 @@ describe("ELP-02: affiliation inference", () => {
     expect(gmail.kind).toBe("personal");
     expect(gmail.source).toBe("manual");
   });
+
+  it("recreate preserves and relinks manual corporate domain overrides", async () => {
+    const entityRepo = createEntityRepository(db);
+    const oldCompany = await entityRepo.upsertEntity({
+      name: "Manual Charlie",
+      sourceType: "company",
+      status: "confirmed",
+    });
+    await db
+      .insertInto("entity_domains")
+      .values({
+        id: "manual-charlie-domain",
+        entity_id: oldCompany.id,
+        domain: "charlie.com",
+        kind: "corporate",
+        is_primary: 1,
+        confidence: 1,
+        source: "manual",
+      })
+      .execute();
+
+    for (let i = 0; i < 5; i++) {
+      const fileId = await seedFile(db, `manual-charlie-file-${i}`);
+      await seedPersonSeedFact(db, {
+        fileId,
+        name: `Manual Charlie Person ${i}`,
+        email: `manual${i}@charlie.com`,
+        sourceId: `manual-charlie-${i}`,
+      });
+    }
+
+    await recreateEntityGraph({
+      db,
+      logger: createTestLogger(),
+      triggeredByUserId: ADMIN_ID,
+      skipEnrichment: true,
+    });
+
+    const domain = await db
+      .selectFrom("entity_domains")
+      .selectAll()
+      .where("domain", "=", "charlie.com")
+      .executeTakeFirstOrThrow();
+    expect(domain.id).toBe("manual-charlie-domain");
+    expect(domain.kind).toBe("corporate");
+    expect(domain.source).toBe("manual");
+    expect(domain.entity_id).not.toBeNull();
+    expect(domain.entity_id).not.toBe(oldCompany.id);
+
+    const linkedCompany = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", domain.entity_id as string)
+      .executeTakeFirstOrThrow();
+    expect(linkedCompany.source_type).toBe("company");
+
+    const worksAt = await db
+      .selectFrom("entity_relationships")
+      .selectAll()
+      .where("relationship_type", "=", "works_at")
+      .where("target_entity_id", "=", domain.entity_id as string)
+      .execute();
+    expect(worksAt).toHaveLength(5);
+  });
 });

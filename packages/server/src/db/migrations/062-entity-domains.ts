@@ -13,7 +13,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema
     .createTable("entity_domains")
     .addColumn("id", "text", (col) => col.primaryKey())
-    .addColumn("entity_id", "text", (col) => col.references("entities.id").onDelete("cascade"))
+    .addColumn("entity_id", "text", (col) => col.references("entities.id").onDelete("set null"))
     .addColumn("domain", "text", (col) => col.notNull().unique())
     .addColumn("kind", "text", (col) => col.notNull())
     .addColumn("is_primary", "integer", (col) => col.notNull().defaultTo(0))
