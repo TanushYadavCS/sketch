@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { type EnrichmentResult, isEnrichmentActive, linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
-import { sweepDomainPromotions } from "../connectors/smart-enrichment";
+import { type DomainSweepResult, sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -254,6 +254,7 @@ export async function resetDerivedEntityData(
 export interface RecreateSummary {
   reset: ResetSummary;
   replay: MaterializeFactsSummary;
+  domainSweep: DomainSweepResult;
   enrichmentIterations: number;
   enrichment: EnrichmentResult;
 }
@@ -327,7 +328,7 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
     // any new company entity (and its `works_at` edges) is visible to the
     // linker. Sweep also runs on every live sync — keep the two paths
     // calling the same helper so recreate doesn't drift.
-    await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
+    const domainSweep = await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
     await fixupPreservedEntityDomainReferences(db, logger.child({ component: "recreate-domain-fixup" }));
     await sweepCoMentionContributesTo(db, logger.child({ component: "recreate-co-mention-sweep" }), {
       scope: { kind: "full" },
@@ -338,6 +339,7 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
       return {
         reset,
         replay,
+        domainSweep,
         enrichmentIterations: 0,
         enrichment: { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] },
       };
@@ -347,7 +349,7 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
       db,
       logger.child({ component: "recreate-deterministic-linking" }),
     );
-    return { reset, replay, enrichmentIterations: 1, enrichment: deterministic };
+    return { reset, replay, domainSweep, enrichmentIterations: 1, enrichment: deterministic };
   };
 
   return deps.lockAlreadyHeld ? run() : withRecreateLock(run);

@@ -96,6 +96,7 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
           evidenceCount.as("evidence_count"),
         ])
         .where("entity_relationships.source_entity_id", "=", entityId)
+        .where("entities.status", "!=", "archived")
         .orderBy(confidenceOrder)
         .orderBy(evidenceCount, "desc")
         .orderBy(confidenceScore, "desc")
@@ -124,6 +125,7 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
           evidenceCount.as("evidence_count"),
         ])
         .where("entity_relationships.target_entity_id", "=", entityId)
+        .where("entities.status", "!=", "archived")
         .orderBy(confidenceOrder)
         .orderBy(evidenceCount, "desc")
         .orderBy(confidenceScore, "desc")

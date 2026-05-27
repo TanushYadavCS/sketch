@@ -2,7 +2,7 @@ import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { createEmbeddingProvider } from "../connectors/embeddings";
-import { applyEngagementFloor } from "../connectors/engagement-floor";
+import { floorRetryForDomains } from "../connectors/engagement-floor";
 import { type EnrichmentDeps, type EnrichmentResult, MAX_FILES_PER_RUN, runEnrichment } from "../connectors/enrichment";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -46,6 +46,8 @@ export interface ReenrichWipeSummary extends ReenrichDryRunSummary {
 export interface PostSweepEngagementFloorSummary {
   filesScanned: number;
   emitted: number;
+  domains: number;
+  cappedDomains: number;
 }
 
 export interface ReenrichSummary {
@@ -433,31 +435,37 @@ export async function runEnrichmentForFileBatches(
 async function runPostSweepEngagementFloor(
   db: Kysely<DB>,
   logger: Logger,
+  domains: string[],
   fileIds: string[],
 ): Promise<PostSweepEngagementFloorSummary> {
-  let emitted = 0;
-  let scanned = 0;
-  for (const fileId of fileIds) {
-    const file = await db
-      .selectFrom("indexed_files")
-      .select(["id", "connector_config_id", "content", "content_hash"])
-      .where("id", "=", fileId)
-      .executeTakeFirst();
-    if (!file || !file.content) continue;
-    scanned += 1;
-    const result = await applyEngagementFloor(
-      { db, logger },
-      {
-        fileId: file.id,
-        fileContent: file.content,
-        connectorConfigId: file.connector_config_id,
-        contentHash: file.content_hash,
-      },
+  let retryDomains = domains;
+  if (retryDomains.length === 0 && fileIds.length > 0) {
+    const attendeeRows = await db
+      .selectFrom("indexed_file_facts")
+      .select("subject_email")
+      .where("indexed_file_facts.indexed_file_id", "in", fileIds)
+      .where("indexed_file_facts.fact_type", "=", "attendee")
+      .where("indexed_file_facts.subject_email", "is not", null)
+      .execute();
+    const domainRows = await db.selectFrom("entity_domains").select("domain").where("kind", "=", "corporate").execute();
+    const corporateDomains = new Set(domainRows.map((row) => row.domain));
+    retryDomains = Array.from(
+      new Set(
+        attendeeRows.flatMap((row) => {
+          const domain = row.subject_email?.split("@").pop()?.trim().toLowerCase();
+          return domain && corporateDomains.has(domain) ? [domain] : [];
+        }),
+      ),
     );
-    emitted += result.emitted;
   }
-  logger.info({ filesScanned: scanned, emitted }, "post-sweep engagement floor pass complete");
-  return { filesScanned: scanned, emitted };
+  const result = await floorRetryForDomains({ db, logger }, retryDomains, { fileIds, materialize: false });
+  logger.info(result, "post-sweep engagement floor pass complete");
+  return {
+    filesScanned: result.filesScanned,
+    emitted: result.emitted,
+    domains: result.domains,
+    cappedDomains: result.cappedDomains,
+  };
 }
 
 export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummary> {
@@ -510,6 +518,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
       const floor = await runPostSweepEngagementFloor(
         deps.db,
         deps.logger.child({ phase: "post-sweep-engagement-floor" }),
+        recreate.domainSweep.promotedDomains,
         deps.fileIds,
       );
       summary.engagementFloor = floor;

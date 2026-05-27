@@ -426,6 +426,14 @@ function emptyRecreateSummary(): RecreateSummary {
       deferred: 0,
       deferredBelowThreshold: 0,
     },
+    domainSweep: {
+      scanned: 0,
+      promoted: 0,
+      promotedDomains: [],
+      linkedExisting: 0,
+      pendingFuzzy: 0,
+      worksAtCreated: 0,
+    },
     enrichmentIterations: 0,
     enrichment: { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] },
   };

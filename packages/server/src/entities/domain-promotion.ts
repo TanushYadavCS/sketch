@@ -11,6 +11,7 @@ export const DOMAIN_PROMOTION_THRESHOLD = 1;
 export interface DomainSweepResult {
   scanned: number;
   promoted: number;
+  promotedDomains: string[];
   linkedExisting: number;
   pendingFuzzy: number;
   worksAtCreated: number;
@@ -165,6 +166,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
   const result: DomainSweepResult = {
     scanned: 0,
     promoted: 0,
+    promotedDomains: [],
     linkedExisting: 0,
     pendingFuzzy: 0,
     worksAtCreated: 0,
@@ -201,6 +203,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
         observedPersonEntityIds: observedPeople,
       });
       result.linkedExisting++;
+      result.promotedDomains.push(domain);
       result.worksAtCreated += observedPeople.length;
       continue;
     }
@@ -240,6 +243,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     });
     if (proposal.kind === "created") result.promoted++;
     else result.linkedExisting++;
+    result.promotedDomains.push(domain);
     result.worksAtCreated += observedPeople.length;
   }
 

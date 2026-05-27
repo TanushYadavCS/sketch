@@ -18,7 +18,10 @@ import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
   HALF_LIFE_DAYS,
+  MAX_ANCHORS_PER_SIDE,
   MIN_SCORE,
+  PER_ANCHOR_INITIATIVE_CAP,
+  PER_ANCHOR_TEAM_CAP,
   adjacencyForAnchor,
   buildFileScopedKnownEntities,
   resolveFileAnchors,
@@ -182,6 +185,23 @@ describe("file-scope-context", () => {
     expect(anchors.companies[0]).toMatchObject({ id: "ent-ow", name: "Oliver Wyman" });
   });
 
+  it("caps company anchors to the file-scope prompt budget", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+
+    for (let i = 0; i < 10; i++) {
+      const entityId = `ent-company-${i}`;
+      const domain = `company-${i}.example`;
+      await seedEntity(db, { id: entityId, name: `Company ${i}`, sourceType: "company", hotness: i });
+      await seedDomain(db, { entityId, domain, kind: "corporate" });
+      await seedAttendeeFact(db, { fileId, name: `Person ${i}`, email: `person@${domain}` });
+    }
+
+    const anchors = await resolveFileAnchors({ db }, fileId);
+    expect(anchors.companies).toHaveLength(MAX_ANCHORS_PER_SIDE);
+    expect(anchors.companies.map((company) => company.name)).toEqual(["Company 9", "Company 8", "Company 7"]);
+  });
+
   it("recency-weighted adjacency outranks raw count, drops sub-MIN_SCORE pairs, and excludes system source types", async () => {
     await seedEntity(db, { id: "ent-anchor", name: "Anchor Co", sourceType: "company", hotness: 0.9 });
     await seedEntity(db, { id: "ent-recent", name: "Recent Project", sourceType: "project", hotness: 0.5 });
@@ -275,5 +295,39 @@ describe("file-scope-context", () => {
 
     const degraded = await buildFileScopedKnownEntities({ db, now: () => now }, fileWithoutAnchor, baseline);
     expect(degraded.map((e) => e.name).sort()).toEqual(["Oliver Wyman", "Sketch"]);
+  });
+
+  it("caps per-anchor initiatives and teams while preserving baseline", async () => {
+    await seedEntity(db, { id: "ent-anchor-cap", name: "Anchor Co", sourceType: "company", hotness: 0.9 });
+    await seedDomain(db, { entityId: "ent-anchor-cap", domain: "anchor.example", kind: "corporate" });
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-cap-prompt";
+    await seedFile(db, promptFile, recentDate);
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Anchor Person", email: "person@anchor.example" });
+
+    for (let i = 0; i < 20; i++) {
+      const entityId = `ent-project-${i}`;
+      const fileId = `file-project-${i}`;
+      await seedEntity(db, { id: entityId, name: `Project ${i}`, sourceType: "project", hotness: 0.5 });
+      await seedFile(db, fileId, recentDate);
+      await seedMention(db, { entityId: "ent-anchor-cap", fileId });
+      await seedMention(db, { entityId, fileId });
+    }
+    for (let i = 0; i < 10; i++) {
+      const entityId = `ent-team-${i}`;
+      const fileId = `file-team-${i}`;
+      await seedEntity(db, { id: entityId, name: `Team ${i}`, sourceType: "team", hotness: 0.5 });
+      await seedFile(db, fileId, recentDate);
+      await seedMention(db, { entityId: "ent-anchor-cap", fileId });
+      await seedMention(db, { entityId, fileId });
+    }
+
+    const baseline = [{ name: "Baseline Product", type: "product" }];
+    const known = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, baseline);
+
+    expect(known.filter((entry) => entry.type === "project")).toHaveLength(PER_ANCHOR_INITIATIVE_CAP);
+    expect(known.filter((entry) => entry.type === "team")).toHaveLength(PER_ANCHOR_TEAM_CAP);
+    expect(known).toContainEqual({ name: "Baseline Product", type: "product" });
   });
 });

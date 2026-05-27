@@ -36,6 +36,15 @@ import { type ProposeEntityType, proposeEntity } from "../entities/propose";
 import { validateLearnedFact, validateLlmMention } from "../entities/validators";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
+import {
+  type FactSelectionCache,
+  type FactSelectionContext,
+  type LearnedFactStored,
+  buildFactSelectionContext,
+  createFactSelectionCache,
+  renderFactsForPrompt,
+  selectRelevantFacts,
+} from "./learned-fact-selector";
 import { normalizeName } from "./name-normalize";
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */
@@ -61,7 +70,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v4";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v5";
 const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>([
   "person",
   "company",
@@ -104,7 +113,7 @@ interface MatchedEntity {
   name: string;
   sourceType: string;
   definition: string | null;
-  learnedFacts: Array<{ fact: string }>;
+  learnedFacts: LearnedFactStored[];
 }
 
 interface SmartEnrichmentDeps {
@@ -210,7 +219,7 @@ Extract entities that a business team would want to track and reference across d
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
 - **Projects**: named umbrella engagements or programs with a clear scope (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration")
-- **Features**: named deliverables or workstreams that sit *inside* a project or product (e.g., "Visa Data Integration", "Aviation Edge scraper", "Google Trends Connector"). Classify as a feature — not a project — when the work is one component of a larger named project; use \`part_of\` to link it to its parent.
+- **Features**: stable named deliverables, workstreams, or components that can recur across files and normally sit inside a named project or product (e.g., "QTD/YTD implementation", "Visa Data Integration", "Aviation Edge scraper", "Access control integration"). Classify as a feature only when the phrase names a reusable piece of work; use \`part_of\` to link it to its parent.
 - **Teams**: named organizational teams (e.g., "QC team", "Content Team")
 
 DO NOT extract:
@@ -224,10 +233,16 @@ DO NOT extract:
 - Generic categories (SEO, Marketing, Support, Content)
 - Countries, currencies, or generic locations (India, INR, US)
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
+- Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns as features
+- Generic feature-like phrases with no stable named parent, such as "Vedant's Project Progress", "67 SQL queries on the new database", "limitation note", "UI development", "backend work", or "new database"
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 
-Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Features** are specific deliverables or workstreams inside a project or product → **People and Teams** work on those features and projects, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down, and prefer \`feature\` over \`project\` when the work is clearly one component of a larger named project.
+Feature examples:
+- YES feature: "QTD/YTD implementation" part_of "Habuild Analytics"; "Aviation Edge scraper" part_of "OW Tourism Dashboard"; "Access control integration" part_of "Sketch"; "Visa Data Integration" part_of "OW Tourism Dashboard"
+- NO feature: "Vedant's Project Progress"; "67 SQL queries on the new database"; "limitation note"; "UI development"; "backend work"; "new database"
+
+Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Features** are specific named deliverables or workstreams inside a project or product → **People and Teams** work on those features and projects, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down. Prefer \`feature\` only when the work is clearly one named component of a larger named project or product; if no parent can be named or inferred and the phrase is generic, skip the feature rather than creating an orphan.
 
 Also extract direct relationships only when the text explicitly supports them.
 
@@ -243,6 +258,8 @@ Valid relationship types:
 Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
 
 Use "part_of" to link a feature to its parent project (or, less commonly, parent product). Example: the "Aviation Edge scraper" feature is part_of the "OW Tourism Dashboard" project.
+
+Known feature entities in the context above are allowed matches only when this file refers to the same named deliverable. Do not match generic meeting topics, progress notes, or activity descriptions to old feature entities.
 
 When a "Meeting participants" block is present above and lists attendees from multiple companies, the cross-company link is itself relationship evidence even when the prose never names the external company. Emit \`engaged_with\` edges from home-company participants who are marked \`[action-item owner]\` to each external company present in the participants block. Treat silent external attendees (no action items) with caution — only emit when the prose corroborates it. Use the participant name and the external company name exactly as they appear in the block as the relation endpoints.
 
@@ -546,20 +563,42 @@ interface LearnedFact {
  * Returns a map of entity ID → new facts.
  */
 export async function extractEntityFacts(
-  generator: GeminiGenerator,
+  deps: { db: Kysely<DB>; logger?: Logger; generator: GeminiGenerator; now?: () => number },
   file: FileContext,
   matchedEntities: MatchedEntity[],
+  context: FactSelectionContext,
+  cache: FactSelectionCache,
   dumpDir?: string,
 ): Promise<Map<string, LearnedFact[]>> {
   if (matchedEntities.length === 0) return new Map();
 
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
-  const entityDescriptions = matchedEntities
-    .map((e) => {
-      const facts = e.learnedFacts.map((f) => f.fact).join("; ");
-      return `- ID: ${e.entityId} | Name: ${e.name} (${e.sourceType}) | Definition: ${e.definition || "none"} | Known facts: ${facts || "none"}`;
-    })
-    .join("\n");
+  let candidateFactCount = 0;
+  let selectedFactCount = 0;
+  let knownFactChars = 0;
+  const entityDescriptions = (
+    await Promise.all(
+      matchedEntities.map(async (e) => {
+        candidateFactCount += e.learnedFacts.length;
+        const selectedFacts = await selectRelevantFacts(deps, e, context, cache);
+        const facts = renderFactsForPrompt(selectedFacts);
+        selectedFactCount += selectedFacts.length;
+        knownFactChars += facts.length;
+        return `- ID: ${e.entityId} | Name: ${e.name} (${e.sourceType}) | Definition: ${e.definition || "none"} | Known facts: ${facts || "none"}`;
+      }),
+    )
+  ).join("\n");
+
+  deps.logger?.info(
+    {
+      fileId: file.id,
+      matchedEntityCount: matchedEntities.length,
+      candidateFactCount,
+      selectedFactCount,
+      knownFactChars,
+    },
+    "extractEntityFacts: selected learned facts for prompt",
+  );
 
   const prompt = `Extract NEW facts about these entities from the document below. Max 3 facts per entity, each under 20 words.
 
@@ -577,7 +616,7 @@ ${truncatedContent}
 
   return new Map(
     Object.entries(
-      await generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
+      await deps.generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
         maxTokens: 8192,
         label: `extractEntityFacts:${file.id}`,
         dumpDir,
@@ -646,9 +685,22 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   );
 
   const t1 = Date.now();
+  const factSelectionContext = await buildFactSelectionContext(
+    db,
+    file.id,
+    allMatched.map((entity) => entity.entityId),
+  );
+  const factSelectionCache = createFactSelectionCache();
   const [summaryResult, factsResult] = await Promise.allSettled([
     generateSummary(generator, file, allMatched, deps.debugDumpDir),
-    extractEntityFacts(generator, file, allMatched, deps.debugDumpDir),
+    extractEntityFacts(
+      { db, logger, generator },
+      file,
+      allMatched,
+      factSelectionContext,
+      factSelectionCache,
+      deps.debugDumpDir,
+    ),
   ]);
 
   const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;

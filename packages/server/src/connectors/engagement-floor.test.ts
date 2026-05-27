@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { applyEngagementFloor } from "./engagement-floor";
+import { applyEngagementFloor, floorRetryForDomains } from "./engagement-floor";
 
 const CONNECTOR_ID = "cfg-ef";
 
@@ -298,5 +298,42 @@ describe("engagement-floor", () => {
     );
 
     expect(result.emitted).toBe(0);
+  });
+
+  it("limits domain retry to the selected file ids", async () => {
+    const selectedFileId = randomUUID();
+    const unrelatedFileId = randomUUID();
+    await seedFile(db, selectedFileId);
+    await seedFile(db, unrelatedFileId);
+    await db
+      .updateTable("indexed_files")
+      .set({ content: OW_CANVAS_BODY })
+      .where("id", "in", [selectedFileId, unrelatedFileId])
+      .execute();
+    await seedEntity(db, { id: "ent-canvas-scoped", name: "Canvas", sourceType: "company" });
+    await seedEntity(db, { id: "ent-ow-scoped", name: "Oliver Wyman", sourceType: "company" });
+    await seedDomain(db, { entityId: "ent-canvas-scoped", domain: "canvasx.ai", kind: "corporate" });
+    await seedDomain(db, { entityId: "ent-ow-scoped", domain: "oliverwyman.com", kind: "corporate" });
+    for (const fileId of [selectedFileId, unrelatedFileId]) {
+      await seedAttendee(db, { fileId, name: "Vedant Parikh", email: "vedant@canvasx.ai" });
+      await seedAttendee(db, { fileId, name: "Ohoud Zitan", email: "ohoud.zitan@oliverwyman.com" });
+    }
+
+    const result = await floorRetryForDomains({ db, logger: createTestLogger() }, ["canvasx.ai"], {
+      fileIds: [selectedFileId],
+      materialize: false,
+    });
+
+    expect(result.filesScanned).toBe(1);
+    expect(result.emitted).toBe(2);
+
+    const rows = await db
+      .selectFrom("indexed_file_facts")
+      .select(["indexed_file_id"])
+      .where("source", "=", "attendee_action_item")
+      .where("deleted_at", "is", null)
+      .orderBy("indexed_file_id")
+      .execute();
+    expect(rows.map((row) => row.indexed_file_id)).toEqual([selectedFileId, selectedFileId]);
   });
 });

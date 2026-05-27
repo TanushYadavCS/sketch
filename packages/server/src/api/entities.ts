@@ -315,6 +315,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const limit = Math.min(Number(c.req.query("limit")) || 50, 200);
     const offset = Number(c.req.query("offset")) || 0;
     const includeSystem = c.req.query("includeSystem") === "true";
+    const includeArchived = c.req.query("includeArchived") === "true";
     const systemTypes = [...SYSTEM_SOURCE_TYPES];
 
     let query = db
@@ -350,8 +351,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       );
     }
 
-    // Default: exclude archived unless explicitly filtered
-    if (!typeFilter) {
+    if (!includeArchived) {
       query = query.where("entities.status", "!=", "archived");
     }
 
@@ -383,7 +383,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       const pattern = `%${search}%`;
       countQuery = countQuery.where((eb) => eb.or([eb("name", "like", pattern), eb("aliases", "like", pattern)]));
     }
-    if (!typeFilter) {
+    if (!includeArchived) {
       countQuery = countQuery.where("status", "!=", "archived");
     }
     if (!typeFilter && !includeSystem && systemTypes.length > 0) {

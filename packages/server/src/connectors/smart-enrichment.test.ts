@@ -482,7 +482,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
   });
 });
 
-describe("extractEntities prompt — v4 hierarchy + feature + part_of", () => {
+describe("extractEntities prompt — v5 strict feature extraction", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
@@ -497,7 +497,7 @@ describe("extractEntities prompt — v4 hierarchy + feature + part_of", () => {
     }
   });
 
-  it("renders the v4 hierarchy paragraph, the feature entity type, and part_of including feature", async () => {
+  it("renders strict feature guidance, counter-examples, and valid feature part_of edges", async () => {
     let capturedPrompt = "";
     const generator = {
       generate: async () => "",
@@ -524,6 +524,12 @@ describe("extractEntities prompt — v4 hierarchy + feature + part_of", () => {
     expect(capturedPrompt).toContain("Projects");
     expect(capturedPrompt).toContain("Features");
     expect(capturedPrompt).toContain("Prefer extracting from the top down");
+    expect(capturedPrompt).toContain("QTD/YTD implementation");
+    expect(capturedPrompt).toContain("Access control integration");
+    expect(capturedPrompt).toContain("Vedant's Project Progress");
+    expect(capturedPrompt).toContain("67 SQL queries on the new database");
+    expect(capturedPrompt).toContain("skip the feature rather than creating an orphan");
+    expect(capturedPrompt).toContain("Known feature entities");
     expect(capturedPrompt).toContain('"engaged_with"');
     expect(capturedPrompt).toContain("without being employed by it");
     expect(capturedPrompt).toContain('"feature"');
