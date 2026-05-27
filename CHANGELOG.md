@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.30.0] -- 2026-05-27
+
+- Audio: add speech-to-text support for Slack and WhatsApp audio attachments using OpenRouter Whisper Large v3 Turbo, preserving the original audio file and passing the transcript into agent context.
+- Agent tools: add `TranscribeAudio` for buffered audio attachments when OpenRouter transcription is configured, while keeping self-hosted/no-key setups non-breaking and tool-free.
+- Context handling: inline transcripts up to the 8K character limit and write longer transcripts as workspace attachment files for the agent to read.
+- Reliability: make transcription failures non-blocking, avoid treating explicit non-audio MIME uploads as audio, and derive OpenRouter audio formats from MIME, whitelisted extensions, or file headers.
+- Maintenance: split the large Sketch MCP tools module into focused tool files.
+
 ## [0.29.0] -- 2026-05-21
 
 - Workflows: add authenticated Canvas-triggered Sketch workflow invocation support, including requester attribution, Canvas workflow metadata, silent output mode, normalized run timestamps, and Canvas-managed trigger display in scheduled tasks.
