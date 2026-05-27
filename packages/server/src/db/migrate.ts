@@ -58,6 +58,7 @@ import * as m055 from "./migrations/055-normalize-automation-run-timestamps";
 import * as m056 from "./migrations/056-scheduled-task-output-mode";
 import * as m057 from "./migrations/057-entity-review-queue";
 import * as m058 from "./migrations/058-entity-mentions-unique";
+import * as m059 from "./migrations/059-scheduled-tasks-fresh-session-only";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -120,6 +121,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "056-scheduled-task-output-mode": m056,
           "057-entity-review-queue": m057,
           "058-entity-mentions-unique": m058,
+          "059-scheduled-tasks-fresh-session-only": m059,
         };
       },
     },

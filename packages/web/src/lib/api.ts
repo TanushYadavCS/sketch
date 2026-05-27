@@ -64,7 +64,7 @@ export interface ScheduledTaskListItem {
   scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
-  sessionMode: "fresh" | "persistent" | "chat";
+  sessionMode: "fresh";
   nextRunAt: string | null;
   lastRunAt: string | null;
   status: "active" | "paused" | "completed";
