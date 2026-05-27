@@ -34,6 +34,7 @@ import {
 } from "../entities/materialize";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
 import { validateLearnedFact, validateLlmMention } from "../entities/validators";
+import { yieldToEventLoop } from "../lib/event-loop";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 import {
@@ -351,6 +352,7 @@ export async function matchEntities(
     if (!found) {
       unmatched.push(mention);
     }
+    await yieldToEventLoop();
   }
 
   return { matched, unmatched };
@@ -472,6 +474,7 @@ export async function handleCandidates(
             source: "llm_extraction",
             relation: "mentioned",
           });
+          await yieldToEventLoop();
         }
         if (liveFileIds.length < seenFileIds.length) {
           logger.warn(
@@ -511,6 +514,7 @@ export async function handleCandidates(
         })
         .execute();
     }
+    await yieldToEventLoop();
   }
 
   return promoted;
@@ -785,6 +789,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     await entityRepo.updateEntity(entityId, { metadata: JSON.stringify(metadata) });
 
     logger.debug({ entityId, newFactCount: facts.length }, "Updated entity definition");
+    await yieldToEventLoop();
   }
 }
 
@@ -843,6 +848,7 @@ async function reconcileLlmExtractionFacts(
     };
     emittedMentionKeys.push(buildIndexedFileFactKey(input));
     await factRepo.upsertFact(input);
+    await yieldToEventLoop();
   }
 
   for (const relation of extraction.relations) {
@@ -856,6 +862,7 @@ async function reconcileLlmExtractionFacts(
     if (!input) continue;
     emittedRelationKeys.push(buildIndexedFileFactKey(input));
     await factRepo.upsertFact(input);
+    await yieldToEventLoop();
   }
 
   const mentionReconcile = await factRepo.reconcileStaleFacts(

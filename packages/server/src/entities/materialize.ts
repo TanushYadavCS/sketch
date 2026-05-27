@@ -14,6 +14,7 @@ import {
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
+import { yieldToEventLoop } from "../lib/event-loop";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
 import { type RankedCandidate, rankPersonLlmMention } from "./rank";
@@ -397,6 +398,7 @@ export async function replaySourceFacts(
       logger.warn({ err, factId: fact.id, factType: fact.fact_type }, "Replay failed for fact");
       summary.skipped++;
     }
+    await yieldToEventLoop();
   }
 
   logger.info({ summary }, "Source-fact replay complete");
@@ -503,6 +505,7 @@ async function materializeUnmaterializedFactsInner(
       summary.deferred++;
     }
     opts.onProgress?.({ phase: "materialize", completed: i + 1, total: facts.length });
+    await yieldToEventLoop();
   }
 
   await cleanupEmptyRelationships(db);

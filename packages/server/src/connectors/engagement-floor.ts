@@ -44,6 +44,7 @@ import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { yieldToEventLoop } from "../lib/event-loop";
 import { parseActionItemOwners } from "./participant-block";
 
 export interface EngagementFloorDeps {
@@ -198,6 +199,7 @@ export async function applyEngagementFloor(
       emittedFactKeys.add(buildIndexedFileFactKey(input));
       await factsRepo.upsertFact(input);
       emitted += 1;
+      await yieldToEventLoop();
     }
   }
 
