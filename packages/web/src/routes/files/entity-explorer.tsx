@@ -1,4 +1,3 @@
-import { useEntityUi } from "@/lib/entity-ui";
 import { ConnectorLogo } from "@/components/connector-logos";
 /**
  * EntityExplorer — entity list for Files → Entities.
@@ -19,6 +18,7 @@ import { countKey, detailKey, listKey, useReviewMutations } from "@/components/r
 import { useRebuildJob } from "@/hooks/use-rebuild-job";
 import type { EntityListItem, EntityMention, EntityReviewEvidenceRow, EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
+import { useEntityUi } from "@/lib/entity-ui";
 import {
   ArrowClockwiseIcon,
   ArrowLeftIcon,

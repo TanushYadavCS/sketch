@@ -1381,7 +1381,13 @@ describe("Entity drawer routes", () => {
     const scopeId = "scope-restricted";
     await db
       .insertInto("connector_configs")
-      .values({ id: "cfg-scope", connector_type: "google_drive", auth_type: "oauth", credentials: "{}", created_by: adminId })
+      .values({
+        id: "cfg-scope",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
     await db
@@ -1423,7 +1429,11 @@ describe("Entity drawer routes", () => {
 
     const includeRes = await app.request("/api/entities?includeSystem=true", { headers: { Cookie: adminCookie } });
     const includeBody = (await includeRes.json()) as { entities: Array<{ sourceType: string }>; total: number };
-    expect(includeBody.entities.map((e) => e.sourceType).sort()).toEqual(["clickup_space", "clickup_workspace", "person"]);
+    expect(includeBody.entities.map((e) => e.sourceType).sort()).toEqual([
+      "clickup_space",
+      "clickup_workspace",
+      "person",
+    ]);
     expect(includeBody.total).toBe(3);
   });
 });

@@ -7,11 +7,16 @@ import type { Config } from "../config";
 import { isPg } from "../db/dialect";
 import { fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
-import { createEntityRelationshipsRepository, type RelationListEntry } from "../db/repositories/entity-relationships";
+import { type RelationListEntry, createEntityRelationshipsRepository } from "../db/repositories/entity-relationships";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
-import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, buildWhatRow, mapSourceTypeToEntityType } from "../entities/profile-facts";
 import type { MaterializeFactsSummary } from "../entities/materialize";
+import {
+  type EntityProfileFacts,
+  SYSTEM_SOURCE_TYPES,
+  buildWhatRow,
+  mapSourceTypeToEntityType,
+} from "../entities/profile-facts";
 import {
   type RecreateSummary,
   type ResetSummary,

@@ -66,11 +66,13 @@ function relativeDate(iso: string | null): string {
   return years === 1 ? "1 year ago" : `${years} years ago`;
 }
 
-function findRelation(facts: EntityProfileFacts, type: string, direction: "outgoing" | "either"): RelationListEntry | undefined {
+function findRelation(
+  facts: EntityProfileFacts,
+  type: string,
+  direction: "outgoing" | "either",
+): RelationListEntry | undefined {
   return facts.topRelationships.find(
-    (r) =>
-      r.relationshipType === type &&
-      (direction === "either" || r.sourceEntityId === facts.entityId),
+    (r) => r.relationshipType === type && (direction === "either" || r.sourceEntityId === facts.entityId),
   );
 }
 

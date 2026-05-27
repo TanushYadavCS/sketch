@@ -448,10 +448,14 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectFrom("entity_mentions")
         .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
         .select([
-          sql<string | null>`MIN(COALESCE(indexed_files.source_created_at, indexed_files.source_updated_at, entity_mentions.mentioned_at))`.as(
+          sql<
+            string | null
+          >`MIN(COALESCE(indexed_files.source_created_at, indexed_files.source_updated_at, entity_mentions.mentioned_at))`.as(
             "first_seen",
           ),
-          sql<string | null>`MAX(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at))`.as(
+          sql<
+            string | null
+          >`MAX(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at))`.as(
             "last_seen",
           ),
         ])

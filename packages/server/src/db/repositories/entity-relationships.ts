@@ -68,6 +68,13 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
         SELECT COUNT(*) FROM entity_relationship_evidence
         WHERE entity_relationship_evidence.relationship_id = entity_relationships.id
       )`;
+      const confidenceOrder = sql<number>`CASE entity_relationships.confidence
+        WHEN 'AMBIGUOUS' THEN 0
+        WHEN 'EXTRACTED' THEN 1
+        WHEN 'INFERRED' THEN 2
+        ELSE 3
+      END`;
+      const confidenceScore = sql<number>`COALESCE(entity_relationships.confidence_score, 0)`;
 
       const outgoingRows = await db
         .selectFrom("entity_relationships")
@@ -89,6 +96,11 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
           evidenceCount.as("evidence_count"),
         ])
         .where("entity_relationships.source_entity_id", "=", entityId)
+        .orderBy(confidenceOrder)
+        .orderBy(evidenceCount, "desc")
+        .orderBy(confidenceScore, "desc")
+        .orderBy("entities.name", "asc")
+        .orderBy("entity_relationships.id", "asc")
         .limit(limit + 1)
         .execute();
 
@@ -112,6 +124,11 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
           evidenceCount.as("evidence_count"),
         ])
         .where("entity_relationships.target_entity_id", "=", entityId)
+        .orderBy(confidenceOrder)
+        .orderBy(evidenceCount, "desc")
+        .orderBy(confidenceScore, "desc")
+        .orderBy("entities.name", "asc")
+        .orderBy("entity_relationships.id", "asc")
         .limit(limit + 1)
         .execute();
 

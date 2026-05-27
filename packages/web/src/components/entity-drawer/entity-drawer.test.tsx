@@ -92,13 +92,28 @@ const relationsForSarah = {
 };
 
 const handlers = [
-  http.get("/api/entities/e-sarah", () =>
-    HttpResponse.json({ entity: SARAH, sourceRefs: [] }),
-  ),
-  http.get("/api/entities/e-stripe", () =>
-    HttpResponse.json({ entity: STRIPE, sourceRefs: [] }),
-  ),
+  http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
+  http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
   http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
+  http.get("/api/entities/e-sarah/relations/rel-2/evidence", () =>
+    HttpResponse.json({
+      rows: [
+        {
+          fileId: "file-1",
+          fileName: "Planning doc",
+          sourceType: "google_drive",
+          occurredAt: "2026-05-01T00:00:00.000Z",
+          chunkIndex: 0,
+          contextSnippet: "Sarah leads Project Atlas.",
+          sourceFactId: null,
+          note: null,
+        },
+      ],
+      visibleCount: 3,
+      totalCount: 3,
+      truncated: true,
+    }),
+  ),
   http.get("/api/entities/e-stripe/relations", () =>
     HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
   ),
@@ -160,5 +175,15 @@ describe("EntityDrawer", () => {
     await waitFor(() => {
       expect(screen.getByText(/Back to Sarah Chen/i)).toBeInTheDocument();
     });
+  });
+
+  it("surfaces when visible evidence rows are truncated", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
+
+    await screen.findByText(/Person · Engineer at Stripe/);
+    await user.click(await screen.findByText("leads"));
+
+    expect(await screen.findByText("+2 more visible evidence rows")).toBeInTheDocument();
   });
 });

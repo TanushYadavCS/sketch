@@ -138,11 +138,7 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
         <SectionDivider />
         <IdentityPanel entity={entity} sourceRefs={sourceRefs} accent={accent} />
         <SectionDivider />
-        <RelationshipsPanel
-          relations={relationsQuery.data}
-          isLoading={relationsQuery.isLoading}
-          entityId={entity.id}
-        />
+        <RelationshipsPanel relations={relationsQuery.data} isLoading={relationsQuery.isLoading} entityId={entity.id} />
       </div>
     </>
   );
@@ -223,7 +219,9 @@ function BriefRow({
   return (
     <div className="grid grid-cols-[88px_1fr] items-start gap-3 py-1">
       <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</span>
-      <span className={cn("text-sm leading-snug", muted && "text-muted-foreground")}>{value ?? placeholder ?? "—"}</span>
+      <span className={cn("text-sm leading-snug", muted && "text-muted-foreground")}>
+        {value ?? placeholder ?? "—"}
+      </span>
     </div>
   );
 }
@@ -275,7 +273,10 @@ function IdentityPanel({ entity, sourceRefs, accent: _accent }: IdentityPanelPro
     });
   }
   if (entity.profile.lastSeenAt) {
-    rows.push({ label: "Last seen", value: <span className="text-xs">{formatRelative(entity.profile.lastSeenAt)}</span> });
+    rows.push({
+      label: "Last seen",
+      value: <span className="text-xs">{formatRelative(entity.profile.lastSeenAt)}</span>,
+    });
   }
   if (sourceRefs.length > 0) {
     rows.push({
@@ -410,7 +411,9 @@ function RelationshipRow({ relation, entityId }: RelationshipRowProps) {
       >
         {expanded ? <CaretDownIcon className="h-3 w-3 shrink-0" /> : <CaretRightIcon className="h-3 w-3 shrink-0" />}
         <span className="text-xs lowercase text-muted-foreground">
-          {relation.direction === "outgoing" ? formatRelationVerb(relation.relationshipType) : `← ${formatRelationVerb(relation.relationshipType)}`}
+          {relation.direction === "outgoing"
+            ? formatRelationVerb(relation.relationshipType)
+            : `← ${formatRelationVerb(relation.relationshipType)}`}
         </span>
         <button
           type="button"
@@ -484,10 +487,18 @@ function RelationshipExpanded({
               +{evidenceQuery.data.totalCount - evidenceQuery.data.visibleCount} not visible to you
             </p>
           ) : null}
+          {evidenceQuery.data.truncated && evidenceQuery.data.visibleCount > evidenceQuery.data.rows.length ? (
+            <p className="text-[10px] text-muted-foreground">
+              +{evidenceQuery.data.visibleCount - evidenceQuery.data.rows.length} more visible evidence rows
+            </p>
+          ) : null}
         </>
       )}
       {relation.reviewId ? (
-        <a className="text-[11px] text-primary underline-offset-2 hover:underline" href={`/files?review=${relation.reviewId}`}>
+        <a
+          className="text-[11px] text-primary underline-offset-2 hover:underline"
+          href={`/files?review=${relation.reviewId}`}
+        >
           Review this →
         </a>
       ) : null}
