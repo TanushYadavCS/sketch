@@ -105,7 +105,7 @@ function PopoverBody({ entityId }: { entityId: string }) {
           </Badge>
         </div>
       </div>
-      <p className="text-xs text-foreground">{entity.profile.aiBrief.what}</p>
+      <p className="text-xs text-foreground">{entity.profile.summary.identity || entity.profile.summary.activity}</p>
       {tops.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {tops.map((r) => (

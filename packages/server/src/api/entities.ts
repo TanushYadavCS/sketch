@@ -4,23 +4,15 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import type { Config } from "../config";
-import { createGeminiGenerator } from "../connectors/gemini-generate";
 import { isPg } from "../db/dialect";
-import { fileVisibilityPredicate } from "../db/repositories/connectors";
+import { type FileViewer, fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { type RelationListEntry, createEntityRelationshipsRepository } from "../db/repositories/entity-relationships";
 import { createEntityTimelineRepository } from "../db/repositories/entity-timeline";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
-import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
-import { computeInputHash, generateAiBrief } from "../entities/ai-brief";
 import type { MaterializeFactsSummary } from "../entities/materialize";
-import {
-  type EntityProfileFacts,
-  SYSTEM_SOURCE_TYPES,
-  buildWhatRow,
-  mapSourceTypeToEntityType,
-} from "../entities/profile-facts";
+import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, mapSourceTypeToEntityType } from "../entities/profile-facts";
 import {
   type RecreateSummary,
   type ResetSummary,
@@ -46,35 +38,10 @@ import {
   runReenrichJob,
   tombstoneActiveLlmFacts,
 } from "../entities/reenrich";
-import { createSingleFlight } from "../lib/single-flight";
 import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
 const RESET_CONFIRM_TOKEN = "RESET_AND_RECREATE";
 const REENRICH_CONFIRM_TOKEN = "REENRICH";
-
-interface CachedAiBrief {
-  signal: string | null;
-  soWhat: string | null;
-  generatedAt: string | null;
-  inputHash: string | null;
-  stale: boolean;
-}
-
-function parseAiBrief(raw: string | null): CachedAiBrief | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<CachedAiBrief>;
-    return {
-      signal: typeof parsed.signal === "string" ? parsed.signal : null,
-      soWhat: typeof parsed.soWhat === "string" ? parsed.soWhat : null,
-      generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null,
-      inputHash: typeof parsed.inputHash === "string" ? parsed.inputHash : null,
-      stale: parsed.stale === true,
-    };
-  } catch {
-    return null;
-  }
-}
 
 function countByType(rows: RelationListEntry[]): Record<string, number> {
   const out: Record<string, number> = {};
@@ -176,6 +143,10 @@ function newResetJob(request: ResetRequest): ResetJob {
   };
 }
 
+export function _setCurrentResetJobForTests(active: boolean): void {
+  currentResetJob = active ? newResetJob({ categories: ["manual"], runAfter: false }) : null;
+}
+
 function newReenrichJob(request: ReenrichRequest): ReenrichJob {
   return {
     id: randomUUID(),
@@ -196,25 +167,16 @@ function newRebuildJob(request: RebuildRequest): RebuildJob {
   };
 }
 
-export function _setCurrentResetJobForTests(active: boolean): void {
-  currentResetJob = active ? newResetJob({ categories: ["manual"], runAfter: false }) : null;
-}
-
 interface EntityRoutesDeps {
   logger: Logger;
   config: Config;
 }
-
-const AI_BRIEF_REFRESH_INTERVAL_MS = 60_000;
 
 export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   const routes = new Hono();
   const repo = createEntityRepository(db);
   const relRepo = createEntityRelationshipsRepository(db);
   const timelineRepo = createEntityTimelineRepository(db);
-  const settingsRepo = createSettingsRepository(db);
-  const briefSingleFlight = createSingleFlight();
-  const lastBriefRefreshAt = new Map<string, number>();
   const { logger, config } = deps;
 
   const RELATIONS_LIMIT = 200;
@@ -222,16 +184,15 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   const TIMELINE_LIMIT = 100;
 
   /**
-   * Loads the structured facts shape the WHAT template + Gemini prompt both
-   * consume. Returns null when the entity doesn't exist. Shared by the detail
-   * read path and the ai-brief refresh route so the inputHash is consistent.
+   * Loads the structured facts shape the drawer Summary block consumes.
+   * Returns null when the entity doesn't exist.
    */
   async function loadEntityFactsForId(entityId: string): Promise<EntityProfileFacts | null> {
     const entity = await repo.getEntity(entityId);
     if (!entity) return null;
     const [aggregates, relations] = await Promise.all([
       repo.getEntityProfileAggregates(entity.id),
-      relRepo.listRelationsForEntity(entity.id, { limit: 10 }),
+      relRepo.listRelationsForEntity(entity.id, { limit: 50 }),
     ]);
     const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
     const topRelationships = [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10);
@@ -250,6 +211,170 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       incomingCounts: countByType(relations.incoming),
       outgoingCounts: countByType(relations.outgoing),
     };
+  }
+
+  interface ActivityStats {
+    fileCount: number;
+    distinctDays: number;
+    topCoAttendees: string[];
+  }
+
+  /**
+   * Aggregate activity stats for the deterministic Summary: how many files
+   * mention this entity, how many distinct calendar days that spans, and the
+   * top 3 people who co-attend the same files. Two queries, both portable
+   * across SQLite/Postgres. File-derived details are filtered through the
+   * same viewer predicate as timeline/evidence routes.
+   */
+  async function loadActivityStats(entityId: string, viewer: FileViewer): Promise<ActivityStats> {
+    let fileQuery = db
+      .selectFrom("entity_mentions")
+      .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+      .select([
+        sql<number>`COUNT(DISTINCT entity_mentions.indexed_file_id)`.as("file_count"),
+        sql<number>`COUNT(DISTINCT substr(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at), 1, 10))`.as(
+          "distinct_days",
+        ),
+      ])
+      .where("entity_mentions.entity_id", "=", entityId);
+    if (!viewer.isAdmin) {
+      fileQuery = fileQuery.where(fileVisibilityPredicate(viewer));
+    }
+    const fileRow = await fileQuery.executeTakeFirst();
+
+    let coAttendeeQuery = db
+      .selectFrom("entity_mentions as em1")
+      .innerJoin("indexed_files", "indexed_files.id", "em1.indexed_file_id")
+      .innerJoin("entity_mentions as em2", (join) =>
+        join.onRef("em2.indexed_file_id", "=", "em1.indexed_file_id").on(sql`em2.entity_id <> em1.entity_id`),
+      )
+      .innerJoin("entities as e2", "e2.id", "em2.entity_id")
+      .select(["e2.id as id", "e2.name as name", sql<number>`COUNT(DISTINCT em1.indexed_file_id)`.as("files")])
+      .where("em1.entity_id", "=", entityId)
+      .where("e2.source_type", "=", "person")
+      .groupBy(["e2.id", "e2.name"])
+      .orderBy("files", "desc")
+      .limit(3);
+    if (!viewer.isAdmin) {
+      coAttendeeQuery = coAttendeeQuery.where(fileVisibilityPredicate(viewer));
+    }
+    const coAttendeeRows = await coAttendeeQuery.execute();
+
+    return {
+      fileCount: Number(fileRow?.file_count ?? 0),
+      distinctDays: Number(fileRow?.distinct_days ?? 0),
+      topCoAttendees: coAttendeeRows.map((r) => r.name),
+    };
+  }
+
+  /**
+   * Deterministic prose summary: an identity sentence + an activity sentence.
+   * Built entirely from relationships + aggregates — no LLM, no shimmer. The
+   * idea is to render facts we already know are true rather than synthesizing
+   * narrative from action-item facts.
+   */
+  function buildSummary(facts: EntityProfileFacts, activity: ActivityStats): { identity: string; activity: string } {
+    const identity = buildIdentitySentence(facts);
+    const activitySentence = buildActivitySentence(facts, activity);
+    return { identity, activity: activitySentence };
+  }
+
+  function pluralize(n: number, singular: string, plural?: string): string {
+    return `${n} ${n === 1 ? singular : (plural ?? `${singular}s`)}`;
+  }
+
+  function buildIdentitySentence(facts: EntityProfileFacts): string {
+    const typeWord = formatEntityType(facts.entityType, facts.sourceType);
+    const email = typeof facts.metadata?.email === "string" ? facts.metadata.email : null;
+    const role = typeof facts.metadata?.role === "string" ? facts.metadata.role : null;
+    const outgoing = facts.topRelationships.filter((r) => r.sourceEntityId === facts.entityId);
+    const employers = uniqueNames(outgoing.filter((r) => r.relationshipType === "works_at").map((r) => r.other.name));
+    const clients = uniqueNames(outgoing.filter((r) => r.relationshipType === "engaged_with").map((r) => r.other.name));
+
+    const parts: string[] = [typeWord];
+
+    if (facts.entityType === "person") {
+      if (role) parts.push(role);
+      if (employers.length > 0) parts.push(`works at ${joinList(employers)}`);
+      if (email) parts.push(`(${email})`);
+    } else if (facts.entityType === "company") {
+      const primary = facts.domainsForCompany.find((d) => d.isPrimary)?.domain;
+      const others = facts.domainsForCompany.filter((d) => !d.isPrimary).map((d) => d.domain);
+      if (primary) parts.push(primary);
+      if (others.length > 0) parts.push(`also: ${joinList(others.slice(0, 3))}`);
+    }
+
+    let sentence = parts.join(" · ");
+    if (sentence.length > 0) sentence = `${sentence}.`;
+
+    if (facts.entityType === "person" && clients.length > 0) {
+      sentence = `${sentence} Engaged with ${joinList(clients.slice(0, 4))}.`;
+    }
+
+    return sentence;
+  }
+
+  function buildActivitySentence(facts: EntityProfileFacts, activity: ActivityStats): string {
+    const pieces: string[] = [];
+    if (activity.fileCount > 0) {
+      const fileTerm = pluralize(activity.fileCount, "file");
+      const mentionsTerm = pluralize(facts.mentionCount, "mention");
+      if (activity.distinctDays > 0) {
+        pieces.push(`Active in ${fileTerm} (${mentionsTerm}) across ${pluralize(activity.distinctDays, "day")}`);
+      } else {
+        pieces.push(`Active in ${fileTerm} (${mentionsTerm})`);
+      }
+    }
+    if (facts.entityType === "person" && activity.topCoAttendees.length > 0) {
+      pieces.push(`most-frequent collaborators: ${joinList(activity.topCoAttendees)}`);
+    }
+    if (pieces.length === 0) return "";
+    return `${pieces.join(". ")}.`;
+  }
+
+  function formatEntityType(entityType: string, sourceType: string): string {
+    switch (entityType) {
+      case "person":
+        return "Person";
+      case "company":
+        return "Company";
+      case "product":
+        return "Product";
+      case "project":
+        return "Project";
+      case "team":
+        return "Team";
+      case "system":
+        return capitalize(sourceType);
+      default:
+        return capitalize(sourceType);
+    }
+  }
+
+  function capitalize(value: string): string {
+    if (!value) return value;
+    return value.charAt(0).toUpperCase() + value.slice(1);
+  }
+
+  function uniqueNames(names: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const name of names) {
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(trimmed);
+    }
+    return out;
+  }
+
+  function joinList(items: string[]): string {
+    if (items.length === 0) return "";
+    if (items.length === 1) return items[0];
+    if (items.length === 2) return `${items[0]} and ${items[1]}`;
+    return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
   }
   const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
   const relationCompare = (a: RelationListEntry, b: RelationListEntry): number => {
@@ -646,20 +771,12 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
 
     // Two-step rebuild: the caller already holds a pending recreate lock from
-    // a prior /resets call. Check route-local jobs first so a still-running
-    // step-1 reset cannot consume the pending id before it is safe to promote.
+    // a prior /resets call. Promote it; only then are the standard sync/
+    // enrichment/in-flight-job conflicts checked (because our own pending
+    // lock would otherwise read as RECREATE_ACTIVE).
     const pendingRebuildId = typeof body.pendingRebuildId === "string" ? body.pendingRebuildId : undefined;
     let lockAlreadyHeld = false;
     if (pendingRebuildId) {
-      if (currentResetJob) {
-        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
-      }
-      if (currentReenrichJob) {
-        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
-      }
-      if (currentRebuildJob) {
-        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
-      }
       const promote = promotePendingRebuild(pendingRebuildId);
       if (promote !== "promoted") {
         return c.json(
@@ -693,9 +810,6 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
 
     const runAfter = body.runAfter !== false;
-    const materializeFactTypes = lockAlreadyHeld
-      ? Array.from(new Set([...FACT_TYPES_BY_CATEGORY.connectors, ...AI_EXTRACTION_FACT_TYPES]))
-      : undefined;
     const job = newReenrichJob({ scope, runAfter });
     job.phase = "wiping";
     currentReenrichJob = job;
@@ -711,7 +825,6 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           missingFileIds: resolved.missingFileIds,
           runAfter,
           lockAlreadyHeld,
-          materializeFactTypes,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           onPhase: (phase) => {
@@ -743,7 +856,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         message: "Re-enrich started.",
         files: resolved.fileIds.length,
         missingFileIds: resolved.missingFileIds,
-        factTypes: materializeFactTypes ?? AI_EXTRACTION_FACT_TYPES,
+        factTypes: AI_EXTRACTION_FACT_TYPES,
         job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
       },
       202,
@@ -987,9 +1100,10 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
    *
    * Backwards-compatible: existing callers keep getting `{ entity, sourceRefs }`
    * with the same field names. The drawer surface receives an additional
-   * `entity.profile` block (aggregates + ai brief) so the open-feel is a single
-   * round-trip. The profile block is always present so the web layer can rely
-   * on it; the experimental flag gates the drawer UI, not the response shape.
+   * `entity.profile` block (aggregates + a deterministic summary) so the
+   * open-feel is a single round-trip. The profile block is always present so
+   * the web layer can rely on it; the experimental flag gates the drawer UI,
+   * not the response shape.
    */
   routes.get("/:id", async (c) => {
     const entity = await repo.getEntity(c.req.param("id"));
@@ -1006,10 +1120,9 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
 
     const parsedAliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
-    const cachedBrief = parseAiBrief(entity.ai_brief);
-    const what = buildWhatRow(facts);
-    const currentInputHash = computeInputHash(facts);
-    const briefIsStale = cachedBrief ? cachedBrief.stale || cachedBrief.inputHash !== currentInputHash : false;
+    const viewer = getFileViewer(c);
+    const activity = await loadActivityStats(entity.id, viewer);
+    const summary = buildSummary(facts, activity);
 
     return c.json({
       entity: {
@@ -1030,13 +1143,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           firstSeenAt: facts.firstSeenAt,
           lastSeenAt: facts.lastSeenAt,
           domainsForCompany: facts.domainsForCompany,
-          aiBrief: {
-            what,
-            signal: cachedBrief?.signal ?? null,
-            soWhat: cachedBrief?.soWhat ?? null,
-            generatedAt: cachedBrief?.generatedAt ?? null,
-            stale: briefIsStale,
-          },
+          summary,
         },
       },
       sourceRefs: sourceRefs.map((r) => ({
@@ -1113,73 +1220,6 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const viewer = getFileViewer(c);
     const result = await timelineRepo.listTimelineForEntity(entity.id, { limit: TIMELINE_LIMIT, viewer });
     return c.json(result);
-  });
-
-  /**
-   * POST /api/entities/:id/ai-brief/refresh
-   * Forces regeneration of the Signal / So-what rows via Gemini. Org-shared
-   * cache, single-flight per entity, rate-limited 1/60s for manual triggers.
-   * Returns the brief shape so the drawer can update inline.
-   */
-  routes.post("/:id/ai-brief/refresh", async (c) => {
-    if (!config.EXPERIMENTAL_FLAG) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
-    }
-    const entityId = c.req.param("id");
-    const entity = await repo.getEntity(entityId);
-    if (!entity) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
-    }
-
-    const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
-    const force = body.force === true;
-
-    const facts = await loadEntityFactsForId(entityId);
-    if (!facts) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
-    }
-
-    const lastAt = lastBriefRefreshAt.get(entityId) ?? 0;
-    const now = Date.now();
-    if (force && now - lastAt < AI_BRIEF_REFRESH_INTERVAL_MS) {
-      const cached = parseAiBrief(entity.ai_brief);
-      const briefIsStale = cached ? cached.stale || cached.inputHash !== computeInputHash(facts) : false;
-      return c.json(
-        {
-          what: buildWhatRow(facts),
-          signal: cached?.signal ?? null,
-          soWhat: cached?.soWhat ?? null,
-          generatedAt: cached?.generatedAt ?? null,
-          stale: briefIsStale,
-          error: "rate_limited",
-        },
-        200,
-      );
-    }
-
-    const settings = await settingsRepo.get();
-    const apiKey = settings?.gemini_api_key;
-    if (!apiKey) {
-      return c.json({ error: { code: "GEMINI_NOT_CONFIGURED", message: "Gemini API key is not configured" } }, 503);
-    }
-    const gemini = createGeminiGenerator(apiKey);
-
-    if (force) lastBriefRefreshAt.set(entityId, now);
-
-    const result = await generateAiBrief(
-      { db, gemini, singleFlight: briefSingleFlight, logger: logger.child({ component: "ai-brief" }) },
-      facts,
-      { force },
-    );
-
-    return c.json({
-      what: buildWhatRow(facts),
-      signal: result.signal,
-      soWhat: result.soWhat,
-      generatedAt: result.generatedAt,
-      stale: result.stale,
-      ...(result.error ? { error: result.error } : {}),
-    });
   });
 
   /**

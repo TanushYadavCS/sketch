@@ -34,12 +34,9 @@ const SARAH = {
     firstSeenAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-05-01T00:00:00.000Z",
     domainsForCompany: [],
-    aiBrief: {
-      what: "Person · Engineer at Stripe · 5 mentions",
-      signal: "Cached signal.",
-      soWhat: "Cached so-what.",
-      generatedAt: "2026-05-01T00:00:00.000Z",
-      stale: false,
+    summary: {
+      identity: "Person · works at Stripe.",
+      activity: "Active in 5 files (5 mentions).",
     },
   },
 };
@@ -69,15 +66,6 @@ const server = setupServer(
   http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
   http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relations)),
   http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json({ groups: [], truncated: false, totalCount: 0 })),
-  http.post("/api/entities/e-sarah/ai-brief/refresh", () =>
-    HttpResponse.json({
-      what: SARAH.profile.aiBrief.what,
-      signal: SARAH.profile.aiBrief.signal,
-      soWhat: SARAH.profile.aiBrief.soWhat,
-      generatedAt: SARAH.profile.aiBrief.generatedAt,
-      stale: false,
-    }),
-  ),
 );
 
 beforeAll(() => server.listen({ onUnhandledRequest: "warn" }));
@@ -105,15 +93,15 @@ describe("EntityPopover", () => {
     const user = userEvent.setup();
     renderWithProviders(<Harness />);
 
-    await screen.findByText(/Person · Engineer at Stripe · 5 mentions/);
+    await screen.findByText(/Person · works at Stripe\./);
     expect(screen.getByRole("button", { name: /Open in drawer/ })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Open in drawer/ }));
 
     await waitFor(() => {
-      // Drawer renders the section labels; popover does not.
-      expect(screen.getByText("Identity")).toBeInTheDocument();
-      expect(screen.getByText("Relationships")).toBeInTheDocument();
+      // Drawer renders the Summary block + tabs; popover does not.
+      expect(screen.getByText("Summary")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Relationships/ })).toBeInTheDocument();
     });
   });
 });

@@ -1,8 +1,8 @@
 /**
  * TimelineStrip contract:
- *  - "1 of N" counter renders with the correct total
- *  - month dividers appear inline ahead of their group's cards
- *  - clicking a card invokes onSelectItem with the item
+ *  - total-entries counter renders with the correct total
+ *  - month headers appear above each group of rows
+ *  - clicking a row invokes onSelectItem with the item
  */
 import { renderWithProviders } from "@/test/utils";
 import { screen } from "@testing-library/react";
@@ -44,9 +44,9 @@ const groups = [
 ];
 
 describe("TimelineStrip", () => {
-  it("renders cards with month dividers inline and a 1-of-N counter", async () => {
+  it("renders rows grouped under month headers with a total-entries counter", async () => {
     renderWithProviders(<TimelineStrip groups={groups} />);
-    expect(screen.getByText(/1 of 2/)).toBeInTheDocument();
+    expect(screen.getByText(/2 entries/)).toBeInTheDocument();
     expect(screen.getByText("May 2026")).toBeInTheDocument();
     expect(screen.getByText("Apr 2026")).toBeInTheDocument();
     expect(screen.getByText("Atlas standup")).toBeInTheDocument();

@@ -1,29 +1,27 @@
 /**
  * EntityDrawer — the universal provenance/audit surface for one entity.
  *
- * Phase 1: brief (WHAT only), Identity, Relationships sections + stacked
- * navigation. Timeline + AI brief Signal/SoWhat rows + global popover land
- * in Phase 2.
+ * Layout:
+ *   1. Header — name + type badge + identity chips (domains / email+role /
+ *      aliases) inline; last seen right-aligned.
+ *   2. Summary block — Gemini narrative + up to 3 top learned-fact bullets.
+ *      Falls back to the deterministic WHAT line when the brief is cold and
+ *      there are no facts yet.
+ *   3. Tabs — Timeline (default) | Relationships.
  *
  * Driven by EntityUiProvider's stack. Each level renders independently —
  * pushing a related entity pushes a new id onto the stack; Back chip pops.
  */
-import type {
-  EntityDetail,
-  EntityRelationEvidenceRow,
-  EntityRelationView,
-  EntityRelationsResponse,
-  EntitySourceRef,
-} from "@/lib/api";
+import type { EntityDetail, EntityRelationEvidenceRow, EntityRelationView, EntityRelationsResponse } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
-import { ArrowClockwiseIcon, ArrowLeftIcon, CaretDownIcon, CaretRightIcon, WarningIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, WarningIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { TimelineStrip } from "./timeline-strip";
 
 const CONFIDENCE_LABEL: Record<string, string> = {
@@ -65,7 +63,7 @@ export function EntityDrawer() {
       <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-[720px]">
         <SheetTitle className="sr-only">Entity drawer</SheetTitle>
         <SheetDescription className="sr-only">
-          Provenance and audit view for the selected entity, with identity, relationships, and timeline sections.
+          Provenance and audit view for the selected entity, with identity flags, summary, timeline, and relationships.
         </SheetDescription>
         {currentId ? (
           <EntityDrawerBody
@@ -122,7 +120,7 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
     return <div className="p-6 text-sm text-muted-foreground">Entity not found.</div>;
   }
 
-  const { entity, sourceRefs } = profileQuery.data;
+  const { entity } = profileQuery.data;
   const accent = entityAccent({ id: entity.id, name: entity.name, sourceType: entity.sourceType });
 
   return (
@@ -135,13 +133,8 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
         accent={accent}
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-        <AiBriefBlock entity={entity} accent={accent} />
-        <SectionDivider />
-        <IdentityPanel entity={entity} sourceRefs={sourceRefs} accent={accent} />
-        <SectionDivider />
-        <RelationshipsPanel relations={relationsQuery.data} isLoading={relationsQuery.isLoading} entityId={entity.id} />
-        <SectionDivider />
-        <TimelinePanel entityId={entity.id} />
+        <SummaryBlock entity={entity} accent={accent} />
+        <DrawerTabs entityId={entity.id} relations={relationsQuery.data} relationsLoading={relationsQuery.isLoading} />
       </div>
     </>
   );
@@ -156,6 +149,7 @@ interface DrawerHeaderProps {
 }
 
 function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: DrawerHeaderProps) {
+  const lastSeen = entity.profile.lastSeenAt;
   return (
     <div
       className="sticky top-0 z-10 border-b bg-background px-6 pb-4 pt-5"
@@ -174,12 +168,19 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
       <div className="flex items-start gap-3">
         <EntityAvatar entity={entity} size="lg" />
         <div className="min-w-0 flex-1">
-          <h2 className="font-serif text-[20px] leading-tight">{entity.name}</h2>
-          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="min-w-0 flex-1 truncate font-serif text-[20px] leading-tight">{entity.name}</h2>
+            {lastSeen ? (
+              <span className="shrink-0 whitespace-nowrap font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                Last seen {formatRelative(lastSeen)}
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Badge variant="outline" className="text-[10px] uppercase tracking-wider">
               {entity.profile.entityType}
             </Badge>
-            <span className="font-mono">{entity.id.slice(0, 8)}</span>
+            <IdentityChips entity={entity} />
             {entity.status !== "confirmed" ? (
               <Badge variant="secondary" className="text-[10px]">
                 {entity.status}
@@ -192,250 +193,159 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
   );
 }
 
-function SectionDivider() {
-  return <div className="my-5 h-px bg-border" />;
+/**
+ * Identity flags rendered inline in the header. Person → email + role.
+ * Company/product → domains (primary first). All types → aliases as a muted
+ * trailing line.
+ */
+function IdentityChips({ entity }: { entity: EntityDetail }) {
+  const meta = entity.metadata ?? {};
+  const email = typeof meta.email === "string" ? meta.email : null;
+  const role = typeof meta.role === "string" ? meta.role : null;
+  const domains = entity.profile.domainsForCompany;
+  const aliases = entity.aliases;
+
+  return (
+    <>
+      {role ? (
+        <Badge variant="outline" className="text-[10px]">
+          {role}
+        </Badge>
+      ) : null}
+      {email ? (
+        <Badge variant="secondary" className="font-mono text-[10px] normal-case tracking-normal">
+          {email}
+        </Badge>
+      ) : null}
+      {domains.map((d) => (
+        <Badge
+          key={d.domain}
+          variant={d.isPrimary ? "secondary" : "outline"}
+          className="font-mono text-[10px] normal-case tracking-normal"
+        >
+          {d.domain}
+          {d.isPrimary ? " · primary" : null}
+        </Badge>
+      ))}
+      {aliases.length > 0 ? (
+        <span className="text-[11px] text-muted-foreground">Also: {aliases.join(", ")}</span>
+      ) : null}
+    </>
+  );
 }
 
 /**
- * AI Brief — three rows. WHAT renders instantly from the deterministic
- * server template. SIGNAL and SO WHAT come from a Gemini-backed org-shared
- * cache; if cold, the drawer fires a refresh and shows a shimmer. Stale
- * rows show a dot indicator and trigger a background refresh on mount.
+ * Summary block — deterministic prose built server-side from relationships +
+ * activity aggregates. No LLM, no shimmer. Two short paragraphs: identity
+ * (type / role / employer / engagements) and activity (file count, mention
+ * count, distinct days active, most-frequent collaborators).
  */
-function AiBriefBlock({ entity, accent }: { entity: EntityDetail; accent: string }) {
-  const queryClient = useQueryClient();
-  const { aiBrief } = entity.profile;
-  const [signal, setSignal] = useState<string | null>(aiBrief.signal);
-  const [soWhat, setSoWhat] = useState<string | null>(aiBrief.soWhat);
-  const [stale, setStale] = useState(aiBrief.stale);
-  const [error, setError] = useState<"generation_failed" | "rate_limited" | null>(null);
-  const autoRefreshKeyRef = useRef<string | null>(null);
-
-  const refreshMutation = useMutation({
-    mutationFn: (force: boolean) => api.entities.refreshAiBrief(entity.id, { force }),
-    onSuccess: (data) => {
-      setSignal(data.signal);
-      setSoWhat(data.soWhat);
-      setStale(data.stale);
-      setError(data.error ?? null);
-      queryClient.invalidateQueries({ queryKey: ["entity-drawer", "profile", entity.id] });
-    },
-    onError: () => setError("generation_failed"),
-  });
-
-  const isCold = signal === null && soWhat === null;
-  const autoRefreshKey = `${entity.id}:${aiBrief.generatedAt ?? "cold"}:${aiBrief.stale ? "stale" : "fresh"}`;
-
-  useEffect(() => {
-    setSignal(aiBrief.signal);
-    setSoWhat(aiBrief.soWhat);
-    setStale(aiBrief.stale);
-    setError(null);
-    autoRefreshKeyRef.current = null;
-  }, [aiBrief.signal, aiBrief.soWhat, aiBrief.stale]);
-
-  useEffect(() => {
-    if ((isCold || stale) && !refreshMutation.isPending && autoRefreshKeyRef.current !== autoRefreshKey) {
-      autoRefreshKeyRef.current = autoRefreshKey;
-      refreshMutation.mutate(false);
-    }
-  }, [autoRefreshKey, isCold, stale, refreshMutation.isPending, refreshMutation.mutate]);
-
-  const showShimmer = isCold && refreshMutation.isPending;
-
+function SummaryBlock({ entity, accent }: { entity: EntityDetail; accent: string }) {
+  const { identity, activity } = entity.profile.summary;
+  const hasContent = identity.length > 0 || activity.length > 0;
   return (
-    <section aria-label="AI brief" className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
-      <div className="mb-1 flex items-center justify-end gap-2">
-        {stale ? (
-          <span
-            className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400"
-            aria-label="Brief inputs have changed since last generation"
-            title="Refreshing in the background"
-          />
-        ) : null}
-        <button
-          type="button"
-          onClick={() => refreshMutation.mutate(true)}
-          disabled={refreshMutation.isPending}
-          className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-50"
-          aria-label="Refresh AI brief"
-        >
-          <ArrowClockwiseIcon className="h-3 w-3" />
-        </button>
-      </div>
-      <BriefRow label="What" value={aiBrief.what} />
-      <BriefRow label="Signal" value={signal} loading={showShimmer} />
-      <BriefRow label="So what" value={soWhat} loading={showShimmer} />
-      {error === "generation_failed" && !showShimmer ? (
-        <button
-          type="button"
-          onClick={() => refreshMutation.mutate(true)}
-          className="mt-1 text-[10px] text-muted-foreground hover:text-foreground"
-        >
-          couldn't generate — retry
-        </button>
-      ) : null}
+    <section aria-label="Summary" className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
+      <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">Summary</div>
+      {hasContent ? (
+        <div className="space-y-2 text-sm leading-snug">
+          {identity ? <p>{identity}</p> : null}
+          {activity ? <p className="text-muted-foreground">{activity}</p> : null}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">No summary yet.</p>
+      )}
     </section>
   );
 }
 
-function BriefRow({ label, value, loading }: { label: string; value: string | null; loading?: boolean }) {
-  return (
-    <div className="grid grid-cols-[88px_1fr] items-start gap-3 py-1">
-      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</span>
-      {loading ? (
-        <Skeleton className="h-4 w-4/5" />
-      ) : (
-        <span className={cn("text-sm leading-snug", value === null && "text-muted-foreground")}>{value ?? "—"}</span>
-      )}
-    </div>
-  );
-}
-
-interface TimelinePanelProps {
+interface DrawerTabsProps {
   entityId: string;
+  relations: EntityRelationsResponse | undefined;
+  relationsLoading: boolean;
 }
 
-function TimelinePanel({ entityId }: TimelinePanelProps) {
+function DrawerTabs({ entityId, relations, relationsLoading }: DrawerTabsProps) {
+  const [tab, setTab] = useState<"timeline" | "relationships">("timeline");
   const timelineQuery = useQuery({
     queryKey: ["entity-drawer", "timeline", entityId],
     queryFn: () => api.entities.timeline(entityId),
   });
 
+  const timelineCount = timelineQuery.data?.totalCount ?? 0;
+  const timelineHint = timelineQuery.data?.truncated
+    ? `${timelineCount}+`
+    : timelineCount > 0
+      ? `${timelineCount}`
+      : null;
+  const relationsCount = relations?.totalCount ?? 0;
+  const relationsHint = relations?.truncated ? `${relationsCount}+` : relationsCount > 0 ? `${relationsCount}` : null;
+
+  return (
+    <div className="mt-5">
+      <div className="mb-3 inline-flex rounded-lg border-[0.5px] border-border bg-card p-0.5 dark:bg-[#111110]">
+        <TabButton
+          active={tab === "timeline"}
+          onClick={() => setTab("timeline")}
+          label="Timeline"
+          hint={timelineHint}
+        />
+        <TabButton
+          active={tab === "relationships"}
+          onClick={() => setTab("relationships")}
+          label="Relationships"
+          hint={relationsHint}
+        />
+      </div>
+      {tab === "timeline" ? (
+        <TimelinePanel timelineQuery={timelineQuery} />
+      ) : (
+        <RelationshipsPanel relations={relations} isLoading={relationsLoading} entityId={entityId} />
+      )}
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  label,
+  hint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint: string | null;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-md px-3 py-1 text-xs transition-colors",
+        active
+          ? "bg-accent font-medium text-foreground dark:bg-[#1C1C1A]"
+          : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {label}
+      {hint ? <span className="ml-1.5 font-mono text-[10px] text-muted-foreground">{hint}</span> : null}
+    </button>
+  );
+}
+
+interface TimelinePanelProps {
+  timelineQuery: ReturnType<typeof useQuery<Awaited<ReturnType<typeof api.entities.timeline>>>>;
+}
+
+function TimelinePanel({ timelineQuery }: TimelinePanelProps) {
   if (timelineQuery.isLoading) {
-    return (
-      <section aria-label="Timeline">
-        <SectionHeader title="Timeline" />
-        <Skeleton className="h-24 w-full" />
-      </section>
-    );
+    return <Skeleton className="h-24 w-full" />;
   }
   const groups = timelineQuery.data?.groups ?? [];
   if (groups.length === 0) {
-    return (
-      <section aria-label="Timeline">
-        <SectionHeader title="Timeline" />
-        <p className="text-xs text-muted-foreground">No file mentions yet.</p>
-      </section>
-    );
+    return <p className="text-xs text-muted-foreground">No file mentions yet.</p>;
   }
-
-  return (
-    <section aria-label="Timeline">
-      <SectionHeader
-        title="Timeline"
-        hint={
-          timelineQuery.data?.truncated
-            ? `${timelineQuery.data.totalCount}+ shown`
-            : `${timelineQuery.data?.totalCount ?? 0}`
-        }
-      />
-      <TimelineStrip groups={groups} />
-    </section>
-  );
-}
-
-interface IdentityPanelProps {
-  entity: EntityDetail;
-  sourceRefs: EntitySourceRef[];
-  accent: string;
-}
-
-function IdentityPanel({ entity, sourceRefs, accent: _accent }: IdentityPanelProps) {
-  const meta = entity.metadata ?? {};
-  const role = typeof meta.role === "string" ? meta.role : null;
-  const email = typeof meta.email === "string" ? meta.email : null;
-
-  const rows: Array<{ label: string; value: React.ReactNode }> = [];
-  if (email) rows.push({ label: "Email", value: <span className="font-mono text-xs">{email}</span> });
-  if (role) rows.push({ label: "Role", value: role });
-  if (entity.profile.domainsForCompany.length > 0) {
-    rows.push({
-      label: "Domains",
-      value: (
-        <div className="flex flex-wrap gap-1.5">
-          {entity.profile.domainsForCompany.map((d) => (
-            <Badge key={d.domain} variant={d.isPrimary ? "secondary" : "outline"} className="text-[10px]">
-              {d.domain}
-              {d.isPrimary ? " · primary" : null}
-            </Badge>
-          ))}
-        </div>
-      ),
-    });
-  }
-  if (entity.aliases.length > 0) {
-    rows.push({ label: "Aliases", value: <span className="text-xs">{entity.aliases.join(", ")}</span> });
-  }
-  if (Object.keys(entity.profile.sourceCounts).length > 0) {
-    rows.push({
-      label: "Sources",
-      value: (
-        <div className="flex flex-wrap gap-1.5">
-          {Object.entries(entity.profile.sourceCounts).map(([source, count]) => (
-            <Badge key={source} variant="secondary" className="text-[10px]">
-              {source} · {count}
-            </Badge>
-          ))}
-        </div>
-      ),
-    });
-  }
-  if (entity.profile.lastSeenAt) {
-    rows.push({
-      label: "Last seen",
-      value: <span className="text-xs">{formatRelative(entity.profile.lastSeenAt)}</span>,
-    });
-  }
-  if (sourceRefs.length > 0) {
-    rows.push({
-      label: "Source IDs",
-      value: (
-        <div className="flex flex-col gap-0.5 font-mono text-[11px] text-muted-foreground">
-          {sourceRefs.slice(0, 4).map((r) => (
-            <span key={r.id} className="truncate">
-              {r.source}:{r.sourceId}
-            </span>
-          ))}
-        </div>
-      ),
-    });
-  }
-
-  return (
-    <section aria-label="Identity">
-      <SectionHeader title="Identity" />
-      {rows.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No identity facts yet.</p>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {rows.map((r) => (
-            <DrawerRow key={r.label} label={r.label}>
-              {r.value}
-            </DrawerRow>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function DrawerRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[88px_1fr] items-start gap-3">
-      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</span>
-      <div className="text-sm">{children}</div>
-    </div>
-  );
-}
-
-function SectionHeader({ title, hint }: { title: string; hint?: string }) {
-  return (
-    <div className="mb-2 flex items-baseline justify-between">
-      <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
-      {hint ? <span className="text-[10px] text-muted-foreground">{hint}</span> : null}
-    </div>
-  );
+  return <TimelineStrip groups={groups} />;
 }
 
 interface RelationshipsPanelProps {
@@ -446,20 +356,10 @@ interface RelationshipsPanelProps {
 
 function RelationshipsPanel({ relations, isLoading, entityId }: RelationshipsPanelProps) {
   if (isLoading) {
-    return (
-      <section aria-label="Relationships">
-        <SectionHeader title="Relationships" />
-        <Skeleton className="h-20 w-full" />
-      </section>
-    );
+    return <Skeleton className="h-20 w-full" />;
   }
   if (!relations || (relations.outgoing.length === 0 && relations.incoming.length === 0)) {
-    return (
-      <section aria-label="Relationships">
-        <SectionHeader title="Relationships" />
-        <p className="text-xs text-muted-foreground">No relationships yet.</p>
-      </section>
-    );
+    return <p className="text-xs text-muted-foreground">No relationships yet.</p>;
   }
 
   // AMBIGUOUS pinned across both directions
@@ -471,11 +371,7 @@ function RelationshipsPanel({ relations, isLoading, entityId }: RelationshipsPan
   const rest = all.filter((r) => r.confidence !== "AMBIGUOUS");
 
   return (
-    <section aria-label="Relationships">
-      <SectionHeader
-        title="Relationships"
-        hint={relations.truncated ? `${relations.totalCount}+ shown · capped` : `${relations.totalCount}`}
-      />
+    <>
       {ambiguous.length > 0 ? (
         <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-50/40 p-2 dark:bg-amber-950/20">
           <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-amber-700 dark:text-amber-500">
@@ -494,7 +390,7 @@ function RelationshipsPanel({ relations, isLoading, entityId }: RelationshipsPan
           <RelationshipRow key={r.id} relation={r} entityId={entityId} />
         ))}
       </div>
-    </section>
+    </>
   );
 }
 
@@ -513,17 +409,15 @@ function RelationshipRow({ relation, entityId }: RelationshipRowProps) {
   });
   return (
     <div className="border-b py-2 last:border-b-0">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 text-left hover:bg-muted/50"
-      >
-        {expanded ? <CaretDownIcon className="h-3 w-3 shrink-0" /> : <CaretRightIcon className="h-3 w-3 shrink-0" />}
-        <span className="text-xs lowercase text-muted-foreground">
-          {relation.direction === "outgoing"
-            ? formatRelationVerb(relation.relationshipType)
-            : `← ${formatRelationVerb(relation.relationshipType)}`}
-        </span>
+      <div className="flex w-full items-center gap-2 hover:bg-muted/50">
+        <button type="button" onClick={() => setExpanded((v) => !v)} className="flex items-center gap-2 text-left">
+          {expanded ? <CaretDownIcon className="h-3 w-3 shrink-0" /> : <CaretRightIcon className="h-3 w-3 shrink-0" />}
+          <span className="text-xs lowercase text-muted-foreground">
+            {relation.direction === "outgoing"
+              ? formatRelationVerb(relation.relationshipType)
+              : `← ${formatRelationVerb(relation.relationshipType)}`}
+          </span>
+        </button>
         <button
           type="button"
           onClick={(e) => {
@@ -539,7 +433,7 @@ function RelationshipRow({ relation, entityId }: RelationshipRowProps) {
         <span className="ml-auto text-[10px] text-muted-foreground">
           {relation.evidenceCount} {relation.evidenceCount === 1 ? "file" : "files"}
         </span>
-      </button>
+      </div>
       {expanded ? <RelationshipExpanded relation={relation} entityId={entityId} /> : null}
     </div>
   );
@@ -594,11 +488,6 @@ function RelationshipExpanded({
           {evidenceQuery.data.visibleCount < evidenceQuery.data.totalCount ? (
             <p className="text-[10px] text-muted-foreground">
               +{evidenceQuery.data.totalCount - evidenceQuery.data.visibleCount} not visible to you
-            </p>
-          ) : null}
-          {evidenceQuery.data.truncated && evidenceQuery.data.visibleCount > evidenceQuery.data.rows.length ? (
-            <p className="text-[10px] text-muted-foreground">
-              +{evidenceQuery.data.visibleCount - evidenceQuery.data.rows.length} more visible evidence rows
             </p>
           ) : null}
         </>
