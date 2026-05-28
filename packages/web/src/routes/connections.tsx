@@ -70,11 +70,15 @@ function ConnectionsCallback() {
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
 
-export function getPersonallyConnectedAppIds(connections: IntegrationConnection[]): Set<string> {
+export function getPersonallyConnectedAppIds(
+  connections: IntegrationConnection[],
+  accessSettingsEnabled = true,
+): Set<string> {
   return new Set(
     connections
       .filter(
         (connection) =>
+          !accessSettingsEnabled ||
           connection.source !== "canvas_user_secrets" ||
           connection.accessLevel !== "organization" ||
           connection.isOwnedByViewer !== false,
@@ -117,6 +121,7 @@ function ConnectionsPage() {
   });
 
   const connections = connectionsQuery.data ?? [];
+  const accessSettingsEnabled = setupStatusQuery.data?.experimentalFlag === true;
 
   const envVarsQuery = useQuery({
     queryKey: ["agent-environment-variables"],
@@ -216,7 +221,7 @@ function ConnectionsPage() {
                   onAdd={() => setShowAddIntegrationDialog(true)}
                   providerId={provider.id}
                   orgName={setupStatusQuery.data?.orgName ?? undefined}
-                  accessSettingsEnabled={setupStatusQuery.data?.experimentalFlag === true}
+                  accessSettingsEnabled={accessSettingsEnabled}
                   onDisconnect={invalidateAll}
                 />
               </>
@@ -326,7 +331,7 @@ function ConnectionsPage() {
           open={showAddIntegrationDialog}
           onOpenChange={setShowAddIntegrationDialog}
           providerId={provider.id}
-          connectedAppIds={getPersonallyConnectedAppIds(connections)}
+          connectedAppIds={getPersonallyConnectedAppIds(connections, accessSettingsEnabled)}
           onSuccess={invalidateAll}
         />
       )}

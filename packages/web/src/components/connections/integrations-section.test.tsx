@@ -197,6 +197,32 @@ describe("IntegrationsSection", () => {
     expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeInTheDocument();
   });
 
+  it("hides access-control state when access settings are disabled", () => {
+    renderSection(
+      [
+        {
+          ...baseConnection,
+          id: "secrets:owner-1:github:github",
+          source: "canvas_user_secrets",
+          accountName: "Engineering GitHub",
+          accessLevel: "organization",
+          ownerName: "Tara",
+          isOwnedByViewer: false,
+          canManageAccess: false,
+          canDelete: false,
+        },
+      ],
+      vi.fn(),
+      { accessSettingsEnabled: false },
+    );
+
+    expect(screen.queryByText("Org shared")).not.toBeInTheDocument();
+    expect(screen.queryByText("Owned by Tara")).not.toBeInTheDocument();
+    expect(screen.getByText("Engineering GitHub")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open settings for GitHub" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeEnabled();
+  });
+
   it("keeps shared accounts non-destructive when Canvas omits canDelete", () => {
     renderSection([
       {

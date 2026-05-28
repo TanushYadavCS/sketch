@@ -123,12 +123,14 @@ function ConnectionRow({
   const isActive = connection.status === "active";
   const abbrev = getAbbreviation(connection.appName);
   const isCanvasOwned = connection.source === "canvas_user_secrets";
-  const canDelete = connection.canDelete !== false && connection.isOwnedByViewer !== false;
   const accountLabel = getAccountDisplayName(connection);
   const ownerDisplayName = getOwnerDisplayName(connection);
   const connectedAt = connection.connectedAt ?? connection.createdAt;
-  const isOrgShared = connection.accessLevel === "organization";
+  const isOrgShared = accessSettingsEnabled && connection.accessLevel === "organization";
   const isSharedByAnotherUser = isOrgShared && connection.isOwnedByViewer === false;
+  const canDelete = accessSettingsEnabled
+    ? connection.canDelete !== false && connection.isOwnedByViewer !== false
+    : true;
   const metadata = [
     isSharedByAnotherUser ? `Owned by ${ownerDisplayName}` : accountLabel,
     `Connected ${formatDate(connectedAt)}`,
