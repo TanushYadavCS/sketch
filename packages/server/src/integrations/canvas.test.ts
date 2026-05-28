@@ -66,9 +66,7 @@ describe("CanvasProvider", () => {
   });
 
   it("sends the current Sketch display name to Canvas when listing connections", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ accounts: [] }), { status: 200 }),
-    );
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ accounts: [] }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
