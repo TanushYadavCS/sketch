@@ -65,6 +65,25 @@ describe("CanvasProvider", () => {
     });
   });
 
+  it("sends the current Sketch display name to Canvas when listing connections", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ accounts: [] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    await provider.listConnections("priya@example.com", "Priya Shah");
+
+    expect(fetchMock).toHaveBeenCalledWith("https://canvas.example.com/api/pipedream/accounts", {
+      headers: {
+        Authorization: "Bearer sk-test",
+        "Content-Type": "application/json",
+        "X-User-Email": "priya@example.com",
+        "X-User-Name": "Priya Shah",
+      },
+    });
+  });
+
   it("classifies legacy Canvas access rows as Canvas-owned when source is missing", async () => {
     vi.stubGlobal(
       "fetch",

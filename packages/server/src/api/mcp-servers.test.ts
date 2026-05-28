@@ -648,6 +648,7 @@ describe("MCP Servers API", () => {
         "member@test.com",
         "slack",
         "https://sketch.example.com/callback",
+        "Test Member",
       );
     });
 
@@ -732,7 +733,7 @@ describe("MCP Servers API", () => {
       const body = await res.json();
       expect(body.connections).toHaveLength(1);
       expect(body.connections[0].appName).toBe("Slack");
-      expect(mockProvider.listConnections).toHaveBeenCalledWith("member@test.com");
+      expect(mockProvider.listConnections).toHaveBeenCalledWith("member@test.com", "Test Member");
     });
 
     it("fills shared connection owner names from Sketch users when Canvas omits them", async () => {
@@ -853,7 +854,7 @@ describe("MCP Servers API", () => {
 
       const body = await res.json();
       expect(body.success).toBe(true);
-      expect(mockProvider.removeConnection).toHaveBeenCalledWith("member@test.com", "conn-1");
+      expect(mockProvider.removeConnection).toHaveBeenCalledWith("member@test.com", "conn-1", "Test Member");
     });
 
     it("rejects deleting non-owner shared Canvas connections", async () => {
@@ -1008,6 +1009,7 @@ describe("MCP Servers API", () => {
         "member@test.com",
         "secrets:owner:github:github",
         "organization",
+        "Test Member",
       );
     });
 

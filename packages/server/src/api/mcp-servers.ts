@@ -149,13 +149,13 @@ async function resolveProvider(
 }
 
 /**
- * Resolves the authenticated user's email from the JWT subject.
- * Returns the email or a JSON error response if the user has none.
+ * Resolves the authenticated user's Canvas identity from the JWT subject.
+ * Returns the email/name or a JSON error response if the user has no email.
  */
-async function resolveUserEmail(
+async function resolveUserIdentity(
   c: import("hono").Context,
   users: UserRepo,
-): Promise<{ ok: true; email: string } | { ok: false; response: Response }> {
+): Promise<{ ok: true; email: string; name?: string } | { ok: false; response: Response }> {
   const userId = c.get("sub");
   const user = await users.findById(userId);
   if (!user?.email) {
@@ -164,7 +164,7 @@ async function resolveUserEmail(
       response: c.json({ error: { code: "BAD_REQUEST", message: "User has no email address" } }, 400),
     };
   }
-  return { ok: true, email: user.email };
+  return { ok: true, email: user.email, name: user.name ?? undefined };
 }
 
 function serializeServer(row: {
@@ -457,7 +457,7 @@ export function mcpServerRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const userResult = await resolveUserEmail(c, users);
+    const userResult = await resolveUserIdentity(c, users);
     if (!userResult.ok) return userResult.response;
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
@@ -465,6 +465,7 @@ export function mcpServerRoutes(
       userResult.email,
       parsed.data.appId,
       parsed.data.callbackUrl ?? "",
+      userResult.name,
     );
     return c.json(result);
   });
@@ -474,11 +475,11 @@ export function mcpServerRoutes(
     if (!resolved.ok) return resolved.response;
     const { row } = resolved;
 
-    const userResult = await resolveUserEmail(c, users);
+    const userResult = await resolveUserIdentity(c, users);
     if (!userResult.ok) return userResult.response;
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
-    const connections = await provider.listConnections(userResult.email);
+    const connections = await provider.listConnections(userResult.email, userResult.name);
     const enrichedConnections = await enrichConnectionOwnerNames(connections, users);
     return c.json({ connections: enrichedConnections });
   });
@@ -488,18 +489,18 @@ export function mcpServerRoutes(
     if (!resolved.ok) return resolved.response;
     const { row } = resolved;
 
-    const userResult = await resolveUserEmail(c, users);
+    const userResult = await resolveUserIdentity(c, users);
     if (!userResult.ok) return userResult.response;
 
     const connectionId = c.req.param("connectionId");
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
-    const connections = await provider.listConnections(userResult.email);
+    const connections = await provider.listConnections(userResult.email, userResult.name);
     const connection = connections.find((item) => item.id === connectionId);
     if (connection && isAccessControlledConnection(connection) && !canDisconnectConnection(connection)) {
       return c.json({ error: { code: "FORBIDDEN", message: "Only the owner can disconnect this app" } }, 403);
     }
 
-    await provider.removeConnection(userResult.email, connectionId);
+    await provider.removeConnection(userResult.email, connectionId, userResult.name);
     return c.json({ success: true });
   });
 
@@ -516,7 +517,7 @@ export function mcpServerRoutes(
         return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
       }
 
-      const userResult = await resolveUserEmail(c, users);
+      const userResult = await resolveUserIdentity(c, users);
       if (!userResult.ok) return userResult.response;
 
       const connectionId = c.req.param("connectionId");
@@ -530,6 +531,7 @@ export function mcpServerRoutes(
           userResult.email,
           connectionId,
           parsed.data.accessLevel,
+          userResult.name,
         );
         return c.json({ success: true, connection });
       } catch (err) {

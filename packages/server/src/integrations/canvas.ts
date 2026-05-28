@@ -101,12 +101,14 @@ export class CanvasProvider implements IntegrationProvider {
     };
   }
 
-  private headers(userEmail?: string, includeContentType = true): Record<string, string> {
+  private headers(userEmail?: string, includeContentType = true, userName?: string): Record<string, string> {
     const h: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
     };
     if (includeContentType) h["Content-Type"] = "application/json";
     if (userEmail) h["X-User-Email"] = userEmail;
+    const trimmedName = userName?.trim();
+    if (trimmedName) h["X-User-Name"] = trimmedName.replace(/[\r\n]/g, " ");
     return h;
   }
 
@@ -181,10 +183,15 @@ export class CanvasProvider implements IntegrationProvider {
     return { apps, pageInfo };
   }
 
-  async initiateConnection(userEmail: string, appId: string, callbackUrl: string): Promise<{ redirectUrl: string }> {
+  async initiateConnection(
+    userEmail: string,
+    appId: string,
+    callbackUrl: string,
+    userName?: string,
+  ): Promise<{ redirectUrl: string }> {
     const res = await fetch(`${this.apiUrl}/api/apps/connect-token`, {
       method: "POST",
-      headers: this.headers(userEmail),
+      headers: this.headers(userEmail, true, userName),
       body: JSON.stringify({ app_slug: appId, callback_url: callbackUrl }),
     });
 
@@ -204,9 +211,9 @@ export class CanvasProvider implements IntegrationProvider {
     return { redirectUrl: connectLinkUrl };
   }
 
-  async listConnections(userEmail: string): Promise<IntegrationConnection[]> {
+  async listConnections(userEmail: string, userName?: string): Promise<IntegrationConnection[]> {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts`, {
-      headers: this.headers(userEmail),
+      headers: this.headers(userEmail, true, userName),
     });
 
     if (!res.ok) {
@@ -250,10 +257,10 @@ export class CanvasProvider implements IntegrationProvider {
     });
   }
 
-  async removeConnection(userEmail: string, connectionId: string): Promise<void> {
+  async removeConnection(userEmail: string, connectionId: string, userName?: string): Promise<void> {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts/${connectionId}`, {
       method: "DELETE",
-      headers: this.headers(userEmail, false),
+      headers: this.headers(userEmail, false, userName),
     });
 
     if (!res.ok) {
@@ -265,10 +272,11 @@ export class CanvasProvider implements IntegrationProvider {
     userEmail: string,
     connectionId: string,
     accessLevel: "personal" | "organization",
+    userName?: string,
   ): Promise<IntegrationConnection | null> {
     const res = await fetch(`${this.apiUrl}/api/canvas-accounts/${encodeURIComponent(connectionId)}/access`, {
       method: "PATCH",
-      headers: this.headers(userEmail),
+      headers: this.headers(userEmail, true, userName),
       body: JSON.stringify({ accessLevel }),
     });
 

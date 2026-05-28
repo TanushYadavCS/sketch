@@ -22,13 +22,19 @@ export interface IntegrationProvider {
   /** Stable provider type identifier (e.g. "canvas"). */
   readonly type: string;
   listApps(query?: string, limit?: number, after?: string): Promise<{ apps: IntegrationApp[]; pageInfo: PageInfo }>;
-  initiateConnection(userEmail: string, appId: string, callbackUrl: string): Promise<{ redirectUrl: string }>;
-  listConnections(userEmail: string): Promise<IntegrationConnection[]>;
-  removeConnection(userEmail: string, connectionId: string): Promise<void>;
+  initiateConnection(
+    userEmail: string,
+    appId: string,
+    callbackUrl: string,
+    userName?: string,
+  ): Promise<{ redirectUrl: string }>;
+  listConnections(userEmail: string, userName?: string): Promise<IntegrationConnection[]>;
+  removeConnection(userEmail: string, connectionId: string, userName?: string): Promise<void>;
   updateConnectionAccess?(
     userEmail: string,
     connectionId: string,
     accessLevel: "personal" | "organization",
+    userName?: string,
   ): Promise<IntegrationConnection | null>;
   /**
    * Static capability check: does this provider type expose a brokered CLI?
