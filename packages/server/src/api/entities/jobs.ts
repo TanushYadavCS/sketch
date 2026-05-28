@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { MaterializeFactsSummary } from "../../entities/materialize";
 import type { RecreateSummary, ResetSummary } from "../../entities/recreate";
-import type { ReenrichDryRunSummary, ReenrichScope, ReenrichSummary } from "../../entities/reenrich";
+import type { ReenrichDryRunSummary, ReenrichSummary } from "../../entities/reenrich";
 import type { ResetRequest } from "./reset-service";
+import type { RebuildRequest, ReenrichRequest } from "./types";
 
 export type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
 export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed" | "cancelled";
@@ -12,15 +13,6 @@ export interface JobProgress {
   phase: string;
   completed: number;
   total: number;
-}
-
-export interface ReenrichRequest {
-  scope: ReenrichScope;
-  runAfter: boolean;
-}
-
-export interface RebuildRequest {
-  pendingRebuildId: string;
 }
 
 export interface ResetJob {
