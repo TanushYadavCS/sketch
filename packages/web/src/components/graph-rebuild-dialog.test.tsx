@@ -20,6 +20,7 @@ import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { useState } from "react";
 import { describe, expect, it } from "vitest";
 import { GraphRebuildDialog } from "./graph-rebuild-dialog";
 
@@ -91,9 +92,6 @@ function setupResetHandlers(recorded: {
         { status: 202 },
       );
     }),
-    // Step-2 polling: dialog stays open while the rebuild runs, so the
-    // following job-detail endpoints get hit. Default to "in flight" so
-    // the dialog reaches the running pane; individual tests can override.
     http.get("/api/entities/rebuilds/jobs/rb-j1", () => {
       return HttpResponse.json({
         id: "rb-j1",
@@ -188,7 +186,7 @@ describe("GraphRebuildDialog", () => {
     expect(recorded.reenrich).toHaveLength(0);
   });
 
-  it("after step 2 submit the dialog stays open and renders a persistent progress pane", async () => {
+  it("after step 2 submit the dialog closes and hands progress to the page banner", async () => {
     const user = userEvent.setup();
     const recorded = {
       resets: [] as ResetRequestBody[],
@@ -197,33 +195,37 @@ describe("GraphRebuildDialog", () => {
     };
     setupResetHandlers(recorded);
     let closed = false;
+    let submitted = false;
 
-    renderWithProviders(
-      <GraphRebuildDialog
-        open={true}
-        onOpenChange={(v) => {
-          if (!v) closed = true;
-        }}
-        onSubmitted={() => {}}
-      />,
-    );
+    function ControlledDialog() {
+      const [open, setOpen] = useState(true);
+      return (
+        <GraphRebuildDialog
+          open={open}
+          onOpenChange={(v) => {
+            if (!v) closed = true;
+            setOpen(v);
+          }}
+          onSubmitted={() => {
+            submitted = true;
+          }}
+        />
+      );
+    }
+
+    renderWithProviders(<ControlledDialog />);
 
     await user.click(await screen.findByTestId("graph-rebuild-step1-submit"));
     await screen.findByTestId("graph-rebuild-step1-result");
     await user.click(screen.getByTestId("graph-rebuild-step2-submit"));
 
-    // The rebuild request fires…
     await waitFor(() => expect(recorded.rebuilds.length).toBe(1));
-    // …and the dialog transitions to the running pane instead of closing.
-    await screen.findByTestId("graph-rebuild-step2-progress");
-    expect(closed).toBe(false);
-    // The footer no longer offers Cancel/Submit while the job is in flight.
-    expect(screen.queryByTestId("graph-rebuild-step2-submit")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("graph-rebuild-step2-cancel")).not.toBeInTheDocument();
-    expect(screen.getByTestId("graph-rebuild-step2-running-button")).toBeDisabled();
+    await waitFor(() => expect(closed).toBe(true));
+    expect(submitted).toBe(true);
+    expect(screen.queryByTestId("graph-rebuild-dialog")).not.toBeInTheDocument();
   });
 
-  it("step 2 cancel releases the pending lock via DELETE /api/entities/rebuilds/pending/:id", async () => {
+  it("step 2 done releases the pending lock via DELETE /api/entities/rebuilds/pending/:id", async () => {
     const user = userEvent.setup();
     const recorded = {
       resets: [] as ResetRequestBody[],
@@ -253,6 +255,7 @@ describe("GraphRebuildDialog", () => {
     await user.click(await screen.findByTestId("graph-rebuild-step1-submit"));
     await screen.findByTestId("graph-rebuild-step1-result");
 
+    expect(screen.getByTestId("graph-rebuild-step2-cancel")).toHaveTextContent("Done");
     await user.click(screen.getByTestId("graph-rebuild-step2-cancel"));
 
     await waitFor(() => expect(cancelHits).toEqual(["p-1"]));

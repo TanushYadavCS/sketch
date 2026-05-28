@@ -71,7 +71,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v6";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v7";
 const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -226,8 +226,23 @@ DO NOT extract:
 - Generic categories (SEO, Marketing, Support, Content)
 - Countries, currencies, or generic locations (India, INR, US)
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
+- Meeting titles or calendar event names — anything containing "<>", "Standup", "Sync", "Weekly", "Daily", or "1:1". These are calendar event names, not projects. Extract the companies and people referenced by the meeting instead.
+- Document, note, or artifact titles as projects (e.g. names ending in "note", "chart", "doc", "spec", "deck"). These are filenames, not engagements.
+- Generic feature descriptions or internal component names as products (e.g. "responder functionality", "conversational model", "X service", "X module", "X pipeline"). Products must be a branded, proper-noun name your org or a client publicly markets — not the internal name of a component you are building.
 - Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns
 - Task fragments or implementation notes with no stable named project/product parent, such as "Vedant's Project Progress", "67 SQL queries on the new database", "limitation note", "UI development", "backend work", or "new database"
+
+Name shape rules (person mentions only):
+- Person mentions must be Title Case with a recognizable first + last name separated by whitespace (e.g. "Sarah Chen", "Ashish Banka"). Reject and omit:
+  - Single first names with no surname or other identifier ("Sarah", "Mohammed", "Manish")
+  - Initials-only strings ("KT", "P C", "SB", "VD")
+  - Email-handle style strings — no spaces, lowercase, or otherwise looks like an email local part ("bhavyasharma", "nancyjain", "ayushgupta")
+  - ALL-CAPS strings ("ASHISH BANKA", "RAJ BHOSLE")
+  - Whitespace-only or non-printing strings
+- When the source uses one of these degraded forms, omit the mention rather than emit the degraded version. If you can recover the proper-name form in Title Case with high confidence from surrounding context, emit the recovered form.
+
+Type disambiguation:
+- Any mention ending in "Pvt Ltd", "Private Limited", "Inc", "LLC", "Ltd", "GmbH", "Consulting", "Solutions", or "Technologies" is type "company", never "person", regardless of where it appears (including the participant block).
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 

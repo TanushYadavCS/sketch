@@ -6,9 +6,11 @@
  *    pre-filled from the job's request
  */
 import type { ActiveRebuildJob, RebuildJobState } from "@/hooks/use-rebuild-job";
+import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { RebuildBanner } from "./rebuild-banner";
 
@@ -72,6 +74,20 @@ function failedJob(): ActiveRebuildJob {
   };
 }
 
+function activeReenrichJob(): ActiveRebuildJob {
+  return {
+    kind: "reenrich",
+    job: {
+      id: "j-active-reenrich",
+      phase: "enriching",
+      startedAt: new Date(Date.now() - 30_000).toISOString(),
+      finishedAt: null,
+      request: { scope: { all: true }, runAfter: true },
+      progress: { phase: "enrich", completed: 4, total: 20 },
+    },
+  };
+}
+
 describe("RebuildBanner", () => {
   it("renders the active banner with phase and progress while a job is running", () => {
     renderWithProviders(
@@ -81,6 +97,44 @@ describe("RebuildBanner", () => {
     expect(banner).toHaveTextContent("Rebuilding entities");
     expect(banner).toHaveTextContent("replaying_facts");
     expect(banner).toHaveTextContent("142 / 480 materialize");
+    expect(screen.queryByTestId("rebuild-stop")).not.toBeInTheDocument();
+  });
+
+  it("shows Stop for active re-enrich jobs and requests cancellation", async () => {
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    const stopHits: string[] = [];
+    server.use(
+      http.delete("/api/entities/reenrichments/jobs/:id", ({ params }) => {
+        stopHits.push(params.id as string);
+        return HttpResponse.json({ message: "Stop requested.", job: activeReenrichJob().job }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(
+      <RebuildBanner
+        state={stateWith({ activeJob: activeReenrichJob(), anyActive: true, refetch })}
+        onRetry={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByTestId("rebuild-stop"));
+
+    expect(stopHits).toEqual(["j-active-reenrich"]);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a neutral banner for cancelled re-enrich jobs", () => {
+    const job = activeReenrichJob();
+    job.job.phase = "cancelled";
+    job.job.finishedAt = new Date().toISOString();
+    job.job.error = "Stop requested";
+
+    renderWithProviders(<RebuildBanner state={stateWith({ latestJob: job })} onRetry={() => {}} />);
+
+    const banner = screen.getByTestId("rebuild-banner-cancelled");
+    expect(banner).toHaveTextContent("Re-enrich stopped");
+    expect(banner).toHaveTextContent("Stop requested");
   });
 
   it("shows the success banner with the relation count after a done job", () => {

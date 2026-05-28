@@ -1,10 +1,12 @@
 import type { GraphRebuildDialogPrefill } from "@/components/graph-rebuild-dialog";
 import type { ActiveRebuildJob, RebuildJobState } from "@/hooks/use-rebuild-job";
-import type { RebuildJob } from "@/lib/api";
+import { type RebuildJob, api } from "@/lib/api";
 import { ArrowsClockwiseIcon, CheckCircleIcon, WarningCircleIcon, XIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
+import { useMutation } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 const SUCCESS_AUTO_DISMISS_MS = 10000;
 
@@ -30,6 +32,16 @@ export function RebuildBanner({ state, onRetry }: RebuildBannerProps) {
   const successJob =
     !active && latest && latest.job.phase === "done" && latest.job.id !== dismissedSuccessJobId ? latest : null;
   const errorJob = !active && latest && latest.job.phase === "failed" ? latest : null;
+  const cancelledJob = !active && latest && latest.job.phase === "cancelled" ? latest : null;
+
+  const stopMutation = useMutation({
+    mutationFn: (job: ActiveRebuildJob) => api.entities.stopReenrichJob(job.job.id),
+    onSuccess: () => {
+      toast.success("Re-enrich stop requested");
+      state.refetch();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
 
   useEffect(() => {
     if (!successJob) return;
@@ -40,7 +52,12 @@ export function RebuildBanner({ state, onRetry }: RebuildBannerProps) {
   if (active) {
     return (
       <>
-        <ActiveBanner active={active} onDetails={() => setShowDetails(true)} />
+        <ActiveBanner
+          active={active}
+          onDetails={() => setShowDetails(true)}
+          onStop={active.kind === "reenrich" ? () => stopMutation.mutate(active) : undefined}
+          stopping={stopMutation.isPending}
+        />
         <DetailsModal open={showDetails} onOpenChange={setShowDetails} job={active} />
       </>
     );
@@ -67,10 +84,24 @@ export function RebuildBanner({ state, onRetry }: RebuildBannerProps) {
     return <ErrorBanner job={errorJob} onRetry={() => onRetry(prefillFromJob(errorJob))} />;
   }
 
+  if (cancelledJob) {
+    return <CancelledBanner job={cancelledJob} />;
+  }
+
   return null;
 }
 
-function ActiveBanner({ active, onDetails }: { active: ActiveRebuildJob; onDetails: () => void }) {
+function ActiveBanner({
+  active,
+  onDetails,
+  onStop,
+  stopping,
+}: {
+  active: ActiveRebuildJob;
+  onDetails: () => void;
+  onStop?: () => void;
+  stopping?: boolean;
+}) {
   const { job } = active;
   const elapsed = formatElapsed(Date.now() - new Date(job.startedAt).getTime());
   const progress = formatProgress(job);
@@ -90,6 +121,18 @@ function ActiveBanner({ active, onDetails }: { active: ActiveRebuildJob; onDetai
       <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={onDetails}>
         Details
       </Button>
+      {onStop ? (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 text-xs"
+          onClick={onStop}
+          disabled={stopping}
+          data-testid="rebuild-stop"
+        >
+          {stopping ? "Stopping..." : "Stop"}
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -161,6 +204,23 @@ function ErrorBanner({ job, onRetry }: { job: ActiveRebuildJob; onRetry: () => v
       <Button variant="outline" size="sm" className="h-6 text-xs" onClick={onRetry} data-testid="rebuild-retry">
         Retry
       </Button>
+    </div>
+  );
+}
+
+function CancelledBanner({ job }: { job: ActiveRebuildJob }) {
+  return (
+    <div
+      className="sticky top-0 z-20 flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs dark:border-amber-900 dark:bg-amber-950/60"
+      data-testid="rebuild-banner-cancelled"
+    >
+      <WarningCircleIcon size={16} className="shrink-0 text-amber-700 dark:text-amber-300" />
+      <div className="min-w-0 flex-1">
+        <span className="font-medium text-amber-900 dark:text-amber-100">Re-enrich stopped</span>
+        {job.job.error ? (
+          <span className="ml-2 truncate text-amber-800/80 dark:text-amber-300/80">{job.job.error}</span>
+        ) : null}
+      </div>
     </div>
   );
 }

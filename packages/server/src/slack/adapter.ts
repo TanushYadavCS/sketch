@@ -28,7 +28,7 @@ import type { createAutomationRunsRepository } from "../db/repositories/automati
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createChannelRepository } from "../db/repositories/channels";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
-import type { createSettingsRepository } from "../db/repositories/settings";
+import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
@@ -442,6 +442,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           onProgressEvent,
           ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
           orgName: settingsRow?.org_name,
+          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
@@ -710,6 +711,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           onProgressEvent,
           threadTs,
           orgName: settingsRow?.org_name,
+          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,

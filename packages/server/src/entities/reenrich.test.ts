@@ -261,6 +261,31 @@ describe("entity re-enrich", () => {
     expect(result.filesProcessed).toBe(fileIds.length);
   });
 
+  it("stops enrichment between batches when cancellation is requested", async () => {
+    const fileIds = Array.from({ length: MAX_FILES_PER_RUN + 3 }, (_, i) => `file-${i}`);
+    const calls: string[][] = [];
+    let stop = false;
+
+    await expect(
+      runEnrichmentForFileBatches(
+        {
+          db,
+          logger,
+          embeddingProvider: null,
+          shouldCancel: () => stop,
+          runEnrichmentImpl: async (deps: EnrichmentDeps) => {
+            calls.push(deps.fileIds ?? []);
+            stop = true;
+            return { filesProcessed: deps.fileIds?.length ?? 0, filesSkipped: 0, filesFailed: 0, errors: [] };
+          },
+        },
+        fileIds,
+      ),
+    ).rejects.toThrow("Re-enrich stopped");
+
+    expect(calls.map((call) => call.length)).toEqual([MAX_FILES_PER_RUN]);
+  });
+
   it("runs a re-enrich job that tombstones stale facts and materializes new ones", async () => {
     await seedLlmExtractedFact(db, "Old Person");
     await db.updateTable("indexed_file_facts").set({ materialized_at: new Date().toISOString() }).execute();

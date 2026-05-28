@@ -9,7 +9,7 @@ import type { DB } from "../db/schema";
 import { beginPendingRebuild, endRecreateLock, isRecreateActive } from "../entities/recreate-state";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import { _setCurrentResetJobForTests } from "./entities";
+import { _setCurrentReenrichJobForTests, _setCurrentResetJobForTests } from "./entities";
 
 const config = createTestConfig();
 const logger = createTestLogger();
@@ -155,6 +155,7 @@ describe("POST /api/entities/resets", () => {
   });
 
   afterEach(async () => {
+    _setCurrentReenrichJobForTests(false);
     if (isRecreateActive()) endRecreateLock();
     try {
       await db.destroy();
@@ -768,6 +769,7 @@ describe("POST /api/entities/reenrichments", () => {
   });
 
   afterEach(async () => {
+    _setCurrentReenrichJobForTests(false);
     if (isRecreateActive()) endRecreateLock();
     try {
       await db.destroy();
@@ -866,6 +868,35 @@ describe("POST /api/entities/reenrichments", () => {
     const body = (await res.json()) as { error: { message: string } };
     expect(body.error.message).toBe("confirm must be REENRICH");
   });
+
+  it("allows admins to request stop for an active re-enrich job", async () => {
+    const jobId = _setCurrentReenrichJobForTests(true);
+    if (!jobId) throw new Error("missing job id");
+
+    const res = await app.request(`/api/entities/reenrichments/jobs/${jobId}`, {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { job: { id: string; cancelRequested: boolean; error: string } };
+    expect(body.job.id).toBe(jobId);
+    expect(body.job.cancelRequested).toBe(true);
+    expect(body.job.error).toBe("Stop requested");
+  });
+
+  it("requires admin access to stop a re-enrich job", async () => {
+    const jobId = _setCurrentReenrichJobForTests(true);
+    const member = await seedMember(db);
+    const memberCookie = await loginAs(app, member.email);
+
+    const res = await app.request(`/api/entities/reenrichments/jobs/${jobId}`, {
+      method: "DELETE",
+      headers: { Cookie: memberCookie },
+    });
+
+    expect(res.status).toBe(403);
+  });
 });
 
 describe("two-step rebuild flow", () => {
@@ -875,6 +906,7 @@ describe("two-step rebuild flow", () => {
   let adminId: string;
 
   beforeEach(async () => {
+    _setCurrentReenrichJobForTests(false);
     if (isRecreateActive()) endRecreateLock();
     db = await createTestDb();
     const admin = await seedAdmin(db);

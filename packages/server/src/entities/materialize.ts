@@ -422,6 +422,7 @@ export interface MaterializeUnmaterializedOptions {
    * watcher to surface live progress to the rebuild banner in the UI.
    */
   onProgress?: (progress: MaterializeProgress) => void;
+  shouldCancel?: () => boolean;
 }
 
 export async function materializeUnmaterializedFacts(
@@ -482,6 +483,7 @@ async function materializeUnmaterializedFactsInner(
   opts.onProgress?.({ phase: "materialize", completed: 0, total: facts.length });
 
   for (let i = 0; i < facts.length; i++) {
+    if (opts.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const fact = facts[i];
     try {
       const result = await materializeFromFact(deps, fact);

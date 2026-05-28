@@ -604,3 +604,88 @@ describe("extractEntities prompt — v6 entity type removal", () => {
     expect(relationship).toBeUndefined();
   });
 });
+
+describe("extractEntities prompt — v7 quality rules", () => {
+  async function capturePrompt(): Promise<string> {
+    let captured = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        captured = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(generator, {
+      id: "f-v7",
+      fileName: "transcript.txt",
+      content: "body",
+      contentCategory: "document",
+      source: "fireflies",
+      sourcePath: "/",
+      contentHash: null,
+      connectorConfigId: "conn-v7",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+    return captured;
+  }
+
+  it("includes name-shape rules that reject degraded person forms", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Name shape rules");
+    expect(prompt).toContain("Title Case");
+    expect(prompt).toContain("Single first names with no surname");
+    expect(prompt).toContain("Initials-only");
+    expect(prompt).toContain("Email-handle style");
+    expect(prompt).toContain("ALL-CAPS");
+  });
+
+  it("includes the company-suffix → company rule", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Type disambiguation");
+    expect(prompt).toContain("Pvt Ltd");
+    expect(prompt).toContain("Private Limited");
+    expect(prompt).toContain('is type "company", never "person"');
+  });
+
+  it("excludes meeting titles and doc-title projects, and generic-feature products", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Meeting titles or calendar event names");
+    expect(prompt).toContain("Standup");
+    expect(prompt).toContain("Document, note, or artifact titles as projects");
+    expect(prompt).toContain("Generic feature descriptions or internal component names as products");
+    expect(prompt).toContain("branded, proper-noun name");
+  });
+
+  it("renders the org description into the extraction prompt when provided", async () => {
+    let captured = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        captured = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(
+      generator,
+      {
+        id: "f-orgctx",
+        fileName: "transcript.txt",
+        content: "body",
+        contentCategory: "document",
+        source: "fireflies",
+        sourcePath: "/",
+        contentHash: null,
+        connectorConfigId: "conn-orgctx",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+      { orgName: "Canvas Labs", description: "AI services company. Sketch is one of our products." },
+    );
+
+    expect(captured).toContain("Organization: Canvas Labs");
+    expect(captured).toContain("AI services company. Sketch is one of our products.");
+  });
+});
