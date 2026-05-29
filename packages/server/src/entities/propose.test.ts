@@ -33,7 +33,7 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
       }
       return out;
     },
-    listByType: (t) => (t === "person" ? getList() : []),
+    listByType: (t) => getList().filter((e) => e.source_type === t),
   };
 }
 
@@ -616,7 +616,7 @@ describe("proposeEntity", () => {
     expect(refreshed.name).toBe("Bob Chen");
   });
 
-  it("12. ambiguous exact-name (two entities share the same canonical name) falls through to ranker", async () => {
+  it("12. ambiguous exact-name (two entities share the same canonical name) queues exact ambiguity", async () => {
     // upsertPersonEntity dedups by name, so we have to insert directly.
     // This shouldn't happen in healthy data but the fast-path must not
     // silently pick one of two same-name entities — that would be the
@@ -675,15 +675,12 @@ describe("proposeEntity", () => {
       triggeredByUserId: "user-1",
     });
 
-    // Two same-name entities → exact-name fast-path declines to link →
-    // ranker takes over. The ranker's token-superset/subset rule requires
-    // different token counts, so "Bob Chen" vs "Bob Chen" doesn't match
-    // there either, and the prefix rule also requires different lengths.
-    // Net result: no ranker candidate, falls through to "created".
-    //
-    // The acceptance criterion that matters: the fast-path did NOT silently
-    // link to one of the two duplicates.
-    expect(result.kind === "linked").toBe(false);
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].candidate_entity_id).toBeNull();
+    expect(queue[0].candidate_score).toBeNull();
+    expect(queue[0].candidate_reason).toBe("exact-ambiguous");
   });
 
   it("13. alias-match links — post-Confirm proposal hits the alias half of the fast-path", async () => {
@@ -771,5 +768,148 @@ describe("proposeEntity", () => {
     expect(result.kind).toBe("linked");
     if (result.kind !== "linked") throw new Error("unreachable");
     expect(result.entity.id).toBe(ss.id);
+  });
+
+  it("15. company fuzzy collision queues without calling person upsert", async () => {
+    const entityRepo = createEntityRepository(db);
+    const existing = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await insertTestFile(db, "file-15");
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Canvas",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:canvas",
+      evidence: [{ indexedFileId: "file-15" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.entity_type).toBe("company");
+    expect(queue.candidate_entity_id).toBe(existing.id);
+    expect(queue.candidate_reason).toBe("token-superset");
+    const companies = await db.selectFrom("entities").selectAll().where("source_type", "=", "company").execute();
+    expect(companies.map((c) => c.name)).toEqual(["Canvas Labs"]);
+  });
+
+  it("16. product version normalization links Claude 3 and Claude-3 but keeps Claude 3.5 separate", async () => {
+    const entityRepo = createEntityRepository(db);
+    const claude3 = await entityRepo.upsertEntity({
+      name: "Claude 3",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const before = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const linked = await proposeEntity(deps, {
+      name: "Claude-3",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:claude-3",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+    expect(linked.kind).toBe("linked");
+    if (linked.kind !== "linked") throw new Error("unreachable");
+    expect(linked.entity.id).toBe(claude3.id);
+
+    const fresh = await db.selectFrom("entities").selectAll().execute();
+    const created = await proposeEntity(
+      { ...deps, lookup: makeLookup(() => fresh) },
+      {
+        name: "Claude 3.5",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:claude-3-5",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+    expect(created.kind).toBe("created");
+    const products = await db.selectFrom("entities").selectAll().where("source_type", "=", "product").execute();
+    expect(products.map((p) => p.name).sort()).toEqual(["Claude 3", "Claude 3.5"]);
+  });
+
+  it("17. precomputed LLM candidates queue after exact-name fast-path is checked", async () => {
+    const entityRepo = createEntityRepository(db);
+    const exact = await entityRepo.upsertPersonEntity({
+      name: "Sarah Chen",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:sarah",
+    });
+    const fuzzy = await entityRepo.upsertPersonEntity({
+      name: "Sarah C",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:sarah-c",
+    });
+    const entities = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const linked = await proposeEntity(deps, {
+      name: "Sarah Chen",
+      entityType: "person",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "llm:sarah",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      precomputedCandidates: [{ entity: fuzzy, score: 12 }],
+    });
+
+    expect(linked.kind).toBe("linked");
+    if (linked.kind !== "linked") throw new Error("unreachable");
+    expect(linked.entity.id).toBe(exact.id);
+
+    await insertTestFile(db, "file-17");
+    const queued = await proposeEntity(deps, {
+      name: "Sarah Cheng",
+      entityType: "person",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "llm:sarah-cheng",
+      evidence: [{ indexedFileId: "file-17" }],
+      triggeredByUserId: "user-1",
+      precomputedCandidates: [{ entity: fuzzy, score: 12 }],
+    });
+
+    expect(queued.kind).toBe("queued");
+    const queue = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("normalized_name", "=", "sarah cheng")
+      .executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(fuzzy.id);
+    expect(queue.candidate_reason).toBe("llm-ambiguous");
   });
 });

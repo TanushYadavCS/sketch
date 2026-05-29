@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { type EnrichmentResult, isEnrichmentActive, linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
+import { sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -23,7 +24,14 @@ export interface RecreateConflict {
   message: string;
 }
 
+/**
+ * Order matters: evidence → relationships → mentions → entities, so FK
+ * cascades don't fire mid-loop. `entity_domains` is handled separately
+ * because it has a per-row override predicate (manual rows survive reset).
+ */
 const DERIVED_TABLES = [
+  "entity_relationship_evidence",
+  "entity_relationships",
   "entity_review_evidence",
   "entity_alias_rejections",
   "entity_review_queue",
@@ -59,6 +67,81 @@ async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
   } catch (err) {
     if (isMissingTableError(err)) return 0;
     throw err;
+  }
+}
+
+/**
+ * Scoped delete for `entity_domains`. Manual rows survive — they encode
+ * operator intent (the personal/shared seed list, plus any operator-promoted
+ * corporate override on a consumer-looking domain). Observed/llm rows are
+ * derived from facts and get rebuilt by replay + sweep.
+ */
+async function deleteDerivedEntityDomains(db: Kysely<DB>): Promise<number> {
+  try {
+    const before = await db
+      .selectFrom("entity_domains")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("source", "!=", "manual")
+      .executeTakeFirst();
+    const count = Number(before?.count ?? 0);
+    if (count === 0) return 0;
+    await db.deleteFrom("entity_domains").where("source", "!=", "manual").execute();
+    return count;
+  } catch (err) {
+    if (isMissingTableError(err)) return 0;
+    throw err;
+  }
+}
+
+/**
+ * After replay + sweep, a preserved manual override may point at an
+ * `entity_id` that no longer exists (the company was rebuilt with a new ID,
+ * or no fact rebuilds it at all). Re-link via the sweep's corporate row
+ * for the same domain when possible; otherwise null the `entity_id` and
+ * leave the row intact — operator intent ("this domain is corporate") is
+ * the durable signal, the target entity is the recoverable part.
+ */
+async function fixupPreservedEntityDomainReferences(db: Kysely<DB>, logger: Logger): Promise<void> {
+  let preserved: Array<{ id: string; entity_id: string | null; domain: string }>;
+  try {
+    preserved = await db
+      .selectFrom("entity_domains")
+      .select(["id", "entity_id", "domain"])
+      .where("source", "=", "manual")
+      .where("entity_id", "is not", null)
+      .execute();
+  } catch (err) {
+    if (isMissingTableError(err)) return;
+    throw err;
+  }
+  if (preserved.length === 0) return;
+  for (const row of preserved) {
+    const target = await db
+      .selectFrom("entities")
+      .select("id")
+      .where("id", "=", row.entity_id as string)
+      .executeTakeFirst();
+    if (target) continue;
+
+    const relink = await db
+      .selectFrom("entity_domains")
+      .select("entity_id")
+      .where("domain", "=", row.domain)
+      .where("kind", "=", "corporate")
+      .where("source", "!=", "manual")
+      .where("entity_id", "is not", null)
+      .executeTakeFirst();
+    if (relink?.entity_id) {
+      await db.updateTable("entity_domains").set({ entity_id: relink.entity_id }).where("id", "=", row.id).execute();
+      logger.info({ domain: row.domain, relinkedTo: relink.entity_id }, "Relinked preserved corporate domain override");
+      continue;
+    }
+
+    await db.updateTable("entity_domains").set({ entity_id: null }).where("id", "=", row.id).execute();
+    logger.warn(
+      { domain: row.domain, previousEntityId: row.entity_id },
+      "Preserved corporate domain override has no rebuild target; cleared entity_id",
+    );
   }
 }
 
@@ -232,6 +315,13 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
       factTypes: deps.materializeFactTypes,
     });
 
+    // Domain promotions run between materialize and deterministic linking so
+    // any new company entity (and its `works_at` edges) is visible to the
+    // linker. Sweep also runs on every live sync — keep the two paths
+    // calling the same helper so recreate doesn't drift.
+    await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
+    await fixupPreservedEntityDomainReferences(db, logger.child({ component: "recreate-domain-fixup" }));
+
     if (deps.skipEnrichment) {
       return {
         reset,
@@ -274,6 +364,9 @@ async function resetDerivedEntityDataInner(db: Kysely<DB>, logger: Logger): Prom
   const appliedDeleted: Record<string, number> = {};
   let appliedFactsMarkedUnmaterialized = 0;
   await db.transaction().execute(async (trx) => {
+    // Derived domain rows go before the rest so any FK cascades from
+    // `entities` deletion don't fire against rows we still need to inspect.
+    appliedDeleted.entity_domains = await deleteDerivedEntityDomains(trx);
     for (const table of DERIVED_TABLES) appliedDeleted[table] = await deleteTable(trx, table);
     appliedFactsMarkedUnmaterialized = await clearMaterializedFlags(trx);
   });

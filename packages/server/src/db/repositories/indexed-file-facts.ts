@@ -10,9 +10,21 @@ export type IndexedFileFactType =
   | "parent_entity"
   | "structural_seed"
   | "person_seed"
-  | "llm_extracted";
+  | "llm_extracted"
+  | "llm_relation";
 
-export type IndexedFileFactRelation = "attended" | "assigned" | "authored" | "mentioned" | "seeded";
+export type IndexedFileFactRelation =
+  | "attended"
+  | "assigned"
+  | "authored"
+  | "mentioned"
+  | "seeded"
+  | "works_at"
+  | "leads"
+  | "contributes_to"
+  | "builds"
+  | "part_of"
+  | "partner_of";
 
 export interface UpsertIndexedFileFactInput {
   indexedFileId?: string | null;
@@ -45,6 +57,7 @@ export interface ReconcileResult {
   wouldTombstone: number;
   tombstoned: number;
   affectedIndexedFileIds: string[];
+  tombstonedFactIds: string[];
   skipped?: { reason: "delta_exceeds_threshold"; ratio: number; threshold: number };
 }
 
@@ -54,6 +67,20 @@ function normalizeName(name: string | null | undefined): string {
 
 function normalizeEmail(email: string | null | undefined): string {
   return (email ?? "").trim().toLowerCase();
+}
+
+function rawString(input: UpsertIndexedFileFactInput, key: string): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const value = raw?.[key];
+  return typeof value === "string" ? normalizeName(value) : "";
+}
+
+function rawEndpoint(input: UpsertIndexedFileFactInput, key: "source" | "target", field: "name" | "type"): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const endpoint = raw?.[key];
+  if (!isRecord(endpoint)) return "";
+  const value = endpoint[field];
+  return typeof value === "string" ? normalizeName(value) : "";
 }
 
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
@@ -69,6 +96,15 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
     normalizeEmail(input.subjectEmail),
     normalizeName(input.subjectName),
   ];
+  if (input.factType === "llm_relation") {
+    parts.push(
+      rawString(input, "relationType"),
+      rawEndpoint(input, "source", "name"),
+      rawEndpoint(input, "source", "type"),
+      rawEndpoint(input, "target", "name"),
+      rawEndpoint(input, "target", "type"),
+    );
+  }
   return createHash("sha256").update(parts.join("|")).digest("hex");
 }
 
@@ -133,6 +169,28 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   } else if (input.factType === "llm_extracted") {
     if (!hasString(raw, "contentHash") || !hasString(raw, "promptVersion")) {
       throw new Error("llm_extracted facts require raw.contentHash and raw.promptVersion");
+    }
+  } else if (input.factType === "llm_relation") {
+    if (
+      !hasString(raw, "contentHash") ||
+      !hasString(raw, "promptVersion") ||
+      !hasString(raw, "relationType") ||
+      !isRecord(raw.source) ||
+      !isRecord(raw.target)
+    ) {
+      throw new Error(
+        "llm_relation facts require raw.contentHash, raw.promptVersion, relationType, source, and target",
+      );
+    }
+    const source = raw.source as Record<string, unknown>;
+    const target = raw.target as Record<string, unknown>;
+    if (
+      !hasString(source, "name") ||
+      !hasString(source, "type") ||
+      !hasString(target, "name") ||
+      !hasString(target, "type")
+    ) {
+      throw new Error("llm_relation endpoints require name and type");
     }
   }
 
@@ -256,6 +314,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
           wouldTombstone,
           tombstoned: 0,
           affectedIndexedFileIds: [],
+          tombstonedFactIds: [],
           skipped: { reason: "delta_exceeds_threshold", ratio, threshold },
         };
       }
@@ -264,7 +323,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         scope.kind === "connector"
           ? await db
               .selectFrom("indexed_file_facts")
-              .select("indexed_file_id")
+              .select(["id", "indexed_file_id"])
               .where("connector_config_id", "=", scope.connectorConfigId)
               .where("deleted_at", "is", null)
               .where("last_seen_sync_run_id", "is not", null)
@@ -273,7 +332,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
           : seenFactKeys && seenFactKeys.size > 0
             ? await db
                 .selectFrom("indexed_file_facts")
-                .select("indexed_file_id")
+                .select(["id", "indexed_file_id"])
                 .where("indexed_file_id", "=", scope.indexedFileId)
                 .where("source", "=", scope.source)
                 .where("fact_type", "=", scope.factType)
@@ -282,7 +341,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
                 .execute()
             : await db
                 .selectFrom("indexed_file_facts")
-                .select("indexed_file_id")
+                .select(["id", "indexed_file_id"])
                 .where("indexed_file_id", "=", scope.indexedFileId)
                 .where("source", "=", scope.source)
                 .where("fact_type", "=", scope.factType)
@@ -326,6 +385,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         affectedIndexedFileIds: [
           ...new Set(stale.map((row) => row.indexed_file_id).filter((id): id is string => Boolean(id))),
         ],
+        tombstonedFactIds: stale.map((row) => row.id),
       };
     },
 
@@ -337,6 +397,37 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         .where("indexed_file_id", "in", indexedFileIds)
         .where("deleted_at", "is", null)
         .execute();
+    },
+
+    async findUnmaterializedRelationFactsByEndpointName(names: string[], limit: number) {
+      const normalizedNames = new Set(names.map(normalizeName).filter((name) => name.length > 0));
+      if (normalizedNames.size === 0 || limit <= 0) return [];
+      const facts = await db
+        .selectFrom("indexed_file_facts")
+        .selectAll()
+        .where("fact_type", "=", "llm_relation")
+        .where("materialized_at", "is", null)
+        .where("deleted_at", "is", null)
+        .execute();
+      const matched = [];
+      for (const fact of facts) {
+        if (!fact.raw) continue;
+        let raw: unknown;
+        try {
+          raw = JSON.parse(fact.raw);
+        } catch {
+          continue;
+        }
+        if (!isRecord(raw)) continue;
+        const source = raw.source;
+        const target = raw.target;
+        const sourceName = isRecord(source) && typeof source.name === "string" ? normalizeName(source.name) : "";
+        const targetName = isRecord(target) && typeof target.name === "string" ? normalizeName(target.name) : "";
+        if (!normalizedNames.has(sourceName) && !normalizedNames.has(targetName)) continue;
+        matched.push(fact);
+        if (matched.length >= limit) return matched;
+      }
+      return matched;
     },
   };
 }

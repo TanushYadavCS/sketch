@@ -655,6 +655,11 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .orderBy("source", "asc")
       .execute();
     expect(mentions).toEqual([
+      // ELP-02: Bob Chen's @acme.com domain promotes "Acme" as a company at
+      // threshold=1, and the promotion writes an INFERRED company mention
+      // on the evidence file so the entity drawer's mention timeline shows
+      // the file context.
+      { confidence: "INFERRED", source: "email_domain", relation: "mentioned" },
       { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
       { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
     ]);

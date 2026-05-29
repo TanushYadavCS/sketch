@@ -21,9 +21,19 @@ import {
   createIndexedFileFactRepository,
 } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
-import { materializeUnmaterializedFacts } from "../entities/materialize";
+export {
+  DOMAIN_PROMOTION_THRESHOLD,
+  type DomainSweepResult,
+  sweepDomainPromotions,
+} from "../entities/domain-promotion";
+import {
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeUnmaterializedFacts,
+} from "../entities/materialize";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
+import { normalizeName } from "./name-normalize";
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */
 const MAX_CONTENT_CHARS = 32000;
@@ -31,6 +41,21 @@ const MAX_CONTENT_CHARS = 32000;
 /** Minimum files a candidate must appear in before auto-promotion. */
 const CANDIDATE_PROMOTION_THRESHOLD = 2;
 
+/**
+ * Minimum distinct people sharing an email domain before a
+ * `domain_observation` candidate gets auto-promoted to a real company entity.
+ *
+ * Set to 1 because the realistic sales motion here is single-person prospect
+ * calls (Calendly demos, intro calls) — anything higher leaves 90% of demo
+ * clients invisible to the graph. The false-positive floor is held by two
+ * orthogonal filters that run BEFORE this counter ever increments:
+ *   - personal/shared seed (gmail.com, outlook.com, slack.com, …)
+ *   - role-account local-parts (hello@, info@, support@, …) — see
+ *     `inferAffiliationFromEmail`
+ * Fuzzy-name collisions still pause for ECR-05 review, so an LLM-extracted
+ * company entity that conflicts with a new domain-derived name stays pending
+ * instead of forking.
+ */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
 const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v2";
@@ -41,6 +66,26 @@ interface ExtractedMention {
   mention: string;
   type: string;
   variations: string[];
+  confidence?: number;
+}
+
+interface ExtractedRelationEndpoint {
+  name: string;
+  type: string;
+  variations?: string[];
+}
+
+interface ExtractedRelation {
+  type: string;
+  source: ExtractedRelationEndpoint;
+  target: ExtractedRelationEndpoint;
+  confidence: number;
+  context?: string;
+}
+
+interface EntityExtractionResult {
+  mentions: ExtractedMention[];
+  relations: ExtractedRelation[];
 }
 
 interface MatchedEntity {
@@ -84,7 +129,7 @@ export async function extractEntities(
   file: FileContext,
   orgContext?: { orgName?: string; description?: string; industry?: string } | null,
   knownEntities?: Array<{ name: string; type: string; description?: string }>,
-): Promise<ExtractedMention[]> {
+): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
   const orgSection = orgContext?.description
@@ -121,26 +166,54 @@ DO NOT extract:
 - Countries, currencies, or generic locations (India, INR, US)
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
 
-For each entity, provide the primary name, type, and name variations.
+For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 
-Return a JSON array:
-[
-  { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"] },
-  { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"] }
-]
+Also extract direct relationships only when the text explicitly supports them.
+
+Valid relationship types:
+- "works_at": person -> company
+- "leads": person -> project | product | team
+- "contributes_to": person -> project | product
+- "builds": company -> product
+- "part_of": project -> project, product -> product, team -> company
+- "partner_of": company -> company
+
+Return one JSON object:
+{
+  "mentions": [
+    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }
+  ],
+  "relations": [
+    {
+      "type": "leads",
+      "source": { "name": "Sarah Chen", "type": "person", "variations": ["Sarah"] },
+      "target": { "name": "Project Atlas", "type": "project", "variations": ["Atlas"] },
+      "confidence": 0.92,
+      "context": "Sarah Chen leads Project Atlas"
+    }
+  ]
+}
 
 Valid types: "person", "project", "company", "product", "team"
 
-If no notable entities are found, return an empty array: []
+If no notable entities or relations are found, return { "mentions": [], "relations": [] }.
 
 <content>
 ${truncatedContent}
 </content>`;
 
-  return generator.generateJSON<ExtractedMention[]>(prompt, {
+  const parsed = await generator.generateJSON<ExtractedMention[] | EntityExtractionResult>(prompt, {
     maxTokens: 4096,
     label: `extractEntities:${file.id}`,
   });
+  if (Array.isArray(parsed)) {
+    return { mentions: parsed, relations: [] };
+  }
+  return {
+    mentions: Array.isArray(parsed.mentions) ? parsed.mentions : [],
+    relations: Array.isArray(parsed.relations) ? parsed.relations : [],
+  };
 }
 
 /**
@@ -436,21 +509,27 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   logger.info(fileMeta, "smartEnrichFile: start");
 
   const t0 = Date.now();
-  let mentions: ExtractedMention[];
+  let extraction: EntityExtractionResult;
   try {
-    mentions = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
+    extraction = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
     throw err;
   }
   logger.info(
-    { fileId: file.id, stage: "extractEntities", mentionCount: mentions.length, durationMs: Date.now() - t0 },
+    {
+      fileId: file.id,
+      stage: "extractEntities",
+      mentionCount: extraction.mentions.length,
+      relationCount: extraction.relations.length,
+      durationMs: Date.now() - t0,
+    },
     "smartEnrichFile: stage done",
   );
 
-  await reconcileLlmExtractionFacts(deps, file, mentions);
+  await reconcileLlmExtractionFacts(deps, file, extraction);
 
-  const { matched, unmatched } = await matchEntities(db, mentions);
+  const { matched, unmatched } = await matchEntities(db, extraction.mentions);
   const allMatched = matched.map((m) => m.entity);
   logger.debug(
     { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length },
@@ -541,7 +620,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
 async function reconcileLlmExtractionFacts(
   deps: SmartEnrichmentDeps,
   file: FileContext,
-  mentions: ExtractedMention[],
+  extraction: EntityExtractionResult,
 ): Promise<void> {
   const { db } = deps;
   const factRepo = createIndexedFileFactRepository(db);
@@ -551,9 +630,10 @@ async function reconcileLlmExtractionFacts(
     .where("id", "=", file.connectorConfigId)
     .executeTakeFirst();
   const contentHash = file.contentHash ?? `missing-content-hash:${file.id}`;
-  const emittedKeys: string[] = [];
+  const emittedMentionKeys: string[] = [];
+  const emittedRelationKeys: string[] = [];
 
-  for (const mention of mentions) {
+  for (const mention of extraction.mentions) {
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
     const input: UpsertIndexedFileFactInput = {
       indexedFileId: file.id,
@@ -574,16 +654,39 @@ async function reconcileLlmExtractionFacts(
         mention: mention.mention,
         type: mention.type,
         variations: mention.variations,
+        confidence: typeof mention.confidence === "number" ? mention.confidence : 0.7,
       },
     };
-    emittedKeys.push(buildIndexedFileFactKey(input));
+    emittedMentionKeys.push(buildIndexedFileFactKey(input));
     await factRepo.upsertFact(input);
   }
 
-  await factRepo.reconcileStaleFacts(
+  for (const relation of extraction.relations) {
+    const input = buildRelationFactInput({
+      file,
+      ownerUserId: owner?.created_by ?? null,
+      contentHash,
+      relation,
+      mentions: extraction.mentions,
+    });
+    if (!input) continue;
+    emittedRelationKeys.push(buildIndexedFileFactKey(input));
+    await factRepo.upsertFact(input);
+  }
+
+  const mentionReconcile = await factRepo.reconcileStaleFacts(
     { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
-    new Set(emittedKeys),
+    new Set(emittedMentionKeys),
   );
+  const relationReconcile = await factRepo.reconcileStaleFacts(
+    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
+    new Set(emittedRelationKeys),
+  );
+  await cleanupRelationshipEvidenceForFacts(db, [
+    ...mentionReconcile.tombstonedFactIds,
+    ...relationReconcile.tombstonedFactIds,
+  ]);
+  await cleanupEmptyRelationships(db);
 
   await db
     .deleteFrom("entity_mentions")
@@ -593,6 +696,79 @@ async function reconcileLlmExtractionFacts(
     .execute();
 
   await materializeUnmaterializedFacts(db, deps.logger);
+}
+
+const RELATION_TYPES = ["works_at", "leads", "contributes_to", "builds", "part_of", "partner_of"] as const;
+
+function normalizeRelationType(raw: string): (typeof RELATION_TYPES)[number] | null {
+  const normalized = raw.trim().toLowerCase();
+  return (RELATION_TYPES as readonly string[]).includes(normalized)
+    ? (normalized as (typeof RELATION_TYPES)[number])
+    : null;
+}
+
+function buildRelationFactInput(input: {
+  file: FileContext;
+  ownerUserId: string | null;
+  contentHash: string;
+  relation: ExtractedRelation;
+  mentions: ExtractedMention[];
+}): UpsertIndexedFileFactInput | null {
+  const relationType = normalizeRelationType(input.relation.type);
+  if (!relationType || input.relation.confidence < 0.85) return null;
+  const sourceName = input.relation.source.name?.trim();
+  const targetName = input.relation.target.name?.trim();
+  if (!sourceName || !targetName) return null;
+  const sourceType = input.relation.source.type?.trim().toLowerCase();
+  const targetType = input.relation.target.type?.trim().toLowerCase();
+  if (!sourceType || !targetType) return null;
+  const sourceConfidence = findMentionConfidence(input.mentions, input.relation.source);
+  const targetConfidence = findMentionConfidence(input.mentions, input.relation.target);
+  if (sourceConfidence < 0.8 || targetConfidence < 0.8) return null;
+
+  return {
+    indexedFileId: input.file.id,
+    connectorConfigId: input.file.connectorConfigId,
+    createdByUserId: input.ownerUserId,
+    contentHash: input.contentHash,
+    source: "llm_extraction",
+    factType: "llm_relation",
+    relation: relationType,
+    subjectName: sourceName,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${input.file.id}:${input.contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${relationType}:${sourceName}:${targetName}`,
+    contextSnippet: input.relation.context ?? null,
+    raw: {
+      contentHash: input.contentHash,
+      promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+      model: "gemini",
+      relationType,
+      confidence: input.relation.confidence,
+      sourceConfidence,
+      targetConfidence,
+      context: input.relation.context,
+      source: {
+        name: sourceName,
+        type: sourceType,
+        variations: input.relation.source.variations ?? [],
+      },
+      target: {
+        name: targetName,
+        type: targetType,
+        variations: input.relation.target.variations ?? [],
+      },
+    },
+  };
+}
+
+function findMentionConfidence(mentions: ExtractedMention[], endpoint: ExtractedRelationEndpoint): number {
+  const names = [endpoint.name, ...(endpoint.variations ?? [])].map(normalizeName).filter((name) => name.length > 0);
+  for (const mention of mentions) {
+    const mentionNames = [mention.mention, ...mention.variations].map(normalizeName);
+    if (!names.some((name) => mentionNames.includes(name))) continue;
+    return typeof mention.confidence === "number" ? mention.confidence : 0.7;
+  }
+  return 0;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

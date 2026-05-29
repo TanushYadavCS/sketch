@@ -11,16 +11,23 @@ import type { Logger } from "pino";
 import type { Config } from "../config";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { inferAffiliationFromEmail } from "../entities/affiliations";
+import {
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeUnmaterializedFacts,
+} from "../entities/materialize";
 import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 import { getConnector } from "./registry";
+import { sweepDomainPromotions } from "./smart-enrichment";
 import type { ConnectorCredentials, ConnectorType, NameResolution, NameResolver, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
@@ -43,15 +50,26 @@ export function getSyncProgress(): SyncProgress[] {
 export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger): Promise<number> {
   try {
     const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
     const users = await db.selectFrom("users").selectAll().execute();
     for (const user of users) {
-      await entityRepo.upsertPersonEntity({
+      const entity = await entityRepo.upsertPersonEntity({
         name: user.name,
         email: user.email ?? undefined,
         subtype: "internal",
         source: "team",
         sourceId: user.id,
       });
+      // Direct seed path: no file evidence available, so the helper can
+      // only write a works_at edge when a corporate domain is already
+      // configured. Without evidence it short-circuits on candidate
+      // accumulation — that's intentional.
+      if (entity && user.email) {
+        await inferAffiliationFromEmail(
+          { db, domainsRepo },
+          { personEntityId: entity.id, email: user.email, evidenceFileId: null },
+        );
+      }
     }
     if (users.length > 0) {
       logger.debug({ count: users.length }, "Team directory entities seeded");
@@ -674,6 +692,9 @@ export async function runConnectorSync(
           await entityRepo.archiveEntitiesForArchivedFiles();
         }
 
+        await cleanupRelationshipEvidenceForFacts(db, reconcileResult.tombstonedFactIds);
+        await cleanupEmptyRelationships(db);
+
         if (reconcileResult.affectedIndexedFileIds.length > 0) {
           await deleteMaterializedFactMentions(db, connectorType, reconcileResult.affectedIndexedFileIds);
           await factRepo.clearMaterializedAtForActiveFacts(reconcileResult.affectedIndexedFileIds);
@@ -685,6 +706,8 @@ export async function runConnectorSync(
     if (materializeSummary.factsRead > 0) {
       syncLogger.info({ materializeSummary }, "Post-sync fact materialization complete");
     }
+
+    await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));
 
     result.newCursor = await connector.getCursor({
       credentials,
