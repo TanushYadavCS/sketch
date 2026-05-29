@@ -40,7 +40,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(62);
+    expect(rows.rows).toHaveLength(63);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -88,14 +88,15 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[51]).toBe("056-scheduled-task-output-mode");
     expect(names[52]).toBe("057-entity-review-queue");
     expect(names[53]).toBe("058-entity-mentions-unique");
-    expect(names[54]).toBe("059-mention-provenance");
-    expect(names[55]).toBe("060-indexed-file-facts");
-    expect(names[56]).toBe("061-fact-materialization-state");
-    expect(names[57]).toBe("062-entity-domains");
-    expect(names[58]).toBe("063-entity-domains-seed");
-    expect(names[59]).toBe("064-entity-domains-reserved-seed");
-    expect(names[60]).toBe("065-entity-review-domain-candidates");
-    expect(names[61]).toBe("066-relation-evidence-fact-link");
+    expect(names[54]).toBe("059-scheduled-tasks-fresh-session-only");
+    expect(names[55]).toBe("060-mention-provenance");
+    expect(names[56]).toBe("061-indexed-file-facts");
+    expect(names[57]).toBe("062-fact-materialization-state");
+    expect(names[58]).toBe("063-entity-domains");
+    expect(names[59]).toBe("064-entity-domains-seed");
+    expect(names[60]).toBe("065-entity-domains-reserved-seed");
+    expect(names[61]).toBe("066-entity-review-domain-candidates");
+    expect(names[62]).toBe("067-relation-evidence-fact-link");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -104,7 +105,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(62);
+    expect(rows.rows).toHaveLength(63);
   });
 
   it("creates the users table", async () => {

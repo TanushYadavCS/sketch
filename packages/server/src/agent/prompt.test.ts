@@ -156,6 +156,12 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("SendFileToChat");
     });
+
+    it("keeps audio attachment guidance stable", () => {
+      expect(buildSystemContext({ platform: "slack" })).toContain(
+        "If no transcript is provided and a TranscribeAudio tool is available",
+      );
+    });
   });
 
   describe("context protocol section", () => {
