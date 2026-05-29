@@ -39,7 +39,7 @@ export async function up<DB>(db: Kysely<DB>): Promise<void> {
       )
       .join("; ");
     throw new Error(
-      `migration 059-mention-provenance: duplicate (entity_id, indexed_file_id, relation) rows found in entity_mentions. Sample: ${sample}. Dedupe before re-running migration.`,
+      `migration 060-mention-provenance: duplicate (entity_id, indexed_file_id, relation) rows found in entity_mentions. Sample: ${sample}. Dedupe before re-running migration.`,
     );
   }
 
@@ -67,7 +67,7 @@ export async function down<DB>(db: Kysely<DB>): Promise<void> {
       .map((r) => `(entity_id=${r.entity_id}, indexed_file_id=${r.indexed_file_id}, count=${r.cnt})`)
       .join("; ");
     throw new Error(
-      `migration 059-mention-provenance down: duplicate (entity_id, indexed_file_id) rows found in entity_mentions. Sample: ${sample}. Dedupe relation-specific rows before re-running migration.`,
+      `migration 060-mention-provenance down: duplicate (entity_id, indexed_file_id) rows found in entity_mentions. Sample: ${sample}. Dedupe relation-specific rows before re-running migration.`,
     );
   }
 
