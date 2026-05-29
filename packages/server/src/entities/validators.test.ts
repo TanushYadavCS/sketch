@@ -35,6 +35,23 @@ describe("validateLlmMention", () => {
       }),
     ).toEqual({ ok: true });
   });
+
+  it("permits LLM names when source content only differs by punctuation", () => {
+    expect(
+      validateLlmMention({
+        displayName: "Acme Inc",
+        fileContent: "The renewal is with Acme, Inc.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      validateLlmMention({
+        displayName: "R Nijhara",
+        fileContent: "R. Nijhara joined the discussion.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: true });
+  });
 });
 
 describe("validateLearnedFact", () => {

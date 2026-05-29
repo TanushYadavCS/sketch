@@ -21,6 +21,26 @@ describe("GroupBuffer", () => {
       expect(buf.drain("new-group@g.us")).toHaveLength(1);
     });
 
+    it("preserves attachments with buffered messages", () => {
+      const buf = new GroupBuffer();
+      const attachment = {
+        originalName: "voice.ogg",
+        mimeType: "audio/ogg",
+        localPath: "/tmp/voice.ogg",
+        sizeBytes: 100,
+      };
+      buf.append("group1@g.us", {
+        senderName: "Alice",
+        text: "See attached files.",
+        timestamp: 1,
+        attachments: [attachment],
+      });
+
+      expect(buf.drain("group1@g.us")).toEqual([
+        { senderName: "Alice", text: "See attached files.", timestamp: 1, attachments: [attachment] },
+      ]);
+    });
+
     it("isolates messages between different groups", () => {
       const buf = new GroupBuffer();
       buf.append("group1@g.us", { senderName: "Alice", text: "g1 msg", timestamp: 1 });

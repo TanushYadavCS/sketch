@@ -14,12 +14,20 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { type WASocket, downloadMediaMessage, getContentType, type proto } from "@whiskeysockets/baileys";
 import type { Logger } from "./logger";
+import { shouldTreatAsAudioAttachment } from "./transcription/audio-types";
 
 export interface Attachment {
   originalName: string;
   mimeType: string;
   localPath: string;
   sizeBytes: number;
+  transcription?: AudioTranscription;
+}
+
+export interface AudioTranscription {
+  status: "completed" | "failed";
+  text?: string;
+  transcriptPath?: string;
 }
 
 function sanitizeFilename(name: string): string {
@@ -112,7 +120,41 @@ export function formatAttachmentsForPrompt(attachments: Attachment[]): string {
   const files = attachments
     .map((a) => `<file name="${a.originalName}" path="${a.localPath}" mime="${a.mimeType}" size="${a.sizeBytes}" />`)
     .join("\n");
-  return `\n\n<attachments>\n${files}\n</attachments>`;
+  return `\n\n<attachments>\n${files}\n</attachments>${formatAudioTranscriptionsForPrompt(attachments)}`;
+}
+
+function formatAudioTranscriptionsForPrompt(attachments: Attachment[]): string {
+  const blocks: string[] = [];
+  for (const attachment of attachments) {
+    if (!attachment.transcription) continue;
+
+    if (attachment.transcription.status === "failed") {
+      blocks.push(`<audio_transcription>
+The user sent an audio file. Sketch tried to transcribe it before invoking the agent, but transcription failed.
+The original audio file is still available in attachments.
+</audio_transcription>`);
+      continue;
+    }
+
+    if (attachment.transcription.transcriptPath) {
+      blocks.push(`<audio_transcription>
+The user sent an audio file. Sketch transcribed it before invoking the agent.
+The transcript is too long to inline. Read the transcript text file in attachments before responding to the audio content.
+</audio_transcription>`);
+      continue;
+    }
+
+    if (attachment.transcription.text) {
+      blocks.push(`<audio_transcription>
+The user sent an audio file. Sketch transcribed it before invoking the agent.
+
+Transcript:
+${attachment.transcription.text}
+</audio_transcription>`);
+    }
+  }
+
+  return blocks.length > 0 ? `\n\n${blocks.join("\n\n")}` : "";
 }
 
 const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -125,6 +167,10 @@ export type ContentBlock =
 
 export function isImageAttachment(attachment: Attachment): boolean {
   return IMAGE_MIME_TYPES.has(attachment.mimeType);
+}
+
+export function isAudioAttachment(attachment: Attachment): boolean {
+  return shouldTreatAsAudioAttachment(attachment);
 }
 
 export function splitAttachments(attachments: Attachment[]): { images: Attachment[]; nonImages: Attachment[] } {

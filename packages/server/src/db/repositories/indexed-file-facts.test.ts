@@ -318,6 +318,46 @@ describe("createIndexedFileFactRepository", () => {
     expect(Number(active.count)).toBe(100);
   });
 
+  it("ignores non-sync-tracked facts during connector stale fact reconciliation", async () => {
+    const repo = createIndexedFileFactRepository(db);
+    await seedConnectorFacts({ count: 10, currentRunCount: 8, syncRunId: "run-current" });
+    await db
+      .insertInto("indexed_file_facts")
+      .values(
+        Array.from({ length: 20 }, (_, i) => ({
+          id: `llm-fact-${i}`,
+          indexed_file_id: "file-0",
+          connector_config_id: "connector-1",
+          source: "llm_extraction",
+          fact_type: "llm_extracted",
+          relation: "mentioned",
+          subject_name: `LLM Mention ${i}`,
+          fact_key: `llm-fact-key-${i}`,
+          last_seen_sync_run_id: null,
+        })),
+      )
+      .execute();
+
+    const result = await repo.reconcileStaleFacts(
+      { kind: "connector", connectorConfigId: "connector-1", syncRunId: "run-current" },
+      null,
+    );
+
+    expect(result).toMatchObject({
+      activeBefore: 10,
+      wouldTombstone: 2,
+      tombstoned: 2,
+    });
+
+    const activeLlmFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("source", "=", "llm_extraction")
+      .where("deleted_at", "is", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(activeLlmFacts.count)).toBe(20);
+  });
+
   it("reconciles all file-scope stale facts when no facts were seen", async () => {
     const repo = createIndexedFileFactRepository(db);
     const now = new Date().toISOString();
