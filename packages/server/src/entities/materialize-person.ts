@@ -155,7 +155,7 @@ export async function materializePersonFact(
         entity = decision.entity as unknown as EntityRow;
         resultKind = "entity_linked";
       } else if (decision.kind === "ambiguous_existing") {
-        return { kind: "skipped", reason: "llm_ambiguous_existing" };
+        precomputedCandidates = decision.candidates;
       } else if (decision.kind === "ambiguous_new_entity") {
         precomputedCandidates = decision.candidates;
       } else if (decision.kind === "confident_no_match") {
