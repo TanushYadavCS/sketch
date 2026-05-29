@@ -17,12 +17,23 @@ import {
   recreateEntityGraph,
 } from "../entities/recreate";
 import { beginRecreateLock, endRecreateLock, isRecreateActive } from "../entities/recreate-state";
+import {
+  AI_EXTRACTION_FACT_TYPES,
+  type ReenrichDryRunSummary,
+  type ReenrichScope,
+  type ReenrichSummary,
+  computeReenrichDryRun,
+  resolveReenrichFileIds,
+  runReenrichJob,
+} from "../entities/reenrich";
 import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
 const RESET_CONFIRM_TOKEN = "RESET_AND_RECREATE";
+const REENRICH_CONFIRM_TOKEN = "REENRICH";
 
 type ResetCategory = "manual" | "connectors" | "ai";
 type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
+type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
 
 interface ResetJob {
   id: string;
@@ -35,6 +46,16 @@ interface ResetJob {
   error?: string;
 }
 
+interface ReenrichJob {
+  id: string;
+  phase: ReenrichJobPhase;
+  startedAt: string;
+  finishedAt: string | null;
+  dryRun?: ReenrichDryRunSummary;
+  summary?: ReenrichSummary;
+  error?: string;
+}
+
 const FACT_TYPES_BY_CATEGORY: Record<ResetCategory, IndexedFileFactType[]> = {
   connectors: ["structural_seed", "person_seed", "attendee", "assignee", "author", "parent_entity"],
   ai: ["llm_extracted"],
@@ -43,8 +64,19 @@ const FACT_TYPES_BY_CATEGORY: Record<ResetCategory, IndexedFileFactType[]> = {
 
 let currentResetJob: ResetJob | null = null;
 let latestResetJob: ResetJob | null = null;
+let currentReenrichJob: ReenrichJob | null = null;
+let latestReenrichJob: ReenrichJob | null = null;
 
 function newResetJob(): ResetJob {
+  return {
+    id: randomUUID(),
+    phase: "idle",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  };
+}
+
+function newReenrichJob(): ReenrichJob {
   return {
     id: randomUUID(),
     phase: "idle",
@@ -228,6 +260,116 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     return c.json({ error: { code: "NOT_FOUND", message: "Reset job not found" } }, 404);
   });
 
+  routes.get("/reenrichments/jobs", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const conflict = await getRecreateConflict(db);
+    return c.json({
+      active: currentReenrichJob !== null || isRecreateActive(),
+      currentJob: currentReenrichJob,
+      latestJob: latestReenrichJob,
+      blockedBy: currentReenrichJob ? null : conflict,
+    });
+  });
+
+  routes.get("/reenrichments/jobs/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const id = c.req.param("id");
+    if (currentReenrichJob?.id === id) return c.json(currentReenrichJob);
+    if (latestReenrichJob?.id === id) return c.json(latestReenrichJob);
+    return c.json({ error: { code: "NOT_FOUND", message: "Re-enrich job not found" } }, 404);
+  });
+
+  routes.post("/reenrichments", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const body = (await c.req.json().catch(() => ({}))) as {
+      scope?: ReenrichScope;
+      confirm?: string;
+      dryRun?: boolean;
+      runAfter?: boolean;
+    };
+
+    const scope = parseReenrichScope(body.scope);
+    if (!scope) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "scope is required" } }, 400);
+    }
+    const dryRun = body.dryRun === true;
+    const allScope = "all" in scope && scope.all === true;
+    if (allScope && !dryRun && body.confirm !== REENRICH_CONFIRM_TOKEN) {
+      return c.json({ error: { code: "BAD_REQUEST", message: `confirm must be ${REENRICH_CONFIRM_TOKEN}` } }, 400);
+    }
+
+    const resolved = await resolveReenrichFileIds(db, scope);
+    if (dryRun) {
+      const summary = await computeReenrichDryRun(db, resolved.fileIds, resolved.missingFileIds);
+      return c.json({ dryRun: true, ...summary });
+    }
+    if (resolved.fileIds.length === 0) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "No non-archived files matched the requested scope" } },
+        400,
+      );
+    }
+
+    const conflict = await getRecreateConflict(db);
+    if (conflict) {
+      return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
+    }
+    if (currentResetJob) {
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
+    }
+    if (currentReenrichJob) {
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
+    }
+
+    const job = newReenrichJob();
+    job.phase = "wiping";
+    currentReenrichJob = job;
+
+    void (async () => {
+      try {
+        job.phase = "wiping";
+        const summary = await runReenrichJob({
+          db,
+          logger: logger.child({ jobId: job.id, component: "entity-reenrich" }),
+          triggeredByUserId: (c.get("sub") as string | undefined) ?? "system",
+          fileIds: resolved.fileIds,
+          missingFileIds: resolved.missingFileIds,
+          runAfter: body.runAfter !== false,
+          llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          onPhase: (phase) => {
+            job.phase = phase;
+          },
+        });
+        job.summary = summary;
+        job.phase = "done";
+        job.finishedAt = new Date().toISOString();
+      } catch (err) {
+        job.error = err instanceof Error ? err.message : String(err);
+        job.phase = "failed";
+        job.finishedAt = new Date().toISOString();
+        logger.error({ err, jobId: job.id }, "Re-enrich job failed");
+        if (isRecreateActive()) endRecreateLock();
+      } finally {
+        latestReenrichJob = job;
+        currentReenrichJob = null;
+      }
+    })();
+
+    return c.json(
+      {
+        message: "Re-enrich started.",
+        files: resolved.fileIds.length,
+        missingFileIds: resolved.missingFileIds,
+        factTypes: AI_EXTRACTION_FACT_TYPES,
+        job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
+      },
+      202,
+    );
+  });
+
   /**
    * POST /api/entities/resets
    * Delete entities by category, optionally clearing related fact flags and
@@ -312,6 +454,9 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
     if (currentResetJob) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
+    }
+    if (currentReenrichJob) {
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
     }
 
     if (runAfter) {
@@ -676,6 +821,19 @@ interface ResetExecutionOptions {
   includeManual: boolean;
   orgSourceTypes: string[];
   factTypes: IndexedFileFactType[];
+}
+
+function parseReenrichScope(scope: unknown): ReenrichScope | null {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return null;
+  const value = scope as Record<string, unknown>;
+  if (value.all === true) return { all: true };
+  if (Array.isArray(value.fileIds)) {
+    return { fileIds: value.fileIds.filter((id): id is string => typeof id === "string") };
+  }
+  if (Array.isArray(value.sources)) {
+    return { sources: value.sources.filter((source): source is string => typeof source === "string") };
+  }
+  return null;
 }
 
 interface ResetExecutionResult {

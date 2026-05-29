@@ -33,11 +33,35 @@ async function seedAdmin(db: Kysely<DB>): Promise<{ id: string }> {
   return { id: admin.id };
 }
 
+async function seedMember(db: Kysely<DB>): Promise<{ id: string; email: string }> {
+  const users = createUserRepository(db);
+  const email = "member@test.com";
+  await users.create({
+    name: "member",
+    email,
+    emailVerified: true,
+    passwordHash: await hashPassword(PASSWORD),
+    authRole: "member",
+  });
+  const member = await users.findByEmail(email);
+  if (!member) throw new Error("member missing");
+  return { id: member.id, email };
+}
+
 async function login(app: ReturnType<typeof createApp>): Promise<string> {
   const res = await app.request("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email: ADMIN_EMAIL, password: PASSWORD }),
+  });
+  return res.headers.get("set-cookie") ?? "";
+}
+
+async function loginAs(app: ReturnType<typeof createApp>, email: string): Promise<string> {
+  const res = await app.request("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password: PASSWORD }),
   });
   return res.headers.get("set-cookie") ?? "";
 }
@@ -661,5 +685,121 @@ describe("POST /api/entities/resets", () => {
     expect(body.entitiesDeleted).toBe(1);
     const remaining = await db.selectFrom("entities").select("id").execute();
     expect(remaining).toHaveLength(1);
+  });
+});
+
+describe("POST /api/entities/reenrichments", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+  let adminId: string;
+
+  beforeEach(async () => {
+    if (isRecreateActive()) endRecreateLock();
+    db = await createTestDb();
+    const admin = await seedAdmin(db);
+    adminId = admin.id;
+    app = createApp(db, config, { logger });
+    adminCookie = await login(app);
+  });
+
+  afterEach(async () => {
+    if (isRecreateActive()) endRecreateLock();
+    try {
+      await db.destroy();
+    } catch {}
+  });
+
+  it("dry-run reports LLM fact types without mutating rows", async () => {
+    await seedConnectorFile(db, adminId);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      contentHash: "hash",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Alice",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash:Alice",
+      raw: {
+        contentHash: "hash",
+        promptVersion: "llm-extraction-v2",
+        model: "gemini",
+        mention: "Alice",
+        type: "person",
+        variations: [],
+      },
+    });
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      contentHash: "hash",
+      source: "llm_extraction",
+      factType: "llm_relation",
+      relation: "contributes_to",
+      subjectName: "Alice",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash:Alice:Apollo",
+      raw: {
+        contentHash: "hash",
+        promptVersion: "llm-extraction-v2",
+        model: "gemini",
+        relationType: "contributes_to",
+        confidence: 0.8,
+        source: { name: "Alice", type: "person", variations: [] },
+        target: { name: "Apollo", type: "project", variations: [] },
+      },
+    });
+
+    const res = await app.request("/api/entities/reenrichments", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: { fileIds: ["file-1", "missing"] }, dryRun: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      dryRun: boolean;
+      files: number;
+      missingFileIds: string[];
+      factsByType: Record<string, number>;
+    };
+    expect(body.dryRun).toBe(true);
+    expect(body.files).toBe(1);
+    expect(body.missingFileIds).toEqual(["missing"]);
+    expect(body.factsByType).toEqual({ llm_extracted: 1, llm_relation: 1 });
+    const factsAfter = await db.selectFrom("indexed_file_facts").select("deleted_at").execute();
+    expect(factsAfter.every((fact) => fact.deleted_at === null)).toBe(true);
+  });
+
+  it("requires admin access", async () => {
+    const member = await seedMember(db);
+    const memberCookie = await loginAs(app, member.email);
+
+    const res = await app.request("/api/entities/reenrichments", {
+      method: "POST",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: { fileIds: ["file-1"] }, dryRun: true }),
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("requires confirm token for all-scope apply", async () => {
+    await seedConnectorFile(db, adminId);
+
+    const res = await app.request("/api/entities/reenrichments", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: { all: true } }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe("confirm must be REENRICH");
   });
 });
