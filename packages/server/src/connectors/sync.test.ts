@@ -34,11 +34,39 @@ const mockConnectorSync = vi.fn();
 vi.mock("./registry", () => ({
   getConnector: vi.fn(() => ({
     type: "google_drive",
+    promotableFileTypes: ["project"],
     sync: (...args: unknown[]) => mockConnectorSync(...args),
     getCursor: vi.fn().mockResolvedValue("cursor-v2"),
     validateCredentials: vi.fn().mockResolvedValue(undefined),
   })),
 }));
+
+interface StableFactTuple {
+  factType: string;
+  subjectName: string | null;
+  subjectEmail: string | null;
+  subjectSourceId: string | null;
+  raw: unknown;
+}
+
+async function loadStableFactTuples(db: Kysely<DB>, connectorConfigId: string): Promise<StableFactTuple[]> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["fact_type", "subject_name", "subject_email", "subject_source_id", "raw"])
+    .where("connector_config_id", "=", connectorConfigId)
+    .where("deleted_at", "is", null)
+    .execute();
+
+  return rows
+    .map((row) => ({
+      factType: row.fact_type,
+      subjectName: row.subject_name,
+      subjectEmail: row.subject_email,
+      subjectSourceId: row.subject_source_id,
+      raw: row.raw ? JSON.parse(row.raw) : null,
+    }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
 
 describe("startSyncScheduler", () => {
   let db: Kysely<DB> | null = null;
@@ -563,6 +591,75 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
     const emails = accessRows.map((r) => r.email).sort();
     expect(emails).toEqual(["alice@example.com", "bob@example.com"]);
+  });
+
+  it("emits the same stable fact set for changed and unchanged item paths", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-fact-parity",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    const item = {
+      providerFileId: "provider-file-parity",
+      providerUrl: "https://example.test/parity",
+      fileName: "Parity Project",
+      fileType: "project",
+      contentCategory: "document" as const,
+      content: "stable parity content",
+      sourcePath: "/Parity Project",
+      contentHash: "hash-parity",
+      sourceCreatedAt: "2026-01-01T00:00:00.000Z",
+      sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+      parentEntities: [{ source: "google_drive", sourceId: "folder-1", contextSnippet: "Folder One" }],
+      attendees: [{ name: "Alice Attendee", email: "alice@example.com" }],
+      assignees: [{ name: "Bob Assignee", email: "bob@example.com" }],
+      authorName: "Carol Author",
+      authorEmail: "carol@example.com",
+      authorSourceId: "author-carol",
+    } satisfies SyncedItem;
+
+    async function* changedPathItems() {
+      yield item;
+    }
+    mockConnectorSync.mockReturnValueOnce(changedPathItems());
+
+    const changedResult = await runConnectorSync(db, "connector-fact-parity", logger);
+    expect(changedResult.itemsProcessed).toBe(1);
+    expect(changedResult.itemsCreated).toBe(1);
+
+    const changedTuples = await loadStableFactTuples(db, "connector-fact-parity");
+    expect(changedTuples.map((tuple) => tuple.factType).sort()).toEqual([
+      "assignee",
+      "attendee",
+      "author",
+      "parent_entity",
+      "structural_seed",
+    ]);
+
+    async function* unchangedPathItems() {
+      yield item;
+    }
+    mockConnectorSync.mockReturnValueOnce(unchangedPathItems());
+
+    const unchangedResult = await runConnectorSync(db, "connector-fact-parity", logger);
+    expect(unchangedResult.itemsProcessed).toBe(1);
+    expect(unchangedResult.itemsCreated).toBe(0);
+    expect(unchangedResult.itemsUpdated).toBe(0);
+
+    const unchangedTuples = await loadStableFactTuples(db, "connector-fact-parity");
+    expect(unchangedTuples).toEqual(changedTuples);
   });
 
   it("re-seeds person entities for attendees even when content hash is unchanged", async () => {

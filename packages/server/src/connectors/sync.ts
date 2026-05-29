@@ -31,6 +31,7 @@ import { clearEnrichmentData, runEnrichment } from "./enrichment";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 import { getConnector } from "./registry";
 import { sweepDomainPromotions } from "./smart-enrichment";
+import { emitFactsForSyncedItem } from "./sync-facts";
 import type { ConnectorCredentials, ConnectorType, NameResolution, NameResolver, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
@@ -323,59 +324,13 @@ export async function runConnectorSync(
       return null;
     };
 
-    const connectorType = config.connector_type;
+    const connectorType = config.connector_type as ConnectorType;
     const syncRunId = randomUUID();
     const factContext = {
       connectorConfigId: config.id,
       createdByUserId: config.created_by,
       lastSeenSyncRunId: syncRunId,
     };
-
-    async function seedAttendeePerson(
-      attendee: { name?: string; email?: string },
-      providerFileId: string,
-      indexedFileId: string,
-      contentHash: string | null,
-    ): Promise<void> {
-      if (!attendee.name) return;
-      await factRepo.upsertFact({
-        ...factContext,
-        indexedFileId,
-        contentHash,
-        source: connectorType,
-        factType: "attendee",
-        relation: "attended",
-        subjectName: attendee.name,
-        subjectEmail: attendee.email ?? null,
-        subjectSource: connectorType,
-        subjectSourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
-        contextSnippet: `Attended ${providerFileId}`,
-        raw: { providerFileId, attendee },
-      });
-    }
-
-    async function seedAuthorPerson(
-      author: { name?: string; email?: string; sourceId?: string },
-      providerFileId: string,
-      indexedFileId: string,
-      contentHash: string | null,
-    ): Promise<void> {
-      if (!author.email && !author.name) return;
-      await factRepo.upsertFact({
-        ...factContext,
-        indexedFileId,
-        contentHash,
-        source: connectorType,
-        factType: "author",
-        relation: "authored",
-        subjectName: author.name ?? null,
-        subjectEmail: author.email ?? null,
-        subjectSource: connectorType,
-        subjectSourceId: author.sourceId ?? author.email ?? `${providerFileId}:${author.name}`,
-        contextSnippet: `Authored ${providerFileId}`,
-        raw: { providerFileId, author },
-      });
-    }
 
     for await (const item of connector.sync({
       credentials,
@@ -453,81 +408,14 @@ export async function runConnectorSync(
             await repo.syncFileAccessEmails(existing.id, item.accessEmails);
           }
 
-          const promotable = connector.promotableFileTypes ?? [];
-          if (item.fileType && promotable.includes(item.fileType)) {
-            await factRepo.upsertFact({
-              ...factContext,
-              indexedFileId: existing.id,
-              contentHash: item.contentHash,
-              source: connectorType,
-              factType: "structural_seed",
-              relation: "seeded",
-              subjectName: item.fileName,
-              subjectSource: connectorType,
-              subjectSourceId: item.providerFileId,
-              contextSnippet: item.sourcePath,
-              raw: {
-                providerFileId: item.providerFileId,
-                providerUrl: item.providerUrl,
-                fileType: item.fileType,
-                sourcePath: item.sourcePath,
-              },
-            });
-          }
-
-          if (item.parentEntities && item.parentEntities.length > 0) {
-            for (const parent of item.parentEntities) {
-              await factRepo.upsertFact({
-                ...factContext,
-                indexedFileId: existing.id,
-                contentHash: item.contentHash,
-                source: connectorType,
-                factType: "parent_entity",
-                relation: "mentioned",
-                subjectSource: parent.source,
-                subjectSourceId: parent.sourceId,
-                contextSnippet: parent.contextSnippet ?? null,
-                raw: { providerFileId: item.providerFileId, parent },
-              });
-            }
-          }
-
-          if (item.attendees) {
-            for (const a of item.attendees) {
-              await seedAttendeePerson(a, item.providerFileId, existing.id, item.contentHash);
-            }
-          }
-
-          if (item.assignees && item.assignees.length > 0) {
-            for (const assignee of item.assignees) {
-              const sourceRefKey = connector.assigneeSourceRefKey
-                ? connector.assigneeSourceRefKey(assignee.name)
-                : `${config.connector_type}:user:${assignee.name}`;
-              await factRepo.upsertFact({
-                ...factContext,
-                indexedFileId: existing.id,
-                contentHash: item.contentHash,
-                source: connectorType,
-                factType: "assignee",
-                relation: "assigned",
-                subjectName: assignee.name,
-                subjectEmail: assignee.email ?? null,
-                subjectSource: sourceRefKey.split(":")[0] ?? connectorType,
-                subjectSourceId: sourceRefKey.split(":").slice(1).join(":") || assignee.name,
-                contextSnippet: `Assigned to ${assignee.name}`,
-                raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
-              });
-            }
-          }
-
-          if (item.authorEmail || item.authorName) {
-            await seedAuthorPerson(
-              { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
-              item.providerFileId,
-              existing.id,
-              item.contentHash,
-            );
-          }
+          await emitFactsForSyncedItem({
+            factRepo,
+            connector,
+            connectorType,
+            factContext,
+            item,
+            indexedFileId: existing.id,
+          });
 
           result.itemsProcessed++;
           progress.itemsProcessed = result.itemsProcessed;
@@ -584,82 +472,14 @@ export async function runConnectorSync(
         // exclusive write lock).
         affectedIndexedFileIds.add(itemResult.id);
 
-        // Promote items to entities based on connector's promotableFileTypes
-        const promotable = connector.promotableFileTypes ?? [];
-        if (item.fileType && promotable.includes(item.fileType)) {
-          await factRepo.upsertFact({
-            ...factContext,
-            indexedFileId: itemResult.id,
-            contentHash: item.contentHash,
-            source: connectorType,
-            factType: "structural_seed",
-            relation: "seeded",
-            subjectName: item.fileName,
-            subjectSource: connectorType,
-            subjectSourceId: item.providerFileId,
-            contextSnippet: item.sourcePath,
-            raw: {
-              providerFileId: item.providerFileId,
-              providerUrl: item.providerUrl,
-              fileType: item.fileType,
-              sourcePath: item.sourcePath,
-            },
-          });
-        }
-
-        if (item.attendees) {
-          for (const a of item.attendees) {
-            await seedAttendeePerson(a, item.providerFileId, itemResult.id, item.contentHash);
-          }
-        }
-
-        if (item.assignees && item.assignees.length > 0) {
-          for (const assignee of item.assignees) {
-            const sourceRefKey = connector.assigneeSourceRefKey
-              ? connector.assigneeSourceRefKey(assignee.name)
-              : `${config.connector_type}:user:${assignee.name}`;
-            await factRepo.upsertFact({
-              ...factContext,
-              indexedFileId: itemResult.id,
-              contentHash: item.contentHash,
-              source: connectorType,
-              factType: "assignee",
-              relation: "assigned",
-              subjectName: assignee.name,
-              subjectEmail: assignee.email ?? null,
-              subjectSource: sourceRefKey.split(":")[0] ?? connectorType,
-              subjectSourceId: sourceRefKey.split(":").slice(1).join(":") || assignee.name,
-              contextSnippet: `Assigned to ${assignee.name}`,
-              raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
-            });
-          }
-        }
-
-        if (item.authorEmail || item.authorName) {
-          await seedAuthorPerson(
-            { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
-            item.providerFileId,
-            itemResult.id,
-            item.contentHash,
-          );
-        }
-
-        if (item.parentEntities && item.parentEntities.length > 0) {
-          for (const parent of item.parentEntities) {
-            await factRepo.upsertFact({
-              ...factContext,
-              indexedFileId: itemResult.id,
-              contentHash: item.contentHash,
-              source: connectorType,
-              factType: "parent_entity",
-              relation: "mentioned",
-              subjectSource: parent.source,
-              subjectSourceId: parent.sourceId,
-              contextSnippet: parent.contextSnippet ?? null,
-              raw: { providerFileId: item.providerFileId, parent },
-            });
-          }
-        }
+        await emitFactsForSyncedItem({
+          factRepo,
+          connector,
+          connectorType,
+          factContext,
+          item,
+          indexedFileId: itemResult.id,
+        });
 
         if (itemResult.created) {
           result.itemsCreated++;
