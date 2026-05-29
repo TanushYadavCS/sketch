@@ -14,7 +14,7 @@ import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, delay } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { EntityExplorer } from "./entity-explorer";
 
@@ -443,6 +443,48 @@ describe("EntityExplorer rebuild dialog", () => {
     expect(await screen.findByTestId("rebuild-source-picker")).toBeInTheDocument();
     expect(screen.getByTestId("rebuild-source-clickup")).toBeInTheDocument();
     expect(screen.getByTestId("rebuild-source-fireflies")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("rebuild-back"));
+    expect(screen.getByTestId("rebuild-category-connectors")).not.toBeChecked();
+    expect(screen.getByTestId("rebuild-category-ai")).toBeChecked();
+  });
+
+  it("keeps re-extract disabled until indexed sources are loaded and non-empty", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+      http.get("/api/connectors/file-counts-by-source", async () => {
+        await delay(100);
+        return HttpResponse.json({ counts: [{ source: "clickup", count: 42 }] });
+      }),
+    );
+    renderWithProviders(<EntityExplorer />);
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+    await user.click(await screen.findByTestId("rebuild-entities-menu-item"));
+    await user.click(await screen.findByTestId("rebuild-next"));
+    await user.click(screen.getByTestId("rebuild-method-reextract"));
+
+    expect(screen.getByTestId("rebuild-next")).toBeDisabled();
+    expect(await screen.findByTestId("rebuild-source-clickup")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-next")).not.toBeDisabled();
+  });
+
+  it("keeps re-extract disabled when no indexed sources exist", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+      http.get("/api/connectors/file-counts-by-source", () => HttpResponse.json({ counts: [] })),
+    );
+    renderWithProviders(<EntityExplorer />);
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+    await user.click(await screen.findByTestId("rebuild-entities-menu-item"));
+    await user.click(await screen.findByTestId("rebuild-next"));
+    await user.click(screen.getByTestId("rebuild-method-reextract"));
+
+    expect(await screen.findByText("No connected sources have indexed files.")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-next")).toBeDisabled();
   });
 
   it("Replay run posts to /resets with runAfter=true and closes the dialog", async () => {

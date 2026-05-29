@@ -31,7 +31,7 @@ interface ScheduledTaskListItem {
   scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
-  sessionMode: "fresh" | "persistent" | "chat";
+  sessionMode: "fresh";
   nextRunAt: string | null;
   lastRunAt: string | null;
   status: "active" | "paused" | "completed";
@@ -215,7 +215,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       scheduleType: row.schedule_type as "cron" | "interval" | "once" | "external",
       scheduleValue: row.schedule_value,
       timezone: row.timezone,
-      sessionMode: row.session_mode as "fresh" | "persistent" | "chat",
+      sessionMode: "fresh",
       nextRunAt: row.next_run_at,
       lastRunAt: row.last_run_at,
       status: row.status as "active" | "paused" | "completed",

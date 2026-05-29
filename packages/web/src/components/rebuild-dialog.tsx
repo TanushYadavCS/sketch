@@ -72,8 +72,9 @@ export function RebuildDialog({ open, onOpenChange, onSubmitted, prefill }: Rebu
     setConfirmExpensive(false);
     setErrorMessage(null);
     if (prefill) {
-      setCategories(new Set(prefill.categories ?? ["connectors", "ai"]));
-      setMethod(prefill.method ?? "replay");
+      const nextMethod = prefill.method ?? "replay";
+      setCategories(new Set(nextMethod === "reextract" ? ["ai"] : (prefill.categories ?? ["connectors", "ai"])));
+      setMethod(nextMethod);
       setSelectedSources(prefill.sources ? new Set(prefill.sources) : null);
     } else {
       setCategories(new Set(["connectors", "ai"]));
@@ -96,13 +97,15 @@ export function RebuildDialog({ open, onOpenChange, onSubmitted, prefill }: Rebu
     availableSources.length > 0 &&
     availableSources.every((s) => selectedSources.has(s.source));
   const sourcesReady =
-    method !== "reextract" || availableSources.length === 0 || (selectedSources !== null && selectedSources.size > 0);
+    method !== "reextract" ||
+    (!sourcesQuery.isLoading && availableSources.length > 0 && selectedSources !== null && selectedSources.size > 0);
 
   const onlyManualWithReplay = method === "replay" && categories.size === 1 && categories.has("manual");
+  const invalidReextractCategories = method === "reextract" && (categories.size !== 1 || !categories.has("ai"));
   const needsExpensiveConfirm = allThree || (method === "reextract" && allSourcesSelected);
 
   const canAdvanceFromCategories = categories.size > 0;
-  const canAdvanceFromMethod = !onlyManualWithReplay && sourcesReady;
+  const canAdvanceFromMethod = !onlyManualWithReplay && !invalidReextractCategories && sourcesReady;
   const canRun = canAdvanceFromCategories && canAdvanceFromMethod && (!needsExpensiveConfirm || confirmExpensive);
 
   const submitMutation = useMutation({
@@ -212,7 +215,10 @@ export function RebuildDialog({ open, onOpenChange, onSubmitted, prefill }: Rebu
             <MethodOption
               value="reextract"
               checked={method === "reextract"}
-              onSelect={() => setMethod("reextract")}
+              onSelect={() => {
+                setMethod("reextract");
+                setCategories(new Set(["ai"]));
+              }}
               icon={<SparkleIcon size={14} className="text-violet-500" />}
               title="Re-extract via LLM"
               description={
@@ -267,6 +273,11 @@ export function RebuildDialog({ open, onOpenChange, onSubmitted, prefill }: Rebu
             {onlyManualWithReplay ? (
               <p className="text-xs text-amber-700 dark:text-amber-400">
                 Manual entities have no facts to replay. Pick Connector or AI categories, or switch to re-extract.
+              </p>
+            ) : null}
+            {invalidReextractCategories ? (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Re-extract only rebuilds AI-extracted entities. Select only AI-extracted entities to continue.
               </p>
             ) : null}
           </section>
