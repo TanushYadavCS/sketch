@@ -1,29 +1,16 @@
 /**
- * Snap-scrolling horizontal carousel for the entity drawer Timeline section.
+ * Vertical timeline list for the entity drawer.
  *
- * Pattern: month dividers inline, one card per file (mentionCount badge for
- * files with multiple mentions), source-type icon, sync'd arrow buttons,
- * live "{index+1} of {total}" counter, auto-scroll to newest on mount.
+ * Newest entries appear at the top. Items are grouped by month with a
+ * sticky-feeling header per group. Each row shows the source-type tag, the
+ * file name, a date, optional mention multiplier, and an optional context
+ * snippet from the file.
  */
 import type { EntityTimelineGroup, EntityTimelineItem } from "@/lib/api";
-import { CaretLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
-import { cn } from "@sketch/ui/lib/utils";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-const CARD_WIDTH_PX = 320;
-const CARD_GAP_PX = 12;
 
 interface TimelineStripProps {
   groups: EntityTimelineGroup[];
   onSelectItem?: (item: EntityTimelineItem) => void;
-}
-
-interface FlatEntry {
-  kind: "divider" | "card";
-  dividerKey?: string;
-  monthLabel?: string;
-  item?: EntityTimelineItem;
-  cardIndex: number;
 }
 
 function monthLabel(key: string): string {
@@ -41,149 +28,52 @@ function formatDate(iso: string): string {
 }
 
 export function TimelineStrip({ groups, onSelectItem }: TimelineStripProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [activeCardIndex, setActiveCardIndex] = useState(0);
-
-  const { entries, cardCount } = useMemo(() => {
-    const result: FlatEntry[] = [];
-    let cardIdx = 0;
-    for (const group of groups) {
-      result.push({
-        kind: "divider",
-        dividerKey: `month:${group.month}`,
-        monthLabel: monthLabel(group.month),
-        cardIndex: -1,
-      });
-      for (const item of group.items) {
-        result.push({ kind: "card", item, cardIndex: cardIdx });
-        cardIdx += 1;
-      }
-    }
-    return { entries: result, cardCount: cardIdx };
-  }, [groups]);
-
-  const scrollToCard = useCallback((cardIndex: number) => {
-    const container = scrollRef.current;
-    if (!container) return;
-    const targets = container.querySelectorAll<HTMLDivElement>("[data-timeline-card]");
-    const target = targets[cardIndex];
-    if (target && typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
-    }
-  }, []);
-
-  // Auto-scroll to first (newest) on mount
-  const initialMountRef = useRef(true);
-  useEffect(() => {
-    if (initialMountRef.current && cardCount > 0) {
-      initialMountRef.current = false;
-      // Use rAF so the layout is in place before scrollIntoView fires.
-      requestAnimationFrame(() => scrollToCard(0));
-    }
-  }, [cardCount, scrollToCard]);
-
-  // Update active index on scroll
-  const onScroll = useCallback(() => {
-    const container = scrollRef.current;
-    if (!container) return;
-    const cards = container.querySelectorAll<HTMLDivElement>("[data-timeline-card]");
-    let best = 0;
-    let bestDelta = Number.POSITIVE_INFINITY;
-    const refLeft = container.scrollLeft;
-    cards.forEach((card, idx) => {
-      const delta = Math.abs(card.offsetLeft - refLeft);
-      if (delta < bestDelta) {
-        bestDelta = delta;
-        best = idx;
-      }
-    });
-    setActiveCardIndex(best);
-  }, []);
-
-  const goPrev = () => scrollToCard(Math.max(0, activeCardIndex - 1));
-  const goNext = () => scrollToCard(Math.min(cardCount - 1, activeCardIndex + 1));
-
-  const atStart = activeCardIndex <= 0;
-  const atEnd = activeCardIndex >= cardCount - 1;
+  const totalCount = groups.reduce((acc, g) => acc + g.items.length, 0);
 
   return (
-    <div>
-      <div className="mb-2 flex items-center justify-between text-[10px] text-muted-foreground">
-        <span aria-live="polite">{cardCount === 0 ? "0 of 0" : `${activeCardIndex + 1} of ${cardCount}`}</span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={goPrev}
-            disabled={atStart}
-            className="rounded p-1 hover:bg-muted disabled:opacity-30"
-            aria-label="Previous card"
-          >
-            <CaretLeftIcon className="h-3 w-3" />
-          </button>
-          <button
-            type="button"
-            onClick={goNext}
-            disabled={atEnd}
-            className="rounded p-1 hover:bg-muted disabled:opacity-30"
-            aria-label="Next card"
-          >
-            <CaretRightIcon className="h-3 w-3" />
-          </button>
-        </div>
+    <div data-testid="timeline-strip">
+      <div className="mb-2 text-[10px] text-muted-foreground">
+        {totalCount === 0 ? "No entries" : totalCount === 1 ? "1 entry" : `${totalCount} entries`}
       </div>
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="snap-x snap-mandatory overflow-x-auto pb-2"
-        style={{ scrollPaddingInlineStart: "0px" }}
-        data-testid="timeline-strip"
-      >
-        <div className="flex items-stretch" style={{ gap: `${CARD_GAP_PX}px` }}>
-          {entries.map((entry) => {
-            if (entry.kind === "divider") {
-              return (
-                <div
-                  key={entry.dividerKey}
-                  className="flex shrink-0 items-center text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
-                >
-                  {entry.monthLabel}
-                </div>
-              );
-            }
-            const item = entry.item;
-            if (!item) return null;
-            return (
-              <button
-                key={`c-${item.fileId}`}
-                type="button"
-                data-timeline-card
-                data-card-index={entry.cardIndex}
-                onClick={() => onSelectItem?.(item)}
-                className={cn(
-                  "snap-start shrink-0 rounded-lg border bg-background p-3 text-left hover:bg-muted/40",
-                  "transition-colors",
-                )}
-                style={{ width: `${CARD_WIDTH_PX}px` }}
-              >
-                <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-                  <span className="rounded-sm bg-muted px-1 py-0.5 font-mono">{item.sourceType}</span>
-                  <span>{formatDate(item.occurredAt)}</span>
-                </div>
-                <div className="mt-1.5 flex items-center gap-2">
-                  <span className="truncate text-sm font-medium">{item.fileName}</span>
-                  {item.mentionCount > 1 ? (
-                    <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
-                      ×{item.mentionCount}
-                    </span>
-                  ) : null}
-                </div>
-                {item.contextSnippet ? (
-                  <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{item.contextSnippet}</p>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
+      <div className="flex flex-col gap-3">
+        {groups.map((group) => (
+          <div key={group.month} className="flex flex-col">
+            <h4 className="mb-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+              {monthLabel(group.month)}
+            </h4>
+            <ul className="flex flex-col divide-y rounded-md border bg-background">
+              {group.items.map((item) => (
+                <li key={item.fileId}>
+                  <button
+                    type="button"
+                    onClick={() => onSelectItem?.(item)}
+                    className="flex w-full flex-col gap-1 px-3 py-2 text-left hover:bg-muted/40"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="shrink-0 rounded-sm bg-muted px-1 py-0.5 font-mono text-[9px] uppercase text-muted-foreground">
+                          {item.sourceType}
+                        </span>
+                        <span className="truncate text-sm font-medium">{item.fileName}</span>
+                        {item.mentionCount > 1 ? (
+                          <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
+                            ×{item.mentionCount}
+                          </span>
+                        ) : null}
+                      </div>
+                      <span className="shrink-0 whitespace-nowrap text-[10px] text-muted-foreground">
+                        {formatDate(item.occurredAt)}
+                      </span>
+                    </div>
+                    {item.contextSnippet ? (
+                      <p className="line-clamp-2 text-[11px] text-muted-foreground">{item.contextSnippet}</p>
+                    ) : null}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </div>
     </div>
   );

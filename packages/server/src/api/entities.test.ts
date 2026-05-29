@@ -1305,10 +1305,12 @@ describe("Entity drawer routes", () => {
       .execute();
   }
 
-  it("GET /api/entities/:id returns profile with deterministic WHAT row", async () => {
-    await seedEntity("e1", "Sarah Chen", "person", { role: "Engineer" });
+  it("GET /api/entities/:id returns profile with deterministic summary built from relationships + activity", async () => {
+    await seedEntity("e1", "Sarah Chen", "person", { role: "Engineer", email: "sarah@stripe.com" });
     await seedEntity("e2", "Stripe", "company");
+    await seedEntity("e3", "Acme", "company");
     await seedRelation("r1", "e1", "e2", "works_at", "EXTRACTED", 0.95);
+    await seedRelation("r2", "e1", "e3", "engaged_with", "EXTRACTED", 0.9);
     await seedFile("f1");
     await db
       .insertInto("entity_mentions")
@@ -1332,59 +1334,110 @@ describe("Entity drawer routes", () => {
         profile: {
           entityType: string;
           mentionCount: number;
-          aiBrief: { what: string; signal: string | null; soWhat: string | null };
+          summary: { identity: string; activity: string };
         };
       };
     };
     expect(body.entity.profile.entityType).toBe("person");
     expect(body.entity.profile.mentionCount).toBe(1);
-    expect(body.entity.profile.aiBrief.what).toContain("Person");
-    expect(body.entity.profile.aiBrief.what).toContain("Engineer");
-    expect(body.entity.profile.aiBrief.what).toContain("Stripe");
-    expect(body.entity.profile.aiBrief.signal).toBeNull();
+    expect(body.entity.profile.summary.identity).toContain("Person");
+    expect(body.entity.profile.summary.identity).toContain("Engineer");
+    expect(body.entity.profile.summary.identity).toContain("Stripe");
+    expect(body.entity.profile.summary.identity).toContain("sarah@stripe.com");
+    expect(body.entity.profile.summary.identity).toContain("Acme");
+    expect(body.entity.profile.summary.activity).toContain("1 file");
+    expect(body.entity.profile.summary.activity).toContain("1 mention");
   });
 
-  it("GET /api/entities/:id marks cached AI brief stale when facts changed", async () => {
-    await seedEntity("e1", "Sarah Chen", "person", { role: "Engineer" });
-    await seedEntity("e2", "Stripe", "company");
+  it("GET /api/entities/:id filters summary activity and collaborators by visible files", async () => {
+    await seedEntity("e1", "Sarah Chen", "person");
+    await seedEntity("bob", "Bob Restricted", "person");
+    await seedEntity("charlie", "Charlie Visible", "person");
+
+    const scopeId = "scope-summary-restricted";
     await db
-      .updateTable("entities")
-      .set({
-        ai_brief: JSON.stringify({
-          signal: "Old signal",
-          soWhat: "Old next step",
-          generatedAt: "2026-05-22T12:00:00.000Z",
-          inputHash: "old-input-hash",
-          stale: false,
-        }),
-      })
-      .where("id", "=", "e1")
-      .execute();
-    await seedRelation("r1", "e1", "e2", "works_at", "EXTRACTED", 0.95);
-    await seedFile("f1");
-    await db
-      .insertInto("entity_mentions")
+      .insertInto("connector_configs")
       .values({
-        id: "m1",
-        entity_id: "e1",
-        indexed_file_id: "f1",
-        chunk_index: 0,
-        context_snippet: "Sarah leads things",
-        confidence: "EXTRACTED",
-        source: "google_drive",
-        relation: "mentioned",
-        mentioned_at: new Date().toISOString(),
+        id: "cfg-summary-scope",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: scopeId,
+        connector_config_id: "cfg-summary-scope",
+        scope_type: "shared_drive",
+        provider_scope_id: "summary-sd",
+        label: "Summary Restricted",
       })
       .execute();
 
-    const res = await app.request("/api/entities/e1", { headers: { Cookie: adminCookie } });
+    await seedFile("f-public");
+    await seedFile("f-restricted", scopeId);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "m-sarah-public",
+          entity_id: "e1",
+          indexed_file_id: "f-public",
+          chunk_index: 0,
+          context_snippet: "Sarah and Charlie",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "m-charlie-public",
+          entity_id: "charlie",
+          indexed_file_id: "f-public",
+          chunk_index: 0,
+          context_snippet: "Sarah and Charlie",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "m-sarah-restricted",
+          entity_id: "e1",
+          indexed_file_id: "f-restricted",
+          chunk_index: 0,
+          context_snippet: "Sarah and Bob",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "m-bob-restricted",
+          entity_id: "bob",
+          indexed_file_id: "f-restricted",
+          chunk_index: 0,
+          context_snippet: "Sarah and Bob",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+
+    const res = await app.request("/api/entities/e1", { headers: { Cookie: memberCookie } });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      entity: { profile: { aiBrief: { signal: string | null; soWhat: string | null; stale: boolean } } };
+      entity: { profile: { summary: { activity: string } } };
     };
-    expect(body.entity.profile.aiBrief.signal).toBe("Old signal");
-    expect(body.entity.profile.aiBrief.soWhat).toBe("Old next step");
-    expect(body.entity.profile.aiBrief.stale).toBe(true);
+    expect(body.entity.profile.summary.activity).toContain("1 file");
+    expect(body.entity.profile.summary.activity).toContain("Charlie Visible");
+    expect(body.entity.profile.summary.activity).not.toContain("Bob Restricted");
   });
 
   it("GET /api/entities/:id/relations partitions outgoing/incoming and pins AMBIGUOUS first", async () => {
@@ -1621,30 +1674,5 @@ describe("Entity drawer routes", () => {
     expect(mayItems[0].mentionCount).toBe(2);
     expect(mayItems[0].mentionConfidence).toBe("EXTRACTED");
     expect(body.totalCount).toBe(2);
-  });
-
-  it("POST /api/entities/:id/ai-brief/refresh returns 503 when Gemini API key is not configured", async () => {
-    await seedEntity("e1", "Sarah", "person");
-    const res = await app.request("/api/entities/e1/ai-brief/refresh", {
-      method: "POST",
-      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ force: true }),
-    });
-    expect(res.status).toBe(503);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("GEMINI_NOT_CONFIGURED");
-  });
-
-  it("POST /api/entities/:id/ai-brief/refresh is gated by EXPERIMENTAL_FLAG", async () => {
-    const offConfig = createTestConfig({ EXPERIMENTAL_FLAG: false });
-    const offApp = createApp(db, offConfig, { logger });
-    await seedEntity("e1", "Sarah", "person");
-    const offCookie = await login(offApp);
-    const res = await offApp.request("/api/entities/e1/ai-brief/refresh", {
-      method: "POST",
-      headers: { Cookie: offCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ force: true }),
-    });
-    expect(res.status).toBe(404);
   });
 });

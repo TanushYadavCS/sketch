@@ -1,9 +1,11 @@
 /**
  * EntityDrawer contract:
- *  - renders sections in order: AI Brief (What), Identity, Relationships
- *  - pins AMBIGUOUS relationships into a "Needs review" group above the main list
- *  - stacked navigation: clicking a related entity pill pushes a new drawer level and
- *    shows a Back chip with the previous entity's name
+ *  - header carries identity flags (role/email/domains/aliases) inline, plus last-seen.
+ *  - Summary block lazy-loads the Gemini narrative; renders the WHAT line as a fallback
+ *    when no cached brief exists.
+ *  - Timeline and Relationships are tabs; Timeline is the default; switching surfaces
+ *    the Relationships pane with AMBIGUOUS pinned to the top.
+ *  - clicking a related entity pill pushes a new drawer level and shows a Back chip.
  */
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
 import { renderWithProviders } from "@/test/utils";
@@ -11,7 +13,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { EntityDrawer } from "./entity-drawer";
 
 const SARAH = {
@@ -19,8 +21,8 @@ const SARAH = {
   name: "Sarah Chen",
   sourceType: "person",
   subtype: null,
-  aliases: [],
-  metadata: { role: "Engineer" },
+  aliases: ["S. Chen"],
+  metadata: { role: "Engineer", email: "sarah@stripe.com" },
   status: "confirmed",
   hotness: 0,
   mentionCount: 5,
@@ -34,12 +36,9 @@ const SARAH = {
     firstSeenAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-05-01T00:00:00.000Z",
     domainsForCompany: [],
-    aiBrief: {
-      what: "Person · Engineer at Stripe · 5 mentions across 1 source · last seen 1 month ago",
-      signal: null,
-      soWhat: null,
-      generatedAt: null,
-      stale: false,
+    summary: {
+      identity: "Person · Engineer · works at Stripe (sarah@stripe.com). Engaged with Acme.",
+      activity: "Active in 5 files (5 mentions) across 3 days. Most-frequent collaborators: Ada Lovelace.",
     },
   },
 };
@@ -49,11 +48,16 @@ const STRIPE = {
   id: "e-stripe",
   name: "Stripe",
   sourceType: "company",
+  aliases: [],
   metadata: null,
   profile: {
     ...SARAH.profile,
     entityType: "company",
-    aiBrief: { ...SARAH.profile.aiBrief, what: "Company · stripe.com · 4 people · 5 mentions · last seen today" },
+    domainsForCompany: [{ domain: "stripe.com", confidence: 0.95, isPrimary: true }],
+    summary: {
+      identity: "Company · stripe.com.",
+      activity: "Active in 5 files (5 mentions) across 3 days.",
+    },
   },
 };
 
@@ -92,44 +96,16 @@ const relationsForSarah = {
 };
 
 const emptyTimeline = { groups: [], truncated: false, totalCount: 0 };
-const cachedBriefRefresh = {
-  what: SARAH.profile.aiBrief.what,
-  signal: "Cached signal sentence.",
-  soWhat: "Cached so-what sentence.",
-  generatedAt: "2026-05-22T12:00:00.000Z",
-  stale: false,
-};
 
 const handlers = [
   http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
   http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
   http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
-  http.get("/api/entities/e-sarah/relations/rel-2/evidence", () =>
-    HttpResponse.json({
-      rows: [
-        {
-          fileId: "file-1",
-          fileName: "Planning doc",
-          sourceType: "google_drive",
-          occurredAt: "2026-05-01T00:00:00.000Z",
-          chunkIndex: 0,
-          contextSnippet: "Sarah leads Project Atlas.",
-          sourceFactId: null,
-          note: null,
-        },
-      ],
-      visibleCount: 3,
-      totalCount: 3,
-      truncated: true,
-    }),
-  ),
   http.get("/api/entities/e-stripe/relations", () =>
     HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
   ),
   http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
   http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
-  http.post("/api/entities/e-sarah/ai-brief/refresh", () => HttpResponse.json(cachedBriefRefresh)),
-  http.post("/api/entities/e-stripe/ai-brief/refresh", () => HttpResponse.json(cachedBriefRefresh)),
 ];
 
 const server = setupServer(...handlers);
@@ -154,21 +130,44 @@ function OpenOnMount({ id }: { id: string }) {
 }
 
 describe("EntityDrawer", () => {
-  it("renders sections in order: What → Identity → Relationships, with AMBIGUOUS pinned", async () => {
+  it("renders header with identity chips and deterministic Summary block, Timeline as default tab", async () => {
     renderWithProviders(<DrawerHarness initialId="e-sarah" />);
 
-    await screen.findByText(/Person · Engineer at Stripe/);
+    await screen.findByRole("heading", { name: /Sarah Chen/ });
 
-    const sections = screen.getAllByRole("region", { hidden: true });
-    // Headings within the drawer:
-    expect(screen.getByRole("heading", { name: /Sarah Chen/ })).toBeInTheDocument();
-    expect(screen.getByText("Identity")).toBeInTheDocument();
-    expect(screen.getByText("Relationships")).toBeInTheDocument();
+    // Identity flags appear inline in the header.
+    expect(screen.getByText("Engineer")).toBeInTheDocument();
+    expect(screen.getByText("sarah@stripe.com")).toBeInTheDocument();
+    expect(screen.getByText(/Also: S\. Chen/)).toBeInTheDocument();
+
+    // Summary renders identity + activity sentences directly (no LLM, no shimmer).
+    expect(screen.getByText("Summary")).toBeInTheDocument();
+    expect(screen.getByText(/works at Stripe/)).toBeInTheDocument();
+    expect(screen.getByText(/Active in 5 files/)).toBeInTheDocument();
+
+    // Tabs visible; Timeline default.
+    expect(screen.getByRole("button", { name: /Timeline/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Relationships/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/No file mentions yet/i)).toBeInTheDocument());
+
+    // Removed surfaces.
+    expect(screen.queryByText("Identity")).not.toBeInTheDocument();
+    expect(screen.queryByText("Source IDs")).not.toBeInTheDocument();
+    expect(screen.queryByText("Signal")).not.toBeInTheDocument();
+    expect(screen.queryByText("So what")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Refresh summary/)).not.toBeInTheDocument();
+  });
+
+  it("switches to the Relationships tab and pins AMBIGUOUS to the top", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
+    await screen.findByRole("heading", { name: /Sarah Chen/ });
+
+    await user.click(screen.getByRole("button", { name: /Relationships/ }));
 
     const needsReview = await screen.findByText(/Needs review/i);
     expect(needsReview).toBeInTheDocument();
 
-    // The AMBIGUOUS row (works_at → Stripe) should appear before the EXTRACTED row in DOM order.
     const stripeRow = (await screen.findAllByText("Stripe"))[0];
     const atlasRow = await screen.findByText("Project Atlas");
     expect(stripeRow.compareDocumentPosition(atlasRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -178,9 +177,10 @@ describe("EntityDrawer", () => {
     const user = userEvent.setup();
     renderWithProviders(<DrawerHarness initialId="e-sarah" />);
 
-    await screen.findByText(/Person · Engineer at Stripe/);
+    await screen.findByRole("heading", { name: /Sarah Chen/ });
+    await user.click(screen.getByRole("button", { name: /Relationships/ }));
+
     const stripeButtons = await screen.findAllByText("Stripe");
-    // Click the related-entity pill (the clickable one inside the relationships row).
     const clickable = stripeButtons.find((el) => el.tagName === "BUTTON");
     if (!clickable) throw new Error("expected a clickable Stripe button");
     await user.click(clickable);
@@ -190,33 +190,10 @@ describe("EntityDrawer", () => {
     });
   });
 
-  it("surfaces when visible evidence rows are truncated", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
-
-    await screen.findByText(/Person · Engineer at Stripe/);
-    await user.click(await screen.findByText("leads"));
-
-    expect(await screen.findByText("+2 more visible evidence rows")).toBeInTheDocument();
-  });
-
-  it("AI brief lazy-loads Signal/SoWhat when cache is cold (fades shimmer into refresh response)", async () => {
-    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
-    // WHAT renders instantly from the deterministic server template.
-    await screen.findByText(/Person · Engineer at Stripe/);
-    // After the refresh roundtrip resolves, the cached SIGNAL row should appear.
-    await waitFor(() => {
-      expect(screen.getByText("Cached signal sentence.")).toBeInTheDocument();
-      expect(screen.getByText("Cached so-what sentence.")).toBeInTheDocument();
-    });
-  });
-
-  it("Timeline section renders empty state when no mentions exist", async () => {
-    renderWithProviders(<DrawerHarness initialId="e-sarah" />);
-    await screen.findByText(/Person · Engineer at Stripe/);
-    await waitFor(() => {
-      expect(screen.getByText("Timeline")).toBeInTheDocument();
-      expect(screen.getByText(/No file mentions yet/i)).toBeInTheDocument();
-    });
+  it("renders the company variant: primary domain chip in header, deterministic summary in body", async () => {
+    renderWithProviders(<DrawerHarness initialId="e-stripe" />);
+    await screen.findByRole("heading", { name: /Stripe/ });
+    expect(screen.getByText(/stripe\.com · primary/)).toBeInTheDocument();
+    expect(screen.getByText(/Company · stripe\.com\./)).toBeInTheDocument();
   });
 });

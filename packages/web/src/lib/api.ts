@@ -320,12 +320,9 @@ export interface EntityListItem {
 
 export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
 
-export interface EntityProfileAiBrief {
-  what: string;
-  signal: string | null;
-  soWhat: string | null;
-  generatedAt: string | null;
-  stale: boolean;
+export interface EntityProfileSummary {
+  identity: string;
+  activity: string;
 }
 
 export interface EntityProfile {
@@ -335,7 +332,7 @@ export interface EntityProfile {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
-  aiBrief: EntityProfileAiBrief;
+  summary: EntityProfileSummary;
 }
 
 export interface EntityDetail extends EntityListItem {
@@ -417,15 +414,6 @@ export interface EntityTimelineResponse {
   groups: EntityTimelineGroup[];
   truncated: boolean;
   totalCount: number;
-}
-
-export interface EntityAiBriefRefreshResponse {
-  what: string;
-  signal: string | null;
-  soWhat: string | null;
-  generatedAt: string | null;
-  stale: boolean;
-  error?: "generation_failed" | "rate_limited";
 }
 
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
@@ -1343,12 +1331,6 @@ export const api = {
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
-    },
-    refreshAiBrief(id: string, opts?: { force?: boolean }) {
-      return request<EntityAiBriefRefreshResponse>(`/api/entities/${id}/ai-brief/refresh`, {
-        method: "POST",
-        body: JSON.stringify({ force: opts?.force ?? false }),
-      });
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();
