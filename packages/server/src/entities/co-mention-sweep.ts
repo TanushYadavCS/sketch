@@ -64,12 +64,14 @@ async function queryCoMentionRows(
 ): Promise<CoMentionRow[]> {
   let query = db
     .selectFrom("entity_mentions as pm")
+    .innerJoin("indexed_files as f", "f.id", "pm.indexed_file_id")
     .innerJoin("entities as p", "p.id", "pm.entity_id")
     .innerJoin("entity_mentions as tm", "tm.indexed_file_id", "pm.indexed_file_id")
     .innerJoin("entities as t", "t.id", "tm.entity_id")
     .select(["pm.entity_id as personEntityId", "tm.entity_id as targetEntityId", "pm.indexed_file_id as indexedFileId"])
     .where("p.source_type", "=", "person")
     .where("t.source_type", "in", ["project", "product"])
+    .where("f.is_archived", "=", 0)
     .where("pm.confidence", "=", "EXTRACTED")
     .where("tm.confidence", "=", "EXTRACTED")
     .whereRef("pm.entity_id", "!=", "tm.entity_id");

@@ -99,6 +99,44 @@ describe("createSketchMcpServer", () => {
     expect(server.name).toBe("sketch");
     expect(server.instance).toBeDefined();
   });
+
+  it("does not expose TranscribeAudio when transcription is disabled", () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });
+    const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+    expect(tools.TranscribeAudio).toBeUndefined();
+  });
+
+  it("exposes TranscribeAudio when transcription is enabled", () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      transcriptionEnabled: true,
+    });
+    const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+    expect(tools.TranscribeAudio).toBeDefined();
+  });
+
+  it("TranscribeAudio validates workspace paths", async () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      transcriptionEnabled: true,
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (input: { file_path: string }) => Promise<{ content: { text: string }[] }> }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.TranscribeAudio.handler({ file_path: "/tmp/outside.ogg" });
+    expect(result.content[0].text).toContain("must be within");
+  });
 });
 
 describe("handleGetTeamDirectory", () => {
