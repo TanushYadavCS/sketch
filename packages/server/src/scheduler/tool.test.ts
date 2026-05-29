@@ -2,8 +2,8 @@
  * Tests for the handleManageScheduledTasks tool handler.
  *
  * Uses a minimal mock TaskScheduler to isolate tool logic from DB/croner dependencies.
- * Covers context scoping (DM vs channel), default session mode selection, chat mode
- * rejection for top-level channels, required field validation, and CRUD delegation.
+ * Covers context scoping (DM vs channel), fresh-only session mode validation,
+ * required field validation, and CRUD delegation.
  */
 import { describe, expect, it, vi } from "vitest";
 import { handleManageScheduledTasks } from "../agent/sketch-tools";
@@ -22,7 +22,7 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     scheduleType: "cron",
     scheduleValue: "0 9 * * 1-5",
     timezone: "UTC",
-    sessionMode: "chat",
+    sessionMode: "fresh",
     nextRunAt: null,
     lastRunAt: null,
     status: "active",
@@ -166,13 +166,13 @@ describe("handleManageScheduledTasks — add", () => {
     expect(result.content[0].text).toContain("Error:");
   });
 
-  it("defaults session_mode to 'chat' for DM context", async () => {
+  it("defaults session_mode to 'fresh' for DM context", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
       { scheduler, stepContentRepo, taskContext: dmContext },
     );
-    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "chat" }));
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
 
   it("defaults session_mode to 'fresh' for top-level channel context (no threadTs)", async () => {
@@ -184,13 +184,13 @@ describe("handleManageScheduledTasks — add", () => {
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
 
-  it("defaults session_mode to 'chat' for channel thread context", async () => {
+  it("defaults session_mode to 'fresh' for channel thread context", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
       { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
-    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "chat" }));
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
 
   it("defaults session_mode to 'fresh' for WhatsApp group", async () => {
@@ -260,25 +260,25 @@ describe("handleManageScheduledTasks — add", () => {
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ timezone: "America/Los_Angeles" }));
   });
 
-  it("rejects 'chat' session_mode for top-level channel (no threadTs)", async () => {
+  it("rejects non-fresh session modes", async () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
       { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", session_mode: "chat" },
       { scheduler, stepContentRepo, taskContext: channelContext },
     );
     expect(result.content[0].text).toContain("Error:");
-    expect(result.content[0].text).toContain("chat");
+    expect(result.content[0].text).toContain("only 'fresh'");
     expect(scheduler.addTask).not.toHaveBeenCalled();
   });
 
-  it("allows 'chat' session_mode for channel thread", async () => {
+  it("allows explicit 'fresh' session_mode for channel thread", async () => {
     const scheduler = makeMockScheduler();
     const result = await handleManageScheduledTasks(
-      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", session_mode: "chat" },
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1", session_mode: "fresh" },
       { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(result.content[0].text).not.toContain("Error:");
-    expect(scheduler.addTask).toHaveBeenCalled();
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ sessionMode: "fresh" }));
   });
 
   it("fills platform/contextType/deliveryTarget/createdBy from taskContext", async () => {
@@ -794,18 +794,24 @@ describe("handleManageScheduledTasks — run", () => {
     expect(result.content[0].text).toContain('"ok": true');
   });
 
-  it("queues same-conversation runs instead of awaiting the current queue", async () => {
+  it("awaits same-thread fresh runs because automation queues are isolated from chat queues", async () => {
+    const runResult = {
+      runId: "run-1",
+      status: "completed",
+      finalOutput: { ok: true },
+      stepOutputs: {},
+    };
     const scheduler = makeMockScheduler({
       getTaskById: vi.fn().mockResolvedValue(
         makeTask({
           contextType: "channel",
           deliveryTarget: "C456",
           threadTs: "1234567890.123456",
-          sessionMode: "chat",
+          sessionMode: "fresh",
           createdBy: "U123",
         }),
       ),
-      executeTaskById: vi.fn(),
+      executeTaskById: vi.fn().mockResolvedValue(runResult),
       enqueueTaskById: vi.fn().mockResolvedValue(undefined),
     });
 
@@ -819,9 +825,9 @@ describe("handleManageScheduledTasks — run", () => {
       },
     );
 
-    expect(scheduler.enqueueTaskById).toHaveBeenCalledWith("task-1");
-    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
-    expect(result.content[0].text).toContain("queued to run after this chat turn completes");
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.enqueueTaskById).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("Automation task-1 completed");
   });
 
   it("returns the latest run when a completed once task is run again", async () => {

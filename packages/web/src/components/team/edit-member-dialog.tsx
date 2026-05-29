@@ -66,16 +66,21 @@ const editMemberSchema = z.object({
 export function EditMemberDialog({
   user,
   users,
+  currentUserId,
+  canManageAuthRoles,
   onOpenChange,
   onSuccess,
 }: {
   user: User | null;
   users: User[];
+  currentUserId?: string;
+  canManageAuthRoles: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
 }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
+  const [authRole, setAuthRole] = useState<"admin" | "member">("member");
   const [email, setEmail] = useState("");
   const [phoneCountry, setPhoneCountry] = useState<PhoneCountryCode>(DEFAULT_PHONE_COUNTRY);
   const [phoneNationalNumber, setPhoneNationalNumber] = useState("");
@@ -88,6 +93,7 @@ export function EditMemberDialog({
   const [error, setError] = useState("");
 
   const isAgent = user?.type === "agent";
+  const canEditAuthRole = !!user && !isAgent && user.id !== currentUserId && canManageAuthRoles;
   const normalizedPhone = phoneNationalNumber.trim()
     ? normalizePhoneNumberToE164(phoneNationalNumber, phoneCountry)
     : null;
@@ -98,6 +104,7 @@ export function EditMemberDialog({
     if (user) {
       setName(user.name);
       setRole(user.role ?? "");
+      setAuthRole(user.auth_role);
       setEmail(user.email ?? "");
       const phoneParts = getPhoneNumberInputParts(user.whatsapp_number);
       setPhoneCountry(phoneParts.country);
@@ -124,6 +131,7 @@ export function EditMemberDialog({
           : {
               email: email.trim() || null,
               whatsappNumber: normalizedPhone,
+              ...(canEditAuthRole ? { authRole } : {}),
             }),
       }),
     onSuccess: (data) => {
@@ -185,6 +193,7 @@ export function EditMemberDialog({
     user &&
     (name.trim() !== user.name ||
       (role.trim() || null) !== (user.role ?? null) ||
+      (canEditAuthRole && authRole !== user.auth_role) ||
       currentReportsTo !== originalReportsTo ||
       (description.trim() || null) !== (user.description ?? null) ||
       allowedToolsDirty ||
@@ -242,6 +251,21 @@ export function EditMemberDialog({
               disabled={updateMutation.isPending}
             />
           </div>
+
+          {canEditAuthRole && (
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-auth-role">Access</Label>
+              <Select value={authRole} onValueChange={(value) => setAuthRole(value as "admin" | "member")}>
+                <SelectTrigger id="edit-auth-role">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="member">Member</SelectItem>
+                  <SelectItem value="admin">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           {isAgent ? (
             <div className="space-y-1.5">
