@@ -126,6 +126,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     );
     const enrichedParams = {
       ...params,
+      loadTranscriptionSettings: params.loadTranscriptionSettings ?? (() => settingsRepo.get()),
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
