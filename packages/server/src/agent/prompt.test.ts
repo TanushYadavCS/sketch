@@ -163,14 +163,14 @@ describe("buildSystemContext", () => {
       );
     });
 
-    it("does not mention AnalyzeImage when vision analysis is unavailable", () => {
-      expect(buildSystemContext({ platform: "slack" })).not.toContain("AnalyzeImage");
+    it("does not mention VisionAnalysis when vision analysis is unavailable", () => {
+      expect(buildSystemContext({ platform: "slack" })).not.toContain("VisionAnalysis");
     });
 
-    it("mentions AnalyzeImage when vision analysis is available", () => {
+    it("mentions VisionAnalysis when vision analysis is available", () => {
       const result = buildSystemContext({ platform: "slack", visionAnalysisEnabled: true });
-      expect(result).toContain("AnalyzeImage");
-      expect(result).toContain("image attachment path");
+      expect(result).toContain("VisionAnalysis");
+      expect(result).toContain("Image and GIF files");
     });
   });
 

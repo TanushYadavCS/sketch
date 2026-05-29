@@ -11,19 +11,19 @@ const fallbackLogger = {
   warn: () => {},
 } as unknown as Logger;
 
-export interface AnalyzeImageToolDeps {
+export interface VisionAnalysisToolDeps {
   absWorkspace: string;
   config?: VisionConfig | null;
   logger?: Logger;
 }
 
-export function createAnalyzeImageTool(deps: AnalyzeImageToolDeps) {
+export function createVisionAnalysisTool(deps: VisionAnalysisToolDeps) {
   return tool(
-    "AnalyzeImage",
-    "Analyze an image attachment from the workspace using the configured vision model. Use this when image content is relevant and native image understanding is unavailable or insufficient.",
+    "VisionAnalysis",
+    "Analyze an image or GIF attachment from the workspace using the configured vision model. Use this when visual content is relevant and native image understanding is unavailable or insufficient.",
     {
-      file_path: z.string().describe("Absolute path to the image file within your workspace"),
-      question: z.string().describe("The specific visual question to answer about the image"),
+      file_path: z.string().describe("Absolute path to the image or GIF file within your workspace"),
+      question: z.string().describe("The specific visual question to answer about the file"),
     },
     async ({ file_path, question }) => {
       const pathError = validateWorkspaceImagePath(file_path, deps.absWorkspace);
@@ -43,7 +43,7 @@ export function createAnalyzeImageTool(deps: AnalyzeImageToolDeps) {
         });
         return { content: [{ type: "text" as const, text }] };
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Image analysis failed.";
+        const message = err instanceof Error ? err.message : "Vision analysis failed.";
         return { content: [{ type: "text" as const, text: `Error: ${message}` }] };
       }
     },

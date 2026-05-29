@@ -138,14 +138,14 @@ describe("createSketchMcpServer", () => {
     expect(result.content[0].text).toContain("must be within");
   });
 
-  it("does not expose AnalyzeImage when vision analysis is disabled", () => {
+  it("does not expose VisionAnalysis when vision analysis is disabled", () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
-    expect(tools.AnalyzeImage).toBeUndefined();
+    expect(tools.VisionAnalysis).toBeUndefined();
   });
 
-  it("exposes AnalyzeImage when vision analysis is enabled", () => {
+  it("exposes VisionAnalysis when vision analysis is enabled", () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({
       uploadCollector: collector,
@@ -154,10 +154,10 @@ describe("createSketchMcpServer", () => {
       visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
     });
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
-    expect(tools.AnalyzeImage).toBeDefined();
+    expect(tools.VisionAnalysis).toBeDefined();
   });
 
-  it("AnalyzeImage validates workspace paths", async () => {
+  it("VisionAnalysis validates workspace paths", async () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({
       uploadCollector: collector,
@@ -174,7 +174,7 @@ describe("createSketchMcpServer", () => {
       }
     )._registeredTools;
 
-    const result = await tools.AnalyzeImage.handler({
+    const result = await tools.VisionAnalysis.handler({
       file_path: "/tmp/outside.png",
       question: "What is in this image?",
     });
