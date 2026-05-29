@@ -134,7 +134,7 @@ function FileDetailContent({
             ) : access.scope === "restricted" ? (
               <>
                 <LockSimpleIcon size={10} weight="fill" />
-                {access.members.length + access.manualShares.length} users
+                {(access.members?.length ?? 0) + (access.manualShares?.length ?? 0)} users
               </>
             ) : (
               <>
@@ -218,7 +218,9 @@ function FileDetailContent({
         </div>
       )}
 
-      {access && (access.members.length > 0 || access.manualShares.length > 0) && <AccessSection access={access} />}
+      {access && ((access.members?.length ?? 0) > 0 || (access.manualShares?.length ?? 0) > 0) && (
+        <AccessSection access={access} />
+      )}
 
       {file.content && <ContentPreview content={file.content} />}
     </div>
@@ -383,7 +385,8 @@ function memberInitial(member: { userName: string | null; email: string }) {
 
 function AccessSection({ access }: { access: FileAccess }) {
   const [expanded, setExpanded] = useState(false);
-  const members = access.members;
+  const members = access.members ?? [];
+  const manualShares = access.manualShares ?? [];
   const mappedCount = members.filter((m) => m.mapped).length;
   const showExpand = members.length > COLLAPSED_MEMBER_LIMIT;
   const visibleMembers = expanded ? members : members.slice(0, COLLAPSED_MEMBER_LIMIT);
@@ -468,13 +471,13 @@ function AccessSection({ access }: { access: FileAccess }) {
         </div>
       )}
 
-      {access.manualShares.length > 0 && (
+      {manualShares.length > 0 && (
         <div className="mt-2">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
-            Manually shared ({access.manualShares.length})
+            Manually shared ({manualShares.length})
           </p>
           <div className="mt-1 flex flex-wrap gap-1">
-            {access.manualShares.map((share) => (
+            {manualShares.map((share) => (
               <Badge key={share.email} variant="outline" className="text-[10px]">
                 {share.email}
               </Badge>

@@ -181,6 +181,10 @@ describe("searchFiles — FTS5 query sanitization", () => {
     expect(results[0].fileName).toBe("planning.txt");
   });
 
+  it("returns no results when userEmails is []", async () => {
+    await expect(searchFiles(db, "planning", { userEmails: [] })).resolves.toEqual([]);
+  });
+
   it("search results include providerFileId (needed for integration handoff)", async () => {
     const results = await searchFiles(db, "planning");
     expect(results.length).toBeGreaterThan(0);
@@ -445,6 +449,32 @@ describe("search — recency browse applies RBAC before limit", () => {
     });
 
     expect(results.map((r) => r.id).sort()).toEqual(["manual-shared", "org-shared"]);
+  });
+
+  it("returns no recency results when userEmails is []", async () => {
+    await insertMeeting("accessible", "2026-04-30T07:00:00.000Z");
+
+    const results = await search(db, "", {
+      kindRules: KIND_TO_RULES.meeting,
+      sortBy: "recency",
+      limit: 1,
+      userEmails: [],
+    });
+
+    expect(results).toEqual([]);
+  });
+
+  it("returns no hybrid results when userEmails is []", async () => {
+    await insertMeeting("planning-meeting", "2026-04-30T07:00:00.000Z");
+    await db
+      .updateTable("indexed_files")
+      .set({ content: "quarterly planning details" })
+      .where("id", "=", "planning-meeting")
+      .execute();
+
+    const results = await search(db, "planning", { userEmails: [] });
+
+    expect(results).toEqual([]);
   });
 });
 

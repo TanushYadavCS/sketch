@@ -168,7 +168,7 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    await settings.update({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles ? 1 : 0 });
+    await settings.update({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles });
     return c.json({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles });
   });
 

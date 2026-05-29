@@ -333,6 +333,14 @@ export interface EntitiesTable {
   created_at: string;
   updated_at: string;
   ai_brief: string | null;
+  share_with_everyone: Generated<number>;
+}
+
+export interface EntityShareEmailsTable {
+  entity_id: string;
+  email: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface EntitySourceRefsTable {
@@ -541,6 +549,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;

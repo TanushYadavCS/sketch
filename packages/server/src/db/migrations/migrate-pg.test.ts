@@ -40,7 +40,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(66);
+    expect(rows.rows).toHaveLength(67);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -100,6 +100,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[63]).toBe("068-entities-ai-brief");
     expect(names[64]).toBe("069-admin-can-read-all-files");
     expect(names[65]).toBe("070-file-shares");
+    expect(names[66]).toBe("071-entity-shares");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -108,7 +109,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(66);
+    expect(rows.rows).toHaveLength(67);
   });
 
   it("creates the users table", async () => {

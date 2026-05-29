@@ -92,6 +92,7 @@ function fileAccessFilterSql(emailList: string[]) {
  */
 export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOptions): Promise<SearchResult[]> {
   const limit = opts?.limit ?? 10;
+  if (opts?.userEmails !== undefined && opts.userEmails.length === 0) return [];
 
   const emailList = opts?.userEmails ?? [];
   const userFilter = emailList.length > 0 ? sql`AND ${fileAccessFilterSql(emailList)}` : sql``;
@@ -256,6 +257,28 @@ export async function getFileContent(
           if (shareMatch.length > 0) allowed = true;
         }
 
+        // Tier 5: entity-share propagation — a shared entity mentioned in
+        // this file grants read access to the file (read-time, no file_access
+        // rows written).
+        if (!allowed) {
+          const entityMatch = await db
+            .selectFrom("entity_mentions")
+            .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+            .leftJoin("entity_share_emails", (join) =>
+              join
+                .onRef("entity_share_emails.entity_id", "=", "entities.id")
+                .on("entity_share_emails.email", "in", userEmails),
+            )
+            .select("entities.id")
+            .where("entity_mentions.indexed_file_id", "=", fileId)
+            .where((eb) =>
+              eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
+            )
+            .limit(1)
+            .execute();
+          if (entityMatch.length > 0) allowed = true;
+        }
+
         if (!allowed) return null;
       }
     }
@@ -300,7 +323,7 @@ export async function filterAccessibleFileIds(
     .where("id", "in", fileIds)
     .execute();
 
-  const [fileAccessRows, scopeMemberRows, shareRows] = await Promise.all([
+  const [fileAccessRows, scopeMemberRows, shareRows, entityPropRows] = await Promise.all([
     db.selectFrom("file_access").select(["indexed_file_id", "email"]).where("indexed_file_id", "in", fileIds).execute(),
     (async () => {
       const scopeIds = files.map((f) => f.access_scope_id).filter((s): s is string => !!s);
@@ -317,6 +340,22 @@ export async function filterAccessibleFileIds(
       .select(["indexed_file_id", "email"])
       .where("indexed_file_id", "in", fileIds)
       .where("email", "in", userEmails)
+      .execute(),
+    // Entity-share propagation: a file is accessible if it mentions any entity
+    // that is shared with the viewer (or share_with_everyone). Read-time only.
+    db
+      .selectFrom("entity_mentions")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .leftJoin("entity_share_emails", (join) =>
+        join
+          .onRef("entity_share_emails.entity_id", "=", "entities.id")
+          .on("entity_share_emails.email", "in", userEmails),
+      )
+      .select(["entity_mentions.indexed_file_id"])
+      .where("entity_mentions.indexed_file_id", "in", fileIds)
+      .where((eb) =>
+        eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
+      )
       .execute(),
   ]);
 
@@ -335,6 +374,10 @@ export async function filterAccessibleFileIds(
   const manualSharesByFile = new Set<string>();
   for (const row of shareRows) {
     manualSharesByFile.add(row.indexed_file_id);
+  }
+  const entityPropByFile = new Set<string>();
+  for (const row of entityPropRows) {
+    entityPropByFile.add(row.indexed_file_id);
   }
 
   const emailSet = new Set(userEmails);
@@ -375,6 +418,11 @@ export async function filterAccessibleFileIds(
     }
 
     if (manualSharesByFile.has(file.id)) {
+      allowed.add(file.id);
+      continue;
+    }
+
+    if (entityPropByFile.has(file.id)) {
       allowed.add(file.id);
     }
   }
@@ -605,6 +653,7 @@ export async function hybridSearch(
   opts?: HybridSearchOptions,
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
+  if (opts?.userEmails !== undefined && opts.userEmails.length === 0) return [];
   const ftsResults = new Map<string, { rank: number; snippet: string | null }>();
   const vecResults = new Map<string, { rank: number; similarity: number; snippet: string | null }>();
 
@@ -1101,6 +1150,7 @@ async function browseLatest(
 ): Promise<HybridSearchResult[]> {
   // Caller is responsible for the empty-fileIds short-circuit; selectFrom().where("id", "in", [])
   // emits invalid `IN ()` SQL on SQLite.
+  if (opts.userEmails !== undefined && opts.userEmails.length === 0) return [];
   let q = db
     .selectFrom("indexed_files")
     .select([

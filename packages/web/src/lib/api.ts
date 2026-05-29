@@ -335,8 +335,20 @@ export interface EntityProfile {
   summary: EntityProfileSummary;
 }
 
+export interface EntityManualShare {
+  email: string;
+  grantedAt: string;
+}
+
 export interface EntityDetail extends EntityListItem {
   profile: EntityProfile;
+  shareWithEveryone: boolean;
+  manualShares: EntityManualShare[];
+}
+
+export interface EntitySharesResponse {
+  shares: EntityManualShare[];
+  shareWithEveryone: boolean;
 }
 
 export interface EntitySourceRef {
@@ -1377,6 +1389,20 @@ export const api = {
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    listShares(id: string) {
+      return request<EntitySharesResponse>(`/api/entities/${id}/shares`);
+    },
+    updateShares(id: string, data: { emails: string[]; shareWithEveryone?: boolean }) {
+      return request<EntitySharesResponse>(`/api/entities/${id}/shares`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
+    revokeShare(id: string, email: string) {
+      return request<{ success: boolean }>(`/api/entities/${id}/shares/${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();

@@ -40,7 +40,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(66);
+    expect(rows.rows).toHaveLength(67);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -103,6 +103,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[63]).toBe("068-entities-ai-brief");
     expect(names[64]).toBe("069-admin-can-read-all-files");
     expect(names[65]).toBe("070-file-shares");
+    expect(names[66]).toBe("071-entity-shares");
   });
 
   it("creates the users table", async () => {
@@ -224,7 +225,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(66);
+    expect(rows.rows).toHaveLength(67);
   });
 });
 
@@ -256,6 +257,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(66);
+    expect(rows.rows).toHaveLength(67);
   });
 });

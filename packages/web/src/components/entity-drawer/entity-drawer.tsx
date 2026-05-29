@@ -12,11 +12,20 @@
  * Driven by EntityUiProvider's stack. Each level renders independently —
  * pushing a related entity pushes a new id onto the stack; Back chip pops.
  */
+import { EntityShareDialog } from "@/components/entity-share-dialog";
 import type { EntityDetail, EntityRelationEvidenceRow, EntityRelationView, EntityRelationsResponse } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
-import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, WarningIcon } from "@phosphor-icons/react";
+import {
+  ArrowLeftIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  GlobeIcon,
+  ShareNetworkIcon,
+  WarningIcon,
+} from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
+import { Button } from "@sketch/ui/components/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
@@ -150,6 +159,16 @@ interface DrawerHeaderProps {
 
 function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: DrawerHeaderProps) {
   const lastSeen = entity.profile.lastSeenAt;
+  // EntityDrawer mounts at root (outside the dashboard route context), so the
+  // route-context auth hook is not available here — query the session directly.
+  const sessionQuery = useQuery({
+    queryKey: ["auth-session"],
+    queryFn: () => api.auth.session(),
+    staleTime: 60_000,
+  });
+  const isAdmin = sessionQuery.data?.role === "admin";
+  const [shareOpen, setShareOpen] = useState(false);
+
   return (
     <div
       className="sticky top-0 z-10 border-b bg-background px-6 pb-4 pt-5"
@@ -170,11 +189,30 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
             <h2 className="min-w-0 flex-1 truncate font-serif text-[20px] leading-tight">{entity.name}</h2>
-            {lastSeen ? (
-              <span className="shrink-0 whitespace-nowrap font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                Last seen {formatRelative(lastSeen)}
-              </span>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-2">
+              {entity.shareWithEveryone ? (
+                <Badge variant="outline" className="gap-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <GlobeIcon size={10} />
+                  Anyone in org
+                </Badge>
+              ) : null}
+              {lastSeen ? (
+                <span className="whitespace-nowrap font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Last seen {formatRelative(lastSeen)}
+                </span>
+              ) : null}
+              {isAdmin ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1 text-[11px]"
+                  onClick={() => setShareOpen(true)}
+                >
+                  <ShareNetworkIcon size={12} />
+                  Share
+                </Button>
+              ) : null}
+            </div>
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Badge variant="outline" className="text-[10px] uppercase tracking-wider">
@@ -186,9 +224,17 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
                 {entity.status}
               </Badge>
             ) : null}
+            {(entity.manualShares?.length ?? 0) > 0 ? (
+              <Badge variant="secondary" className="text-[10px]">
+                Shared with {entity.manualShares?.length ?? 0}
+              </Badge>
+            ) : null}
           </div>
         </div>
       </div>
+      {isAdmin ? (
+        <EntityShareDialog entityId={entity.id} entityName={entity.name} open={shareOpen} onOpenChange={setShareOpen} />
+      ) : null}
     </div>
   );
 }
