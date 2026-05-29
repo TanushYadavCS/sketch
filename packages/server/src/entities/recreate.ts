@@ -6,6 +6,7 @@ import { sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
+import { sweepCoMentionContributesTo } from "./co-mention-sweep";
 import { type MaterializeFactsSummary, type MaterializeProgress, materializeUnmaterializedFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
 
@@ -285,6 +286,7 @@ export interface RecreateDeps {
    * Production callers should pass `config.LLM_PROMOTION_THRESHOLD`.
    */
   llmPromotionThreshold?: number;
+  coMentionContributesToThreshold?: number;
   /**
    * Restrict the materialize replay to a subset of fact types. Used by
    * category reset+rebuild to avoid replaying unrelated pending facts.
@@ -327,6 +329,10 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
     // calling the same helper so recreate doesn't drift.
     await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
     await fixupPreservedEntityDomainReferences(db, logger.child({ component: "recreate-domain-fixup" }));
+    await sweepCoMentionContributesTo(db, logger.child({ component: "recreate-co-mention-sweep" }), {
+      scope: { kind: "full" },
+      threshold: deps.coMentionContributesToThreshold,
+    });
 
     if (deps.skipEnrichment) {
       return {
