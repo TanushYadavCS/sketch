@@ -4,7 +4,12 @@ import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { buildMaterializeDeps, materializeFromFact, replaySourceFacts } from "./materialize";
+import {
+  buildMaterializeDeps,
+  materializeFromFact,
+  materializeUnmaterializedFacts,
+  replaySourceFacts,
+} from "./materialize";
 import { recreateEntityGraph } from "./recreate";
 
 const ATTENDED_FILE_ID = "file-1";
@@ -333,6 +338,48 @@ describe("replaySourceFacts", () => {
     ).resolves.toHaveLength(0);
     await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(1);
   });
+
+  it("runs a follow-up materialization pass for concurrent callers", async () => {
+    await db.deleteFrom("indexed_file_facts").execute();
+    const repo = createIndexedFileFactRepository(db);
+    for (let i = 0; i < 1000; i++) {
+      await repo.upsertFact({
+        source: "manual",
+        factType: "person_seed",
+        relation: "seeded",
+        subjectName: `Queued Person ${i}`,
+        subjectEmail: `queued-${i}@example.com`,
+        subjectSource: "manual",
+        subjectSourceId: `queued-${i}`,
+        raw: { subtype: "external" },
+      });
+    }
+
+    const first = materializeUnmaterializedFacts(db, createTestLogger());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await repo.upsertFact({
+      source: "manual",
+      factType: "person_seed",
+      relation: "seeded",
+      subjectName: "Late Person",
+      subjectEmail: "late@example.com",
+      subjectSource: "manual",
+      subjectSourceId: "late",
+      raw: { subtype: "external" },
+    });
+    const second = materializeUnmaterializedFacts(db, createTestLogger());
+
+    await first;
+    const followUp = await second;
+
+    expect(followUp.factsRead).toBeGreaterThanOrEqual(1);
+    const late = await db
+      .selectFrom("indexed_file_facts")
+      .select("materialized_at")
+      .where("subject_source_id", "=", "late")
+      .executeTakeFirstOrThrow();
+    expect(late.materialized_at).not.toBeNull();
+  });
 });
 
 describe("recreateEntityGraph", () => {
@@ -412,7 +459,95 @@ describe("recreateEntityGraph", () => {
     expect(sourceRef).toBeTruthy();
   });
 
-  it("does not pass downloadImage into enrichment (no provider downloads)", async () => {
+  it("round-trips author facts through recreate", async () => {
+    const now = new Date().toISOString();
+    const configs = [
+      { id: "connector-clickup-author", connectorType: "clickup", source: "clickup" },
+      { id: "connector-notion-author", connectorType: "notion", source: "notion" },
+      { id: "connector-gdrive-author", connectorType: "google_drive", source: "google_drive" },
+    ];
+    await db
+      .insertInto("connector_configs")
+      .values(
+        configs.map((config) => ({
+          id: config.id,
+          connector_type: config.connectorType,
+          auth_type: config.connectorType === "google_drive" ? "oauth" : "api_key",
+          credentials: "{}",
+          created_by: TEST_USER_ID,
+        })),
+      )
+      .execute();
+
+    const factRepo = createIndexedFileFactRepository(db);
+    for (const config of configs) {
+      const fileId = `file-${config.source}-author`;
+      const providerFileId = `provider-${config.source}-author`;
+      const author = {
+        name: `${config.source} Author`,
+        email: `${config.source.replace("_", "-")}@example.com`,
+        sourceId: `user:${config.source}`,
+      };
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: fileId,
+          connector_config_id: config.id,
+          provider_file_id: providerFileId,
+          file_name: `${config.source} authored file`,
+          file_type: "document",
+          content_category: "document",
+          content: "content",
+          source: config.source,
+          content_hash: `hash-${config.source}`,
+          is_archived: 0,
+          synced_at: now,
+        })
+        .execute();
+      await factRepo.upsertFact({
+        indexedFileId: fileId,
+        connectorConfigId: config.id,
+        createdByUserId: TEST_USER_ID,
+        source: config.source,
+        factType: "author",
+        relation: "authored",
+        subjectName: author.name,
+        subjectEmail: author.email,
+        subjectSource: config.source,
+        subjectSourceId: author.sourceId,
+        contextSnippet: `Authored ${providerFileId}`,
+        raw: { providerFileId, author },
+      });
+    }
+
+    await recreateEntityGraph({
+      db,
+      logger: createTestLogger(),
+      triggeredByUserId: TEST_USER_ID,
+      maxIterations: 2,
+    });
+
+    const authored = await db
+      .selectFrom("entity_mentions")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .select([
+        "entities.name as name",
+        "entity_mentions.confidence as confidence",
+        "entity_mentions.source as source",
+        "entity_mentions.relation as relation",
+      ])
+      .where("entity_mentions.relation", "=", "authored")
+      .orderBy("entity_mentions.source", "asc")
+      .execute();
+
+    expect(authored).toEqual([
+      { name: "clickup Author", confidence: "EXTRACTED", source: "clickup_author", relation: "authored" },
+      { name: "google_drive Author", confidence: "EXTRACTED", source: "google_drive_author", relation: "authored" },
+      { name: "notion Author", confidence: "EXTRACTED", source: "notion_author", relation: "authored" },
+    ]);
+  });
+
+  it("does not run provider download enrichment during recreate", async () => {
     // We can't directly assert on the runEnrichment call, but we can assert
     // that the recreate path never imports a download helper — runEnrichment's
     // image branch hits the `if (!downloadImage)` short-circuit, marking image

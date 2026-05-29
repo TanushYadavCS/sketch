@@ -15,6 +15,11 @@ export interface ReplayFactsSummary {
   skipped: number;
 }
 
+export interface MaterializeFactsSummary extends ReplayFactsSummary {
+  materialized: number;
+  deferred: number;
+}
+
 type EntityRow = Selectable<EntitiesTable>;
 export type IndexedFileFactRow = Selectable<IndexedFileFactsTable>;
 
@@ -32,7 +37,7 @@ export interface MaterializeDeps {
   lookup: EntityLookup;
   index: LookupIndex;
   readEmail: (entity: Entity) => string | null;
-  resolveTriggeredBy: (indexedFileId: string | null) => string | null;
+  resolveOwner: (fact: IndexedFileFactRow) => string | null;
 }
 
 export type MaterializeResult =
@@ -171,7 +176,9 @@ export async function buildMaterializeDeps(db: Kysely<DB>): Promise<MaterializeD
     lookup,
     index,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
-    resolveTriggeredBy: (indexedFileId: string | null) => {
+    resolveOwner: (fact: IndexedFileFactRow) => {
+      if (fact.created_by_user_id) return fact.created_by_user_id;
+      const indexedFileId = fact.indexed_file_id;
       if (!indexedFileId) return null;
       if (indexedFileId) {
         const cfg = fileToConnector.get(indexedFileId);
@@ -233,7 +240,7 @@ export async function replaySourceFacts(db: Kysely<DB>, logger: Logger): Promise
 
   const deps = await buildMaterializeDeps(db);
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
-  const facts = (await db.selectFrom("indexed_file_facts").selectAll().execute())
+  const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
     .filter((f) => orderRank.has(f.fact_type))
     .sort((a, b) => (orderRank.get(a.fact_type) ?? 0) - (orderRank.get(b.fact_type) ?? 0));
 
@@ -251,6 +258,86 @@ export async function replaySourceFacts(db: Kysely<DB>, logger: Logger): Promise
 
   logger.info({ summary }, "Source-fact replay complete");
   return summary;
+}
+
+let materializeQueue: Promise<void> = Promise.resolve();
+
+export async function materializeUnmaterializedFacts(db: Kysely<DB>, logger: Logger): Promise<MaterializeFactsSummary> {
+  const run = materializeQueue.then(() => materializeUnmaterializedFactsInner(db, logger));
+  materializeQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function materializeUnmaterializedFactsInner(db: Kysely<DB>, logger: Logger): Promise<MaterializeFactsSummary> {
+  const summary: MaterializeFactsSummary = {
+    factsRead: 0,
+    entitiesCreated: 0,
+    entitiesLinked: 0,
+    queued: 0,
+    mentionsWritten: 0,
+    skipped: 0,
+    materialized: 0,
+    deferred: 0,
+  };
+
+  const deps = await buildMaterializeDeps(db);
+  const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
+  const facts = (
+    await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("deleted_at", "is", null)
+      .where("materialized_at", "is", null)
+      .execute()
+  ).sort(
+    (a, b) =>
+      (orderRank.get(a.fact_type) ?? Number.MAX_SAFE_INTEGER) - (orderRank.get(b.fact_type) ?? Number.MAX_SAFE_INTEGER),
+  );
+
+  summary.factsRead = facts.length;
+
+  for (const fact of facts) {
+    try {
+      const result = await materializeFromFact(deps, fact);
+      accumulate(summary, result);
+      if (shouldMarkMaterialized(result)) {
+        await db
+          .updateTable("indexed_file_facts")
+          .set({ materialized_at: new Date().toISOString() })
+          .where("id", "=", fact.id)
+          .execute();
+        summary.materialized++;
+      } else {
+        summary.deferred++;
+      }
+    } catch (err) {
+      logger.warn({ err, factId: fact.id, factType: fact.fact_type }, "Materialization failed for fact");
+      summary.skipped++;
+      summary.deferred++;
+    }
+  }
+
+  logger.info({ summary }, "Source-fact materialization complete");
+  return summary;
+}
+
+function shouldMarkMaterialized(result: MaterializeResult): boolean {
+  if (
+    result.kind === "entity_created" ||
+    result.kind === "entity_linked" ||
+    result.kind === "queued" ||
+    result.kind === "structural"
+  ) {
+    return true;
+  }
+  if (result.kind === "skipped_missing_owner") return false;
+  if (result.kind === "skipped") {
+    return result.reason !== "missing_parent_seed" && result.reason !== "unknown_fact_type";
+  }
+  return false;
 }
 
 async function materializeStructuralSeed(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
@@ -326,7 +413,7 @@ async function materializePersonFact(deps: MaterializeDeps, fact: IndexedFileFac
     const source = fact.subject_source ?? fact.source;
     const sourceId =
       fact.subject_source_id ?? `${fact.indexed_file_id ?? "no-file"}:${fact.subject_email ?? fact.subject_name}`;
-    const triggeredByUserId = deps.resolveTriggeredBy(fact.indexed_file_id);
+    const triggeredByUserId = deps.resolveOwner(fact);
     if (!triggeredByUserId) {
       return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
     }

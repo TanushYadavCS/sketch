@@ -640,6 +640,72 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
     const bob = persons.find((p) => p.name === "Bob Chen");
     expect(bob?.metadata && JSON.parse(bob.metadata).email).toBe("rchen@acme.com");
+
+    const facts = await db.selectFrom("indexed_file_facts").selectAll().execute();
+    expect(facts).toHaveLength(2);
+    expect(facts.every((fact) => fact.created_by_user_id === "admin")).toBe(true);
+    expect(facts.every((fact) => fact.connector_config_id === "connector-attendees-test")).toBe(true);
+    expect(facts.every((fact) => fact.materialized_at !== null)).toBe(true);
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .orderBy("source", "asc")
+      .execute();
+    expect(mentions).toEqual([
+      { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
+      { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
+    ]);
+  });
+
+  it("writes author facts and materializes authored mentions", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-author-test",
+        connector_type: "clickup",
+        auth_type: "api_key",
+        credentials: JSON.stringify({ type: "api_key", api_key: "test" }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "task-author-1",
+        providerUrl: null,
+        fileName: "Author task",
+        fileType: "task",
+        contentCategory: "document" as const,
+        content: "Task body",
+        sourcePath: null,
+        contentHash: "hash-author",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        authorEmail: "ada@example.com",
+        authorName: "Ada Lovelace",
+        authorSourceId: "user:ada",
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const result = await runConnectorSync(db, "connector-author-test", logger);
+    expect(result.itemsProcessed).toBe(1);
+
+    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    expect(fact.fact_type).toBe("author");
+    expect(fact.relation).toBe("authored");
+    expect(fact.subject_email).toBe("ada@example.com");
+    expect(fact.subject_source_id).toBe("user:ada");
+    expect(fact.materialized_at).not.toBeNull();
+
+    const mention = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .executeTakeFirstOrThrow();
+    expect(mention).toEqual({ confidence: "EXTRACTED", source: "clickup_author", relation: "authored" });
   });
 });
 

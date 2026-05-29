@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData, matchesAsWord, runEnrichment } from "./enrichment";
@@ -109,6 +110,50 @@ describe("clearEnrichmentData — batch DELETE via subquery", () => {
     const fileId = randomUUID();
     await seedFile(db, fileId, "content");
     await expect(clearEnrichmentData(db, fileId)).resolves.toBeUndefined();
+  });
+
+  it("preserves EXTRACTED mentions and removes content-derived mentions", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "content");
+    const entityRepo = createEntityRepository(db);
+    const extractedEntity = await entityRepo.upsertPersonEntity({
+      name: "Extracted Person",
+      email: "extracted@example.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "meeting-1:extracted@example.com",
+    });
+    const inferredEntity = await entityRepo.upsertEntity({
+      name: "Inferred Company",
+      sourceType: "company",
+      status: "confirmed",
+    });
+
+    await entityRepo.createMention({
+      entityId: extractedEntity.id,
+      indexedFileId: fileId,
+      confidence: "EXTRACTED",
+      source: "fireflies_attendee",
+      relation: "attended",
+    });
+    await entityRepo.createMention({
+      entityId: inferredEntity.id,
+      indexedFileId: fileId,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+
+    await clearEnrichmentData(db, fileId);
+
+    const mentions = await db.selectFrom("entity_mentions").selectAll().where("indexed_file_id", "=", fileId).execute();
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0]).toMatchObject({
+      entity_id: extractedEntity.id,
+      confidence: "EXTRACTED",
+      source: "fireflies_attendee",
+      relation: "attended",
+    });
   });
 });
 

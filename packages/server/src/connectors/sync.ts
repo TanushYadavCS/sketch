@@ -5,16 +5,16 @@
  * content hashing for change detection, summary generation (placeholder),
  * and cursor management.
  */
+import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
-import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { type Entity, type EntityLookup, proposeEntity } from "../entities/propose";
+import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
@@ -86,6 +86,28 @@ const MAX_ERROR_MESSAGE_LENGTH = 500;
 function truncateErrorMessage(message: string): string {
   const collapsed = message.replace(/\s+/g, " ").trim();
   return collapsed.length > MAX_ERROR_MESSAGE_LENGTH ? `${collapsed.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : collapsed;
+}
+
+async function deleteMaterializedFactMentions(
+  db: Kysely<DB>,
+  connectorType: string,
+  indexedFileIds: string[],
+): Promise<void> {
+  if (indexedFileIds.length === 0) return;
+  const sources = [
+    `${connectorType}_attendee`,
+    `${connectorType}_assignee`,
+    `${connectorType}_author`,
+    `${connectorType}_parent_entity`,
+    "assignee",
+    "parent_entity",
+  ];
+  await db
+    .deleteFrom("entity_mentions")
+    .where("indexed_file_id", "in", indexedFileIds)
+    .where("confidence", "=", "EXTRACTED")
+    .where("source", "in", sources)
+    .execute();
 }
 
 export { getConnector } from "./registry";
@@ -217,68 +239,21 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       existingHashes.set(f.provider_file_id, { id: f.id, contentHash: f.content_hash });
     }
 
-    // Pre-load entities for linking (avoids per-item queries)
+    // Pre-load person entities for name→email resolution. Entity/source-ref
+    // writes happen in the materializer after facts are persisted.
     const allEntities = await db.selectFrom("entities").selectAll().execute();
-    const personEntities: Entity[] = allEntities.filter((e) => e.source_type === "person");
-    const personBySourceRef = new Map<string, Entity>();
-    const personByNameLower = new Map<string, Entity>();
-    // Ambiguity-preserving lookup keyed by normalizeName(entity.name). Used by
-    // proposeEntity's fuzzy ranker so multi-candidate matches (e.g. two
-    // "Simran Suri" rows) trigger a queue-with-NULL-candidate instead of
-    // collapsing to a single match. A plain Map silently overwrites and
-    // misfires on this case.
-    const personEntitiesByNormalizedName = new Map<string, Entity[]>();
-    // Parallel index over aliases — entity may appear under multiple keys
-    // (one per alias). Used by proposeEntity's exact-name/alias fast-path
-    // (Fix 2 in ECR-02) so a post-Confirm proposal whose canonical-name
-    // match lives only in the entity's aliases JSON still auto-links.
-    // Bucketed by alias key; an alias shared across two entities yields a
-    // 2-bucket — exactly what the ambiguity-aware fast-path expects.
-    const personEntitiesByNormalizedAlias = new Map<string, Entity[]>();
     // Ambiguity-aware lookup keyed by normalizeName: name → { email, entityId }.
     // Covers canonical name AND aliases (alias-confirmation persists merges
     // there). Conflicting values on the same key drop the key — single
     // unambiguous match only, matching the rule the in-meeting maps use.
     const personEmailByName = createAmbiguityAwareMap<string, { email: string; entityId: string }>();
-    for (const p of personEntities) {
-      personByNameLower.set(p.name.toLowerCase(), p);
-      const normKey = normalizeName(p.name);
-      const bucket = personEntitiesByNormalizedName.get(normKey);
-      if (bucket) bucket.push(p);
-      else personEntitiesByNormalizedName.set(normKey, [p]);
-      for (const alias of parseAliases(p.aliases)) {
-        const aliasKey = normalizeName(alias);
-        if (!aliasKey) continue;
-        const aliasBucket = personEntitiesByNormalizedAlias.get(aliasKey);
-        if (aliasBucket) {
-          if (!aliasBucket.some((b) => b.id === p.id)) aliasBucket.push(p);
-        } else {
-          personEntitiesByNormalizedAlias.set(aliasKey, [p]);
-        }
-      }
+    for (const p of allEntities.filter((e) => e.source_type === "person")) {
       const email = readPersonEmail(p.metadata);
       if (!email) continue;
       const value = { email, entityId: p.id };
       personEmailByName.add(normalizeName(p.name), value);
       for (const alias of parseAliases(p.aliases)) {
         personEmailByName.add(normalizeName(alias), value);
-      }
-    }
-    const sourceRefs = await db
-      .selectFrom("entity_source_refs")
-      .select(["entity_id", "source", "source_id"])
-      .where("source", "=", config.connector_type)
-      .execute();
-    // Build lookup: "source:sourceId" → entity (for both person and structural entities)
-    const entityBySourceRef = new Map<string, (typeof allEntities)[0]>();
-    for (const ref of sourceRefs) {
-      const entity = allEntities.find((e) => e.id === ref.entity_id);
-      if (entity) {
-        entityBySourceRef.set(`${ref.source}:${ref.source_id}`, entity);
-        // Also populate person-specific map
-        if (entity.source_type === "person") {
-          personBySourceRef.set(`${ref.source}:${ref.source_id}`, entity);
-        }
       }
     }
 
@@ -309,66 +284,25 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       return null;
     };
 
-    const reviewRepo = createEntityReviewRepo(db);
-
-    /**
-     * Lookup contract for proposeEntity. Uses the in-memory preloads so the
-     * hot Fireflies attendee path doesn't issue per-attendee queries.
-     */
-    const entityLookup: EntityLookup = {
-      getByNormalizedName: (normalized) => personEntitiesByNormalizedName.get(normalized) ?? [],
-      getByAlias: (normalized) => personEntitiesByNormalizedAlias.get(normalized) ?? [],
-      listByType: (entityType) => (entityType === "person" ? personEntities : []),
-    };
-
-    const proposeDeps = {
-      entityRepo,
-      reviewRepo,
-      lookup: entityLookup,
-      readEmail: (e: Entity) => readPersonEmail(e.metadata),
-    };
-
-    /**
-     * Keep the in-memory person maps current after a proposeEntity call
-     * materializes a new (or refreshed) entity. Without this, two attendees
-     * with the same name in one sync would both hit the empty-lookup path
-     * and create duplicate entities.
-     */
-    function registerPersonEntity(entity: Entity) {
-      personByNameLower.set(entity.name.toLowerCase(), entity);
-      const normKey = normalizeName(entity.name);
-      const bucket = personEntitiesByNormalizedName.get(normKey);
-      if (bucket) {
-        if (!bucket.some((b) => b.id === entity.id)) bucket.push(entity);
-      } else {
-        personEntitiesByNormalizedName.set(normKey, [entity]);
-      }
-      for (const alias of parseAliases(entity.aliases)) {
-        const aliasKey = normalizeName(alias);
-        if (!aliasKey) continue;
-        const aliasBucket = personEntitiesByNormalizedAlias.get(aliasKey);
-        if (aliasBucket) {
-          if (!aliasBucket.some((b) => b.id === entity.id)) aliasBucket.push(entity);
-        } else {
-          personEntitiesByNormalizedAlias.set(aliasKey, [entity]);
-        }
-      }
-      if (!personEntities.some((p) => p.id === entity.id)) {
-        personEntities.push(entity);
-      }
-    }
-
     const connectorType = config.connector_type;
-    const triggeredByUserId = config.created_by;
+    const syncRunId = randomUUID();
+    const factContext = {
+      connectorConfigId: config.id,
+      createdByUserId: config.created_by,
+      lastSeenSyncRunId: syncRunId,
+    };
 
     async function seedAttendeePerson(
       attendee: { name?: string; email?: string },
       providerFileId: string,
       indexedFileId: string,
+      contentHash: string | null,
     ): Promise<void> {
       if (!attendee.name) return;
       await factRepo.upsertFact({
+        ...factContext,
         indexedFileId,
+        contentHash,
         source: connectorType,
         factType: "attendee",
         relation: "attended",
@@ -379,19 +313,29 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
         contextSnippet: `Attended ${providerFileId}`,
         raw: { providerFileId, attendee },
       });
-      const result = await proposeEntity(proposeDeps, {
-        name: attendee.name,
-        email: attendee.email ?? null,
-        entityType: "person",
-        subtype: "external",
+    }
+
+    async function seedAuthorPerson(
+      author: { name?: string; email?: string; sourceId?: string },
+      providerFileId: string,
+      indexedFileId: string,
+      contentHash: string | null,
+    ): Promise<void> {
+      if (!author.email && !author.name) return;
+      await factRepo.upsertFact({
+        ...factContext,
+        indexedFileId,
+        contentHash,
         source: connectorType,
-        sourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
-        evidence: [{ indexedFileId }],
-        triggeredByUserId,
+        factType: "author",
+        relation: "authored",
+        subjectName: author.name ?? null,
+        subjectEmail: author.email ?? null,
+        subjectSource: connectorType,
+        subjectSourceId: author.sourceId ?? author.email ?? `${providerFileId}:${author.name}`,
+        contextSnippet: `Authored ${providerFileId}`,
+        raw: { providerFileId, author },
       });
-      if (result.kind === "created" || result.kind === "linked") {
-        registerPersonEntity(result.entity);
-      }
     }
 
     for await (const item of connector.sync({
@@ -403,6 +347,7 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       resolveNameToEmail,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
+          ...factContext,
           source: seed.source,
           factType: "structural_seed",
           relation: "seeded",
@@ -411,12 +356,10 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           subjectSourceId: seed.sourceId,
           raw: seed,
         });
-        const entity = await entityRepo.upsertEntityFromTool(seed);
-        // Keep in-memory maps current so items yielded later can link to this entity
-        entityBySourceRef.set(`${seed.source}:${seed.sourceId}`, entity);
       },
       onPersonSeed: async (seed) => {
         await factRepo.upsertFact({
+          ...factContext,
           source: seed.source,
           factType: "person_seed",
           relation: "seeded",
@@ -426,12 +369,6 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           subjectSourceId: seed.sourceId,
           raw: seed,
         });
-        const entity = await entityRepo.upsertPersonEntity(seed);
-        // Keep in-memory person maps current so assignee linking works within the same sync
-        personByNameLower.set(entity.name.toLowerCase(), entity);
-        const refKey = `${seed.source}:${seed.sourceId}`;
-        personBySourceRef.set(refKey, entity);
-        entityBySourceRef.set(refKey, entity);
       },
     })) {
       try {
@@ -479,7 +416,9 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
           const promotable = connector.promotableFileTypes ?? [];
           if (item.fileType && promotable.includes(item.fileType)) {
             await factRepo.upsertFact({
+              ...factContext,
               indexedFileId: existing.id,
+              contentHash: item.contentHash,
               source: connectorType,
               factType: "structural_seed",
               relation: "seeded",
@@ -496,12 +435,12 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
             });
           }
 
-          // Link parent entities on skipped items (they may have been
-          // seeded after the item was first created). Check existence to avoid duplicates.
           if (item.parentEntities && item.parentEntities.length > 0) {
             for (const parent of item.parentEntities) {
               await factRepo.upsertFact({
+                ...factContext,
                 indexedFileId: existing.id,
+                contentHash: item.contentHash,
                 source: connectorType,
                 factType: "parent_entity",
                 relation: "mentioned",
@@ -510,36 +449,12 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                 contextSnippet: parent.contextSnippet ?? null,
                 raw: { providerFileId: item.providerFileId, parent },
               });
-              let entity = entityBySourceRef.get(`${parent.source}:${parent.sourceId}`);
-              if (!entity) {
-                const found = await entityRepo.getEntityBySourceRef(parent.source, parent.sourceId);
-                if (found) {
-                  entity = found;
-                  entityBySourceRef.set(`${parent.source}:${parent.sourceId}`, found);
-                }
-              }
-              if (entity) {
-                await entityRepo.createMention({
-                  entityId: entity.id,
-                  indexedFileId: existing.id,
-                  contextSnippet: parent.contextSnippet ?? null,
-                  confidence: "EXTRACTED",
-                  source: "parent_entity",
-                  relation: "mentioned",
-                });
-              }
             }
           }
 
-          // Idempotent — re-seed person entities so that fixes to attendee
-          // resolution (e.g. better name→email matching) flow through to
-          // already-synced items on a cursor reset. Mirrors the post-transaction
-          // block in the change branch. Routed through proposeEntity so a
-          // re-walk also bumps occurrence_count / seen_at on any pending
-          // review queue row covering this attendee.
           if (item.attendees) {
             for (const a of item.attendees) {
-              await seedAttendeePerson(a, item.providerFileId, existing.id);
+              await seedAttendeePerson(a, item.providerFileId, existing.id, item.contentHash);
             }
           }
 
@@ -549,7 +464,9 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                 ? connector.assigneeSourceRefKey(assignee.name)
                 : `${config.connector_type}:user:${assignee.name}`;
               await factRepo.upsertFact({
+                ...factContext,
                 indexedFileId: existing.id,
+                contentHash: item.contentHash,
                 source: connectorType,
                 factType: "assignee",
                 relation: "assigned",
@@ -561,6 +478,15 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
                 raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
               });
             }
+          }
+
+          if (item.authorEmail || item.authorName) {
+            await seedAuthorPerson(
+              { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
+              item.providerFileId,
+              existing.id,
+              item.contentHash,
+            );
           }
 
           result.itemsProcessed++;
@@ -621,7 +547,9 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
         const promotable = connector.promotableFileTypes ?? [];
         if (item.fileType && promotable.includes(item.fileType)) {
           await factRepo.upsertFact({
+            ...factContext,
             indexedFileId: itemResult.id,
+            contentHash: item.contentHash,
             source: connectorType,
             factType: "structural_seed",
             relation: "seeded",
@@ -636,26 +564,11 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
               sourcePath: item.sourcePath,
             },
           });
-          await entityRepo.upsertEntityFromTool({
-            name: item.fileName,
-            sourceType: `${config.connector_type}_${item.fileType}`,
-            source: config.connector_type,
-            sourceId: item.providerFileId,
-            sourceUrl: item.providerUrl ?? undefined,
-            sourceRefId: itemResult.id,
-            metadata: item.sourcePath ? { path: item.sourcePath } : undefined,
-          });
         }
 
-        // Seed person entities from connector-supplied attendees.
-        // Skip entries without a name — accessEmails already covers ACL,
-        // and email-as-name rows poison the entity register. proposeEntity
-        // decides whether the seed becomes a linked entity, a fresh one,
-        // or a row in the review queue (for fuzzy-collisions on name-only
-        // attendees).
         if (item.attendees) {
           for (const a of item.attendees) {
-            await seedAttendeePerson(a, item.providerFileId, itemResult.id);
+            await seedAttendeePerson(a, item.providerFileId, itemResult.id, item.contentHash);
           }
         }
 
@@ -665,7 +578,9 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
               ? connector.assigneeSourceRefKey(assignee.name)
               : `${config.connector_type}:user:${assignee.name}`;
             await factRepo.upsertFact({
+              ...factContext,
               indexedFileId: itemResult.id,
+              contentHash: item.contentHash,
               source: connectorType,
               factType: "assignee",
               relation: "assigned",
@@ -676,25 +591,24 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
               contextSnippet: `Assigned to ${assignee.name}`,
               raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
             });
-            const entity = personBySourceRef.get(sourceRefKey) ?? personByNameLower.get(assignee.name.toLowerCase());
-            if (entity) {
-              await entityRepo.createMention({
-                entityId: entity.id,
-                indexedFileId: itemResult.id,
-                contextSnippet: `Assigned to ${assignee.name}`,
-                confidence: "EXTRACTED",
-                source: "assignee",
-                relation: "assigned",
-              });
-            }
           }
         }
 
-        // Link files to parent structural entities (folders, spaces, drives)
+        if (item.authorEmail || item.authorName) {
+          await seedAuthorPerson(
+            { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
+            item.providerFileId,
+            itemResult.id,
+            item.contentHash,
+          );
+        }
+
         if (item.parentEntities && item.parentEntities.length > 0) {
           for (const parent of item.parentEntities) {
             await factRepo.upsertFact({
+              ...factContext,
               indexedFileId: itemResult.id,
+              contentHash: item.contentHash,
               source: connectorType,
               factType: "parent_entity",
               relation: "mentioned",
@@ -703,26 +617,6 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
               contextSnippet: parent.contextSnippet ?? null,
               raw: { providerFileId: item.providerFileId, parent },
             });
-            // Try cached lookup first; fall back to DB (entities may have been
-            // seeded during this sync via onEntitySeed, after the cache was built)
-            let entity = entityBySourceRef.get(`${parent.source}:${parent.sourceId}`);
-            if (!entity) {
-              const found = await entityRepo.getEntityBySourceRef(parent.source, parent.sourceId);
-              if (found) {
-                entity = found;
-                entityBySourceRef.set(`${parent.source}:${parent.sourceId}`, found);
-              }
-            }
-            if (entity) {
-              await entityRepo.createMention({
-                entityId: entity.id,
-                indexedFileId: itemResult.id,
-                contextSnippet: parent.contextSnippet ?? null,
-                confidence: "EXTRACTED",
-                source: "parent_entity",
-                relation: "mentioned",
-              });
-            }
           }
         }
 
@@ -751,6 +645,16 @@ export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string
       if (result.itemsArchived > 0) {
         await entityRepo.archiveEntitiesForArchivedFiles();
       }
+      const affectedFactFiles = await factRepo.tombstoneStaleFactsForConnector(config.id, syncRunId);
+      if (affectedFactFiles.length > 0) {
+        await deleteMaterializedFactMentions(db, connectorType, affectedFactFiles);
+        await factRepo.clearMaterializedAtForActiveFacts(affectedFactFiles);
+      }
+    }
+
+    const materializeSummary = await materializeUnmaterializedFacts(db, syncLogger);
+    if (materializeSummary.factsRead > 0) {
+      syncLogger.info({ materializeSummary }, "Post-sync fact materialization complete");
     }
 
     result.newCursor = await connector.getCursor({

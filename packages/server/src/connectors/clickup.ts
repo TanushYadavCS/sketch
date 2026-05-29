@@ -33,6 +33,7 @@ interface ClickUpTask {
   description?: string;
   status: { status: string; type: string };
   priority?: { priority: string } | null;
+  creator?: { id?: number | string; username?: string; email?: string };
   assignees: Array<{ id?: number; username: string; email?: string; profilePicture?: string }>;
   tags: Array<{ name: string }>;
   date_created?: string;
@@ -261,6 +262,9 @@ function taskToSyncedItem(
     sourceUpdatedAt: parseClickUpTimestamp(task.date_updated ?? null),
     accessScope,
     assignees: task.assignees.filter((a) => a.username).map((a) => ({ name: a.username })),
+    authorEmail: task.creator?.email,
+    authorName: task.creator?.username,
+    authorSourceId: task.creator?.id === undefined ? undefined : `user:${String(task.creator.id)}`,
     parentEntities,
   };
 }
