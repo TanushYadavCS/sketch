@@ -43,11 +43,13 @@ export function getFileViewer(c: Context): FileViewer {
 }
 
 /**
- * Same shape as getFileViewer but always isAdmin: false.
- * Use for content-read endpoints (file body, mention contexts) — admin role grants
- * ops access (manage connectors, see metadata) but does NOT confer read access to
- * private contents. The two named call sites make the asymmetry obvious.
+ * Same shape as getFileViewer but admin status is gated by the org-level
+ * `admin_can_read_all_files` setting. By default admin role grants ops access
+ * (manage connectors, see metadata) but does NOT confer read access to private
+ * contents. Orgs that need it can flip the setting on from Settings → Access.
+ * The agent file-content tool stays on email rails regardless of this setting.
  */
 export function getContentViewer(c: Context): FileViewer {
-  return { email: c.get("email") ?? null, isAdmin: false };
+  const bypass = c.get("adminCanReadAllFiles") === true;
+  return { email: c.get("email") ?? null, isAdmin: isAdmin(c) && bypass };
 }

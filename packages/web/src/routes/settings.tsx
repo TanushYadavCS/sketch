@@ -21,6 +21,7 @@ import {
 import { Button } from "@sketch/ui/components/button";
 import { Input } from "@sketch/ui/components/input";
 import { Skeleton } from "@sketch/ui/components/skeleton";
+import { Switch } from "@sketch/ui/components/switch";
 import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
@@ -55,6 +56,7 @@ function SettingsPage() {
 
       <div className="mt-6 space-y-8">
         <OrgContextSection />
+        <AccessSection />
         <ApiKeySection />
       </div>
     </div>
@@ -144,6 +146,60 @@ function OrgContextSection() {
               Save
             </Button>
           </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AccessSection() {
+  const queryClient = useQueryClient();
+  const accessQuery = useQuery({
+    queryKey: ["settings", "access"],
+    queryFn: () => api.settings.access(),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (value: boolean) => api.settings.updateAccess({ adminCanReadAllFiles: value }),
+    onMutate: async (value) => {
+      await queryClient.cancelQueries({ queryKey: ["settings", "access"] });
+      const previous = queryClient.getQueryData<{ adminCanReadAllFiles: boolean }>(["settings", "access"]);
+      queryClient.setQueryData(["settings", "access"], { adminCanReadAllFiles: value });
+      return { previous };
+    },
+    onError: (err: Error, _value, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(["settings", "access"], ctx.previous);
+      toast.error(err.message);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings", "access"] });
+      toast.success("Saved");
+    },
+  });
+
+  const value = accessQuery.data?.adminCanReadAllFiles ?? false;
+
+  return (
+    <section>
+      <p className="mb-3 text-sm font-medium text-muted-foreground">Access</p>
+      {accessQuery.isLoading ? (
+        <Skeleton className="h-20 rounded-lg" />
+      ) : (
+        <div className="flex items-start justify-between gap-4 rounded-lg border border-border bg-card p-4">
+          <div>
+            <p className="text-sm font-medium">Admins can read all file content</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              When off, admins manage connectors and see file metadata but not file content unless explicitly shared.
+              When on, admins can read any file's content. The agent's file-content tool stays on email rails either
+              way.
+            </p>
+          </div>
+          <Switch
+            checked={value}
+            onCheckedChange={(next) => updateMutation.mutate(next)}
+            disabled={updateMutation.isPending}
+            aria-label="Allow admins to read all file content"
+          />
         </div>
       )}
     </section>

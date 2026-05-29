@@ -796,6 +796,15 @@ export const api = {
     revokeApiKey() {
       return request<{ success: true }>("/api/settings/api-key", { method: "DELETE" });
     },
+    access() {
+      return request<{ adminCanReadAllFiles: boolean }>("/api/settings/access");
+    },
+    updateAccess(data: { adminCanReadAllFiles: boolean }) {
+      return request<{ adminCanReadAllFiles: boolean }>("/api/settings/access", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
     searchConfig() {
       return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number; syncIntervalMinutes: number }>(
         "/api/settings/search",

@@ -78,6 +78,7 @@ export interface SettingsTable {
   google_oauth_client_secret: string | null;
   gemini_api_key: string | null;
   enrichment_enabled: Generated<number>;
+  admin_can_read_all_files: Generated<number>;
   sync_interval_minutes: Generated<number>;
   org_context: string | null;
   sketch_api_key: string | null;
