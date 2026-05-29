@@ -64,7 +64,7 @@ export interface ScheduledTaskListItem {
   scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
-  sessionMode: "fresh" | "persistent" | "chat";
+  sessionMode: "fresh";
   nextRunAt: string | null;
   lastRunAt: string | null;
   status: "active" | "paused" | "completed";
@@ -1097,6 +1097,7 @@ export const api = {
         whatsappNumber?: string | null;
         description?: string | null;
         role?: string | null;
+        authRole?: "admin" | "member";
         reportsTo?: string | null;
         allowedTools?: string[] | null;
         slackChannelIds?: string[] | null;

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { downloadSlackFile } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
+import { transcribeEagerAttachments } from "../transcription/service";
 import type { SlackAdapterDeps } from "./adapter";
 import { createConfiguredSlackBot, validateSlackTokens } from "./adapter";
 
@@ -190,6 +192,10 @@ vi.mock("../files", async (importOriginal) => {
   };
 });
 
+vi.mock("../transcription/service", () => ({
+  transcribeEagerAttachments: vi.fn(async (attachments) => attachments),
+}));
+
 // Stub workspace to avoid filesystem access
 vi.mock("../agent/workspace", () => ({
   ensureWorkspace: vi.fn().mockResolvedValue("/tmp/test-data/workspaces/u1"),
@@ -223,6 +229,9 @@ function getHandlers() {
 describe("slack/adapter", () => {
   beforeEach(() => {
     mockBotInstance = freshMockBot();
+    vi.mocked(transcribeEagerAttachments).mockClear();
+    vi.mocked(transcribeEagerAttachments).mockImplementation(async (attachments) => attachments);
+    vi.mocked(downloadSlackFile).mockClear();
   });
 
   describe("createConfiguredSlackBot", () => {
@@ -395,6 +404,46 @@ describe("slack/adapter", () => {
 
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
+    });
+
+    it("eagerly transcribes audio attachments before running the agent", async () => {
+      const deps = makeDeps();
+      vi.mocked(downloadSlackFile).mockResolvedValueOnce({
+        originalName: "voice.ogg",
+        mimeType: "audio/ogg",
+        localPath: "/tmp/test-data/workspaces/u1/attachments/voice.ogg",
+        sizeBytes: 100,
+      });
+      vi.mocked(transcribeEagerAttachments).mockImplementationOnce(async (attachments) =>
+        attachments.map((attachment) => ({
+          ...attachment,
+          transcription: { status: "completed", text: "hello from slack voice note" },
+        })),
+      );
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({
+        text: "",
+        userId: "S1",
+        channelId: "D1",
+        ts: "1",
+        type: "dm",
+        files: [{ name: "voice.ogg", urlPrivate: "https://slack.test/voice.ogg", mimetype: "audio/ogg", size: 100 }],
+      });
+      await flush();
+
+      expect(transcribeEagerAttachments).toHaveBeenCalledWith(
+        [expect.objectContaining({ originalName: "voice.ogg", mimeType: "audio/ogg" })],
+        expect.objectContaining({ logger: deps.logger }),
+      );
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0]?.[0];
+      expect(agentCall?.attachments).toEqual([
+        expect.objectContaining({
+          originalName: "voice.ogg",
+          transcription: { status: "completed", text: "hello from slack voice note" },
+        }),
+      ]);
     });
 
     it("treats leading-space /new as a reset command in Slack DMs", async () => {
@@ -628,6 +677,40 @@ describe("slack/adapter", () => {
         expect.objectContaining({ text: "reply" }),
       );
     });
+
+    it("downloads and buffers registered thread audio without eager transcription", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.slack.threadBuffer.hasThread).mockReturnValue(true);
+      vi.mocked(downloadSlackFile).mockResolvedValueOnce({
+        originalName: "voice.ogg",
+        mimeType: "audio/ogg",
+        localPath: "/tmp/test-data/workspaces/channel-C1/attachments/voice.ogg",
+        sizeBytes: 100,
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { thread } = getHandlers();
+
+      await thread({
+        text: "",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        threadTs: "1",
+        type: "thread_message",
+        files: [{ name: "voice.ogg", urlPrivate: "https://slack.test/voice.ogg", mimetype: "audio/ogg", size: 100 }],
+      });
+
+      expect(transcribeEagerAttachments).not.toHaveBeenCalled();
+      expect(deps.slack.threadBuffer.append).toHaveBeenCalledWith(
+        "C1",
+        "1",
+        expect.objectContaining({
+          text: "See attached files.",
+          attachments: [expect.objectContaining({ originalName: "voice.ogg", mimeType: "audio/ogg" })],
+        }),
+      );
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
   });
 
   describe("channel mention handler", () => {
@@ -667,6 +750,46 @@ describe("slack/adapter", () => {
       await flush();
 
       expect(deps.slack.threadBuffer.register).toHaveBeenCalledWith("C1", "1");
+    });
+
+    it("eagerly transcribes audio attachments on channel mentions", async () => {
+      const deps = makeDeps();
+      vi.mocked(downloadSlackFile).mockResolvedValueOnce({
+        originalName: "voice.ogg",
+        mimeType: "audio/ogg",
+        localPath: "/tmp/test-data/workspaces/channel-C1/attachments/voice.ogg",
+        sizeBytes: 100,
+      });
+      vi.mocked(transcribeEagerAttachments).mockImplementationOnce(async (attachments) =>
+        attachments.map((attachment) => ({
+          ...attachment,
+          transcription: { status: "completed", text: "hello from channel voice note" },
+        })),
+      );
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({
+        text: "",
+        userId: "S1",
+        channelId: "C1",
+        ts: "1",
+        type: "channel_mention",
+        files: [{ name: "voice.ogg", urlPrivate: "https://slack.test/voice.ogg", mimetype: "audio/ogg", size: 100 }],
+      });
+      await flush();
+
+      expect(transcribeEagerAttachments).toHaveBeenCalledWith(
+        [expect.objectContaining({ originalName: "voice.ogg", mimeType: "audio/ogg" })],
+        expect.objectContaining({ logger: deps.logger }),
+      );
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0]?.[0];
+      expect(agentCall?.attachments).toEqual([
+        expect.objectContaining({
+          originalName: "voice.ogg",
+          transcription: { status: "completed", text: "hello from channel voice note" },
+        }),
+      ]);
     });
 
     it("passes MCP servers to agent for channel mentions", async () => {
