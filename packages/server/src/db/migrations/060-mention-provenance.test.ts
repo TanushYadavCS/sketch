@@ -2,7 +2,7 @@ import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../schema";
-import * as migration from "./059-mention-provenance";
+import * as migration from "./060-mention-provenance";
 
 function createDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -38,7 +38,7 @@ async function insertLegacyMention(
   `.execute(db);
 }
 
-describe("059-mention-provenance", () => {
+describe("060-mention-provenance", () => {
   let db: Kysely<DB>;
 
   beforeEach(() => {
@@ -143,7 +143,7 @@ describe("059-mention-provenance", () => {
     await insertLegacyMention(db, { id: "m-2", entityId: "e-1", indexedFileId: "f-1" });
 
     await expect(migration.up(db)).rejects.toThrow(
-      "migration 059-mention-provenance: duplicate (entity_id, indexed_file_id, relation) rows found",
+      "migration 060-mention-provenance: duplicate (entity_id, indexed_file_id, relation) rows found",
     );
   });
 
@@ -168,7 +168,7 @@ describe("059-mention-provenance", () => {
     `.execute(db);
 
     await expect(migration.down(db)).rejects.toThrow(
-      "migration 059-mention-provenance down: duplicate (entity_id, indexed_file_id) rows found",
+      "migration 060-mention-provenance down: duplicate (entity_id, indexed_file_id) rows found",
     );
   });
 });

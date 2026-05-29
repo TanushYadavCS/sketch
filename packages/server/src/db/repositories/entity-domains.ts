@@ -154,7 +154,16 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
       if (existing) {
         // Manual overrides win. Don't downgrade source from manual → observed/llm,
         // and don't flip kind out from under the operator.
-        if (existing.source === "manual") return;
+        if (existing.source === "manual") {
+          if (existing.entity_id === null && input.entityId && existing.kind === input.kind) {
+            await db
+              .updateTable("entity_domains")
+              .set({ entity_id: input.entityId })
+              .where("id", "=", existing.id)
+              .execute();
+          }
+          return;
+        }
         if (existing.kind === input.kind && existing.entity_id === input.entityId) return;
         await db
           .updateTable("entity_domains")
