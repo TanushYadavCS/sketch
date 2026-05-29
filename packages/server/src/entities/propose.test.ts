@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
@@ -911,5 +912,97 @@ describe("proposeEntity", () => {
       .executeTakeFirstOrThrow();
     expect(queue.candidate_entity_id).toBe(fuzzy.id);
     expect(queue.candidate_reason).toBe("llm-ambiguous");
+  });
+
+  it("18. evidenceDomain links a token-overlapping company before fuzzy queueing", async () => {
+    const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
+    const canvas = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await entityRepo.upsertEntity({
+      name: "Canvas Industries",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await domainsRepo.upsertDomain({
+      entityId: canvas.id,
+      domain: "canvas.example",
+      kind: "corporate",
+      source: "manual",
+    });
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        getCompanyIdsByDomain: (domain: string) => (domain === "canvas.example" ? [canvas.id] : []),
+      },
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Canvas",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:canvas-domain",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      evidenceDomain: "canvas.example",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(canvas.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("19. evidenceDomain queues when the domain maps to multiple token-overlapping companies", async () => {
+    const entityRepo = createEntityRepository(db);
+    const first = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const second = await entityRepo.upsertEntity({
+      name: "Canvas Studios",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await insertTestFile(db, "file-19");
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        getCompanyIdsByDomain: (domain: string) => (domain === "canvas.example" ? [first.id, second.id] : []),
+      },
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Canvas",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:canvas-ambiguous-domain",
+      evidence: [{ indexedFileId: "file-19" }],
+      triggeredByUserId: "user-1",
+      evidenceDomain: "canvas.example",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBeNull();
+    expect(queue.candidate_reason).toBe("exact-ambiguous");
   });
 });

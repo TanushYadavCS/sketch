@@ -14,7 +14,7 @@ import { ConnectorLogo } from "@/components/connector-logos";
 import { EntityPicker } from "@/components/entity-picker";
 import { RebuildBanner } from "@/components/rebuild-banner";
 import { RebuildDialog, type RebuildDialogPrefill } from "@/components/rebuild-dialog";
-import { COUNT_KEY, LIST_KEY, detailKey, useReviewMutations } from "@/components/review-actions";
+import { countKey, detailKey, listKey, useReviewMutations } from "@/components/review-actions";
 import { useRebuildJob } from "@/hooks/use-rebuild-job";
 import type { EntityListItem, EntityMention, EntityReviewEvidenceRow, EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -197,8 +197,8 @@ export function EntityExplorer() {
   const experimentalEnabled = setupStatus?.experimentalFlag === true;
 
   const { data: reviewCount } = useQuery({
-    queryKey: COUNT_KEY,
-    queryFn: () => api.entityReview.list({ limit: 0 }),
+    queryKey: countKey(debouncedSearch),
+    queryFn: () => api.entityReview.list({ limit: 0, search: debouncedSearch || undefined }),
     enabled: experimentalEnabled,
     refetchInterval: experimentalEnabled ? 30000 : false,
   });
@@ -206,8 +206,8 @@ export function EntityExplorer() {
   const hasPendingReviews = experimentalEnabled && reviewTotal > 0;
 
   const { data: reviewList } = useQuery({
-    queryKey: LIST_KEY,
-    queryFn: () => api.entityReview.list({ limit: 200 }),
+    queryKey: listKey(debouncedSearch),
+    queryFn: () => api.entityReview.list({ limit: 200, search: debouncedSearch || undefined }),
     enabled: hasPendingReviews,
   });
 

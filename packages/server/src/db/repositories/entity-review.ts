@@ -219,6 +219,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       isAdmin: boolean;
       limit: number;
       offset?: number;
+      search?: string;
     }) {
       let q = db.selectFrom("entity_review_queue").selectAll().where("status", "=", "pending");
       if (!opts.isAdmin) {
@@ -240,6 +241,13 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             ),
           );
       }
+      const search = opts.search?.trim();
+      if (search) {
+        const pattern = `%${search.toLowerCase()}%`;
+        q = q.where((eb) =>
+          eb.or([eb("normalized_name", "like", pattern), eb(sql<string>`LOWER(proposed_name)`, "like", pattern)]),
+        );
+      }
       q = q.orderBy("last_seen_at", "desc").limit(opts.limit);
       if (opts.offset) q = q.offset(opts.offset);
       return q.execute();
@@ -249,7 +257,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
      * Count of `pending` rows under the same visibility predicate as
      * `listPending`. Used by the badge endpoint and by list pagination.
      */
-    async countPending(opts: { ownerUserId?: string; isAdmin: boolean }): Promise<number> {
+    async countPending(opts: { ownerUserId?: string; isAdmin: boolean; search?: string }): Promise<number> {
       let q = db
         .selectFrom("entity_review_queue")
         .select(db.fn.countAll<number>().as("c"))
@@ -272,6 +280,13 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
               ),
             ),
           );
+      }
+      const search = opts.search?.trim();
+      if (search) {
+        const pattern = `%${search.toLowerCase()}%`;
+        q = q.where((eb) =>
+          eb.or([eb("normalized_name", "like", pattern), eb(sql<string>`LOWER(proposed_name)`, "like", pattern)]),
+        );
       }
       const row = await q.executeTakeFirst();
       return Number(row?.c ?? 0);
