@@ -6,6 +6,7 @@ import {
   buildMultimodalContent,
   downloadSlackFile,
   formatAttachmentsForPrompt,
+  isAudioAttachment,
   isImageAttachment,
   mimeToExtension,
   splitAttachments,
@@ -157,6 +158,37 @@ describe("formatAttachmentsForPrompt", () => {
     expect(result).toContain('name="a.txt"');
     expect(result).toContain('name="b.png"');
   });
+
+  it("formats inline audio transcription blocks", () => {
+    const result = formatAttachmentsForPrompt([
+      {
+        originalName: "voice.ogg",
+        localPath: "/w/voice.ogg",
+        mimeType: "audio/ogg",
+        sizeBytes: 10,
+        transcription: { status: "completed", text: "hello world" },
+      },
+    ]);
+
+    expect(result).toContain("<audio_transcription>");
+    expect(result).toContain("Transcript:");
+    expect(result).toContain("hello world");
+  });
+
+  it("formats long audio transcription instructions without preview text", () => {
+    const result = formatAttachmentsForPrompt([
+      {
+        originalName: "voice.ogg",
+        localPath: "/w/voice.ogg",
+        mimeType: "audio/ogg",
+        sizeBytes: 10,
+        transcription: { status: "completed", transcriptPath: "/w/voice.ogg.transcript.txt" },
+      },
+    ]);
+
+    expect(result).toContain("too long to inline");
+    expect(result).not.toContain("Transcript:");
+  });
 });
 
 describe("isImageAttachment", () => {
@@ -170,6 +202,42 @@ describe("isImageAttachment", () => {
     for (const mime of ["application/pdf", "text/csv", "text/plain", "application/octet-stream"]) {
       expect(isImageAttachment({ originalName: "f", localPath: "/f", mimeType: mime, sizeBytes: 1 })).toBe(false);
     }
+  });
+});
+
+describe("isAudioAttachment", () => {
+  it("returns true for explicit audio MIME types", () => {
+    expect(
+      isAudioAttachment({ originalName: "voice.bin", localPath: "/w/voice.bin", mimeType: "audio/ogg", sizeBytes: 1 }),
+    ).toBe(true);
+    expect(
+      isAudioAttachment({
+        originalName: "voice.bin",
+        localPath: "/w/voice.bin",
+        mimeType: "audio/ogg; codecs=opus",
+        sizeBytes: 1,
+      }),
+    ).toBe(true);
+  });
+
+  it("uses extension fallback only for generic MIME types", () => {
+    expect(
+      isAudioAttachment({
+        originalName: "voice.mp3",
+        localPath: "/w/voice.mp3",
+        mimeType: "application/octet-stream",
+        sizeBytes: 1,
+      }),
+    ).toBe(true);
+    expect(
+      isAudioAttachment({ originalName: "voice.mp3", localPath: "/w/voice.mp3", mimeType: "", sizeBytes: 1 }),
+    ).toBe(true);
+  });
+
+  it("does not treat explicit non-audio MIME types as audio by extension", () => {
+    expect(
+      isAudioAttachment({ originalName: "clip.mp4", localPath: "/w/clip.mp4", mimeType: "video/mp4", sizeBytes: 1 }),
+    ).toBe(false);
   });
 });
 
