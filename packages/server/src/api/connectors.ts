@@ -27,6 +27,7 @@ import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createFileSharesRepository } from "../db/repositories/file-shares";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import {
@@ -110,6 +111,7 @@ export function connectorRoutes(
   >,
 ) {
   const routes = new Hono();
+  const fileSharesRepo = createFileSharesRepository(db);
 
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
     if (!userRepo) return [];
@@ -411,6 +413,8 @@ export function connectorRoutes(
     }
 
     const accessDetails = await connectorRepo.getFileAccessDetails(fileId);
+    const manualShares = await fileSharesRepo.listForFile(fileId);
+    const shareWithEveryone = await fileSharesRepo.getOrgWide(fileId);
 
     // Get entities linked to this file via entity_mentions
     const mentions = await db
@@ -452,8 +456,160 @@ export function connectorRoutes(
           source: a.source,
           mapped: !!a.userId,
         })),
+        manualShares: manualShares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
+        shareWithEveryone,
       },
       entities: linkedEntities,
+    });
+  });
+
+  /**
+   * Manual file share management. Connector reconcile never touches these rows.
+   *
+   * Authz:
+   *   - GET, POST, DELETE individual shares: admin OR connector owner
+   *     (admins always have manage access; connector owners can share files
+   *     they ingested)
+   *   - PUT share-everyone: admin only (org-wide flag)
+   *   - PUT batch: admin OR connector owner for the emails delta, plus admin
+   *     gate when shareWithEveryone is in the body
+   */
+  const shareEmailBodySchema = z.object({ email: z.string().email().toLowerCase() });
+  const shareEveryoneBodySchema = z.object({ enabled: z.boolean() });
+  const shareBatchBodySchema = z.object({
+    emails: z.array(z.string().email().toLowerCase()),
+    shareWithEveryone: z.boolean().optional(),
+  });
+
+  async function loadFileForShare(fileId: string) {
+    const config = await connectorRepo.findConfigByFileId(fileId);
+    if (!config) return null;
+    return { connectorConfigId: config.id, createdBy: config.created_by };
+  }
+
+  routes.get("/files/:fileId/shares", async (c) => {
+    const fileId = c.req.param("fileId");
+    const fileOwner = await loadFileForShare(fileId);
+    if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    const denied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    if (denied) return denied;
+    const shares = await fileSharesRepo.listForFile(fileId);
+    const shareWithEveryone = await fileSharesRepo.getOrgWide(fileId);
+    return c.json({
+      shares: shares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
+      shareWithEveryone,
+    });
+  });
+
+  routes.post("/files/:fileId/shares", async (c) => {
+    const fileId = c.req.param("fileId");
+    const fileOwner = await loadFileForShare(fileId);
+    if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    const denied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    if (denied) return denied;
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = shareEmailBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    const grantedBy = c.get("sub") as string;
+    await fileSharesRepo.grantToEmail(fileId, parsed.data.email, grantedBy);
+    const shares = await fileSharesRepo.listForFile(fileId);
+    return c.json({ shares: shares.map((s) => ({ email: s.email, grantedAt: s.granted_at })) });
+  });
+
+  routes.delete("/files/:fileId/shares/:email", async (c) => {
+    const fileId = c.req.param("fileId");
+    const email = decodeURIComponent(c.req.param("email"));
+    const fileOwner = await loadFileForShare(fileId);
+    if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    const denied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    if (denied) return denied;
+    await fileSharesRepo.revokeFromEmail(fileId, email);
+    return c.json({ success: true });
+  });
+
+  routes.put("/files/:fileId/share-everyone", async (c) => {
+    const fileId = c.req.param("fileId");
+    const fileOwner = await loadFileForShare(fileId);
+    if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = shareEveryoneBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    await fileSharesRepo.setOrgWide(fileId, parsed.data.enabled);
+    return c.json({ shareWithEveryone: parsed.data.enabled });
+  });
+
+  /**
+   * Replace the share set in one transaction. Lets the UI commit the dialog
+   * without sequencing several requests; partial-save states aren't possible.
+   */
+  routes.put("/files/:fileId/shares", async (c) => {
+    const fileId = c.req.param("fileId");
+    const fileOwner = await loadFileForShare(fileId);
+    if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    const editDenied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    if (editDenied) return editDenied;
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = shareBatchBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    if (parsed.data.shareWithEveryone !== undefined) {
+      const adminDenied = denyIfNotAdmin(c);
+      if (adminDenied) return adminDenied;
+    }
+    const grantedBy = c.get("sub") as string;
+    const targetEmails = new Set(parsed.data.emails);
+    await db.transaction().execute(async (trx) => {
+      const existing = await trx
+        .selectFrom("file_share_emails")
+        .select("email")
+        .where("indexed_file_id", "=", fileId)
+        .execute();
+      const existingSet = new Set(existing.map((r) => r.email));
+      const toAdd = [...targetEmails].filter((e) => !existingSet.has(e));
+      const toRemove = [...existingSet].filter((e) => !targetEmails.has(e));
+      if (toAdd.length > 0) {
+        await trx
+          .insertInto("file_share_emails")
+          .values(
+            toAdd.map((email) => ({
+              indexed_file_id: fileId,
+              email,
+              granted_by_user_id: grantedBy,
+            })),
+          )
+          .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
+          .execute();
+      }
+      if (toRemove.length > 0) {
+        await trx
+          .deleteFrom("file_share_emails")
+          .where("indexed_file_id", "=", fileId)
+          .where("email", "in", toRemove)
+          .execute();
+      }
+      if (parsed.data.shareWithEveryone !== undefined) {
+        await trx
+          .updateTable("indexed_files")
+          .set({ share_with_everyone: parsed.data.shareWithEveryone ? 1 : 0 })
+          .where("id", "=", fileId)
+          .execute();
+      }
+    });
+    const shares = await fileSharesRepo.listForFile(fileId);
+    const shareWithEveryone = await fileSharesRepo.getOrgWide(fileId);
+    return c.json({
+      shares: shares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
+      shareWithEveryone,
     });
   });
 

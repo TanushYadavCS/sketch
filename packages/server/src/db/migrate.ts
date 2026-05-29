@@ -69,6 +69,7 @@ import * as m066 from "./migrations/066-entity-review-domain-candidates";
 import * as m067 from "./migrations/067-relation-evidence-fact-link";
 import * as m068 from "./migrations/068-entities-ai-brief";
 import * as m069 from "./migrations/069-admin-can-read-all-files";
+import * as m070 from "./migrations/070-file-shares";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -142,6 +143,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "067-relation-evidence-fact-link": m067,
           "068-entities-ai-brief": m068,
           "069-admin-can-read-all-files": m069,
+          "070-file-shares": m070,
         };
       },
     },

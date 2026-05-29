@@ -130,6 +130,7 @@ export interface IndexedFilesTable {
   mime_type: string | null;
   embedding_status: Generated<string>;
   summary_status: Generated<string>;
+  share_with_everyone: Generated<number>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -191,6 +192,13 @@ export interface UserProviderIdentitiesTable {
 export interface FileAccessTable {
   indexed_file_id: string;
   email: string;
+}
+
+export interface FileShareEmailsTable {
+  indexed_file_id: string;
+  email: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface EmailVerificationTokensTable {
@@ -521,6 +529,7 @@ export interface DB {
   file_embeddings: FileEmbeddingsTable;
   user_provider_identities: UserProviderIdentitiesTable;
   file_access: FileAccessTable;
+  file_share_emails: FileShareEmailsTable;
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;

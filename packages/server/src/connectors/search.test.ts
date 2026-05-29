@@ -480,6 +480,32 @@ describe("getFileContent — RBAC", () => {
     const file = await getFileContent(db, "does-not-exist", ["member@example.com"]);
     expect(file).toBeNull();
   });
+
+  it("manual share grants content access; revoking removes it immediately", async () => {
+    // outsider isn't in scope-c → blocked.
+    expect(await getFileContent(db, "file-restricted", ["outsider@example.com"])).toBeNull();
+
+    await db
+      .insertInto("users")
+      .values({ id: "u-admin", name: "admin", email: "admin@example.com" })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("file_share_emails")
+      .values({ indexed_file_id: "file-restricted", email: "outsider@example.com", granted_by_user_id: "u-admin" })
+      .execute();
+
+    const granted = await getFileContent(db, "file-restricted", ["outsider@example.com"]);
+    expect(granted?.content).toBe("top secret content");
+
+    await db
+      .deleteFrom("file_share_emails")
+      .where("indexed_file_id", "=", "file-restricted")
+      .where("email", "=", "outsider@example.com")
+      .execute();
+
+    expect(await getFileContent(db, "file-restricted", ["outsider@example.com"])).toBeNull();
+  });
 });
 
 describe("listIndexedSourcesForPrompt", () => {
