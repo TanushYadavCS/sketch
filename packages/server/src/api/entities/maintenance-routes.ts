@@ -268,6 +268,14 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
     });
   });
 
+  /**
+   * POST /api/entities/reenrichments
+   * Re-extract entity facts for a file scope and optionally rebuild afterward.
+   * Rejects category-shaped reset payloads so a misrouted reset request cannot
+   * silently re-extract the whole graph. When given a pendingRebuildId from
+   * /resets, promotes that lock before normal recreate conflict checks because
+   * the caller's own pending lock would otherwise look like RECREATE_ACTIVE.
+   */
   routes.post("/reenrichments", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
@@ -277,9 +285,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
       dryRun?: boolean;
       runAfter?: boolean;
       pendingRebuildId?: string;
-      // Guard rail: /reenrichments never accepts categories. A misrouted
-      // reset payload landing here would silently re-extract on the entire
-      // graph (the original silent-discard regression).
       categories?: unknown;
     };
     if (body.categories !== undefined) {
@@ -311,10 +316,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
       );
     }
 
-    // Two-step rebuild: the caller already holds a pending recreate lock from
-    // a prior /resets call. Promote it; only then are the standard sync/
-    // enrichment/in-flight-job conflicts checked (because our own pending
-    // lock would otherwise read as RECREATE_ACTIVE).
     const pendingRebuildId = typeof body.pendingRebuildId === "string" ? body.pendingRebuildId : undefined;
     let lockAlreadyHeld = false;
     if (pendingRebuildId) {
@@ -355,6 +356,11 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
     job.phase = "wiping";
     setCurrentReenrichJob(job);
 
+    /**
+     * Runs the re-enrichment job after the HTTP response returns. A promoted
+     * pending lock becomes active, and runReenrichJob does not release that
+     * caller-held lock, so the cleanup path releases it here.
+     */
     void (async () => {
       try {
         job.phase = "wiping";
@@ -391,8 +397,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
       } finally {
         setLatestReenrichJob(job);
         setCurrentReenrichJob(null);
-        // Promoted pending → active; runReenrichJob doesn't release the
-        // caller-held lock, so we release it here.
         if (lockAlreadyHeld && isRecreateActive()) endRecreateLock();
       }
     })();
@@ -418,13 +422,21 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
    *   categories: ("manual" | "connectors" | "ai")[],
    *   runAfter?: boolean,
    *   dryRun?: boolean,
-   *   confirm?: string,  // required when runAfter=true OR all categories
-   *   wipeLlmFacts?: boolean,  // tombstone llm_extracted/llm_relation facts after the category purge (step-1 two-step rebuild)
+   *   confirm?: string,
+   *   wipeLlmFacts?: boolean,
    * }
+   *
+   * confirm is required when runAfter=true or all categories are selected.
+   * wipeLlmFacts tombstones llm_extracted/llm_relation facts after the
+   * category purge in step 1 of the two-step rebuild flow.
+   * Rejects scope-shaped re-enrichment payloads so a misrouted re-enrich
+   * request cannot silently succeed as a category reset.
    *
    * When `runAfter=false`, the server begins a pending recreate lock and
    * returns `pendingRebuildId` + `pendingRebuildExpiresAt` so the caller can
    * present them to /rebuilds or /reenrichments for step 2.
+   * When `runAfter=true`, the server begins an active lock for the legacy
+   * single-shot reset+rebuild path.
    */
   routes.post("/resets", async (c) => {
     const denied = denyIfNotAdmin(c);
@@ -435,9 +447,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
       dryRun?: boolean;
       confirm?: string;
       wipeLlmFacts?: boolean;
-      // Guard rail: /resets never accepts scope. Reject explicitly so a
-      // misrouted reenrich payload doesn't silently succeed as a category
-      // reset (regression for the silent-discard bug that landed in prod).
       scope?: unknown;
     };
     if (body.scope !== undefined) {
@@ -521,10 +530,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
     const job = newResetJob({ categories: [...categories], runAfter, wipeLlmFacts });
     job.phase = "resetting";
 
-    // Lock acquisition:
-    //   runAfter=true  → active (legacy single-shot reset+rebuild)
-    //   runAfter=false → pending (step 1 of two-step rebuild: hold the lane
-    //                   until step 2 promotes or TTL expires)
     let pendingRebuildId: string | null = null;
     let pendingExpiresAtIso: string | null = null;
     if (runAfter) {
@@ -539,6 +544,12 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
     setCurrentResetJob(job);
     const triggeredByUserId = (c.get("sub") as string | undefined) ?? "system";
 
+    /**
+     * Runs reset after the HTTP response returns. Failed step-1 resets release
+     * their pending lock so sync and enrichment do not remain blocked behind a
+     * graph the operator never got; successful pending resets keep the lock for
+     * step 2, while single-shot resets release their active lock here.
+     */
     void (async () => {
       try {
         job.progress = { phase: "resetting", completed: 0, total: 1 };
@@ -583,16 +594,12 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
         job.phase = "failed";
         job.finishedAt = new Date().toISOString();
         logger.error({ err, jobId: job.id, runAfter, wipeLlmFacts }, "Reset job failed");
-        // When the step-1 reset itself fails, release the pending lock so sync
-        // and enrichment aren't stuck behind a graph the operator never got.
         if (!runAfter && pendingRebuildId) {
           cancelPendingRebuild(pendingRebuildId);
         }
       } finally {
         setLatestResetJob(job);
         setCurrentResetJob(null);
-        // runAfter=true: release the active lock we held.
-        // runAfter=false: pending lock stays for step 2 (or TTL releases it).
         if (runAfter && isRecreateActive()) endRecreateLock();
       }
     })();

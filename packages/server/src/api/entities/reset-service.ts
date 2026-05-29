@@ -136,6 +136,13 @@ export function selectEntitiesForCategories(
     });
 }
 
+/**
+ * Applies a category reset while preserving ownership boundaries for mixed
+ * provenance entities. AI resets strip only LLM mentions/refs from connector
+ * owned entities; connector resets strip only connector mentions/refs from
+ * AI-only org entities. Entities fully owned by the selected category are
+ * deleted, and selected fact types are marked unmaterialized for replay.
+ */
 export async function performReset(db: Kysely<DB>, opts: ResetExecutionOptions): Promise<ResetExecutionResult> {
   const rows = await selectEntitiesForCategories(
     db,

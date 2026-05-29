@@ -21,6 +21,215 @@ function countByType(rows: RelationListEntry[]): Record<string, number> {
   return out;
 }
 
+/**
+ * Loads the structured facts shape the drawer Summary block consumes.
+ * Returns null when the entity doesn't exist.
+ */
+async function loadEntityFactsForId(db: Kysely<DB>, entityId: string): Promise<EntityProfileFacts | null> {
+  const repo = createEntityRepository(db);
+  const relRepo = createEntityRelationshipsRepository(db);
+  const entity = await repo.getEntity(entityId);
+  if (!entity) return null;
+  const [aggregates, relations] = await Promise.all([
+    repo.getEntityProfileAggregates(entity.id),
+    relRepo.listRelationsForEntity(entity.id, { limit: 50 }),
+  ]);
+  const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
+  const topRelationships = [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10);
+  return {
+    entityId: entity.id,
+    name: entity.name,
+    sourceType: entity.source_type,
+    entityType: mapSourceTypeToEntityType(entity.source_type),
+    metadata: parsedMetadata,
+    mentionCount: aggregates.mentionCount,
+    sourceCounts: aggregates.sourceCounts,
+    firstSeenAt: aggregates.firstSeenAt,
+    lastSeenAt: aggregates.lastSeenAt,
+    domainsForCompany: aggregates.domainsForCompany,
+    topRelationships,
+    incomingCounts: countByType(relations.incoming),
+    outgoingCounts: countByType(relations.outgoing),
+  };
+}
+
+interface ActivityStats {
+  fileCount: number;
+  distinctDays: number;
+  topCoAttendees: string[];
+}
+
+/**
+ * Aggregate activity stats for the deterministic Summary: how many files
+ * mention this entity, how many distinct calendar days that spans, and the
+ * top 3 people who co-attend the same files. Two queries, both portable
+ * across SQLite/Postgres. File-derived details are filtered through the
+ * same viewer predicate as timeline/evidence routes.
+ */
+async function loadActivityStats(db: Kysely<DB>, entityId: string, viewer: FileViewer): Promise<ActivityStats> {
+  let fileQuery = db
+    .selectFrom("entity_mentions")
+    .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+    .select([
+      sql<number>`COUNT(DISTINCT entity_mentions.indexed_file_id)`.as("file_count"),
+      sql<number>`COUNT(DISTINCT substr(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at), 1, 10))`.as(
+        "distinct_days",
+      ),
+    ])
+    .where("entity_mentions.entity_id", "=", entityId);
+  if (!viewer.isAdmin) {
+    fileQuery = fileQuery.where(fileVisibilityPredicate(viewer));
+  }
+  const fileRow = await fileQuery.executeTakeFirst();
+
+  let coAttendeeQuery = db
+    .selectFrom("entity_mentions as em1")
+    .innerJoin("indexed_files", "indexed_files.id", "em1.indexed_file_id")
+    .innerJoin("entity_mentions as em2", (join) =>
+      join.onRef("em2.indexed_file_id", "=", "em1.indexed_file_id").on(sql`em2.entity_id <> em1.entity_id`),
+    )
+    .innerJoin("entities as e2", "e2.id", "em2.entity_id")
+    .select(["e2.id as id", "e2.name as name", sql<number>`COUNT(DISTINCT em1.indexed_file_id)`.as("files")])
+    .where("em1.entity_id", "=", entityId)
+    .where("e2.source_type", "=", "person")
+    .groupBy(["e2.id", "e2.name"])
+    .orderBy("files", "desc")
+    .limit(3);
+  if (!viewer.isAdmin) {
+    coAttendeeQuery = coAttendeeQuery.where(fileVisibilityPredicate(viewer));
+  }
+  const coAttendeeRows = await coAttendeeQuery.execute();
+
+  return {
+    fileCount: Number(fileRow?.file_count ?? 0),
+    distinctDays: Number(fileRow?.distinct_days ?? 0),
+    topCoAttendees: coAttendeeRows.map((r) => r.name),
+  };
+}
+
+/**
+ * Deterministic prose summary: an identity sentence + an activity sentence.
+ * Built entirely from relationships + aggregates — no LLM, no shimmer. The
+ * idea is to render facts we already know are true rather than synthesizing
+ * narrative from action-item facts.
+ */
+function buildSummary(facts: EntityProfileFacts, activity: ActivityStats): { identity: string; activity: string } {
+  const identity = buildIdentitySentence(facts);
+  const activitySentence = buildActivitySentence(facts, activity);
+  return { identity, activity: activitySentence };
+}
+
+function pluralize(n: number, singular: string, plural?: string): string {
+  return `${n} ${n === 1 ? singular : (plural ?? `${singular}s`)}`;
+}
+
+function buildIdentitySentence(facts: EntityProfileFacts): string {
+  const typeWord = formatEntityType(facts.entityType, facts.sourceType);
+  const email = typeof facts.metadata?.email === "string" ? facts.metadata.email : null;
+  const role = typeof facts.metadata?.role === "string" ? facts.metadata.role : null;
+  const outgoing = facts.topRelationships.filter((r) => r.sourceEntityId === facts.entityId);
+  const employers = uniqueNames(outgoing.filter((r) => r.relationshipType === "works_at").map((r) => r.other.name));
+  const clients = uniqueNames(outgoing.filter((r) => r.relationshipType === "engaged_with").map((r) => r.other.name));
+
+  const parts: string[] = [typeWord];
+
+  if (facts.entityType === "person") {
+    if (role) parts.push(role);
+    if (employers.length > 0) parts.push(`works at ${joinList(employers)}`);
+    if (email) parts.push(`(${email})`);
+  } else if (facts.entityType === "company") {
+    const primary = facts.domainsForCompany.find((d) => d.isPrimary)?.domain;
+    const others = facts.domainsForCompany.filter((d) => !d.isPrimary).map((d) => d.domain);
+    if (primary) parts.push(primary);
+    if (others.length > 0) parts.push(`also: ${joinList(others.slice(0, 3))}`);
+  }
+
+  let sentence = parts.join(" · ");
+  if (sentence.length > 0) sentence = `${sentence}.`;
+
+  if (facts.entityType === "person" && clients.length > 0) {
+    sentence = `${sentence} Engaged with ${joinList(clients.slice(0, 4))}.`;
+  }
+
+  return sentence;
+}
+
+function buildActivitySentence(facts: EntityProfileFacts, activity: ActivityStats): string {
+  const pieces: string[] = [];
+  if (activity.fileCount > 0) {
+    const fileTerm = pluralize(activity.fileCount, "file");
+    const mentionsTerm = pluralize(facts.mentionCount, "mention");
+    if (activity.distinctDays > 0) {
+      pieces.push(`Active in ${fileTerm} (${mentionsTerm}) across ${pluralize(activity.distinctDays, "day")}`);
+    } else {
+      pieces.push(`Active in ${fileTerm} (${mentionsTerm})`);
+    }
+  }
+  if (facts.entityType === "person" && activity.topCoAttendees.length > 0) {
+    pieces.push(`most-frequent collaborators: ${joinList(activity.topCoAttendees)}`);
+  }
+  if (pieces.length === 0) return "";
+  return `${pieces.join(". ")}.`;
+}
+
+function formatEntityType(entityType: string, sourceType: string): string {
+  switch (entityType) {
+    case "person":
+      return "Person";
+    case "company":
+      return "Company";
+    case "product":
+      return "Product";
+    case "project":
+      return "Project";
+    case "team":
+      return "Team";
+    case "system":
+      return capitalize(sourceType);
+    default:
+      return capitalize(sourceType);
+  }
+}
+
+function capitalize(value: string): string {
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function uniqueNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of names) {
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function joinList(items: string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
+
+function relationCompare(a: RelationListEntry, b: RelationListEntry): number {
+  const ac = CONFIDENCE_ORDER[a.confidence] ?? 3;
+  const bc = CONFIDENCE_ORDER[b.confidence] ?? 3;
+  if (ac !== bc) return ac - bc;
+  if (a.evidenceCount !== b.evidenceCount) return b.evidenceCount - a.evidenceCount;
+  if (a.confidenceScore !== b.confidenceScore) return b.confidenceScore - a.confidenceScore;
+  const byName = a.other.name.localeCompare(b.other.name);
+  if (byName !== 0) return byName;
+  return a.id.localeCompare(b.id);
+}
+
 export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   const routes = new Hono();
   const repo = createEntityRepository(db);
@@ -33,217 +242,16 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
   const TIMELINE_LIMIT = 100;
 
   /**
-   * Loads the structured facts shape the drawer Summary block consumes.
-   * Returns null when the entity doesn't exist.
-   */
-  async function loadEntityFactsForId(entityId: string): Promise<EntityProfileFacts | null> {
-    const entity = await repo.getEntity(entityId);
-    if (!entity) return null;
-    const [aggregates, relations] = await Promise.all([
-      repo.getEntityProfileAggregates(entity.id),
-      relRepo.listRelationsForEntity(entity.id, { limit: 50 }),
-    ]);
-    const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
-    const topRelationships = [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10);
-    return {
-      entityId: entity.id,
-      name: entity.name,
-      sourceType: entity.source_type,
-      entityType: mapSourceTypeToEntityType(entity.source_type),
-      metadata: parsedMetadata,
-      mentionCount: aggregates.mentionCount,
-      sourceCounts: aggregates.sourceCounts,
-      firstSeenAt: aggregates.firstSeenAt,
-      lastSeenAt: aggregates.lastSeenAt,
-      domainsForCompany: aggregates.domainsForCompany,
-      topRelationships,
-      incomingCounts: countByType(relations.incoming),
-      outgoingCounts: countByType(relations.outgoing),
-    };
-  }
-
-  interface ActivityStats {
-    fileCount: number;
-    distinctDays: number;
-    topCoAttendees: string[];
-  }
-
-  /**
-   * Aggregate activity stats for the deterministic Summary: how many files
-   * mention this entity, how many distinct calendar days that spans, and the
-   * top 3 people who co-attend the same files. Two queries, both portable
-   * across SQLite/Postgres. File-derived details are filtered through the
-   * same viewer predicate as timeline/evidence routes.
-   */
-  async function loadActivityStats(entityId: string, viewer: FileViewer): Promise<ActivityStats> {
-    let fileQuery = db
-      .selectFrom("entity_mentions")
-      .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
-      .select([
-        sql<number>`COUNT(DISTINCT entity_mentions.indexed_file_id)`.as("file_count"),
-        sql<number>`COUNT(DISTINCT substr(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at), 1, 10))`.as(
-          "distinct_days",
-        ),
-      ])
-      .where("entity_mentions.entity_id", "=", entityId);
-    if (!viewer.isAdmin) {
-      fileQuery = fileQuery.where(fileVisibilityPredicate(viewer));
-    }
-    const fileRow = await fileQuery.executeTakeFirst();
-
-    let coAttendeeQuery = db
-      .selectFrom("entity_mentions as em1")
-      .innerJoin("indexed_files", "indexed_files.id", "em1.indexed_file_id")
-      .innerJoin("entity_mentions as em2", (join) =>
-        join.onRef("em2.indexed_file_id", "=", "em1.indexed_file_id").on(sql`em2.entity_id <> em1.entity_id`),
-      )
-      .innerJoin("entities as e2", "e2.id", "em2.entity_id")
-      .select(["e2.id as id", "e2.name as name", sql<number>`COUNT(DISTINCT em1.indexed_file_id)`.as("files")])
-      .where("em1.entity_id", "=", entityId)
-      .where("e2.source_type", "=", "person")
-      .groupBy(["e2.id", "e2.name"])
-      .orderBy("files", "desc")
-      .limit(3);
-    if (!viewer.isAdmin) {
-      coAttendeeQuery = coAttendeeQuery.where(fileVisibilityPredicate(viewer));
-    }
-    const coAttendeeRows = await coAttendeeQuery.execute();
-
-    return {
-      fileCount: Number(fileRow?.file_count ?? 0),
-      distinctDays: Number(fileRow?.distinct_days ?? 0),
-      topCoAttendees: coAttendeeRows.map((r) => r.name),
-    };
-  }
-
-  /**
-   * Deterministic prose summary: an identity sentence + an activity sentence.
-   * Built entirely from relationships + aggregates — no LLM, no shimmer. The
-   * idea is to render facts we already know are true rather than synthesizing
-   * narrative from action-item facts.
-   */
-  function buildSummary(facts: EntityProfileFacts, activity: ActivityStats): { identity: string; activity: string } {
-    const identity = buildIdentitySentence(facts);
-    const activitySentence = buildActivitySentence(facts, activity);
-    return { identity, activity: activitySentence };
-  }
-
-  function pluralize(n: number, singular: string, plural?: string): string {
-    return `${n} ${n === 1 ? singular : (plural ?? `${singular}s`)}`;
-  }
-
-  function buildIdentitySentence(facts: EntityProfileFacts): string {
-    const typeWord = formatEntityType(facts.entityType, facts.sourceType);
-    const email = typeof facts.metadata?.email === "string" ? facts.metadata.email : null;
-    const role = typeof facts.metadata?.role === "string" ? facts.metadata.role : null;
-    const outgoing = facts.topRelationships.filter((r) => r.sourceEntityId === facts.entityId);
-    const employers = uniqueNames(outgoing.filter((r) => r.relationshipType === "works_at").map((r) => r.other.name));
-    const clients = uniqueNames(outgoing.filter((r) => r.relationshipType === "engaged_with").map((r) => r.other.name));
-
-    const parts: string[] = [typeWord];
-
-    if (facts.entityType === "person") {
-      if (role) parts.push(role);
-      if (employers.length > 0) parts.push(`works at ${joinList(employers)}`);
-      if (email) parts.push(`(${email})`);
-    } else if (facts.entityType === "company") {
-      const primary = facts.domainsForCompany.find((d) => d.isPrimary)?.domain;
-      const others = facts.domainsForCompany.filter((d) => !d.isPrimary).map((d) => d.domain);
-      if (primary) parts.push(primary);
-      if (others.length > 0) parts.push(`also: ${joinList(others.slice(0, 3))}`);
-    }
-
-    let sentence = parts.join(" · ");
-    if (sentence.length > 0) sentence = `${sentence}.`;
-
-    if (facts.entityType === "person" && clients.length > 0) {
-      sentence = `${sentence} Engaged with ${joinList(clients.slice(0, 4))}.`;
-    }
-
-    return sentence;
-  }
-
-  function buildActivitySentence(facts: EntityProfileFacts, activity: ActivityStats): string {
-    const pieces: string[] = [];
-    if (activity.fileCount > 0) {
-      const fileTerm = pluralize(activity.fileCount, "file");
-      const mentionsTerm = pluralize(facts.mentionCount, "mention");
-      if (activity.distinctDays > 0) {
-        pieces.push(`Active in ${fileTerm} (${mentionsTerm}) across ${pluralize(activity.distinctDays, "day")}`);
-      } else {
-        pieces.push(`Active in ${fileTerm} (${mentionsTerm})`);
-      }
-    }
-    if (facts.entityType === "person" && activity.topCoAttendees.length > 0) {
-      pieces.push(`most-frequent collaborators: ${joinList(activity.topCoAttendees)}`);
-    }
-    if (pieces.length === 0) return "";
-    return `${pieces.join(". ")}.`;
-  }
-
-  function formatEntityType(entityType: string, sourceType: string): string {
-    switch (entityType) {
-      case "person":
-        return "Person";
-      case "company":
-        return "Company";
-      case "product":
-        return "Product";
-      case "project":
-        return "Project";
-      case "team":
-        return "Team";
-      case "system":
-        return capitalize(sourceType);
-      default:
-        return capitalize(sourceType);
-    }
-  }
-
-  function capitalize(value: string): string {
-    if (!value) return value;
-    return value.charAt(0).toUpperCase() + value.slice(1);
-  }
-
-  function uniqueNames(names: string[]): string[] {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const name of names) {
-      const trimmed = name.trim();
-      if (!trimmed) continue;
-      const key = trimmed.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(trimmed);
-    }
-    return out;
-  }
-
-  function joinList(items: string[]): string {
-    if (items.length === 0) return "";
-    if (items.length === 1) return items[0];
-    if (items.length === 2) return `${items[0]} and ${items[1]}`;
-    return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
-  }
-  const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
-  const relationCompare = (a: RelationListEntry, b: RelationListEntry): number => {
-    const ac = CONFIDENCE_ORDER[a.confidence] ?? 3;
-    const bc = CONFIDENCE_ORDER[b.confidence] ?? 3;
-    if (ac !== bc) return ac - bc;
-    if (a.evidenceCount !== b.evidenceCount) return b.evidenceCount - a.evidenceCount;
-    if (a.confidenceScore !== b.confidenceScore) return b.confidenceScore - a.confidenceScore;
-    const byName = a.other.name.localeCompare(b.other.name);
-    if (byName !== 0) return byName;
-    return a.id.localeCompare(b.id);
-  };
-
-  /**
    * GET /api/entities
    *   ?type=person,clickup_space     — filter by source_type (comma-separated)
    *   &source=clickup,linear          — filter by source (from entity_source_refs)
    *   &search=beetu                   — name/alias search
    *   &sort=hotness|mentions|name     — sort field (default: hotness)
    *   &limit=50&offset=0
+   *
+   * Hides container/system entities such as clickup_workspace and clickup_space
+   * unless the caller opts in. Explicit type filters always win so deep links
+   * and the "Show system entities" toggle keep working.
    */
   /**
    * POST /api/entities
@@ -329,9 +337,6 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
       query = query.where("entities.status", "!=", "archived");
     }
 
-    // Hide container/system entities (clickup_workspace, clickup_space) unless
-    // the caller opts in. Explicit type filters always win — deep links and the
-    // "Show system entities" toggle keep working.
     if (!typeFilter && !includeSystem && systemTypes.length > 0) {
       query = query.where("entities.source_type", "not in", systemTypes);
     }
@@ -417,11 +422,12 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
    * Mark enriched files that have no entity mentions for re-enrichment.
    * The next enrichment run will process them with entity linking enabled.
    * Optional: ?source=clickup,fireflies to limit to specific sources.
+   * Selects done, non-archived files without entity mentions and marks their
+   * embedding_status pending so the enrichment scheduler picks them up.
    */
   routes.post("/backfill", async (c) => {
     const sourceFilter = c.req.query("source")?.split(",").filter(Boolean);
 
-    // Find files that are enriched but have no entity mentions
     let query = db
       .selectFrom("indexed_files")
       .select(["indexed_files.id"])
@@ -439,7 +445,6 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
       return c.json({ message: "No files need entity backfill.", count: 0 });
     }
 
-    // Reset their embedding_status to pending so enrichment picks them up
     const fileIds = files.map((f) => f.id);
     await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "in", fileIds).execute();
 
@@ -467,7 +472,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
 
     const [sourceRefs, facts] = await Promise.all([
       db.selectFrom("entity_source_refs").selectAll().where("entity_id", "=", entity.id).execute(),
-      loadEntityFactsForId(entity.id),
+      loadEntityFactsForId(db, entity.id),
     ]);
     if (!facts) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
@@ -475,7 +480,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
 
     const parsedAliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
     const viewer = getFileViewer(c);
-    const activity = await loadActivityStats(entity.id, viewer);
+    const activity = await loadActivityStats(db, entity.id, viewer);
     const summary = buildSummary(facts, activity);
 
     return c.json({
