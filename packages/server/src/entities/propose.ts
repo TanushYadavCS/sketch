@@ -264,19 +264,30 @@ function pickConfirmedCanonical(candidates: Entity[], input: ProposeInput, looku
   if (confirmed.length === 1) return confirmed[0];
 
   let pool = confirmed;
+  let matchedByDomain = false;
   const evidenceDomain = input.evidenceDomain?.trim().toLowerCase();
   if (evidenceDomain && input.entityType === "company") {
     const domainIds = new Set(lookup.getCompanyIdsByDomain?.(evidenceDomain) ?? []);
     if (domainIds.size > 0) {
       const withDomain = confirmed.filter((c) => domainIds.has(c.id));
-      if (withDomain.length > 0) pool = withDomain;
+      if (withDomain.length > 0) {
+        pool = withDomain;
+        matchedByDomain = true;
+      }
     }
   }
-  return [...pool].sort((a, b) => {
+  const sorted = [...pool].sort((a, b) => {
     if (b.hotness !== a.hotness) return b.hotness - a.hotness;
     if (a.created_at !== b.created_at) return a.created_at.localeCompare(b.created_at);
     return a.id.localeCompare(b.id);
-  })[0];
+  });
+  if (!matchedByDomain && input.entityType === "company" && sorted.length >= 2) {
+    const topHotness = Number(sorted[0].hotness ?? 0);
+    const secondHotness = Number(sorted[1].hotness ?? 0);
+    const strongEnough = secondHotness <= 0 ? topHotness > 0 : topHotness >= 3 * secondHotness;
+    if (!strongEnough) return null;
+  }
+  return sorted[0];
 }
 
 async function queueProposal(

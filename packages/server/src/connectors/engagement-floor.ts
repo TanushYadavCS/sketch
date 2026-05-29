@@ -43,6 +43,7 @@ import {
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
+import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { parseActionItemOwners } from "./participant-block";
 
 export interface EngagementFloorDeps {
@@ -62,6 +63,13 @@ export interface EngagementFloorResult {
   emitted: number;
   /** Number of previously emitted facts tombstoned because this pass no longer supports them. */
   tombstoned: number;
+}
+
+export interface FloorRetryForDomainsResult {
+  domains: number;
+  filesScanned: number;
+  emitted: number;
+  cappedDomains: number;
 }
 
 interface ResolvedAttendee {
@@ -201,4 +209,73 @@ export async function applyEngagementFloor(
   }
 
   return finish(emitted);
+}
+
+export async function floorRetryForDomains(
+  deps: EngagementFloorDeps,
+  domains: string[],
+  opts?: { maxFilesPerDomain?: number; materialize?: boolean; fileIds?: string[] },
+): Promise<FloorRetryForDomainsResult> {
+  const domainsRepo = createEntityDomainsRepository(deps.db);
+  const maxFilesPerDomain = opts?.maxFilesPerDomain ?? 5000;
+  const normalizedDomains = Array.from(new Set(domains.map((domain) => domain.trim().toLowerCase()).filter(Boolean)));
+  const scopedFileIds = opts?.fileIds ? Array.from(new Set(opts.fileIds.filter(Boolean))) : null;
+  const result: FloorRetryForDomainsResult = {
+    domains: normalizedDomains.length,
+    filesScanned: 0,
+    emitted: 0,
+    cappedDomains: 0,
+  };
+  if (normalizedDomains.length === 0) return result;
+  if (scopedFileIds?.length === 0) return result;
+
+  for (const domain of normalizedDomains) {
+    const attendeeRows = await deps.db
+      .selectFrom("indexed_file_facts")
+      .select(["indexed_file_id", "subject_email"])
+      .where("fact_type", "=", "attendee")
+      .where("subject_email", "is not", null)
+      .$if(scopedFileIds !== null, (qb) => qb.where("indexed_file_id", "in", scopedFileIds ?? []))
+      .where("deleted_at", "is", null)
+      .execute();
+
+    const fileIds: string[] = [];
+    const seen = new Set<string>();
+    for (const row of attendeeRows) {
+      if (!row.indexed_file_id) continue;
+      if (!row.subject_email) continue;
+      if (domainsRepo.normalizeEmailDomain(row.subject_email) !== domain) continue;
+      if (seen.has(row.indexed_file_id)) continue;
+      seen.add(row.indexed_file_id);
+      fileIds.push(row.indexed_file_id);
+      if (fileIds.length >= maxFilesPerDomain) break;
+    }
+    if (fileIds.length >= maxFilesPerDomain) result.cappedDomains += 1;
+
+    if (fileIds.length === 0) continue;
+    const files = await deps.db
+      .selectFrom("indexed_files")
+      .select(["id", "connector_config_id", "content", "content_hash"])
+      .where("id", "in", fileIds)
+      .where("is_archived", "=", 0)
+      .execute();
+    for (const file of files) {
+      if (!file.content) continue;
+      result.filesScanned += 1;
+      const floor = await applyEngagementFloor(deps, {
+        fileId: file.id,
+        fileContent: file.content,
+        connectorConfigId: file.connector_config_id,
+        contentHash: file.content_hash,
+      });
+      result.emitted += floor.emitted;
+    }
+  }
+
+  if (result.emitted > 0 && opts?.materialize !== false && deps.logger) {
+    await materializeUnmaterializedFacts(deps.db, deps.logger);
+  }
+
+  deps.logger?.info(result, "engagement-floor: domain retry complete");
+  return result;
 }

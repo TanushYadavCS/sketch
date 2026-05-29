@@ -1119,4 +1119,127 @@ describe("proposeEntity", () => {
     const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
     expect(queue).toHaveLength(0);
   });
+
+  it("22. company exact-name collision with strong hotness disparity links without evidenceDomain", async () => {
+    const entityRepo = createEntityRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "acme-hot",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 100,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+        {
+          id: "acme-cold",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 1,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+      ])
+      .execute();
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Acme",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:acme-strong",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe("acme-hot");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("23. company exact-name collision with similar hotness queues without evidenceDomain", async () => {
+    const entityRepo = createEntityRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "acme-first",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 5,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+        {
+          id: "acme-second",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 4,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+      ])
+      .execute();
+    await insertTestFile(db, "file-23");
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Acme",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:acme-similar",
+      evidence: [{ indexedFileId: "file-23" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].candidate_reason).toBe("exact-ambiguous");
+  });
 });

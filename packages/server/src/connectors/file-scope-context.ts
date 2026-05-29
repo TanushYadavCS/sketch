@@ -33,9 +33,9 @@ import { SYSTEM_SOURCE_TYPES } from "../entities/profile-facts";
 
 export const HALF_LIFE_DAYS = 60;
 export const MIN_SCORE = 0.5;
-export const MAX_ANCHORS_PER_SIDE = 5;
-export const PER_ANCHOR_INITIATIVE_CAP = 20;
-export const PER_ANCHOR_TEAM_CAP = 10;
+export const MAX_ANCHORS_PER_SIDE = 3;
+export const PER_ANCHOR_INITIATIVE_CAP = 8;
+export const PER_ANCHOR_TEAM_CAP = 4;
 export const RECENTLY_ACTIVE_WINDOW_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 

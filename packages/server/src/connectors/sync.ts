@@ -18,6 +18,7 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
+import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import {
   cleanupEmptyRelationships,
   cleanupRelationshipEvidenceForFacts,
@@ -25,6 +26,7 @@ import {
 } from "../entities/materialize";
 import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
+import { floorRetryForDomains } from "./engagement-floor";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 import { getConnector } from "./registry";
@@ -184,7 +186,16 @@ export async function runConnectorSync(
   connectorConfigId: string,
   logger: Logger,
   appConfig?: Partial<
-    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+    Pick<
+      Config,
+      | "SYNC_ALLOW_LARGE_RECONCILE"
+      | "SYNC_MAX_RECONCILE_RATIO"
+      | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
+      | "FLOOR_RETRY_MAX_FILES_PER_DOMAIN"
+      | "FEATURE_ARCHIVE_MIN_MENTIONS"
+      | "FEATURE_ARCHIVE_AGE_DAYS"
+      | "FEATURE_ARCHIVE_MAX_PER_RUN"
+    >
   >,
 ): Promise<SyncResult> {
   if (isRecreateActive()) {
@@ -714,7 +725,14 @@ export async function runConnectorSync(
       syncLogger.info({ materializeSummary }, "Post-sync fact materialization complete");
     }
 
-    await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));
+    const domainSweep = await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));
+    if (domainSweep.promotedDomains.length > 0) {
+      await floorRetryForDomains(
+        { db, logger: syncLogger.child({ component: "domain-floor-retry" }) },
+        domainSweep.promotedDomains,
+        { maxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN },
+      );
+    }
     await sweepCoMentionContributesTo(db, syncLogger.child({ component: "co-mention-sweep" }), {
       scope: { kind: "files", indexedFileIds: [...affectedIndexedFileIds] },
       threshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
@@ -766,7 +784,16 @@ export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
   appConfig?: Partial<
-    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+    Pick<
+      Config,
+      | "SYNC_ALLOW_LARGE_RECONCILE"
+      | "SYNC_MAX_RECONCILE_RATIO"
+      | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
+      | "FLOOR_RETRY_MAX_FILES_PER_DOMAIN"
+      | "FEATURE_ARCHIVE_MIN_MENTIONS"
+      | "FEATURE_ARCHIVE_AGE_DAYS"
+      | "FEATURE_ARCHIVE_MAX_PER_RUN"
+    >
   >;
 }
 
@@ -796,6 +823,8 @@ async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T
 const SYNC_CONCURRENCY = 4;
 const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
 const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+const FEATURE_ARCHIVE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let lastFeatureArchiveSweepAt = 0;
 
 async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Promise<number> {
   try {
@@ -897,6 +926,20 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     }
   } catch (err) {
     logger.error({ err }, "Entity hotness recomputation failed");
+  }
+
+  const now = Date.now();
+  if (now - lastFeatureArchiveSweepAt >= FEATURE_ARCHIVE_SWEEP_INTERVAL_MS) {
+    lastFeatureArchiveSweepAt = now;
+    try {
+      await runFeatureArchiveSweep(db, logger.child({ component: "feature-archive-sweep" }), {
+        minMentions: deps?.appConfig?.FEATURE_ARCHIVE_MIN_MENTIONS,
+        ageDays: deps?.appConfig?.FEATURE_ARCHIVE_AGE_DAYS,
+        maxPerRun: deps?.appConfig?.FEATURE_ARCHIVE_MAX_PER_RUN,
+      });
+    } catch (err) {
+      logger.error({ err }, "Feature archive sweep failed");
+    }
   }
 }
 
