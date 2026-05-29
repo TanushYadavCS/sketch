@@ -7,10 +7,13 @@
  * evicted when the buffer exceeds maxPerGroup.
  */
 
+import type { Attachment } from "../files";
+
 export interface GroupBufferedMessage {
   senderName: string;
   text: string;
   timestamp: number;
+  attachments?: Attachment[];
 }
 
 export class GroupBuffer {

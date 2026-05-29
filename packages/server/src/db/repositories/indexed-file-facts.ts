@@ -266,6 +266,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
               .select(db.fn.countAll<number>().as("count"))
               .where("connector_config_id", "=", scope.connectorConfigId)
               .where("deleted_at", "is", null)
+              .where("last_seen_sync_run_id", "is not", null)
               .executeTakeFirst()
           : await db
               .selectFrom("indexed_file_facts")
@@ -284,9 +285,8 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
               .select(db.fn.countAll<number>().as("count"))
               .where("connector_config_id", "=", scope.connectorConfigId)
               .where("deleted_at", "is", null)
-              .where((eb) =>
-                eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", scope.syncRunId)]),
-              )
+              .where("last_seen_sync_run_id", "is not", null)
+              .where("last_seen_sync_run_id", "!=", scope.syncRunId)
               .executeTakeFirst()
           : seenFactKeys && seenFactKeys.size > 0
             ? await db
@@ -327,9 +327,8 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
               .select(["id", "indexed_file_id"])
               .where("connector_config_id", "=", scope.connectorConfigId)
               .where("deleted_at", "is", null)
-              .where((eb) =>
-                eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", scope.syncRunId)]),
-              )
+              .where("last_seen_sync_run_id", "is not", null)
+              .where("last_seen_sync_run_id", "!=", scope.syncRunId)
               .execute()
           : seenFactKeys && seenFactKeys.size > 0
             ? await db
@@ -358,9 +357,8 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
               .set({ deleted_at: now, materialized_at: null, updated_at: now })
               .where("connector_config_id", "=", scope.connectorConfigId)
               .where("deleted_at", "is", null)
-              .where((eb) =>
-                eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", scope.syncRunId)]),
-              )
+              .where("last_seen_sync_run_id", "is not", null)
+              .where("last_seen_sync_run_id", "!=", scope.syncRunId)
               .executeTakeFirst()
           : seenFactKeys && seenFactKeys.size > 0
             ? await db
