@@ -186,6 +186,36 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(entity.source_type).toBe("person");
   });
 
+  it("queues ambiguous existing LLM person mentions for review and leaves the fact pending", async () => {
+    await seedFiles(db, 1);
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Sam Smith",
+      email: "sam.smith@example.com",
+      subtype: "external",
+      source: "google_drive",
+      sourceId: "person:sam-smith",
+    });
+    await entityRepo.upsertPersonEntity({
+      name: "Sam Patel",
+      email: "sam.patel@example.com",
+      subtype: "external",
+      source: "google_drive",
+      sourceId: "person:sam-patel",
+    });
+    await upsertLlmFact(db, "file-1", "Sam", "person");
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.queued).toBe(1);
+    expect(summary.materialized).toBe(0);
+    expect(summary.deferred).toBe(1);
+    const review = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(review.proposed_name).toBe("Sam");
+    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    expect(fact.materialized_at).toBeNull();
+  });
+
   it("creates non-person entities without queuing reviews", async () => {
     await seedFiles(db, 2);
     await upsertLlmFact(db, "file-1", "Apollo", "project");

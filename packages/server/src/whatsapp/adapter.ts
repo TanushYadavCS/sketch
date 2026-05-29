@@ -42,6 +42,7 @@ import {
 } from "../progress-settings";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
+import { transcribeEagerAttachments } from "../transcription/service";
 import type { WhatsAppBot } from "./bot";
 import type { GroupBuffer } from "./group-buffer";
 import { createWhatsAppMessageHandler } from "./message-handler";
@@ -280,7 +281,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         let progressTransport: ReturnType<typeof createWhatsAppProgressTransport> | null = null;
 
         try {
-          const attachments: Attachment[] = [];
+          let attachments: Attachment[] = [];
           if (message.mediaType && whatsapp.socket) {
             const attachDir = join(workspaceDir, "attachments");
             try {
@@ -296,6 +297,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
               logger.warn({ err, mediaType: message.mediaType }, "Failed to download WhatsApp media");
             }
           }
+          attachments = await transcribeEagerAttachments(attachments, {
+            loadSettings: () => repos.settings.get(),
+            logger,
+          });
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
           const progressSettings = resolveProgressDisplaySettings(user);
@@ -414,10 +419,34 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
     if (!message.isMentioned) {
       const user = message.senderPhone ? await repos.users.findByWhatsappNumber(message.senderPhone) : undefined;
+      const attachments: Attachment[] = [];
+      if (message.mediaType === "audioMessage" && whatsapp.socket) {
+        const existingGroup = await repos.whatsappGroups.getByJid(message.jid);
+        const boundAgent = existingGroup?.agent_user_id
+          ? await repos.users.findById(existingGroup.agent_user_id)
+          : null;
+        const workspaceDir = boundAgent
+          ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${message.jid}`)
+          : await ensureGroupWorkspace(config, message.jid);
+        const attachDir = join(workspaceDir, "attachments");
+        try {
+          const attachment = await downloadWhatsAppMedia(
+            message.rawMessage,
+            whatsapp.socket,
+            attachDir,
+            maxFileBytes,
+            logger,
+          );
+          attachments.push(attachment);
+        } catch (err) {
+          logger.warn({ err, mediaType: message.mediaType }, "Failed to download untagged WhatsApp group audio");
+        }
+      }
       groupBuffer.append(message.jid, {
         senderName: user?.name ?? message.pushName,
-        text: message.text,
+        text: message.text || (attachments.length > 0 ? "See attached files." : ""),
         timestamp: Date.now(),
+        ...(attachments.length > 0 && { attachments }),
       });
       return;
     }
@@ -537,9 +566,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           userName: m.senderName,
           text: m.text,
           ts: String(m.timestamp),
+          ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         }));
 
-        const attachments: Attachment[] = [];
+        let attachments: Attachment[] = [];
         if (message.mediaType && whatsapp.socket) {
           const attachDir = join(workspaceDir, "attachments");
           try {
@@ -555,6 +585,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             logger.warn({ err, mediaType: message.mediaType }, "Failed to download WhatsApp media");
           }
         }
+        attachments = await transcribeEagerAttachments(attachments, {
+          loadSettings: () => repos.settings.get(),
+          logger,
+        });
 
         const userMessage = buildSketchContext({
           messages: contextMessages,
