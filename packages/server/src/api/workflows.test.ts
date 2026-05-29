@@ -95,7 +95,7 @@ async function createWorkflow(
     status?: "active" | "paused" | "completed";
     deliveryTarget?: string;
     outputTarget?: string | null;
-    sessionMode?: "fresh" | "persistent" | "chat";
+    sessionMode?: "fresh";
     threadTs?: string | null;
     steps?: Array<Record<string, unknown>>;
     contentType?: "prompt" | "script";
@@ -470,7 +470,7 @@ describe("workflow invoke API", () => {
       createdBy: requester.id,
       deliveryTarget: "C_SOURCE",
       outputTarget: "C_OUTPUT",
-      sessionMode: "chat",
+      sessionMode: "fresh",
       threadTs: "1234567890.000100",
     });
     const slack = {
