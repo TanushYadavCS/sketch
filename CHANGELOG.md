@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [0.31.0] -- 2026-05-27
+
+- Team management: allow admins to promote and demote other human users between admin and member from the Team edit modal, with the Access control hidden from non-admins and self-edits.
+- Auth: enforce auth-role changes in the Users API so only admins can change another human user's auth role, and users cannot change their own auth role.
+- Fix(scheduling): force scheduled automations to fresh sessions only, including a migration for legacy `chat` and `persistent` scheduled tasks, so run-now checks from the same Slack thread no longer deadlock behind the active chat queue.
+
+## [0.30.0] -- 2026-05-27
+
+- Audio: add speech-to-text support for Slack and WhatsApp audio attachments using OpenRouter Whisper Large v3 Turbo, preserving the original audio file and passing the transcript into agent context.
+- Agent tools: add `TranscribeAudio` for buffered audio attachments when OpenRouter transcription is configured, while keeping self-hosted/no-key setups non-breaking and tool-free.
+- Context handling: inline transcripts up to the 8K character limit and write longer transcripts as workspace attachment files for the agent to read.
+- Reliability: make transcription failures non-blocking, avoid treating explicit non-audio MIME uploads as audio, and derive OpenRouter audio formats from MIME, whitelisted extensions, or file headers.
+- Maintenance: split the large Sketch MCP tools module into focused tool files.
+
 ## [0.29.0] -- 2026-05-21
 
 - Workflows: add authenticated Canvas-triggered Sketch workflow invocation support, including requester attribution, Canvas workflow metadata, silent output mode, normalized run timestamps, and Canvas-managed trigger display in scheduled tasks.

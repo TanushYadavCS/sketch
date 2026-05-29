@@ -74,6 +74,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__TranscribeAudio",
+    label: "Transcribe audio",
+    description: "Convert an audio attachment in the workspace into text.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__getProviderConfig",
     label: "Check integration provider",
     description: "Check whether an integration provider is configured.",
