@@ -32,11 +32,17 @@ export interface UpsertPersonEntityData {
   sourceId: string;
 }
 
+export type EntityMentionConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type EntityMentionRelation = "mentioned" | "attended" | "authored" | "assigned" | "organized" | "corresponded";
+
 export interface CreateMentionData {
   entityId: string;
   indexedFileId: string;
   chunkIndex?: number | null;
   contextSnippet?: string | null;
+  confidence: EntityMentionConfidence;
+  source: string;
+  relation: EntityMentionRelation;
 }
 
 export function createEntityRepository(db: Kysely<DB>) {
@@ -223,17 +229,33 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Mentions ──
 
     async createMention(data: CreateMentionData) {
-      await db
-        .insertInto("entity_mentions")
-        .values({
-          id: randomUUID(),
-          entity_id: data.entityId,
-          indexed_file_id: data.indexedFileId,
-          chunk_index: data.chunkIndex ?? null,
-          context_snippet: data.contextSnippet ?? null,
-          mentioned_at: new Date().toISOString(),
-        })
-        .execute();
+      let insert = db.insertInto("entity_mentions").values({
+        id: randomUUID(),
+        entity_id: data.entityId,
+        indexed_file_id: data.indexedFileId,
+        chunk_index: data.chunkIndex ?? null,
+        context_snippet: data.contextSnippet ?? null,
+        confidence: data.confidence,
+        source: data.source,
+        relation: data.relation,
+        mentioned_at: new Date().toISOString(),
+      });
+
+      if (data.confidence === "EXTRACTED") {
+        insert = insert.onConflict((oc) =>
+          oc.columns(["entity_id", "indexed_file_id", "relation"]).doUpdateSet({
+            chunk_index: data.chunkIndex ?? null,
+            context_snippet: data.contextSnippet ?? null,
+            confidence: data.confidence,
+            source: data.source,
+            mentioned_at: new Date().toISOString(),
+          }),
+        );
+      } else {
+        insert = insert.onConflict((oc) => oc.columns(["entity_id", "indexed_file_id", "relation"]).doNothing());
+      }
+
+      await insert.execute();
     },
 
     async getMentionsForEntity(entityId: string, opts?: { limit?: number; since?: string }) {
@@ -273,8 +295,19 @@ export function createEntityRepository(db: Kysely<DB>) {
       return db.selectFrom("entity_mentions").selectAll().where("indexed_file_id", "=", indexedFileId).execute();
     },
 
+    /**
+     * Delete content-derived mentions for a file. EXTRACTED rows survive
+     * because they come from durable connector facts (attendee/assignee/
+     * parent_entity), not from re-runnable content extraction. Wiping them
+     * here would destroy the fact-driven graph every time enrichment
+     * re-runs (content change, manual re-trigger, recreate orchestrator).
+     */
     async deleteMentionsForFile(indexedFileId: string) {
-      await db.deleteFrom("entity_mentions").where("indexed_file_id", "=", indexedFileId).execute();
+      await db
+        .deleteFrom("entity_mentions")
+        .where("indexed_file_id", "=", indexedFileId)
+        .where("confidence", "!=", "EXTRACTED")
+        .execute();
     },
 
     // ── Search ──

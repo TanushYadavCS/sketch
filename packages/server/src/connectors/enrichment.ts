@@ -485,6 +485,23 @@ async function enrichImage(
  * Deterministic entity linking: substring-match entity names/aliases
  * against document content, create mentions for matches.
  */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Word-boundary substring match. Plain `String.includes` falsely matches
+ * short names inside longer words — "Anshu" inside "Himanshu", "Tim" inside
+ * "estimated", "Don" inside "donate". `\b` ensures the candidate sits at
+ * an ASCII word boundary. JS `\b` is ASCII-only; names with non-ASCII
+ * letters (accents, Devanagari, etc.) would need `\p{L}` boundaries — out
+ * of scope for this fix, which targets the dominant false-positive class.
+ */
+export function matchesAsWord(content: string, name: string): boolean {
+  if (!name || !content) return false;
+  return new RegExp(`\\b${escapeRegex(name)}\\b`).test(content);
+}
+
 async function linkEntitiesDeterministic(
   db: Kysely<DB>,
   fileId: string,
@@ -493,7 +510,10 @@ async function linkEntitiesDeterministic(
 ): Promise<void> {
   const entityRepo = createEntityRepository(db);
 
-  // Clear existing mentions for this file (re-linking on re-enrichment)
+  // Clear existing mentions for this file (re-linking on re-enrichment).
+  // Note: `deleteMentionsForFile` preserves EXTRACTED rows by construction —
+  // see the repo method's docstring. Re-running enrichment never destroys
+  // fact-derived mentions.
   await entityRepo.deleteMentionsForFile(fileId);
 
   // Get all confirmed entities
@@ -509,23 +529,27 @@ async function linkEntitiesDeterministic(
       /* skip bad JSON */
     }
 
-    // Check if any name/alias appears in content (skip very short names)
+    // Check if any name/alias appears in content (skip very short names).
+    // Word-boundary match avoids "anshu" inside "himanshu" false positives.
     const matchedName = names.find((name) => {
       const nameLower = name.toLowerCase();
       if (nameLower.length < MIN_ENTITY_NAME_LENGTH) return false;
-      return contentLower.includes(nameLower);
+      return matchesAsWord(contentLower, nameLower);
     });
 
     if (matchedName) {
       // Find the best chunk for context snippet
       const nameLower = matchedName.toLowerCase();
-      const chunkIndex = chunks.findIndex((c) => c.content.toLowerCase().includes(nameLower));
+      const chunkIndex = chunks.findIndex((c) => matchesAsWord(c.content.toLowerCase(), nameLower));
 
       await entityRepo.createMention({
         entityId: entity.id,
         indexedFileId: fileId,
         chunkIndex: chunkIndex >= 0 ? chunkIndex : null,
         contextSnippet: chunkIndex >= 0 ? chunks[chunkIndex].content.slice(0, 300) : null,
+        confidence: "INFERRED",
+        source: "llm_extraction",
+        relation: "mentioned",
       });
       await entityRepo.updateHotness(entity.id);
     }

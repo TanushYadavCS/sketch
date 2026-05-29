@@ -178,6 +178,11 @@ describe("confirmReview", () => {
 
     const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", target.id).execute();
     expect(mentions.map((m) => m.indexed_file_id).sort()).toEqual(["file-1", "file-2", "file-3"]);
+    expect(mentions.map((m) => ({ confidence: m.confidence, source: m.source, relation: m.relation }))).toEqual([
+      { confidence: "EXTRACTED", source: "fireflies", relation: "attended" },
+      { confidence: "EXTRACTED", source: "fireflies", relation: "attended" },
+      { confidence: "EXTRACTED", source: "fireflies", relation: "attended" },
+    ]);
 
     const finalRow = await reviewRepo.getById(reviewId);
     expect(finalRow?.status).toBe("confirmed");
@@ -236,6 +241,9 @@ describe("confirmReview", () => {
         indexed_file_id: "file-stale",
         chunk_index: null,
         context_snippet: null,
+        confidence: "INFERRED",
+        source: "llm_extraction",
+        relation: "mentioned",
         mentioned_at: new Date().toISOString(),
       })
       .execute();
@@ -249,6 +257,9 @@ describe("confirmReview", () => {
         indexed_file_id: "file-stale",
         chunk_index: null,
         context_snippet: null,
+        confidence: "INFERRED",
+        source: "llm_extraction",
+        relation: "mentioned",
         mentioned_at: new Date().toISOString(),
       })
       .execute();
@@ -607,6 +618,10 @@ describe("rejectReview", () => {
     // Mentions exist for both evidence files.
     const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", newEntity.id).execute();
     expect(mentions.map((m) => m.indexed_file_id).sort()).toEqual(["file-1", "file-2"]);
+    expect(mentions.map((m) => ({ confidence: m.confidence, source: m.source, relation: m.relation }))).toEqual([
+      { confidence: "INFERRED", source: "fireflies", relation: "attended" },
+      { confidence: "INFERRED", source: "fireflies", relation: "attended" },
+    ]);
 
     // Sticky rejection on the suggested candidate.
     const rejections = await db

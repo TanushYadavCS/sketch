@@ -21,7 +21,11 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../connectors/name-normalize";
-import { createEntityRepository } from "../db/repositories/entities";
+import {
+  type EntityMentionConfidence,
+  type EntityMentionRelation,
+  createEntityRepository,
+} from "../db/repositories/entities";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
 
@@ -107,14 +111,18 @@ export interface RejectResult {
  * Codified here so the same constants drive both Confirm and Reject. Falls
  * back to `'mentioned'` for unknown sources.
  */
-const RELATION_BY_SOURCE: Record<string, string> = {
+const RELATION_BY_SOURCE: Record<string, EntityMentionRelation> = {
   fireflies: "attended",
   gmail: "corresponded",
   "smart-enrichment": "mentioned",
 };
 
-function resolveRelation(source: string): string {
+function resolveRelation(source: string): EntityMentionRelation {
   return RELATION_BY_SOURCE[source] ?? "mentioned";
+}
+
+function resolveConfidence(confidence: "confirmed" | "inferred"): EntityMentionConfidence {
+  return confidence === "confirmed" ? "EXTRACTED" : "INFERRED";
 }
 
 function readEmail(metadata: string | null): string | null {
@@ -164,31 +172,44 @@ async function markResolvedOrThrow(
 }
 
 /**
- * Insert one entity_mentions row for (entityId, fileId). Idempotent via the
- * UNIQUE index from migration 056. `chunk_index` and `context_snippet` left
- * null — held mentions don't carry chunk-level info (that's a connector's
- * concern; here we're only re-creating the entity↔file link).
+ * Insert one entity_mentions row for (entityId, fileId, relation). `chunk_index`
+ * and `context_snippet` stay null because held mentions don't carry chunk-level
+ * info; here we're only re-creating the entity↔file edge.
  */
 async function insertHeldMention(
   ctx: ResolveTxnCtx,
   entityId: string,
   indexedFileId: string,
-  _source: string,
-  _confidence: "confirmed" | "inferred",
+  source: string,
+  confidence: "confirmed" | "inferred",
 ): Promise<void> {
+  const relation = resolveRelation(source);
+  const mentionConfidence = resolveConfidence(confidence);
   await sql`
-    INSERT INTO entity_mentions (id, entity_id, indexed_file_id, chunk_index, context_snippet, mentioned_at)
-    VALUES (${randomUUID()}, ${entityId}, ${indexedFileId}, NULL, NULL, ${ctx.now})
-    ON CONFLICT (entity_id, indexed_file_id) DO NOTHING
+    INSERT INTO entity_mentions (
+      id,
+      entity_id,
+      indexed_file_id,
+      chunk_index,
+      context_snippet,
+      confidence,
+      source,
+      relation,
+      mentioned_at
+    )
+    VALUES (
+      ${randomUUID()},
+      ${entityId},
+      ${indexedFileId},
+      NULL,
+      NULL,
+      ${mentionConfidence},
+      ${source},
+      ${relation},
+      ${ctx.now}
+    )
+    ON CONFLICT (entity_id, indexed_file_id, relation) DO NOTHING
   `.execute(ctx.db);
-  // `relation` / `confidence` columns land with ENTITY_LINKAGE_PROVENANCE
-  // PR-1. When they exist the resolve module's INSERT shape must be widened
-  // to populate them (relation = resolveRelation(_source), confidence =
-  // _confidence). The relation map is centralized in RELATION_BY_SOURCE
-  // above and the confidence vocabulary mirrors that PR's choices. Until
-  // those columns ship, the underscore-prefixed args here are unused on
-  // purpose — they're already plumbed so the migration that adds the
-  // columns is the only place needing edits.
 }
 
 /**
@@ -282,9 +303,29 @@ async function mergeStaleEntityPortable(ctx: ResolveTxnCtx, stale: Entity, targe
     .execute();
   for (const m of staleMentions) {
     await sql`
-      INSERT INTO entity_mentions (id, entity_id, indexed_file_id, chunk_index, context_snippet, mentioned_at)
-      VALUES (${randomUUID()}, ${target.id}, ${m.indexed_file_id}, ${m.chunk_index}, ${m.context_snippet}, ${m.mentioned_at})
-      ON CONFLICT (entity_id, indexed_file_id) DO NOTHING
+      INSERT INTO entity_mentions (
+        id,
+        entity_id,
+        indexed_file_id,
+        chunk_index,
+        context_snippet,
+        confidence,
+        source,
+        relation,
+        mentioned_at
+      )
+      VALUES (
+        ${randomUUID()},
+        ${target.id},
+        ${m.indexed_file_id},
+        ${m.chunk_index},
+        ${m.context_snippet},
+        ${m.confidence},
+        ${m.source},
+        ${m.relation},
+        ${m.mentioned_at}
+      )
+      ON CONFLICT (entity_id, indexed_file_id, relation) DO NOTHING
     `.execute(ctx.db);
   }
 

@@ -340,6 +340,9 @@ export interface EntityMentionsTable {
   indexed_file_id: string;
   chunk_index: number | null;
   context_snippet: string | null;
+  confidence: string;
+  source: string;
+  relation: string;
   mentioned_at: string;
 }
 

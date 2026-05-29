@@ -15,7 +15,7 @@ import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { clearEnrichmentData, runEnrichment } from "./enrichment";
+import { clearEnrichmentData, matchesAsWord, runEnrichment } from "./enrichment";
 
 /** Insert the minimum rows needed to have an indexed file ready for enrichment. */
 async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promise<void> {
@@ -265,5 +265,34 @@ describe("runEnrichment — claim semantics", () => {
 
     expect(result.filesProcessed).toBe(1);
     expect(await getStatus(fileId)).toBe("done");
+  });
+});
+
+describe("matchesAsWord — word-boundary entity name matching", () => {
+  it("does NOT match a name embedded inside a longer word", () => {
+    // The bug that motivated this helper: "Anshu" inside "Himanshu" was
+    // creating false-positive entity_mentions on every "Himanshu" doc.
+    expect(matchesAsWord("himanshu kalra is here", "anshu")).toBe(false);
+    expect(matchesAsWord("estimated 5 days", "tim")).toBe(false);
+    expect(matchesAsWord("donate to charity", "don")).toBe(false);
+  });
+
+  it("matches at word boundaries", () => {
+    expect(matchesAsWord("anshu is on the call", "anshu")).toBe(true);
+    expect(matchesAsWord("called anshu yesterday", "anshu")).toBe(true);
+    expect(matchesAsWord("anshu, please review", "anshu")).toBe(true);
+    expect(matchesAsWord("hello, anshu!", "anshu")).toBe(true);
+  });
+
+  it("matches multi-word names exactly", () => {
+    expect(matchesAsWord("himanshu kalra reviewed it", "himanshu kalra")).toBe(true);
+    expect(matchesAsWord("met with himanshu kalra today", "himanshu kalra")).toBe(true);
+    expect(matchesAsWord("himanshu and kalra are different people", "himanshu kalra")).toBe(false);
+  });
+
+  it("escapes regex metacharacters in names", () => {
+    // Names with regex-special chars must not be treated as patterns.
+    expect(matchesAsWord("invoiced o.brien yesterday", "o.brien")).toBe(true);
+    expect(matchesAsWord("invoiced oXbrien yesterday", "o.brien")).toBe(false);
   });
 });
