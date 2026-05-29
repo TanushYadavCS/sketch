@@ -31,6 +31,13 @@ export const configSchema = z.object({
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
 
+  // Sync reconciliation
+  SYNC_ALLOW_LARGE_RECONCILE: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+  SYNC_MAX_RECONCILE_RATIO: z.coerce.number().min(0).max(1).default(0.5),
+
   // Slack mode
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
   SLACK_SIGNING_SECRET: z.string().optional(),

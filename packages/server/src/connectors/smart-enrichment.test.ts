@@ -258,4 +258,86 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     expect(mentions.length).toBeGreaterThanOrEqual(2);
     expect(mentions.every((m) => m.source === "llm_extraction" && m.confidence === "INFERRED")).toBe(true);
   });
+
+  it("preserves prior LLM facts when extractEntities throws", async () => {
+    // Regression guard: smartEnrichFile re-throws on Gemini failure, so the
+    // file-scope reconcile must never run with an empty mention set. If a
+    // future refactor swallows the error and falls through with mentions=[],
+    // every active llm_extracted fact for the file would be tombstoned.
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+
+    const priorMentions = [
+      { name: "Acme Corp", type: "company" },
+      { name: "Apollo", type: "project" },
+      { name: "Sarah Chen", type: "person" },
+    ];
+    for (const m of priorMentions) {
+      await db
+        .insertInto("indexed_file_facts")
+        .values({
+          id: randomUUID(),
+          indexed_file_id: fileId,
+          connector_config_id: "conn-smart",
+          created_by_user_id: "admin",
+          content_hash: "hash-prior",
+          source: "llm_extraction",
+          fact_type: "llm_extracted",
+          relation: "mentioned",
+          subject_name: m.name,
+          subject_source: "llm_extraction",
+          subject_source_id: `${fileId}:hash-prior:llm-extraction-v2:${m.name}`,
+          fact_key: `llm-prior-${m.name}`,
+          raw: JSON.stringify({
+            contentHash: "hash-prior",
+            promptVersion: "llm-extraction-v2",
+            model: "gemini",
+            mention: m.name,
+            type: m.type,
+            variations: [],
+          }),
+        })
+        .execute();
+    }
+
+    const throwingGenerator = {
+      generate: async () => {
+        throw new Error("unexpected summary call");
+      },
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          throw new Error("simulated Gemini timeout");
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await expect(
+      smartEnrichFile(
+        { db, logger: createTestLogger(), generator: throwingGenerator, embeddingProvider: null },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content: "some content that would have been analyzed",
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: "hash-new",
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("simulated Gemini timeout");
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    expect(facts).toHaveLength(3);
+    expect(facts.every((f) => f.deleted_at === null)).toBe(true);
+    expect(facts.map((f) => f.subject_name).sort()).toEqual(["Acme Corp", "Apollo", "Sarah Chen"]);
+  });
 });

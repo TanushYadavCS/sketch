@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
+import type { Config } from "../config";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
@@ -34,8 +35,13 @@ type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
 /** Run sync in background. Enrichment runs separately on the scheduled sync cycle. */
-function syncInBackground(db: Kysely<DB>, connectorId: string, logger: Logger) {
-  runConnectorSync(db, connectorId, logger).catch((err) => {
+function syncInBackground(
+  db: Kysely<DB>,
+  connectorId: string,
+  logger: Logger,
+  config?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">,
+) {
+  runConnectorSync(db, connectorId, logger, config).catch((err) => {
     logger.error({ err, connectorId }, "Background sync failed");
   });
 }
@@ -85,7 +91,13 @@ const updateScopeSchema = z.object({
   scopeConfig: z.record(z.string(), z.unknown()),
 });
 
-export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, logger: Logger, userRepo?: UserRepo) {
+export function connectorRoutes(
+  connectorRepo: ConnectorRepo,
+  db: Kysely<DB>,
+  logger: Logger,
+  userRepo?: UserRepo,
+  appConfig?: Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO">,
+) {
   const routes = new Hono();
 
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
@@ -209,7 +221,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     });
 
     // Auto-trigger first sync + enrichment in background (non-blocking)
-    syncInBackground(db, config.id, logger);
+    syncInBackground(db, config.id, logger, appConfig);
 
     return c.json(
       {
@@ -1010,7 +1022,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     });
 
     // Auto-trigger re-sync + enrichment in background
-    syncInBackground(db, config.id, logger);
+    syncInBackground(db, config.id, logger, appConfig);
 
     const updated = await connectorRepo.findConfigById(config.id);
     if (!updated) {
@@ -1043,7 +1055,7 @@ export function connectorRoutes(connectorRepo: ConnectorRepo, db: Kysely<DB>, lo
     }
 
     // Run sync then enrichment in background
-    syncInBackground(db, config.id, logger);
+    syncInBackground(db, config.id, logger, appConfig);
 
     return c.json({ sync: { connectorId: config.id, status: "started" } }, 201);
   });
