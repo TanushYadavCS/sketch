@@ -19,6 +19,7 @@ import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { yieldToEventLoop } from "../lib/event-loop";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
 import type { EmbeddingProvider } from "./embeddings/types";
@@ -731,17 +732,6 @@ async function linkEntitiesDeterministic(
       await yieldToEventLoop();
     }
   }
-}
-
-/**
- * better-sqlite3 is synchronous, so `await db.x.execute()` only queues a
- * microtask. Tight loops of sync-backed awaits starve libuv and block
- * incoming HTTP requests (e.g. the entity drawer hangs while enrichment
- * runs). `setImmediate` hands control back to the event loop so I/O
- * callbacks can fire between iterations.
- */
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function normalizeDeterministicName(value: string): string {
