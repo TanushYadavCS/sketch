@@ -21,6 +21,7 @@ import {
 import { Button } from "@sketch/ui/components/button";
 import { Input } from "@sketch/ui/components/input";
 import { Skeleton } from "@sketch/ui/components/skeleton";
+import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
@@ -53,9 +54,99 @@ function SettingsPage() {
       <p className="mt-2 text-sm text-muted-foreground">Manage workspace-level configuration.</p>
 
       <div className="mt-6 space-y-8">
+        <OrgContextSection />
         <ApiKeySection />
       </div>
     </div>
+  );
+}
+
+function OrgContextSection() {
+  const queryClient = useQueryClient();
+  const identityQuery = useQuery({
+    queryKey: ["settings", "identity"],
+    queryFn: () => api.settings.identity(),
+  });
+
+  const [orgName, setOrgName] = useState("");
+  const [description, setDescription] = useState("");
+  const [initialised, setInitialised] = useState(false);
+
+  if (!initialised && identityQuery.data) {
+    setOrgName(identityQuery.data.orgName ?? "");
+    setDescription(identityQuery.data.orgContext?.description ?? "");
+    setInitialised(true);
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: { orgName: string; description: string }) =>
+      api.settings.updateIdentity({
+        orgName: payload.orgName,
+        orgContext: { description: payload.description },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings", "identity"] });
+      toast.success("Saved");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const trimmedName = orgName.trim();
+  const trimmedDescription = description.trim();
+  const initialName = identityQuery.data?.orgName ?? "";
+  const initialDescription = identityQuery.data?.orgContext?.description ?? "";
+  const dirty = trimmedName !== initialName.trim() || trimmedDescription !== initialDescription.trim();
+  const canSave = dirty && trimmedName.length > 0 && trimmedDescription.length <= 2000;
+
+  return (
+    <section>
+      <p className="mb-3 text-sm font-medium text-muted-foreground">Company profile</p>
+      {identityQuery.isLoading ? (
+        <Skeleton className="h-48 rounded-lg" />
+      ) : (
+        <div className="rounded-lg border border-border bg-card p-4">
+          <label htmlFor="org-name" className="text-sm font-medium">
+            Company name
+          </label>
+          <Input
+            id="org-name"
+            className="mt-1.5 h-9"
+            value={orgName}
+            onChange={(e) => setOrgName(e.target.value)}
+            placeholder="Canvas Labs"
+          />
+
+          <label htmlFor="org-description" className="mt-4 block text-sm font-medium">
+            Company description
+          </label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Tell Sketch what your company does — what you build, who you serve, and any flagship products. A paragraph
+            is fine. This is used to recognise the right companies and projects when reading your files, and to ground
+            Sketch's responses in chat.
+          </p>
+          <Textarea
+            id="org-description"
+            className="mt-2 min-h-32"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Canvas Labs is an AI services company working with multiple clients to ship custom AI products. We also build Sketch, an AI assistant for organisations."
+            maxLength={2000}
+          />
+          <div className="mt-1.5 text-right text-xs text-muted-foreground">{trimmedDescription.length} / 2000</div>
+
+          <div className="mt-3 flex justify-end">
+            <Button
+              size="sm"
+              onClick={() => saveMutation.mutate({ orgName: trimmedName, description: trimmedDescription })}
+              disabled={!canSave || saveMutation.isPending}
+            >
+              {saveMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

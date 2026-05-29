@@ -9,10 +9,8 @@
  * (POST /api/entities/rebuilds) or re-extract LLM facts and then replay
  * (POST /api/entities/reenrichments with the pendingRebuildId from step 1).
  *
- * The dialog stays mounted (and modal) for the entire flow — including the
- * long-running step-2 phase — so the operator can't drive the rest of the
- * UI into a half-rebuilt graph. A persistent progress bar polls the running
- * job. The dialog only releases when the job reaches a terminal state.
+ * Once step 2 starts, progress moves to the page-level rebuild banner so the
+ * entity list remains browsable while work continues.
  *
  * Replaces the prior `RebuildDialog` which conflated destructive scope with
  * generative method in a single pane. That conflation silently dropped
@@ -21,7 +19,7 @@
  */
 import type { ReenrichScope, ResetCategory, ResetSubmitResponse } from "@/lib/api";
 import { ApiRequestError, api } from "@/lib/api";
-import { ArrowsClockwiseIcon, CheckCircleIcon, SparkleIcon, TrashIcon, WarningIcon } from "@phosphor-icons/react";
+import { ArrowsClockwiseIcon, SparkleIcon, TrashIcon, WarningIcon } from "@phosphor-icons/react";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -35,20 +33,17 @@ import { Button } from "@sketch/ui/components/button";
 import { Progress } from "@sketch/ui/components/progress";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
 
 const REBUILD_CATEGORIES: ResetCategory[] = ["connectors", "ai"];
 const RESET_POLL_INTERVAL_MS = 300;
-const STEP2_POLL_INTERVAL_MS = 1500;
 
 export interface GraphRebuildDialogPrefill {
   /** Pre-check the "Re-extract" method on step 2. Used by the banner Retry button. */
   preferReextract?: boolean;
 }
 
-type Step = "step1" | "step1-running" | "step2" | "step2-running" | "step2-done" | "step2-failed";
+type Step = "step1" | "step1-running" | "step2";
 type Method = "replay" | "reextract";
-type Step2JobKind = "rebuild" | "reenrich";
 
 interface GraphRebuildDialogProps {
   open: boolean;
@@ -65,14 +60,6 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
   const [resetJobId, setResetJobId] = useState<string | null>(null);
   const [resetDeletedCounts, setResetDeletedCounts] = useState<Record<string, number> | null>(null);
   const [factsWipedCount, setFactsWipedCount] = useState<number | null>(null);
-  const [step2JobId, setStep2JobId] = useState<string | null>(null);
-  const [step2JobKind, setStep2JobKind] = useState<Step2JobKind | null>(null);
-  const [step2Progress, setStep2Progress] = useState<{
-    phase: string;
-    completed: number;
-    total: number;
-  } | null>(null);
-  const [step2FinalSummary, setStep2FinalSummary] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Reset all state when the dialog re-opens.
@@ -85,10 +72,6 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
     setResetJobId(null);
     setResetDeletedCounts(null);
     setFactsWipedCount(null);
-    setStep2JobId(null);
-    setStep2JobKind(null);
-    setStep2Progress(null);
-    setStep2FinalSummary(null);
     setErrorMessage(null);
   }, [open]);
 
@@ -152,10 +135,6 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
     refetchInterval: step === "step1-running" ? RESET_POLL_INTERVAL_MS : false,
   });
 
-  // ── Step 2 — submit the long-running rebuild (replay or re-extract) ─────
-  // On success we do NOT close the dialog. We capture the job id and kind,
-  // transition to the running pane, and let the polling query below take
-  // over. The dialog remains modal until the job reaches a terminal state.
   const submitRebuildMutation = useMutation({
     mutationFn: async () => {
       if (!pendingRebuildId) throw new Error("Missing pendingRebuildId");
@@ -166,23 +145,15 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
           confirm: "REENRICH",
           pendingRebuildId,
         });
-        return { kind: "reenrich" as const, jobId: res.job?.id ?? null };
-      }
-      const res = await api.entities.rebuild(pendingRebuildId);
-      return { kind: "rebuild" as const, jobId: res.job.id };
-    },
-    onSuccess: (res) => {
-      if (!res.jobId) {
-        setErrorMessage("Server did not return a job id");
-        setStep("step2");
+        if (!res.job?.id) throw new Error("Server did not return a job id");
         return;
       }
-      setStep2JobKind(res.kind);
-      setStep2JobId(res.jobId);
-      setStep("step2-running");
-      // Let the banner pick this up too so it stays in sync if the dialog
-      // is later dismissed.
+      const res = await api.entities.rebuild(pendingRebuildId);
+      if (!res.job.id) throw new Error("Server did not return a job id");
+    },
+    onSuccess: () => {
       onSubmitted();
+      onOpenChange(false);
     },
     onError: (err: Error) => {
       setErrorMessage(err.message);
@@ -190,41 +161,6 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
     },
   });
 
-  // Persistent poll of the step-2 job. Updates the progress bar and waits
-  // for the terminal phase before unblocking the dialog.
-  useQuery({
-    queryKey: ["graph-rebuild-dialog", "step2-job", step2JobKind, step2JobId],
-    queryFn: async () => {
-      if (!step2JobId || !step2JobKind) return null;
-      const job =
-        step2JobKind === "rebuild"
-          ? await api.entities.rebuildJob(step2JobId)
-          : await api.entities.reenrichJob(step2JobId);
-      if (job.progress) {
-        setStep2Progress({ phase: job.progress.phase, completed: job.progress.completed, total: job.progress.total });
-      }
-      if (job.phase === "done") {
-        const replay = job.replay ?? job.summary?.recreate?.replay ?? null;
-        if (replay) {
-          setStep2FinalSummary(
-            `${replay.entitiesCreated} entities created · ${replay.entitiesLinked ?? 0} linked · ${replay.relationshipsWritten} edges written`,
-          );
-        } else {
-          setStep2FinalSummary("Rebuild complete.");
-        }
-        setStep("step2-done");
-      } else if (job.phase === "failed") {
-        setErrorMessage(job.error ?? "Rebuild failed");
-        setStep("step2-failed");
-      }
-      return job;
-    },
-    enabled: step === "step2-running" && !!step2JobId,
-    refetchInterval: step === "step2-running" ? STEP2_POLL_INTERVAL_MS : false,
-  });
-
-  // Cancel on step 2 (before submit) releases the pending lock so
-  // sync/enrichment can resume. Not available once the rebuild has started.
   const cancelMutation = useMutation({
     mutationFn: async () => {
       if (!pendingRebuildId) return;
@@ -239,6 +175,7 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
       }
     },
     onSuccess: () => {
+      onSubmitted();
       onOpenChange(false);
     },
     onError: (err: Error) => {
@@ -248,23 +185,14 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
 
   const reextractEnabled = wipeLlmFacts;
   const submitting = submitRebuildMutation.isPending || cancelMutation.isPending;
-  const isRunning = step === "step1-running" || step === "step2-running";
+  const isRunning = step === "step1-running";
 
   const deletedSummary = useMemo(() => summarizeDeleted(resetDeletedCounts), [resetDeletedCounts]);
-  const step2ProgressValue = useMemo(() => {
-    if (!step2Progress || step2Progress.total <= 0) return null;
-    return Math.min(100, Math.round((step2Progress.completed / step2Progress.total) * 100));
-  }, [step2Progress]);
 
   function handleDialogChange(next: boolean) {
     if (!next && (isRunning || submitting)) {
-      // Don't allow Esc/outside-click to close while a job is in flight.
-      // The dialog is the operator's guarantee that the rest of the UI
-      // isn't drivable mid-rebuild.
       return;
     }
-    // If the user dismisses on step 2 (clean close without explicit Cancel
-    // press), best-effort release the pending lock.
     if (!next && step === "step2" && pendingRebuildId) {
       cancelMutation.mutate();
       return;
@@ -274,8 +202,6 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
 
   const title = (() => {
     if (step === "step1" || step === "step1-running") return "Rebuild graph — step 1 of 2";
-    if (step === "step2-done") return "Rebuild graph — done";
-    if (step === "step2-failed") return "Rebuild graph — failed";
     return "Rebuild graph — step 2 of 2";
   })();
 
@@ -283,9 +209,7 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
     if (step === "step1") return "What do you want to delete? Step 1 is instant.";
     if (step === "step1-running") return "Wiping the entity graph…";
     if (step === "step2") return "Now rebuild how? Step 2 is long-running.";
-    if (step === "step2-running") return "Rebuilding the graph. Don't navigate away.";
-    if (step === "step2-done") return "Rebuild finished successfully.";
-    return "Rebuild failed. Review the error and decide whether to retry.";
+    return "";
   })();
 
   return (
@@ -296,7 +220,7 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
 
-        <div className="relative min-h-[200px]">
+        <div>
           <Pane visible={step === "step1" || step === "step1-running"} testId="graph-rebuild-step-1">
             <section className="space-y-2 py-1">
               <CheckboxOption
@@ -333,11 +257,11 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
                   data-testid="graph-rebuild-step1-result"
                 >
                   <dt className="text-muted-foreground">Step 1 deleted</dt>
-                  <dd>{deletedSummary.join(", ")}</dd>
+                  <dd className="min-w-0 break-words">{deletedSummary.join(", ")}</dd>
                   {factsWipedCount !== null && factsWipedCount > 0 ? (
                     <>
                       <dt className="text-muted-foreground">LLM facts tombstoned</dt>
-                      <dd>{factsWipedCount}</dd>
+                      <dd className="min-w-0 break-words">{factsWipedCount}</dd>
                     </>
                   ) : null}
                 </dl>
@@ -382,72 +306,9 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
               </fieldset>
             </section>
           </Pane>
-
-          <Pane visible={step === "step2-running"} testId="graph-rebuild-step-2-running">
-            <section className="space-y-4 py-1">
-              {deletedSummary.length > 0 ? (
-                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
-                  <dt className="text-muted-foreground">Step 1 deleted</dt>
-                  <dd>{deletedSummary.join(", ")}</dd>
-                </dl>
-              ) : null}
-
-              <div className="space-y-2" data-testid="graph-rebuild-step2-progress">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="flex items-center gap-2 font-medium">
-                    <ArrowsClockwiseIcon size={12} className="animate-spin text-blue-600 dark:text-blue-300" />
-                    {step2JobKind === "reenrich" ? "Re-extracting & rebuilding" : "Rebuilding graph"}
-                  </span>
-                  <span className="text-muted-foreground">
-                    {step2ProgressValue !== null ? `${step2ProgressValue}%` : "Working…"}
-                  </span>
-                </div>
-                <Progress
-                  value={step2ProgressValue ?? null}
-                  className={step2ProgressValue === null ? "h-2 animate-pulse" : "h-2"}
-                />
-                {step2Progress ? (
-                  <p className="text-[11px] text-muted-foreground">
-                    Phase: {step2Progress.phase}
-                    {step2Progress.total > 0 ? ` · ${step2Progress.completed} / ${step2Progress.total}` : ""}
-                  </p>
-                ) : (
-                  <p className="text-[11px] text-muted-foreground">Job queued; waiting for first progress report…</p>
-                )}
-              </div>
-
-              <p className="rounded-md border border-amber-300 bg-amber-50/50 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
-                Keep this dialog open. The rest of the page is locked while the graph rebuilds so partial data doesn't
-                leak into the UI.
-              </p>
-            </section>
-          </Pane>
-
-          <Pane visible={step === "step2-done"} testId="graph-rebuild-step-2-done">
-            <section className="space-y-3 py-1">
-              <div className="flex items-center gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-300">
-                <CheckCircleIcon size={16} weight="fill" />
-                Graph rebuilt
-              </div>
-              {step2FinalSummary ? (
-                <p className="rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100">
-                  {step2FinalSummary}
-                </p>
-              ) : null}
-            </section>
-          </Pane>
-
-          <Pane visible={step === "step2-failed"} testId="graph-rebuild-step-2-failed">
-            <section className="space-y-3 py-1">
-              <p className="text-sm font-medium text-destructive">Rebuild failed.</p>
-              <p className="rounded-md border border-rose-200 bg-rose-50/60 px-3 py-2 text-xs text-rose-900 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-100">
-                {errorMessage ?? "Unknown error"}
-              </p>
-            </section>
-          </Pane>
         </div>
 
-        {errorMessage && step !== "step2-failed" ? (
+        {errorMessage ? (
           <p className="text-xs text-destructive" data-testid="graph-rebuild-error">
             {errorMessage}
           </p>
@@ -484,7 +345,7 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
             disabled={submitting}
             data-testid="graph-rebuild-step2-cancel"
           >
-            Cancel rebuild
+            Done
           </Button>
           <Button
             onClick={() => submitRebuildMutation.mutate()}
@@ -496,41 +357,13 @@ export function GraphRebuildDialog({ open, onOpenChange, onSubmitted, prefill }:
         </>
       );
     }
-    if (step === "step2-running") {
-      // No actionable buttons: the operator should not be able to drive
-      // anything while the rebuild is in flight. The progress pane is the
-      // only feedback surface.
-      return (
-        <Button disabled data-testid="graph-rebuild-step2-running-button">
-          Working — please wait…
-        </Button>
-      );
-    }
-    if (step === "step2-done") {
-      return (
-        <Button onClick={() => onOpenChange(false)} data-testid="graph-rebuild-step2-close">
-          Close
-        </Button>
-      );
-    }
-    // step2-failed
-    return (
-      <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="graph-rebuild-step2-failed-close">
-        Close
-      </Button>
-    );
+    return null;
   }
 }
 
 function Pane({ visible, children, testId }: { visible: boolean; children: React.ReactNode; testId: string }) {
   return (
-    <div
-      data-testid={testId}
-      aria-hidden={!visible}
-      className={`absolute inset-0 transition-opacity duration-150 ${
-        visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
-      }`}
-    >
+    <div data-testid={testId} aria-hidden={!visible} className={visible ? "block" : "hidden"}>
       {children}
     </div>
   );

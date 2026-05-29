@@ -82,6 +82,7 @@ export interface ReenrichDeps {
    * 0-of-1 → 1-of-1 transition since its batches are coarse.
    */
   onProgress?: (progress: MaterializeProgress) => void;
+  shouldCancel?: () => boolean;
   runEnrichmentImpl?: (deps: EnrichmentDeps) => Promise<EnrichmentResult>;
   recreateEntityGraphImpl?: typeof recreateEntityGraph;
 }
@@ -280,11 +281,13 @@ export async function wipeLlmEnrichmentForFiles(
   logger: Logger,
   fileIds: string[],
   missingFileIds: string[] = [],
+  shouldCancel?: () => boolean,
 ): Promise<ReenrichWipeSummary> {
   const summary = emptyWipeSummary(fileIds, missingFileIds);
   if (fileIds.length === 0) return summary;
 
   for (let i = 0; i < fileIds.length; i += WIPE_BATCH_SIZE) {
+    if (shouldCancel?.()) throw new Error("Re-enrich stopped");
     const batch = fileIds.slice(i, i + WIPE_BATCH_SIZE);
     await db.transaction().execute(async (trx) => {
       const before = await computeReenrichDryRun(trx as unknown as Kysely<DB>, batch);
@@ -396,7 +399,10 @@ export async function tombstoneActiveLlmFacts(
 }
 
 export async function runEnrichmentForFileBatches(
-  deps: Omit<EnrichmentDeps, "fileIds"> & { runEnrichmentImpl?: (deps: EnrichmentDeps) => Promise<EnrichmentResult> },
+  deps: Omit<EnrichmentDeps, "fileIds"> & {
+    runEnrichmentImpl?: (deps: EnrichmentDeps) => Promise<EnrichmentResult>;
+    shouldCancel?: () => boolean;
+  },
   fileIds: string[],
 ): Promise<EnrichmentResult> {
   const result: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
@@ -404,6 +410,7 @@ export async function runEnrichmentForFileBatches(
   const totalFiles = fileIds.length;
   let baseCompleted = 0;
   for (let i = 0; i < fileIds.length; i += MAX_FILES_PER_RUN) {
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const batch = fileIds.slice(i, i + MAX_FILES_PER_RUN);
     const start = baseCompleted;
     const batchResult = await run({
@@ -418,6 +425,7 @@ export async function runEnrichmentForFileBatches(
     result.filesFailed += batchResult.filesFailed;
     result.errors.push(...batchResult.errors);
     baseCompleted += batch.length;
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
   }
   return result;
 }
@@ -471,6 +479,7 @@ async function runPostSweepEngagementFloor(
 export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummary> {
   if (!deps.lockAlreadyHeld) beginRecreateLock();
   try {
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     deps.onPhase?.("wiping");
     deps.onProgress?.({ phase: "wipe", completed: 0, total: 1 });
     const settings = await deps.db
@@ -481,8 +490,16 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
     const embeddingProvider = settings?.gemini_api_key
       ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
       : null;
-    const wipe = await wipeLlmEnrichmentForFiles(deps.db, deps.logger, deps.fileIds, deps.missingFileIds ?? []);
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    const wipe = await wipeLlmEnrichmentForFiles(
+      deps.db,
+      deps.logger,
+      deps.fileIds,
+      deps.missingFileIds ?? [],
+      deps.shouldCancel,
+    );
     deps.onProgress?.({ phase: "wipe", completed: 1, total: 1 });
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     deps.onPhase?.("enriching");
     const enrichment = await runEnrichmentForFileBatches(
       {
@@ -492,9 +509,11 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         geminiApiKey: settings?.gemini_api_key,
         runEnrichmentImpl: deps.runEnrichmentImpl,
         onProgress: deps.onProgress,
+        shouldCancel: deps.shouldCancel,
       },
       deps.fileIds,
     );
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const summary: ReenrichSummary = {
       scope: { fileIds: deps.fileIds, missingFileIds: deps.missingFileIds ?? [] },
       wipe,
@@ -512,9 +531,11 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         coMentionContributesToThreshold: deps.coMentionContributesToThreshold,
         materializeFactTypes: deps.materializeFactTypes ?? [...AI_EXTRACTION_FACT_TYPES],
         onProgress: deps.onProgress,
+        shouldCancel: deps.shouldCancel,
       });
       summary.recreate = recreate;
 
+      if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
       const floor = await runPostSweepEngagementFloor(
         deps.db,
         deps.logger.child({ phase: "post-sweep-engagement-floor" }),
@@ -523,9 +544,11 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
       );
       summary.engagementFloor = floor;
       if (floor.emitted > 0) {
+        if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
         await materializeUnmaterializedFacts(deps.db, deps.logger.child({ phase: "post-floor-materialize" }), {
           llmPromotionThreshold: deps.llmPromotionThreshold,
           factTypes: [...AI_EXTRACTION_FACT_TYPES],
+          shouldCancel: deps.shouldCancel,
         });
       }
     }

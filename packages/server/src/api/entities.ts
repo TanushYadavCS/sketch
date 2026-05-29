@@ -53,7 +53,7 @@ function countByType(rows: RelationListEntry[]): Record<string, number> {
 
 type ResetCategory = "manual" | "connectors" | "ai";
 type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
-type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
+type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed" | "cancelled";
 type RebuildJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
 
 interface JobProgress {
@@ -107,6 +107,7 @@ interface ReenrichJob {
   dryRun?: ReenrichDryRunSummary;
   summary?: ReenrichSummary;
   error?: string;
+  cancelRequested?: boolean;
 }
 
 interface RebuildJob {
@@ -155,6 +156,12 @@ function newReenrichJob(request: ReenrichRequest): ReenrichJob {
     finishedAt: null,
     request,
   };
+}
+
+export function _setCurrentReenrichJobForTests(active: boolean): string | null {
+  currentReenrichJob = active ? newReenrichJob({ scope: { all: true }, runAfter: true }) : null;
+  if (currentReenrichJob) currentReenrichJob.phase = "enriching";
+  return currentReenrichJob?.id ?? null;
 }
 
 function newRebuildJob(request: RebuildRequest): RebuildJob {
@@ -535,7 +542,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     });
   });
 
-  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project", "feature"];
+  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
 
   /**
    * GET /api/entities/resets/jobs
@@ -584,6 +591,18 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     if (currentReenrichJob?.id === id) return c.json(currentReenrichJob);
     if (latestReenrichJob?.id === id) return c.json(latestReenrichJob);
     return c.json({ error: { code: "NOT_FOUND", message: "Re-enrich job not found" } }, 404);
+  });
+
+  routes.delete("/reenrichments/jobs/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const id = c.req.param("id");
+    if (!currentReenrichJob || currentReenrichJob.id !== id) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Active re-enrich job not found" } }, 404);
+    }
+    currentReenrichJob.cancelRequested = true;
+    currentReenrichJob.error = "Stop requested";
+    return c.json({ message: "Stop requested.", job: currentReenrichJob }, 202);
   });
 
   /**
@@ -833,15 +852,20 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           onProgress: (progress) => {
             job.progress = progress;
           },
+          shouldCancel: () => job.cancelRequested === true,
         });
         job.summary = summary;
         job.phase = "done";
         job.finishedAt = new Date().toISOString();
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
-        job.phase = "failed";
+        job.phase = job.cancelRequested ? "cancelled" : "failed";
         job.finishedAt = new Date().toISOString();
-        logger.error({ err, jobId: job.id }, "Re-enrich job failed");
+        if (job.cancelRequested) {
+          logger.warn({ jobId: job.id }, "Re-enrich job stopped");
+        } else {
+          logger.error({ err, jobId: job.id }, "Re-enrich job failed");
+        }
       } finally {
         latestReenrichJob = job;
         currentReenrichJob = null;

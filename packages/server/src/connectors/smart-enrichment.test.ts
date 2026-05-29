@@ -482,7 +482,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
   });
 });
 
-describe("extractEntities prompt — v5 strict feature extraction", () => {
+describe("extractEntities prompt — v6 entity type removal", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
@@ -497,7 +497,7 @@ describe("extractEntities prompt — v5 strict feature extraction", () => {
     }
   });
 
-  it("renders strict feature guidance, counter-examples, and valid feature part_of edges", async () => {
+  it("renders supported entity types without removed feature guidance", async () => {
     let capturedPrompt = "";
     const generator = {
       generate: async () => "",
@@ -522,22 +522,18 @@ describe("extractEntities prompt — v5 strict feature extraction", () => {
 
     expect(capturedPrompt).toContain("Companies");
     expect(capturedPrompt).toContain("Projects");
-    expect(capturedPrompt).toContain("Features");
+    expect(capturedPrompt).toContain("Products");
+    expect(capturedPrompt).toContain("Teams");
     expect(capturedPrompt).toContain("Prefer extracting from the top down");
-    expect(capturedPrompt).toContain("QTD/YTD implementation");
-    expect(capturedPrompt).toContain("Access control integration");
-    expect(capturedPrompt).toContain("Vedant's Project Progress");
-    expect(capturedPrompt).toContain("67 SQL queries on the new database");
-    expect(capturedPrompt).toContain("skip the feature rather than creating an orphan");
-    expect(capturedPrompt).toContain("Known feature entities");
     expect(capturedPrompt).toContain('"engaged_with"');
     expect(capturedPrompt).toContain("without being employed by it");
-    expect(capturedPrompt).toContain('"feature"');
-    expect(capturedPrompt).toContain("feature -> project | product");
-    expect(capturedPrompt).toContain('"part_of"');
+    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product", "team"');
+    expect(capturedPrompt).not.toContain("Features");
+    expect(capturedPrompt).not.toContain('"feature"');
+    expect(capturedPrompt).not.toContain("feature -> project | product");
   });
 
-  it("persists and materializes feature -> part_of -> project end to end", async () => {
+  it("ignores feature mentions and feature endpoint relations emitted by the model", async () => {
     const fileId = randomUUID();
     await seedFile(db, fileId);
     const generator = {
@@ -580,79 +576,116 @@ describe("extractEntities prompt — v5 strict feature extraction", () => {
       },
     );
 
-    const feature = await db
+    const llmFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "raw"])
+      .where("fact_type", "in", ["llm_extracted", "llm_relation"])
+      .execute();
+    const typedFeatureFacts = llmFacts.filter((fact) => {
+      const raw = JSON.parse(fact.raw ?? "{}") as {
+        type?: string;
+        source?: { type?: string };
+        target?: { type?: string };
+      };
+      return raw.type === "feature" || raw.source?.type === "feature" || raw.target?.type === "feature";
+    });
+    expect(typedFeatureFacts).toHaveLength(0);
+    const featureEntity = await db
       .selectFrom("entities")
-      .select(["name", "source_type"])
-      .where("name", "=", "Aviation Edge scraper")
-      .executeTakeFirstOrThrow();
-    expect(feature.source_type).toBe("feature");
-
+      .selectAll()
+      .where("source_type", "=", "feature")
+      .executeTakeFirst();
+    expect(featureEntity).toBeUndefined();
     const relationship = await db
       .selectFrom("entity_relationships")
-      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
-      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
-      .select(["entity_relationships.relationship_type", "source.name as src", "target.name as tgt"])
-      .where("entity_relationships.relationship_type", "=", "part_of")
-      .executeTakeFirstOrThrow();
-    expect(relationship).toEqual({
-      relationship_type: "part_of",
-      src: "Aviation Edge scraper",
-      tgt: "OW Tourism Dashboard",
-    });
+      .selectAll()
+      .where("relationship_type", "=", "part_of")
+      .executeTakeFirst();
+    expect(relationship).toBeUndefined();
   });
+});
 
-  it("rejects part_of in the wrong direction (project -> feature) via direction guard", async () => {
-    const fileId = randomUUID();
-    await seedFile(db, fileId);
+describe("extractEntities prompt — v7 quality rules", () => {
+  async function capturePrompt(): Promise<string> {
+    let captured = "";
     const generator = {
-      generate: async () => "wrong-direction fixture summary.",
-      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
-        if (opts?.label?.startsWith("extractEntities")) {
-          return {
-            mentions: [
-              { mention: "OW Tourism Dashboard", type: "project", variations: [], confidence: 0.95 },
-              { mention: "Aviation Edge scraper", type: "feature", variations: [], confidence: 0.92 },
-            ],
-            relations: [
-              {
-                type: "part_of",
-                source: { name: "OW Tourism Dashboard", type: "project", variations: [] },
-                target: { name: "Aviation Edge scraper", type: "feature", variations: [] },
-                confidence: 0.9,
-                context: "wrong direction",
-              },
-            ],
-          } as T;
-        }
-        return {} as T;
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        captured = prompt;
+        return { mentions: [], relations: [] } as T;
       },
     } as GeminiGenerator;
 
-    await smartEnrichFile(
-      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+    await extractEntities(generator, {
+      id: "f-v7",
+      fileName: "transcript.txt",
+      content: "body",
+      contentCategory: "document",
+      source: "fireflies",
+      sourcePath: "/",
+      contentHash: null,
+      connectorConfigId: "conn-v7",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+    return captured;
+  }
+
+  it("includes name-shape rules that reject degraded person forms", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Name shape rules");
+    expect(prompt).toContain("Title Case");
+    expect(prompt).toContain("Single first names with no surname");
+    expect(prompt).toContain("Initials-only");
+    expect(prompt).toContain("Email-handle style");
+    expect(prompt).toContain("ALL-CAPS");
+  });
+
+  it("includes the company-suffix → company rule", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Type disambiguation");
+    expect(prompt).toContain("Pvt Ltd");
+    expect(prompt).toContain("Private Limited");
+    expect(prompt).toContain('is type "company", never "person"');
+  });
+
+  it("excludes meeting titles and doc-title projects, and generic-feature products", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Meeting titles or calendar event names");
+    expect(prompt).toContain("Standup");
+    expect(prompt).toContain("Document, note, or artifact titles as projects");
+    expect(prompt).toContain("Generic feature descriptions or internal component names as products");
+    expect(prompt).toContain("branded, proper-noun name");
+  });
+
+  it("renders the org description into the extraction prompt when provided", async () => {
+    let captured = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        captured = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(
+      generator,
       {
-        id: fileId,
-        fileName: `${fileId}.txt`,
-        content: "wrong-direction fixture",
+        id: "f-orgctx",
+        fileName: "transcript.txt",
+        content: "body",
         contentCategory: "document",
-        source: "google_drive",
+        source: "fireflies",
         sourcePath: "/",
-        contentHash: "hash-feature-wrongdir",
-        connectorConfigId: "conn-smart",
+        contentHash: null,
+        connectorConfigId: "conn-orgctx",
         sourceCreatedAt: null,
         sourceUpdatedAt: null,
       },
+      { orgName: "Canvas Labs", description: "AI services company. Sketch is one of our products." },
     );
 
-    const wrongDirEdge = await db
-      .selectFrom("entity_relationships")
-      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
-      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
-      .selectAll()
-      .where("source.source_type", "=", "project")
-      .where("target.source_type", "=", "feature")
-      .where("entity_relationships.relationship_type", "=", "part_of")
-      .executeTakeFirst();
-    expect(wrongDirEdge).toBeUndefined();
+    expect(captured).toContain("Organization: Canvas Labs");
+    expect(captured).toContain("AI services company. Sketch is one of our products.");
   });
 });

@@ -6,7 +6,7 @@ export const MAX_FACT_CHARS = 180;
 export const MAX_FACTS_CHARS_PER_ENTITY = 1500;
 const DEFAULT_HALF_LIFE_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const ANCHOR_TYPES = new Set(["company", "product", "project", "feature"]);
+const ANCHOR_TYPES = new Set(["company", "product", "project"]);
 
 export interface LearnedFactStored {
   fact: string;

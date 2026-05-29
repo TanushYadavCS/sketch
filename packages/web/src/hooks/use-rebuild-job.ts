@@ -28,7 +28,7 @@ export interface RebuildJobState {
 }
 
 function isTerminal(phase: string): boolean {
-  return phase === "done" || phase === "failed";
+  return phase === "done" || phase === "failed" || phase === "cancelled";
 }
 
 function pickActive(streams: Record<RebuildJobKind, RebuildJobsResponse | undefined>): ActiveRebuildJob | null {

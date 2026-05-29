@@ -34,7 +34,7 @@ export function configureMaterializeDefaults(opts: { llmPromotionThreshold?: num
   }
 }
 
-const NON_PERSON_MENTION_TYPES = ["project", "feature", "company", "product", "team"] as const;
+const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team"] as const;
 type NonPersonMentionType = (typeof NON_PERSON_MENTION_TYPES)[number];
 type MentionType = "person" | NonPersonMentionType;
 const RELATION_TYPES = [
@@ -174,7 +174,7 @@ function normalizeEntityMatchName(entityType: string, name: string): string {
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "feature", "team"];
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team"];
   const entities = await db.selectFrom("entities").selectAll().where("source_type", "in", supportedTypes).execute();
   const entitiesByType = new Map<ProposeEntityType, EntityRow[]>();
   for (const t of supportedTypes) entitiesByType.set(t, []);
@@ -422,6 +422,7 @@ export interface MaterializeUnmaterializedOptions {
    * watcher to surface live progress to the rebuild banner in the UI.
    */
   onProgress?: (progress: MaterializeProgress) => void;
+  shouldCancel?: () => boolean;
 }
 
 export async function materializeUnmaterializedFacts(
@@ -482,6 +483,7 @@ async function materializeUnmaterializedFactsInner(
   opts.onProgress?.({ phase: "materialize", completed: 0, total: facts.length });
 
   for (let i = 0; i < facts.length; i++) {
+    if (opts.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const fact = facts[i];
     try {
       const result = await materializeFromFact(deps, fact);
@@ -675,27 +677,20 @@ function relationDirectionAllowed(
 ): boolean {
   if (relationType === "works_at") return sourceType === "person" && targetType === "company";
   if (relationType === "engaged_with") {
-    return (sourceType === "person" || sourceType === "team" || sourceType === "feature") && targetType === "company";
+    return (sourceType === "person" || sourceType === "team") && targetType === "company";
   }
   if (relationType === "leads") {
-    return (
-      sourceType === "person" &&
-      (targetType === "project" || targetType === "product" || targetType === "feature" || targetType === "team")
-    );
+    return sourceType === "person" && (targetType === "project" || targetType === "product" || targetType === "team");
   }
   if (relationType === "contributes_to") {
-    return (
-      (sourceType === "person" || sourceType === "team") &&
-      (targetType === "project" || targetType === "product" || targetType === "feature")
-    );
+    return (sourceType === "person" || sourceType === "team") && (targetType === "project" || targetType === "product");
   }
   if (relationType === "builds") return sourceType === "company" && targetType === "product";
   if (relationType === "part_of") {
     return (
       (sourceType === "project" && targetType === "project") ||
       (sourceType === "product" && targetType === "product") ||
-      (sourceType === "team" && targetType === "company") ||
-      (sourceType === "feature" && (targetType === "project" || targetType === "product"))
+      (sourceType === "team" && targetType === "company")
     );
   }
   return sourceType === "company" && targetType === "company";

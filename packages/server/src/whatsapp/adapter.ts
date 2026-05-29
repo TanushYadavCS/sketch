@@ -26,7 +26,7 @@ import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
-import type { createSettingsRepository } from "../db/repositories/settings";
+import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
@@ -358,6 +358,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             platform: "whatsapp",
             onProgressEvent,
             orgName: settingsRow?.org_name,
+            orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
             botName: settingsRow?.bot_name,
             attachments: attachments.length > 0 ? attachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
@@ -635,6 +636,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           platform: "whatsapp",
           onProgressEvent,
           orgName: settingsRow?.org_name,
+          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,

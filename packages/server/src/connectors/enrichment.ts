@@ -111,6 +111,7 @@ export interface EnrichmentDeps {
    * pending-file batch. Used by reset/reenrich jobs to surface live progress.
    */
   onProgress?: (progress: { phase: string; completed: number; total: number }) => void;
+  shouldCancel?: () => boolean;
   /**
    * When set, every LLM call inside this enrichment run writes a dump file
    * (prompt + raw response + token usage) under this directory. Set only by
@@ -220,6 +221,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   deps.onProgress?.({ phase: "enrich", completed: 0, total: pendingFiles.length });
 
   for (let idx = 0; idx < pendingFiles.length; idx++) {
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const file = pendingFiles[idx];
     const fileStart = Date.now();
     try {

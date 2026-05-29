@@ -422,7 +422,7 @@ export type ResetCategory = "manual" | "connectors" | "ai";
 
 export type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
 
-export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
+export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed" | "cancelled";
 
 export type RebuildOnlyJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
 
@@ -774,7 +774,18 @@ export const api = {
   },
   settings: {
     identity() {
-      return request<{ orgName: string | null; botName: string }>("/api/settings/identity");
+      return request<{
+        orgName: string | null;
+        botName: string;
+        orgContext: { description?: string; industry?: string } | null;
+      }>("/api/settings/identity");
+    },
+    updateIdentity(data: { orgName?: string; orgContext?: { description?: string; industry?: string } }) {
+      return request<{
+        orgName: string | null;
+        botName: string;
+        orgContext: { description?: string; industry?: string } | null;
+      }>("/api/settings/identity", { method: "PUT", body: JSON.stringify(data) });
     },
     apiKey() {
       return request<{ configured: boolean; apiKey: string | null }>("/api/settings/api-key");
@@ -1395,6 +1406,11 @@ export const api = {
     },
     reenrichJobs() {
       return request<RebuildJobsResponse>("/api/entities/reenrichments/jobs");
+    },
+    stopReenrichJob(id: string) {
+      return request<{ message: string; job: RebuildJob }>(`/api/entities/reenrichments/jobs/${id}`, {
+        method: "DELETE",
+      });
     },
     rebuild(pendingRebuildId: string) {
       return request<RebuildSubmitResponse>("/api/entities/rebuilds", {

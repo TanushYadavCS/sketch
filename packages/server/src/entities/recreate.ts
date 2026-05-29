@@ -298,6 +298,7 @@ export interface RecreateDeps {
    * surface live progress on the rebuild banner.
    */
   onProgress?: (progress: MaterializeProgress) => void;
+  shouldCancel?: () => boolean;
 }
 
 export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateSummary> {
@@ -318,22 +319,28 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
 
     await seedTeamDirectoryEntities(db, logger);
 
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const replay = await materializeUnmaterializedFacts(db, logger, {
       llmPromotionThreshold: deps.llmPromotionThreshold,
       factTypes: deps.materializeFactTypes,
       onProgress: deps.onProgress,
+      shouldCancel: deps.shouldCancel,
     });
 
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     // Domain promotions run between materialize and deterministic linking so
     // any new company entity (and its `works_at` edges) is visible to the
     // linker. Sweep also runs on every live sync — keep the two paths
     // calling the same helper so recreate doesn't drift.
     const domainSweep = await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     await fixupPreservedEntityDomainReferences(db, logger.child({ component: "recreate-domain-fixup" }));
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     await sweepCoMentionContributesTo(db, logger.child({ component: "recreate-co-mention-sweep" }), {
       scope: { kind: "full" },
       threshold: deps.coMentionContributesToThreshold,
     });
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
 
     if (deps.skipEnrichment) {
       return {
