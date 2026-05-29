@@ -58,15 +58,16 @@ import * as m055 from "./migrations/055-normalize-automation-run-timestamps";
 import * as m056 from "./migrations/056-scheduled-task-output-mode";
 import * as m057 from "./migrations/057-entity-review-queue";
 import * as m058 from "./migrations/058-entity-mentions-unique";
-import * as m059 from "./migrations/059-mention-provenance";
-import * as m060 from "./migrations/060-indexed-file-facts";
-import * as m061 from "./migrations/061-fact-materialization-state";
-import * as m062 from "./migrations/062-entity-domains";
-import * as m063 from "./migrations/063-entity-domains-seed";
-import * as m064 from "./migrations/064-entity-domains-reserved-seed";
-import * as m065 from "./migrations/065-entity-review-domain-candidates";
-import * as m066 from "./migrations/066-relation-evidence-fact-link";
-import * as m067 from "./migrations/067-entities-ai-brief";
+import * as m059 from "./migrations/059-scheduled-tasks-fresh-session-only";
+import * as m060 from "./migrations/060-mention-provenance";
+import * as m061 from "./migrations/061-indexed-file-facts";
+import * as m062 from "./migrations/062-fact-materialization-state";
+import * as m063 from "./migrations/063-entity-domains";
+import * as m064 from "./migrations/064-entity-domains-seed";
+import * as m065 from "./migrations/065-entity-domains-reserved-seed";
+import * as m066 from "./migrations/066-entity-review-domain-candidates";
+import * as m067 from "./migrations/067-relation-evidence-fact-link";
+import * as m068 from "./migrations/068-entities-ai-brief";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -129,15 +130,16 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "056-scheduled-task-output-mode": m056,
           "057-entity-review-queue": m057,
           "058-entity-mentions-unique": m058,
-          "059-mention-provenance": m059,
-          "060-indexed-file-facts": m060,
-          "061-fact-materialization-state": m061,
-          "062-entity-domains": m062,
-          "063-entity-domains-seed": m063,
-          "064-entity-domains-reserved-seed": m064,
-          "065-entity-review-domain-candidates": m065,
-          "066-relation-evidence-fact-link": m066,
-          "067-entities-ai-brief": m067,
+          "059-scheduled-tasks-fresh-session-only": m059,
+          "060-mention-provenance": m060,
+          "061-indexed-file-facts": m061,
+          "062-fact-materialization-state": m062,
+          "063-entity-domains": m063,
+          "064-entity-domains-seed": m064,
+          "065-entity-domains-reserved-seed": m065,
+          "066-entity-review-domain-candidates": m066,
+          "067-relation-evidence-fact-link": m067,
+          "068-entities-ai-brief": m068,
         };
       },
     },

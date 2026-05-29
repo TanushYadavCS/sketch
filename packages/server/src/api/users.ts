@@ -67,6 +67,7 @@ const updateUserSchema = z.object({
   whatsappNumber: whatsappNumberSchema.nullable().optional(),
   description: z.string().max(AGENT_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
   role: z.string().max(100).nullable().optional(),
+  authRole: z.enum(["admin", "member"]).optional(),
   reportsTo: z.string().nullable().optional(),
   allowedTools: allowedToolsSchema,
   slackChannelIds: slackChannelIdsSchema,
@@ -394,6 +395,21 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
+    if (parsed.data.authRole !== undefined) {
+      if (c.get("role") !== "admin") {
+        return c.json({ error: { code: "FORBIDDEN", message: "Admin role required" } }, 403);
+      }
+      if (id === c.get("sub")) {
+        return c.json({ error: { code: "FORBIDDEN", message: "Cannot change your own auth role" } }, 403);
+      }
+      if (existing.type !== "human") {
+        return c.json(
+          { error: { code: "VALIDATION_ERROR", message: "authRole can only be changed for human users" } },
+          400,
+        );
+      }
+    }
+
     const reportsToValue = parsed.data.reportsTo;
     if (reportsToValue != null) {
       if (reportsToValue === id) {
@@ -495,6 +511,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         whatsappNumber: parsed.data.whatsappNumber,
         description: parsed.data.description,
         role: parsed.data.role,
+        authRole: parsed.data.authRole,
         reportsTo: reportsToValue,
         allowedTools: parsed.data.allowedTools,
       });

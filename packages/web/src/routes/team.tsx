@@ -110,6 +110,8 @@ export function TeamPage() {
       <EditMemberDialog
         user={editingUser}
         users={users}
+        currentUserId={auth.userId}
+        canManageAuthRoles={auth.role === "admin"}
         onOpenChange={(open) => !open && setEditingUser(null)}
         onSuccess={() => {
           setEditingUser(null);
