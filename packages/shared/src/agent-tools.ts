@@ -80,6 +80,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__AnalyzeImage",
+    label: "Analyze image",
+    description: "Inspect an image attachment in the workspace using the configured vision model.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__getProviderConfig",
     label: "Check integration provider",
     description: "Check whether an integration provider is configured.",

@@ -30,6 +30,21 @@ describe("configSchema", () => {
         expect(result.data.SLACK_CHANNEL_HISTORY_LIMIT).toBe(5);
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
+        expect(result.data.VISION_ENABLED).toBe(false);
+      }
+    });
+
+    it("parses vision analysis environment settings", () => {
+      const result = configSchema.safeParse({
+        VISION_ENABLED: "true",
+        VISION_PROVIDER: "xiaomi/mimo-v2.5",
+        VISION_API_KEY: "sk-or-vision",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.VISION_ENABLED).toBe(true);
+        expect(result.data.VISION_PROVIDER).toBe("xiaomi/mimo-v2.5");
+        expect(result.data.VISION_API_KEY).toBe("sk-or-vision");
       }
     });
 

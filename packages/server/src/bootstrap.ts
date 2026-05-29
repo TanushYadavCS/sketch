@@ -41,6 +41,7 @@ import { ThreadBuffer } from "./slack/thread-buffer";
 import { UserCache } from "./slack/user-cache";
 import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
 import { initTelemetry } from "./telemetry/setup";
+import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
 import { GroupBuffer } from "./whatsapp/group-buffer";
@@ -124,6 +125,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     const enrichedParams = {
       ...params,
       loadTranscriptionSettings: params.loadTranscriptionSettings ?? (() => settingsRepo.get()),
+      visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config),
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

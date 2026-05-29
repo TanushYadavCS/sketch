@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { createAnalyzeImageTool } from "./tools/analyze-image";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
 import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
@@ -40,6 +41,15 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
           createTranscribeAudioTool({
             absWorkspace,
             loadSettings: deps.loadTranscriptionSettings,
+            logger: deps.logger,
+          }),
+        ]
+      : []),
+    ...(deps.visionAnalysisEnabled && deps.visionConfig
+      ? [
+          createAnalyzeImageTool({
+            absWorkspace,
+            config: deps.visionConfig,
             logger: deps.logger,
           }),
         ]

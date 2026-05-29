@@ -137,6 +137,49 @@ describe("createSketchMcpServer", () => {
     const result = await tools.TranscribeAudio.handler({ file_path: "/tmp/outside.ogg" });
     expect(result.content[0].text).toContain("must be within");
   });
+
+  it("does not expose AnalyzeImage when vision analysis is disabled", () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });
+    const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+    expect(tools.AnalyzeImage).toBeUndefined();
+  });
+
+  it("exposes AnalyzeImage when vision analysis is enabled", () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      visionAnalysisEnabled: true,
+      visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+    });
+    const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+    expect(tools.AnalyzeImage).toBeDefined();
+  });
+
+  it("AnalyzeImage validates workspace paths", async () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      visionAnalysisEnabled: true,
+      visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (input: { file_path: string; question: string }) => Promise<{ content: { text: string }[] }> }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.AnalyzeImage.handler({
+      file_path: "/tmp/outside.png",
+      question: "What is in this image?",
+    });
+    expect(result.content[0].text).toContain("must be within");
+  });
 });
 
 describe("handleGetTeamDirectory", () => {
