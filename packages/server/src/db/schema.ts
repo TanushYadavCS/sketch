@@ -431,6 +431,23 @@ export interface EntityAliasRejectionsTable {
   rejected_at: Generated<string>;
 }
 
+export interface IndexedFileFactsTable {
+  id: string;
+  indexed_file_id: string | null;
+  source: string;
+  fact_type: string;
+  relation: string;
+  subject_name: string | null;
+  subject_email: string | null;
+  subject_source: string | null;
+  subject_source_id: string | null;
+  context_snippet: string | null;
+  raw: string | null;
+  fact_key: string;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface DB {
   users: UsersTable;
   channels: ChannelsTable;
@@ -468,4 +485,5 @@ export interface DB {
   entity_review_queue: EntityReviewQueueTable;
   entity_review_evidence: EntityReviewEvidenceTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
+  indexed_file_facts: IndexedFileFactsTable;
 }

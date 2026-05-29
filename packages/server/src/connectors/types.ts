@@ -135,6 +135,21 @@ export interface PersonEntitySeed {
 export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
+export type IndexedFileFactRaw =
+  | { providerFileId: string; attendee: { name?: string; email?: string } }
+  | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
+  | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
+  | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
+  | { subtype: "internal" | "external" }
+  | EntitySeed
+  | PersonEntitySeed
+  | {
+      providerFileId: string;
+      providerUrl?: string | null;
+      fileType: string;
+      sourcePath?: string | null;
+    };
+
 /**
  * Result of resolving a speaker / attendee name against Sketch-side state
  * (users table, person entities). Carries the resolved entity id and the
