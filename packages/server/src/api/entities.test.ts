@@ -6,9 +6,10 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { endRecreateLock, isRecreateActive } from "../entities/recreate-state";
+import { beginPendingRebuild, endRecreateLock, isRecreateActive } from "../entities/recreate-state";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { _setCurrentResetJobForTests } from "./entities";
 
 const config = createTestConfig();
 const logger = createTestLogger();
@@ -864,5 +865,317 @@ describe("POST /api/entities/reenrichments", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { message: string } };
     expect(body.error.message).toBe("confirm must be REENRICH");
+  });
+});
+
+describe("two-step rebuild flow", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+  let adminId: string;
+
+  beforeEach(async () => {
+    if (isRecreateActive()) endRecreateLock();
+    db = await createTestDb();
+    const admin = await seedAdmin(db);
+    adminId = admin.id;
+    app = createApp(db, config, { logger });
+    adminCookie = await login(app);
+  });
+
+  afterEach(async () => {
+    if (isRecreateActive()) endRecreateLock();
+    try {
+      await db.destroy();
+    } catch {}
+  });
+
+  async function step1Reset(body: Record<string, unknown>) {
+    const res = await app.request("/api/entities/resets", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = res.status === 202 ? ((await res.json()) as Record<string, unknown>) : null;
+    return { status: res.status, json };
+  }
+
+  async function waitForResetDone(jobId: string): Promise<string> {
+    for (let i = 0; i < 100; i++) {
+      const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: adminCookie } });
+      if (res.status === 200) {
+        const body = (await res.json()) as { phase: string };
+        if (body.phase === "done" || body.phase === "failed") return body.phase;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error("reset job did not finish");
+  }
+
+  /**
+   * Distinct failure mode 1 — lock continuity across the step-1 / step-2
+   * pause. Step 1 hands out a pendingRebuildId; step 2 can only proceed by
+   * presenting it, and no other recreate-class job may slip in during the
+   * pending window.
+   */
+  it("lock continuity: step 1 → step 2 with pendingRebuildId; without id and during pending, 409", async () => {
+    const reset = await step1Reset({
+      categories: ["manual", "connectors", "ai"],
+      runAfter: false,
+      confirm: "RESET_AND_RECREATE",
+    });
+    expect(reset.status).toBe(202);
+    const pendingRebuildId = reset.json?.pendingRebuildId as string | undefined;
+    expect(typeof pendingRebuildId).toBe("string");
+    expect(pendingRebuildId).toBeTruthy();
+    const jobId = (reset.json?.job as { id: string }).id;
+
+    expect(await waitForResetDone(jobId)).toBe("done");
+
+    // A second /resets while the lock is pending must be rejected — sync,
+    // enrichment, or another rebuild attempt cannot slip in here.
+    const racing = await step1Reset({
+      categories: ["connectors"],
+    });
+    expect(racing.status).toBe(409);
+
+    // /rebuilds without an id is rejected; with a wrong id, 409.
+    const noId = await app.request("/api/entities/rebuilds", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(noId.status).toBe(400);
+    const wrongId = await app.request("/api/entities/rebuilds", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ pendingRebuildId: "does-not-match" }),
+    });
+    expect(wrongId.status).toBe(409);
+
+    // With the right id, step 2 promotes the pending lock and the rebuild starts.
+    const promote = await app.request("/api/entities/rebuilds", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ pendingRebuildId }),
+    });
+    expect(promote.status).toBe(202);
+    const body = (await promote.json()) as { job: { id: string } };
+    for (let i = 0; i < 100; i++) {
+      const r = await app.request(`/api/entities/rebuilds/jobs/${body.job.id}`, { headers: { Cookie: adminCookie } });
+      if (r.status === 200) {
+        const j = (await r.json()) as { phase: string };
+        if (j.phase === "done" || j.phase === "failed") {
+          expect(j.phase).toBe("done");
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // After promotion + completion, the same id can't be reused.
+    const replay = await app.request("/api/entities/rebuilds", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ pendingRebuildId }),
+    });
+    expect(replay.status).toBe(409);
+  });
+
+  it("does not consume a pending rebuild id while a reset job is active", async () => {
+    const pendingRebuildId = randomUUID();
+    beginPendingRebuild({ pendingRebuildId });
+    _setCurrentResetJobForTests(true);
+    try {
+      const earlyPromote = await app.request("/api/entities/rebuilds", {
+        method: "POST",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ pendingRebuildId }),
+      });
+      expect(earlyPromote.status).toBe(409);
+      const stillPending = await app.request("/api/entities/rebuilds/pending", { headers: { Cookie: adminCookie } });
+      expect(stillPending.status).toBe(200);
+      expect(((await stillPending.json()) as { pending: { pendingRebuildId: string } }).pending.pendingRebuildId).toBe(
+        pendingRebuildId,
+      );
+    } finally {
+      _setCurrentResetJobForTests(false);
+      endRecreateLock();
+    }
+  });
+
+  /**
+   * Distinct failure mode 2 — wipeLlmFacts must control LLM-fact survival.
+   * Off (default): facts keep deleted_at IS NULL. On: facts are tombstoned
+   * and their dependent relation evidence is gone.
+   */
+  it("wipeLlmFacts: off leaves LLM facts intact; on tombstones them and clears relation evidence", async () => {
+    await seedConnectorFile(db, adminId);
+    async function seedLlmFactWithRelation(suffix: string) {
+      const factRepo = createIndexedFileFactRepository(db);
+      await factRepo.upsertFact({
+        indexedFileId: "file-1",
+        connectorConfigId: "cfg",
+        createdByUserId: adminId,
+        contentHash: `hash-${suffix}`,
+        source: "llm_extraction",
+        factType: "llm_extracted",
+        relation: "mentioned",
+        subjectName: `Alice${suffix}`,
+        subjectSource: "llm_extraction",
+        subjectSourceId: `file-1:hash-${suffix}:Alice`,
+        raw: {
+          contentHash: `hash-${suffix}`,
+          promptVersion: "llm-extraction-v2",
+          model: "gemini",
+          mention: `Alice${suffix}`,
+          type: "person",
+          variations: [],
+        },
+      });
+      await factRepo.upsertFact({
+        indexedFileId: "file-1",
+        connectorConfigId: "cfg",
+        createdByUserId: adminId,
+        contentHash: `hash-${suffix}`,
+        source: "llm_extraction",
+        factType: "llm_relation",
+        relation: "contributes_to",
+        subjectName: `Alice${suffix}`,
+        subjectSource: "llm_extraction",
+        subjectSourceId: `file-1:hash-${suffix}:Alice:Apollo`,
+        raw: {
+          contentHash: `hash-${suffix}`,
+          promptVersion: "llm-extraction-v2",
+          model: "gemini",
+          relationType: "contributes_to",
+          confidence: 0.8,
+          source: { name: `Alice${suffix}`, type: "person", variations: [] },
+          target: { name: "Apollo", type: "project", variations: [] },
+        },
+      });
+      const relationFact = await db
+        .selectFrom("indexed_file_facts")
+        .select("id")
+        .where("fact_type", "=", "llm_relation")
+        .where("subject_name", "=", `Alice${suffix}`)
+        .executeTakeFirstOrThrow();
+      // Seed an entity_relationship + evidence that points at the llm_relation
+      // fact so we can confirm cleanup happens on tombstone.
+      const now = new Date().toISOString();
+      await db
+        .insertInto("entities")
+        .values([
+          {
+            id: `alice${suffix}`,
+            name: `Alice${suffix}`,
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: `apollo${suffix}`,
+            name: "Apollo",
+            source_type: "project",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ])
+        .execute();
+      const relId = randomUUID();
+      await db
+        .insertInto("entity_relationships")
+        .values({
+          id: relId,
+          source_entity_id: `alice${suffix}`,
+          target_entity_id: `apollo${suffix}`,
+          relationship_type: "contributes_to",
+          confidence: "INFERRED",
+          confidence_score: 0.8,
+          source: "llm_extraction",
+        })
+        .execute();
+      await db
+        .insertInto("entity_relationship_evidence")
+        .values({
+          id: randomUUID(),
+          relationship_id: relId,
+          indexed_file_id: "file-1",
+          note: null,
+          source_fact_id: relationFact.id,
+        })
+        .execute();
+    }
+
+    // ── wipeLlmFacts: false (default) ────────────────────────────
+    await seedLlmFactWithRelation("a");
+    const off = await step1Reset({
+      categories: ["connectors"],
+      runAfter: false,
+    });
+    expect(off.status).toBe(202);
+    await waitForResetDone((off.json?.job as { id: string }).id);
+
+    const factsOff = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "deleted_at"])
+      .where("fact_type", "in", ["llm_extracted", "llm_relation"])
+      .execute();
+    expect(factsOff.length).toBeGreaterThanOrEqual(2);
+    expect(factsOff.every((f) => f.deleted_at === null)).toBe(true);
+
+    // Release the pending lock so the next test can run cleanly.
+    const pendingOff = (off.json as { pendingRebuildId: string }).pendingRebuildId;
+    const cancel = await app.request(`/api/entities/rebuilds/pending/${pendingOff}`, {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(cancel.status).toBe(204);
+
+    // ── wipeLlmFacts: true ───────────────────────────────────────
+    await seedLlmFactWithRelation("b");
+    const on = await step1Reset({
+      categories: ["ai"],
+      runAfter: false,
+      wipeLlmFacts: true,
+    });
+    expect(on.status).toBe(202);
+    await waitForResetDone((on.json?.job as { id: string }).id);
+
+    const factsOn = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "deleted_at"])
+      .where("fact_type", "in", ["llm_extracted", "llm_relation"])
+      .execute();
+    expect(factsOn.length).toBeGreaterThanOrEqual(2);
+    expect(factsOn.every((f) => f.deleted_at !== null)).toBe(true);
+    const evidence = await db.selectFrom("entity_relationship_evidence").select("id").execute();
+    expect(evidence).toHaveLength(0);
+  });
+
+  /**
+   * Distinct failure mode 3 — payload-shape guards stop the original silent
+   * silent-discard regression: /resets must reject scope, /reenrichments
+   * must reject categories. The two endpoints don't accept each other's
+   * fields under any circumstances.
+   */
+  it("payload guards: /resets rejects scope; /reenrichments rejects categories", async () => {
+    const resetWithScope = await app.request("/api/entities/resets", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ categories: ["connectors"], scope: { all: true } }),
+    });
+    expect(resetWithScope.status).toBe(400);
+
+    const reenrichWithCategories = await app.request("/api/entities/reenrichments", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: { all: true }, categories: ["ai"] }),
+    });
+    expect(reenrichWithCategories.status).toBe(400);
   });
 });

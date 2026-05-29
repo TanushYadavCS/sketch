@@ -54,6 +54,13 @@ export interface ReenrichDeps {
   missingFileIds?: string[];
   llmPromotionThreshold?: number;
   coMentionContributesToThreshold?: number;
+  /**
+   * Set when the caller already promoted a pending recreate lock (two-step
+   * rebuild flow). Skips the internal beginRecreateLock/endRecreateLock so
+   * we don't double-acquire; the caller's `finally` is responsible for
+   * releasing the lock.
+   */
+  lockAlreadyHeld?: boolean;
   onPhase?: (phase: "wiping" | "enriching" | "rebuilding") => void;
   /**
    * Fires during enrich and rebuild phases (per-file during enrichment,
@@ -324,6 +331,56 @@ export async function wipeLlmEnrichmentForFiles(
   return summary;
 }
 
+/**
+ * Tombstone all active llm_extracted / llm_relation facts graph-wide and
+ * clean up dependent relation evidence + emptied relationships. Used by the
+ * step-1 reset path when the operator opted into wiping LLM-extracted facts.
+ *
+ * Narrower than `wipeLlmEnrichmentForFiles`: does not delete document_chunks,
+ * file/chunk embeddings, summaries, or document_timeframes. Step 1 is an
+ * entity-and-fact checkpoint, not a file-reprocessing job — the file-level
+ * artifacts only get wiped if step 2 chooses re-extract, which runs
+ * `wipeLlmEnrichmentForFiles` as usual before LLM extraction.
+ */
+export async function tombstoneActiveLlmFacts(
+  db: Kysely<DB>,
+  logger: Logger,
+): Promise<{ factsTombstoned: number; relationshipEvidenceDeleted: number; relationshipsDeleted: number }> {
+  const result = { factsTombstoned: 0, relationshipEvidenceDeleted: 0, relationshipsDeleted: 0 };
+  const factRows = await db
+    .selectFrom("indexed_file_facts")
+    .select("id")
+    .where("fact_type", "in", AI_EXTRACTION_FACT_TYPES)
+    .where("deleted_at", "is", null)
+    .execute();
+  if (factRows.length === 0) return result;
+  const factIds = factRows.map((r) => r.id);
+
+  result.relationshipEvidenceDeleted = await cleanupRelationshipEvidenceForFacts(db, factIds);
+  result.relationshipsDeleted = await cleanupEmptyRelationships(db);
+
+  const now = new Date().toISOString();
+  for (let i = 0; i < factIds.length; i += WIPE_BATCH_SIZE) {
+    const batch = factIds.slice(i, i + WIPE_BATCH_SIZE);
+    const tomb = await db
+      .updateTable("indexed_file_facts")
+      .set({ deleted_at: now, materialized_at: null, updated_at: now })
+      .where("id", "in", batch)
+      .executeTakeFirst();
+    result.factsTombstoned += Number(tomb.numUpdatedRows ?? 0);
+  }
+
+  logger.warn(
+    {
+      factsTombstoned: result.factsTombstoned,
+      relationshipEvidenceDeleted: result.relationshipEvidenceDeleted,
+      relationshipsDeleted: result.relationshipsDeleted,
+    },
+    "LLM facts tombstoned (step-1 wipe)",
+  );
+  return result;
+}
+
 export async function runEnrichmentForFileBatches(
   deps: Omit<EnrichmentDeps, "fileIds"> & { runEnrichmentImpl?: (deps: EnrichmentDeps) => Promise<EnrichmentResult> },
   fileIds: string[],
@@ -352,7 +409,7 @@ export async function runEnrichmentForFileBatches(
 }
 
 export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummary> {
-  beginRecreateLock();
+  if (!deps.lockAlreadyHeld) beginRecreateLock();
   try {
     deps.onPhase?.("wiping");
     deps.onProgress?.({ phase: "wipe", completed: 0, total: 1 });
@@ -400,6 +457,6 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
     }
     return summary;
   } finally {
-    endRecreateLock();
+    if (!deps.lockAlreadyHeld) endRecreateLock();
   }
 }

@@ -16,7 +16,15 @@ import {
   getRecreateConflict,
   recreateEntityGraph,
 } from "../entities/recreate";
-import { beginRecreateLock, endRecreateLock, isRecreateActive } from "../entities/recreate-state";
+import {
+  beginPendingRebuild,
+  beginRecreateLock,
+  cancelPendingRebuild,
+  endRecreateLock,
+  getPendingRebuild,
+  isRecreateActive,
+  promotePendingRebuild,
+} from "../entities/recreate-state";
 import {
   AI_EXTRACTION_FACT_TYPES,
   type ReenrichDryRunSummary,
@@ -25,6 +33,7 @@ import {
   computeReenrichDryRun,
   resolveReenrichFileIds,
   runReenrichJob,
+  tombstoneActiveLlmFacts,
 } from "../entities/reenrich";
 import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
@@ -34,6 +43,7 @@ const REENRICH_CONFIRM_TOKEN = "REENRICH";
 type ResetCategory = "manual" | "connectors" | "ai";
 type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
 type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
+type RebuildJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
 
 interface JobProgress {
   phase: string;
@@ -44,11 +54,16 @@ interface JobProgress {
 interface ResetRequest {
   categories: ResetCategory[];
   runAfter: boolean;
+  wipeLlmFacts?: boolean;
 }
 
 interface ReenrichRequest {
   scope: ReenrichScope;
   runAfter: boolean;
+}
+
+interface RebuildRequest {
+  pendingRebuildId: string;
 }
 
 interface ResetJob {
@@ -61,6 +76,13 @@ interface ResetJob {
   reset?: ResetSummary;
   replay?: MaterializeFactsSummary;
   recreate?: RecreateSummary;
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
+  llmFactsWiped?: {
+    factsTombstoned: number;
+    relationshipEvidenceDeleted: number;
+    relationshipsDeleted: number;
+  };
   error?: string;
 }
 
@@ -76,6 +98,17 @@ interface ReenrichJob {
   error?: string;
 }
 
+interface RebuildJob {
+  id: string;
+  phase: RebuildJobPhase;
+  startedAt: string;
+  finishedAt: string | null;
+  request: RebuildRequest;
+  progress?: JobProgress;
+  recreate?: RecreateSummary;
+  error?: string;
+}
+
 const FACT_TYPES_BY_CATEGORY: Record<ResetCategory, IndexedFileFactType[]> = {
   connectors: ["structural_seed", "person_seed", "attendee", "assignee", "author", "parent_entity"],
   ai: ["llm_extracted", "llm_relation"],
@@ -86,6 +119,8 @@ let currentResetJob: ResetJob | null = null;
 let latestResetJob: ResetJob | null = null;
 let currentReenrichJob: ReenrichJob | null = null;
 let latestReenrichJob: ReenrichJob | null = null;
+let currentRebuildJob: RebuildJob | null = null;
+let latestRebuildJob: RebuildJob | null = null;
 
 function newResetJob(request: ResetRequest): ResetJob {
   return {
@@ -105,6 +140,20 @@ function newReenrichJob(request: ReenrichRequest): ReenrichJob {
     finishedAt: null,
     request,
   };
+}
+
+function newRebuildJob(request: RebuildRequest): RebuildJob {
+  return {
+    id: randomUUID(),
+    phase: "idle",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    request,
+  };
+}
+
+export function _setCurrentResetJobForTests(active: boolean): void {
+  currentResetJob = active ? newResetJob({ categories: ["manual"], runAfter: false }) : null;
 }
 
 interface EntityRoutesDeps {
@@ -303,6 +352,147 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     return c.json({ error: { code: "NOT_FOUND", message: "Re-enrich job not found" } }, 404);
   });
 
+  /**
+   * GET /api/entities/rebuilds/jobs
+   * Active/most-recent rebuild job (step 2 of two-step replay path).
+   */
+  routes.get("/rebuilds/jobs", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const conflict = await getRecreateConflict(db);
+    return c.json({
+      active: currentRebuildJob !== null || isRecreateActive(),
+      currentJob: currentRebuildJob,
+      latestJob: latestRebuildJob,
+      blockedBy: currentRebuildJob ? null : conflict,
+    });
+  });
+
+  routes.get("/rebuilds/jobs/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const id = c.req.param("id");
+    if (currentRebuildJob?.id === id) return c.json(currentRebuildJob);
+    if (latestRebuildJob?.id === id) return c.json(latestRebuildJob);
+    return c.json({ error: { code: "NOT_FOUND", message: "Rebuild job not found" } }, 404);
+  });
+
+  /**
+   * POST /api/entities/rebuilds
+   * Step 2 (replay path) of the two-step rebuild. Requires a pendingRebuildId
+   * returned by a prior /resets call. Replays existing facts only — does not
+   * call the LLM. Use /reenrichments for the re-extract path.
+   *
+   * Body: { pendingRebuildId: string }
+   */
+  routes.post("/rebuilds", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const body = (await c.req.json().catch(() => ({}))) as { pendingRebuildId?: string };
+    if (typeof body.pendingRebuildId !== "string" || body.pendingRebuildId.length === 0) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "pendingRebuildId is required" } }, 400);
+    }
+    const pendingRebuildId = body.pendingRebuildId;
+
+    if (currentResetJob || currentReenrichJob || currentRebuildJob) {
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Another job is already active" } }, 409);
+    }
+
+    const promote = promotePendingRebuild(pendingRebuildId);
+    if (promote !== "promoted") {
+      return c.json(
+        {
+          error: {
+            code: promote === "expired" ? "PENDING_REBUILD_EXPIRED" : "PENDING_REBUILD_INVALID",
+            message: `pendingRebuildId ${promote.replace(/_/g, " ")}`,
+          },
+        },
+        409,
+      );
+    }
+
+    const job = newRebuildJob({ pendingRebuildId });
+    job.phase = "replaying_facts";
+    currentRebuildJob = job;
+    const triggeredByUserId = (c.get("sub") as string | undefined) ?? "system";
+
+    void (async () => {
+      try {
+        const result = await recreateEntityGraph({
+          db,
+          logger: logger.child({ jobId: job.id, component: "entity-rebuild" }),
+          triggeredByUserId,
+          skipReset: true,
+          lockAlreadyHeld: true,
+          llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+          onProgress: (progress) => {
+            job.progress = progress;
+          },
+        });
+        job.recreate = result;
+        job.phase = "done";
+        job.finishedAt = new Date().toISOString();
+      } catch (err) {
+        job.error = err instanceof Error ? err.message : String(err);
+        job.phase = "failed";
+        job.finishedAt = new Date().toISOString();
+        logger.error({ err, jobId: job.id }, "Rebuild job failed");
+      } finally {
+        latestRebuildJob = job;
+        currentRebuildJob = null;
+        if (isRecreateActive()) endRecreateLock();
+      }
+    })();
+
+    return c.json(
+      {
+        message: "Rebuild started.",
+        job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
+      },
+      202,
+    );
+  });
+
+  /**
+   * DELETE /api/entities/rebuilds/pending/:id
+   * Release a pending recreate lock (caller hit Cancel on step 2). Idempotent
+   * from the UI perspective:
+   *   - 204 when the lock was pending under this id and released.
+   *   - 409 when the lock was already promoted into an active rebuild.
+   *   - 404 otherwise (no pending lock or id mismatch — expired counts too).
+   */
+  routes.delete("/rebuilds/pending/:id", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const id = c.req.param("id");
+    const result = cancelPendingRebuild(id);
+    if (result === "released") return c.body(null, 204);
+    if (result === "already_promoted") {
+      return c.json({ error: { code: "PENDING_REBUILD_INVALID", message: "pendingRebuildId already promoted" } }, 409);
+    }
+    return c.json({ error: { code: "NOT_FOUND", message: `pendingRebuildId ${result.replace(/_/g, " ")}` } }, 404);
+  });
+
+  /**
+   * GET /api/entities/rebuilds/pending
+   * Inspect the current pending lock (used by the dialog when the page is
+   * refreshed mid-flow to recover step state).
+   */
+  routes.get("/rebuilds/pending", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const pending = getPendingRebuild();
+    if (!pending) return c.json({ pending: null });
+    return c.json({
+      pending: {
+        pendingRebuildId: pending.pendingRebuildId,
+        expiresAt: new Date(pending.expiresAt).toISOString(),
+        createdAt: new Date(pending.createdAt).toISOString(),
+      },
+    });
+  });
+
   routes.post("/reenrichments", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
@@ -311,7 +501,18 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       confirm?: string;
       dryRun?: boolean;
       runAfter?: boolean;
+      pendingRebuildId?: string;
+      // Guard rail: /reenrichments never accepts categories. A misrouted
+      // reset payload landing here would silently re-extract on the entire
+      // graph (the original silent-discard regression).
+      categories?: unknown;
     };
+    if (body.categories !== undefined) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "/reenrichments does not accept categories; use /resets" } },
+        400,
+      );
+    }
 
     const scope = parseReenrichScope(body.scope);
     if (!scope) {
@@ -335,15 +536,51 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       );
     }
 
-    const conflict = await getRecreateConflict(db);
-    if (conflict) {
-      return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
+    // Two-step rebuild: the caller already holds a pending recreate lock from
+    // a prior /resets call. Check route-local jobs first so a still-running
+    // step-1 reset cannot consume the pending id before it is safe to promote.
+    const pendingRebuildId = typeof body.pendingRebuildId === "string" ? body.pendingRebuildId : undefined;
+    let lockAlreadyHeld = false;
+    if (pendingRebuildId) {
+      if (currentResetJob) {
+        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
+      }
+      if (currentReenrichJob) {
+        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
+      }
+      if (currentRebuildJob) {
+        return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
+      }
+      const promote = promotePendingRebuild(pendingRebuildId);
+      if (promote !== "promoted") {
+        return c.json(
+          {
+            error: {
+              code: promote === "expired" ? "PENDING_REBUILD_EXPIRED" : "PENDING_REBUILD_INVALID",
+              message: `pendingRebuildId ${promote.replace(/_/g, " ")}`,
+            },
+          },
+          409,
+        );
+      }
+      lockAlreadyHeld = true;
+    } else {
+      const conflict = await getRecreateConflict(db);
+      if (conflict) {
+        return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
+      }
     }
     if (currentResetJob) {
+      if (lockAlreadyHeld) endRecreateLock();
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
     }
     if (currentReenrichJob) {
+      if (lockAlreadyHeld) endRecreateLock();
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
+    }
+    if (currentRebuildJob) {
+      if (lockAlreadyHeld) endRecreateLock();
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
     }
 
     const runAfter = body.runAfter !== false;
@@ -361,6 +598,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           fileIds: resolved.fileIds,
           missingFileIds: resolved.missingFileIds,
           runAfter,
+          lockAlreadyHeld,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           onPhase: (phase) => {
@@ -378,10 +616,12 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         job.phase = "failed";
         job.finishedAt = new Date().toISOString();
         logger.error({ err, jobId: job.id }, "Re-enrich job failed");
-        if (isRecreateActive()) endRecreateLock();
       } finally {
         latestReenrichJob = job;
         currentReenrichJob = null;
+        // Promoted pending → active; runReenrichJob doesn't release the
+        // caller-held lock, so we release it here.
+        if (lockAlreadyHeld && isRecreateActive()) endRecreateLock();
       }
     })();
 
@@ -407,7 +647,12 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
    *   runAfter?: boolean,
    *   dryRun?: boolean,
    *   confirm?: string,  // required when runAfter=true OR all categories
+   *   wipeLlmFacts?: boolean,  // tombstone llm_extracted/llm_relation facts after the category purge (step-1 two-step rebuild)
    * }
+   *
+   * When `runAfter=false`, the server begins a pending recreate lock and
+   * returns `pendingRebuildId` + `pendingRebuildExpiresAt` so the caller can
+   * present them to /rebuilds or /reenrichments for step 2.
    */
   routes.post("/resets", async (c) => {
     const denied = denyIfNotAdmin(c);
@@ -417,7 +662,18 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       runAfter?: boolean;
       dryRun?: boolean;
       confirm?: string;
+      wipeLlmFacts?: boolean;
+      // Guard rail: /resets never accepts scope. Reject explicitly so a
+      // misrouted reenrich payload doesn't silently succeed as a category
+      // reset (regression for the silent-discard bug that landed in prod).
+      scope?: unknown;
     };
+    if (body.scope !== undefined) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "/resets does not accept scope; use /reenrichments" } },
+        400,
+      );
+    }
     const categoriesIn = Array.isArray(body.categories) ? body.categories : [];
     const categories = new Set<ResetCategory>(
       categoriesIn.filter((c): c is ResetCategory => c === "manual" || c === "connectors" || c === "ai"),
@@ -429,6 +685,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
 
     const runAfter = body.runAfter === true;
     const dryRun = body.dryRun === true;
+    const wipeLlmFacts = body.wipeLlmFacts === true;
     const allCategoriesSelected = categories.size === 3;
 
     if ((runAfter || allCategoriesSelected) && !dryRun && body.confirm !== RESET_CONFIRM_TOKEN) {
@@ -485,10 +742,28 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     if (currentReenrichJob) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
     }
+    if (currentRebuildJob) {
+      return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
+    }
 
-    const job = newResetJob({ categories: [...categories], runAfter });
+    const job = newResetJob({ categories: [...categories], runAfter, wipeLlmFacts });
     job.phase = "resetting";
-    if (runAfter) beginRecreateLock();
+
+    // Lock acquisition:
+    //   runAfter=true  → active (legacy single-shot reset+rebuild)
+    //   runAfter=false → pending (step 1 of two-step rebuild: hold the lane
+    //                   until step 2 promotes or TTL expires)
+    let pendingRebuildId: string | null = null;
+    let pendingExpiresAtIso: string | null = null;
+    if (runAfter) {
+      beginRecreateLock();
+    } else {
+      pendingRebuildId = randomUUID();
+      const { expiresAt } = beginPendingRebuild({ pendingRebuildId });
+      pendingExpiresAtIso = new Date(expiresAt).toISOString();
+      job.pendingRebuildId = pendingRebuildId;
+      job.pendingRebuildExpiresAt = pendingExpiresAtIso;
+    }
     currentResetJob = job;
     const triggeredByUserId = (c.get("sub") as string | undefined) ?? "system";
 
@@ -503,6 +778,10 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           factTypes,
         });
         job.reset = summary.resetSummary;
+        if (wipeLlmFacts) {
+          const tomb = await tombstoneActiveLlmFacts(db, logger.child({ jobId: job.id, phase: "tombstone-llm" }));
+          job.llmFactsWiped = tomb;
+        }
         job.progress = { phase: "resetting", completed: 1, total: 1 };
         if (!runAfter) {
           job.phase = "done";
@@ -531,10 +810,17 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         job.error = err instanceof Error ? err.message : String(err);
         job.phase = "failed";
         job.finishedAt = new Date().toISOString();
-        logger.error({ err, jobId: job.id, runAfter }, "Reset job failed");
+        logger.error({ err, jobId: job.id, runAfter, wipeLlmFacts }, "Reset job failed");
+        // When the step-1 reset itself fails, release the pending lock so sync
+        // and enrichment aren't stuck behind a graph the operator never got.
+        if (!runAfter && pendingRebuildId) {
+          cancelPendingRebuild(pendingRebuildId);
+        }
       } finally {
         latestResetJob = job;
         currentResetJob = null;
+        // runAfter=true: release the active lock we held.
+        // runAfter=false: pending lock stays for step 2 (or TTL releases it).
         if (runAfter && isRecreateActive()) endRecreateLock();
       }
     })();
@@ -542,7 +828,13 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     return c.json(
       {
         message: runAfter ? "Reset started, rebuild will follow." : "Reset started.",
-        job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
+        job: {
+          id: job.id,
+          phase: job.phase,
+          startedAt: job.startedAt,
+          ...(pendingRebuildId ? { pendingRebuildId, pendingRebuildExpiresAt: pendingExpiresAtIso ?? undefined } : {}),
+        },
+        ...(pendingRebuildId ? { pendingRebuildId, pendingRebuildExpiresAt: pendingExpiresAtIso } : {}),
       },
       202,
     );
