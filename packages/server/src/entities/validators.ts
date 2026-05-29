@@ -18,9 +18,9 @@ export function validateLlmMention(input: {
   if (input.source !== "llm_extraction") return { ok: true };
   if (input.entityType?.trim().toLowerCase() === "feature") return { ok: false, reason: "type_removed" };
 
-  const content = normalizeName(input.fileContent);
+  const content = normalizePresenceText(input.fileContent);
   const names = [input.displayName, ...(input.aliases ?? [])]
-    .map((name) => normalizeName(name))
+    .map((name) => normalizePresenceText(name))
     .filter((name) => name.length > 0);
 
   if (!names.some((name) => content.includes(name))) {
@@ -96,4 +96,11 @@ export async function rewriteLearnedFacts(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizePresenceText(value: string): string {
+  return normalizeName(value)
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
