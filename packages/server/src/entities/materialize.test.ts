@@ -217,6 +217,25 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(entities).toHaveLength(0);
   });
 
+  it("stops before materializing when cancellation is requested", async () => {
+    await seedFiles(db, 2);
+    await upsertLlmFact(db, "file-1", "Acme", "company");
+    await upsertLlmFact(db, "file-2", "Acme", "company");
+
+    await expect(
+      materializeUnmaterializedFacts(db, createTestLogger(), {
+        llmPromotionThreshold: 1,
+        shouldCancel: () => true,
+      }),
+    ).rejects.toThrow("Re-enrich stopped");
+
+    const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
+    expect(facts).toHaveLength(2);
+    expect(facts.every((fact) => fact.materialized_at === null)).toBe(true);
+    expect(await db.selectFrom("entities").selectAll().execute()).toHaveLength(0);
+    expect(await db.selectFrom("entity_mentions").selectAll().execute()).toHaveLength(0);
+  });
+
   it("respects configurable threshold (=1 promotes immediately, =3 keeps deferred)", async () => {
     await seedFiles(db, 2);
     await upsertLlmFact(db, "file-1", "Acme", "company");
@@ -246,7 +265,6 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
   it("counts distinct files — two facts in the same file don't promote", async () => {
     await seedFiles(db, 1);
     await upsertLlmFact(db, "file-1", "Acme", "company");
-    // Second fact w/ different variation makes a different fact_key.
     const repo = createIndexedFileFactRepository(db);
     await repo.upsertFact({
       indexedFileId: "file-1",
