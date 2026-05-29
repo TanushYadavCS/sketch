@@ -9,7 +9,7 @@ import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
 import { type SketchMcpDeps, UploadCollector } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
-import { createVisionAnalysisTool } from "./tools/vision-analysis";
+import { createVisualAnalysisTool } from "./tools/visual-analysis";
 
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
@@ -47,7 +47,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       : []),
     ...(deps.visionAnalysisEnabled && deps.visionConfig
       ? [
-          createVisionAnalysisTool({
+          createVisualAnalysisTool({
             absWorkspace,
             config: deps.visionConfig,
             logger: deps.logger,

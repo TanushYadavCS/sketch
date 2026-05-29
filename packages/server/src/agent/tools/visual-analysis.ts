@@ -11,18 +11,18 @@ const fallbackLogger = {
   warn: () => {},
 } as unknown as Logger;
 
-export interface VisionAnalysisToolDeps {
+export interface VisualAnalysisToolDeps {
   absWorkspace: string;
   config?: VisionConfig | null;
   logger?: Logger;
 }
 
-export function createVisionAnalysisTool(deps: VisionAnalysisToolDeps) {
+export function createVisualAnalysisTool(deps: VisualAnalysisToolDeps) {
   return tool(
-    "VisionAnalysis",
-    "Analyze an image or GIF attachment from the workspace using the configured vision model. Use this when visual content is relevant and native image understanding is unavailable or insufficient.",
+    "VisualAnalysis",
+    "Analyze visual attachments from the workspace using the configured vision model. Use this for visual tasks such as OCR, screenshot inspection, diagram interpretation, and animation review when native vision is unavailable or insufficient.",
     {
-      file_path: z.string().describe("Absolute path to the image or GIF file within your workspace"),
+      file_path: z.string().describe("Absolute path to the visual file within your workspace"),
       question: z.string().describe("The specific visual question to answer about the file"),
     },
     async ({ file_path, question }) => {
@@ -43,7 +43,7 @@ export function createVisionAnalysisTool(deps: VisionAnalysisToolDeps) {
         });
         return { content: [{ type: "text" as const, text }] };
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Vision analysis failed.";
+        const message = err instanceof Error ? err.message : "Visual analysis failed.";
         return { content: [{ type: "text" as const, text: `Error: ${message}` }] };
       }
     },

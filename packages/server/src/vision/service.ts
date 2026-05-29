@@ -43,7 +43,7 @@ function loadConfig(deps: VisionServiceDeps): VisionConfig | null {
 export async function analyzeImageFile(imagePath: string, question: string, deps: VisionServiceDeps): Promise<string> {
   const config = loadConfig(deps);
   if (!config) {
-    throw new Error("Vision analysis is not configured.");
+    throw new Error("Visual analysis is not configured.");
   }
 
   const result = await analyzeImageWithOpenRouter(imagePath, question, {
@@ -57,7 +57,7 @@ export async function analyzeImageFile(imagePath: string, question: string, deps
       totalTokens: result.usage?.total_tokens,
       cost: result.usage?.cost,
     },
-    "Vision analysis completed",
+    "Visual analysis completed",
   );
 
   return result.text;
