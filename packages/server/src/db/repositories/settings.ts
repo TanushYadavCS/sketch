@@ -3,6 +3,28 @@ import type { Kysely } from "kysely";
 import { decrypt, encrypt } from "../../auth/encryption";
 import type { DB } from "../schema";
 
+export interface OrgContext {
+  description?: string;
+  industry?: string;
+}
+
+export function parseOrgContext(raw: string | null | undefined): OrgContext | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: OrgContext = {};
+    if (typeof parsed.description === "string" && parsed.description.trim().length > 0) {
+      result.description = parsed.description.trim();
+    }
+    if (typeof parsed.industry === "string" && parsed.industry.trim().length > 0) {
+      result.industry = parsed.industry.trim();
+    }
+    return result.description || result.industry ? result : null;
+  } catch {
+    return null;
+  }
+}
+
 const SENSITIVE_FIELDS = new Set<string>([
   "slack_bot_token",
   "slack_app_token",

@@ -1,0 +1,118 @@
+import type { Kysely } from "kysely";
+import type { DB } from "../db/schema";
+import { type MentionType, type NonPersonMentionType, normalizeMentionType } from "./graph";
+import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
+import { isString, readJsonObject } from "./materialize-json";
+import { createMentionFromFact } from "./materialize-mentions";
+import { materializePersonFact } from "./materialize-person";
+import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { proposeEntity } from "./propose";
+
+async function countActiveLlmFilesForName(
+  db: Kysely<DB>,
+  normalized: string,
+  mentionType: MentionType,
+): Promise<number> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["indexed_file_id", "subject_name", "raw"])
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .execute();
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row.indexed_file_id || !row.subject_name) continue;
+    const raw = readJsonObject(row.raw);
+    if (normalizeMentionType(raw.type) !== mentionType) continue;
+    if (normalizeEntityMatchName(mentionType, row.subject_name) !== normalized) continue;
+    seen.add(row.indexed_file_id);
+  }
+  return seen.size;
+}
+
+export async function materializeLlmExtractedFact(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+): Promise<MaterializeResult> {
+  if (!fact.subject_name) {
+    return { kind: "skipped", reason: "missing_llm_subject" };
+  }
+  const raw = readJsonObject(fact.raw);
+  const mentionType = normalizeMentionType(raw.type);
+  if (!mentionType) {
+    return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
+  }
+  const normalized = normalizeEntityMatchName(mentionType, fact.subject_name);
+  if (!normalized) {
+    return { kind: "skipped", reason: "missing_llm_subject" };
+  }
+  const fileCount = await countActiveLlmFilesForName(deps.db, normalized, mentionType);
+  if (fileCount < deps.llmPromotionThreshold) {
+    return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
+  }
+
+  if (mentionType === "person") {
+    return materializePersonFact(deps, fact);
+  }
+  return materializeNonPersonLlmEntity(deps, fact, mentionType);
+}
+
+export async function materializeNonPersonLlmEntity(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+  sourceType: NonPersonMentionType,
+): Promise<MaterializeResult> {
+  const raw = readJsonObject(fact.raw);
+  const variations = Array.isArray(raw.variations) ? raw.variations.filter(isString) : [];
+  const triggeredByUserId = deps.resolveOwner(fact);
+  if (!triggeredByUserId) {
+    return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
+  }
+
+  const result = await proposeEntity(
+    {
+      entityRepo: deps.entityRepo,
+      reviewRepo: deps.reviewRepo,
+      lookup: deps.lookup,
+      readEmail: deps.readEmail,
+    },
+    {
+      name: fact.subject_name as string,
+      entityType: sourceType,
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: fact.subject_source_id ?? `${fact.indexed_file_id ?? "no-file"}:${fact.subject_name}`,
+      evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
+      triggeredByUserId,
+      aliases: variations,
+      metadata: { origin: "ai" },
+      evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+    },
+  );
+
+  if (result.kind === "queued") {
+    return { kind: "queued_held", reviewId: result.reviewId, reason: "non_person_collision" };
+  }
+
+  const entity = result.entity as unknown as EntityRow;
+  const created = result.kind === "created";
+  registerEntity(deps.index, entity);
+
+  if (!fact.indexed_file_id) {
+    return { kind: created ? "entity_created" : "entity_linked", entity, mentionWritten: false };
+  }
+  await createMentionFromFact(deps, {
+    entityId: entity.id,
+    indexedFileId: fact.indexed_file_id,
+    contextSnippet: fact.context_snippet ?? null,
+    confidence: "INFERRED",
+    source: "llm_extraction",
+    relation: "mentioned",
+  });
+  return {
+    kind: created ? "entity_created" : "entity_linked",
+    entity,
+    mentionWritten: true,
+  };
+}

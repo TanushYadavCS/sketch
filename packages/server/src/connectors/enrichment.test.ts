@@ -13,9 +13,11 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEntityRepository } from "../db/repositories/entities";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { clearEnrichmentData, runEnrichment } from "./enrichment";
+import { clearEnrichmentData, matchesAsWord, runEnrichment } from "./enrichment";
 
 /** Insert the minimum rows needed to have an indexed file ready for enrichment. */
 async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promise<void> {
@@ -109,6 +111,50 @@ describe("clearEnrichmentData — batch DELETE via subquery", () => {
     const fileId = randomUUID();
     await seedFile(db, fileId, "content");
     await expect(clearEnrichmentData(db, fileId)).resolves.toBeUndefined();
+  });
+
+  it("preserves EXTRACTED mentions and removes content-derived mentions", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "content");
+    const entityRepo = createEntityRepository(db);
+    const extractedEntity = await entityRepo.upsertPersonEntity({
+      name: "Extracted Person",
+      email: "extracted@example.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "meeting-1:extracted@example.com",
+    });
+    const inferredEntity = await entityRepo.upsertEntity({
+      name: "Inferred Company",
+      sourceType: "company",
+      status: "confirmed",
+    });
+
+    await entityRepo.createMention({
+      entityId: extractedEntity.id,
+      indexedFileId: fileId,
+      confidence: "EXTRACTED",
+      source: "fireflies_attendee",
+      relation: "attended",
+    });
+    await entityRepo.createMention({
+      entityId: inferredEntity.id,
+      indexedFileId: fileId,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+
+    await clearEnrichmentData(db, fileId);
+
+    const mentions = await db.selectFrom("entity_mentions").selectAll().where("indexed_file_id", "=", fileId).execute();
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0]).toMatchObject({
+      entity_id: extractedEntity.id,
+      confidence: "EXTRACTED",
+      source: "fireflies_attendee",
+      relation: "attended",
+    });
   });
 });
 
@@ -265,5 +311,197 @@ describe("runEnrichment — claim semantics", () => {
 
     expect(result.filesProcessed).toBe(1);
     expect(await getStatus(fileId)).toBe("done");
+  });
+
+  it("deterministic relinking preserves LLM extraction mentions", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "Jane Doe discussed the launch plan.");
+    await setStatus(fileId, "pending");
+    const entity = await createEntityRepository(db).upsertEntity({
+      name: "Jane Doe",
+      sourceType: "person",
+      status: "confirmed",
+    });
+    await createEntityRepository(db).createMention({
+      entityId: entity.id,
+      indexedFileId: fileId,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: fileId,
+      connectorConfigId: "conn-1",
+      contentHash: "hash",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Jane Doe",
+      subjectSource: "llm_extraction",
+      subjectSourceId: `${fileId}:hash:Jane Doe`,
+      raw: {
+        contentHash: "hash",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Jane Doe",
+        type: "person",
+        variations: [],
+      },
+    });
+
+    await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    expect(mentions).toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+  });
+
+  it("deterministic relinking removes legacy llm_extraction mentions without backing facts", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "Jane Doe discussed the launch plan.");
+    await setStatus(fileId, "pending");
+    const entity = await createEntityRepository(db).upsertEntity({
+      name: "Jane Doe",
+      sourceType: "person",
+      status: "confirmed",
+    });
+    await createEntityRepository(db).createMention({
+      entityId: entity.id,
+      indexedFileId: fileId,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
+    });
+
+    await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation"])
+      .where("indexed_file_id", "=", fileId)
+      .execute();
+    expect(mentions).not.toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+    expect(mentions).toContainEqual({
+      source: "deterministic_substring",
+      confidence: "INFERRED",
+      relation: "mentioned",
+    });
+  });
+});
+
+describe("matchesAsWord — word-boundary entity name matching", () => {
+  it("does NOT match a name embedded inside a longer word", () => {
+    // The bug that motivated this helper: "Anshu" inside "Himanshu" was
+    // creating false-positive entity_mentions on every "Himanshu" doc.
+    expect(matchesAsWord("himanshu kalra is here", "anshu")).toBe(false);
+    expect(matchesAsWord("estimated 5 days", "tim")).toBe(false);
+    expect(matchesAsWord("donate to charity", "don")).toBe(false);
+  });
+
+  it("matches at word boundaries", () => {
+    expect(matchesAsWord("anshu is on the call", "anshu")).toBe(true);
+    expect(matchesAsWord("called anshu yesterday", "anshu")).toBe(true);
+    expect(matchesAsWord("anshu, please review", "anshu")).toBe(true);
+    expect(matchesAsWord("hello, anshu!", "anshu")).toBe(true);
+  });
+
+  it("matches multi-word names exactly", () => {
+    expect(matchesAsWord("himanshu kalra reviewed it", "himanshu kalra")).toBe(true);
+    expect(matchesAsWord("met with himanshu kalra today", "himanshu kalra")).toBe(true);
+    expect(matchesAsWord("himanshu and kalra are different people", "himanshu kalra")).toBe(false);
+  });
+
+  it("escapes regex metacharacters in names", () => {
+    // Names with regex-special chars must not be treated as patterns.
+    expect(matchesAsWord("invoiced o.brien yesterday", "o.brien")).toBe(true);
+    expect(matchesAsWord("invoiced oXbrien yesterday", "o.brien")).toBe(false);
+  });
+});
+
+describe("runEnrichment — chronological pending-files order", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("processes pending files in source_created_at ascending order with id as tiebreaker", async () => {
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "conn-order",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const oldest = "f-aaa";
+    const middleEarlier = "f-bbb";
+    const middleLater = "f-ccc";
+    const newest = "f-ddd";
+    const tsOld = "2025-06-01T00:00:00.000Z";
+    const tsMid = "2026-01-15T00:00:00.000Z";
+    const tsNew = "2026-04-01T00:00:00.000Z";
+
+    const insertions = [
+      { id: middleLater, ts: tsMid },
+      { id: newest, ts: tsNew },
+      { id: oldest, ts: tsOld },
+      { id: middleEarlier, ts: tsMid },
+    ];
+    for (const row of insertions) {
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: row.id,
+          connector_config_id: "conn-order",
+          provider_file_id: row.id,
+          file_name: `${row.id}.txt`,
+          file_type: "text",
+          content_category: "document",
+          source: "google_drive",
+          source_path: "My Drive",
+          content: `marker:${row.id} this is a fixture body unique to the file so embedTexts can identify which file is being processed in the loop.`,
+          source_created_at: row.ts,
+          source_updated_at: row.ts,
+          synced_at: new Date().toISOString(),
+        })
+        .execute();
+    }
+
+    const order: string[] = [];
+    const markerRe = /marker:(f-[a-z]+)/;
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: {
+        name: "stub",
+        dimensions: 8,
+        supportsImages: false,
+        async embedTexts(texts: string[]) {
+          for (const text of texts) {
+            const m = text.match(markerRe);
+            if (m && !order.includes(m[1])) order.push(m[1]);
+          }
+          return texts.map(() => new Array(8).fill(0));
+        },
+      },
+    });
+
+    expect(result.filesProcessed).toBe(4);
+    expect(order).toEqual([oldest, middleEarlier, middleLater, newest]);
   });
 });

@@ -81,6 +81,23 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("knowledgeable, direct, and action-oriented");
     });
+
+    it("appends the org description when provided, and omits the line otherwise", () => {
+      const withDescription = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: "Canvas Labs",
+        orgDescription: "AI services company. Sketch is one of our products.",
+      });
+      expect(withDescription).toContain("About Canvas Labs: AI services company. Sketch is one of our products.");
+
+      const without = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: "Canvas Labs",
+      });
+      expect(without).not.toContain("About Canvas Labs");
+    });
   });
 
   describe("memory section", () => {

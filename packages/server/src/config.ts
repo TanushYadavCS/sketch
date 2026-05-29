@@ -34,6 +34,21 @@ export const configSchema = z.object({
   VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
+  // Entity materialization
+  LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
+  CO_MENTION_CONTRIBUTES_TO_THRESHOLD: z.coerce.number().int().min(2).default(3),
+  FLOOR_RETRY_MAX_FILES_PER_DOMAIN: z.coerce.number().int().min(1).default(5000),
+  FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),
+  FEATURE_ARCHIVE_AGE_DAYS: z.coerce.number().int().min(1).default(30),
+  FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
+
+  // Sync reconciliation
+  SYNC_ALLOW_LARGE_RECONCILE: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+  SYNC_MAX_RECONCILE_RATIO: z.coerce.number().min(0).max(1).default(0.5),
+
   // Slack mode
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
   SLACK_SIGNING_SECRET: z.string().optional(),
