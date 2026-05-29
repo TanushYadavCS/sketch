@@ -17,6 +17,7 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
+  BASELINE_RELEVANCE_CAP,
   HALF_LIFE_DAYS,
   MAX_ANCHORS_PER_SIDE,
   MIN_SCORE,
@@ -329,5 +330,79 @@ describe("file-scope-context", () => {
     expect(known.filter((entry) => entry.type === "project")).toHaveLength(PER_ANCHOR_INITIATIVE_CAP);
     expect(known.filter((entry) => entry.type === "team")).toHaveLength(PER_ANCHOR_TEAM_CAP);
     expect(known).toContainEqual({ name: "Baseline Product", type: "product" });
+  });
+
+  it("caps ranked baseline entries by hotness when no other signal differentiates them", async () => {
+    const fileId = "file-baseline-cap";
+    await seedFile(db, fileId);
+    const baseline = Array.from({ length: 200 }, (_, i) => ({
+      id: `baseline-product-${i}`,
+      name: `Baseline Product ${i}`,
+      type: "product",
+      hotness: i,
+    }));
+
+    const known = await buildFileScopedKnownEntities({ db }, fileId, baseline, "");
+    const baselineEntries = known.filter((entry) => entry.type === "product");
+
+    expect(baselineEntries).toHaveLength(BASELINE_RELEVANCE_CAP);
+    expect(baselineEntries.map((entry) => entry.name)).toEqual(
+      Array.from({ length: BASELINE_RELEVANCE_CAP }, (_, i) => `Baseline Product ${199 - i}`),
+    );
+  });
+
+  it("ranks anchor-overlapping baseline entries above hotter unrelated entries", async () => {
+    await seedEntity(db, { id: "ent-anchor-baseline", name: "Anchor Co", sourceType: "company", hotness: 0.9 });
+    await seedEntity(db, { id: "baseline-overlap", name: "Relevant Product", sourceType: "product", hotness: 5 });
+    await seedEntity(db, { id: "baseline-hot", name: "Hot Product", sourceType: "product", hotness: 50 });
+    await seedDomain(db, { entityId: "ent-anchor-baseline", domain: "anchor-baseline.example", kind: "corporate" });
+
+    const promptFile = "file-baseline-overlap";
+    const coMentionFile = "file-baseline-comention";
+    const recentDate = new Date(Date.UTC(2026, 4, 25)).toISOString();
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, coMentionFile, recentDate);
+    await seedAttendeeFact(db, {
+      fileId: promptFile,
+      name: "Anchor Person",
+      email: "person@anchor-baseline.example",
+    });
+    await seedMention(db, { entityId: "ent-anchor-baseline", fileId: coMentionFile });
+    await seedMention(db, { entityId: "baseline-overlap", fileId: coMentionFile });
+
+    const known = await buildFileScopedKnownEntities(
+      { db, now: () => Date.UTC(2026, 4, 26) },
+      promptFile,
+      [
+        { id: "baseline-overlap", name: "Relevant Product", type: "product", hotness: 5 },
+        { id: "baseline-hot", name: "Hot Product", type: "product", hotness: 50 },
+      ],
+      "",
+      { baselineRelevanceCap: 1 },
+    );
+
+    expect(known.map((entry) => entry.name)).toContain("Relevant Product");
+    expect(known.map((entry) => entry.name)).not.toContain("Hot Product");
+  });
+
+  it("always includes verbatim baseline matches even when ranked baseline cap is zero", async () => {
+    const fileId = "file-baseline-verbatim";
+    await seedFile(db, fileId);
+
+    const known = await buildFileScopedKnownEntities(
+      { db },
+      fileId,
+      [{ id: "baseline-sketch", name: "Sketch", type: "product", hotness: 0 }],
+      "The team discussed Sketch and its access model.",
+      { baselineRelevanceCap: 0 },
+    );
+
+    expect(known).toContainEqual({
+      name: "Sketch",
+      type: "product",
+      description: undefined,
+      mentionCount: undefined,
+      recentlyActive: undefined,
+    });
   });
 });

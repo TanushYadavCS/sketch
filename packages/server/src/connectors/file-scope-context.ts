@@ -37,6 +37,9 @@ export const MAX_ANCHORS_PER_SIDE = 3;
 export const PER_ANCHOR_INITIATIVE_CAP = 8;
 export const PER_ANCHOR_TEAM_CAP = 4;
 export const RECENTLY_ACTIVE_WINDOW_DAYS = 14;
+export const BASELINE_RELEVANCE_CAP = 15;
+export const BASELINE_RECENCY_WINDOW_DAYS = 30;
+export const MIN_VERBATIM_NAME_LENGTH = 4;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface FileScopeDeps {
@@ -67,11 +70,26 @@ export interface AdjacencyEntry {
 }
 
 export interface KnownEntityForPrompt {
+  id?: string;
   name: string;
   type: string;
   description?: string;
+  aliases?: string[];
+  hotness?: number;
   mentionCount?: number;
   recentlyActive?: boolean;
+}
+
+interface BaselineScore {
+  entity: KnownEntityForPrompt;
+  anchorOverlap: number;
+  recency: number;
+  hotness: number;
+  score: number;
+}
+
+export interface BuildFileScopedKnownEntitiesOptions {
+  baselineRelevanceCap?: number;
 }
 
 /**
@@ -179,6 +197,8 @@ export async function buildFileScopedKnownEntities(
   deps: FileScopeDeps,
   fileId: string,
   baseline: KnownEntityForPrompt[],
+  fileContent?: string,
+  opts: BuildFileScopedKnownEntitiesOptions = {},
 ): Promise<KnownEntityForPrompt[]> {
   const anchors = await resolveFileAnchors(deps, fileId);
   const byKey = new Map<string, KnownEntityForPrompt>();
@@ -207,11 +227,127 @@ export async function buildFileScopedKnownEntities(
     }
   }
 
-  for (const b of baseline) {
+  for (const b of await rankBaselineKnownEntities(deps, baseline, anchors, fileContent ?? "", opts)) {
     const k = keyOf(b.name, b.type);
     if (byKey.has(k)) continue;
-    byKey.set(k, b);
+    byKey.set(k, stripPromptInternalFields(b));
   }
 
   return Array.from(byKey.values());
+}
+
+function stripPromptInternalFields(entity: KnownEntityForPrompt): KnownEntityForPrompt {
+  return {
+    name: entity.name,
+    type: entity.type,
+    description: entity.description,
+    mentionCount: entity.mentionCount,
+    recentlyActive: entity.recentlyActive,
+  };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasVerbatimMention(content: string, entity: KnownEntityForPrompt): boolean {
+  if (!content) return false;
+  const names = [entity.name, ...(entity.aliases ?? [])].filter(
+    (name) => name.trim().length >= MIN_VERBATIM_NAME_LENGTH,
+  );
+  return names.some((name) => new RegExp(`\\b${escapeRegExp(name.trim())}\\b`, "i").test(content));
+}
+
+async function loadBaselineLastSeen(deps: FileScopeDeps, baselineIds: string[]): Promise<Map<string, number>> {
+  if (baselineIds.length === 0) return new Map();
+  const rows = await deps.db
+    .selectFrom("entity_mentions")
+    .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+    .select([
+      "entity_mentions.entity_id",
+      sql<
+        string | null
+      >`MAX(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at))`.as(
+        "last_seen",
+      ),
+    ])
+    .where("entity_mentions.entity_id", "in", baselineIds)
+    .groupBy("entity_mentions.entity_id")
+    .execute();
+
+  const out = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.last_seen) continue;
+    const t = new Date(row.last_seen).getTime();
+    if (!Number.isNaN(t)) out.set(row.entity_id, t);
+  }
+  return out;
+}
+
+async function loadBaselineAnchorOverlap(
+  deps: FileScopeDeps,
+  baselineIds: string[],
+  anchorIds: string[],
+): Promise<Set<string>> {
+  if (baselineIds.length === 0 || anchorIds.length === 0) return new Set();
+  const rows = await deps.db
+    .selectFrom("entity_mentions as base")
+    .innerJoin("entity_mentions as anchor", "anchor.indexed_file_id", "base.indexed_file_id")
+    .select("base.entity_id")
+    .where("base.entity_id", "in", baselineIds)
+    .where("anchor.entity_id", "in", anchorIds)
+    .groupBy("base.entity_id")
+    .execute();
+  return new Set(rows.map((row) => row.entity_id));
+}
+
+async function rankBaselineKnownEntities(
+  deps: FileScopeDeps,
+  baseline: KnownEntityForPrompt[],
+  anchors: FileAnchors,
+  fileContent: string,
+  opts: BuildFileScopedKnownEntitiesOptions,
+): Promise<KnownEntityForPrompt[]> {
+  const legacy = baseline.filter((entity) => !entity.id);
+  const scoredCandidates = baseline.filter((entity) => entity.id);
+  if (scoredCandidates.length === 0) return legacy;
+
+  const cap = opts.baselineRelevanceCap ?? BASELINE_RELEVANCE_CAP;
+  const alwaysInclude = scoredCandidates.filter((entity) => hasVerbatimMention(fileContent, entity));
+  const alwaysIds = new Set(alwaysInclude.map((entity) => entity.id));
+  const candidates = scoredCandidates.filter((entity) => !alwaysIds.has(entity.id));
+  const candidateIds = candidates.flatMap((entity) => (entity.id ? [entity.id] : []));
+  const anchorIds = anchors.companies.map((anchor) => anchor.id);
+  const [lastSeenById, overlapIds] = await Promise.all([
+    loadBaselineLastSeen(deps, candidateIds),
+    loadBaselineAnchorOverlap(deps, candidateIds, anchorIds),
+  ]);
+
+  const now = deps.now ? deps.now() : Date.now();
+  const maxHotness = Math.max(1, ...candidates.map((entity) => Number(entity.hotness ?? 0)));
+  const scored: BaselineScore[] = candidates.map((entity) => {
+    const lastSeen = entity.id ? lastSeenById.get(entity.id) : undefined;
+    const ageDays = lastSeen === undefined ? Number.POSITIVE_INFINITY : Math.max(0, (now - lastSeen) / DAY_MS);
+    const recency = ageDays <= BASELINE_RECENCY_WINDOW_DAYS ? Math.exp(-ageDays / BASELINE_RECENCY_WINDOW_DAYS) : 0;
+    const anchorOverlap = entity.id && overlapIds.has(entity.id) ? 1 : 0;
+    const hotness = Number(entity.hotness ?? 0) / maxHotness;
+    return {
+      entity,
+      anchorOverlap,
+      recency,
+      hotness,
+      score: 0.5 * anchorOverlap + 0.3 * recency + 0.2 * hotness,
+    };
+  });
+
+  const ranked = scored
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.hotness !== a.hotness) return b.hotness - a.hotness;
+      return a.entity.name.localeCompare(b.entity.name);
+    })
+    .slice(0, cap)
+    .map((entry) => entry.entity);
+
+  return [...legacy, ...alwaysInclude, ...ranked];
 }

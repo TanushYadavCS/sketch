@@ -23,7 +23,7 @@ import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { applyEngagementFloor } from "./engagement-floor";
-import { buildFileScopedKnownEntities } from "./file-scope-context";
+import { type KnownEntityForPrompt, buildFileScopedKnownEntities } from "./file-scope-context";
 import { createGeminiGenerator } from "./gemini-generate";
 import type { GeminiGenerator } from "./gemini-generate";
 import { buildParticipantBlock } from "./participant-block";
@@ -49,6 +49,43 @@ type DeterministicEntity = {
   aliases: string | null;
 };
 
+function parseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseDescription(raw: string | null): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return typeof parsed.description === "string" ? parsed.description : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
+  const entities = await db
+    .selectFrom("entities")
+    .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
+    .where("source_type", "in", ["product", "team"])
+    .where("status", "=", "confirmed")
+    .execute();
+  return entities.map((entity) => ({
+    id: entity.id,
+    name: entity.name,
+    type: entity.source_type,
+    aliases: parseStringArray(entity.aliases),
+    description: parseDescription(entity.metadata),
+    hotness: Number(entity.hotness ?? 0),
+  }));
+}
+
 export interface EnrichmentDeps {
   db: Kysely<DB>;
   logger: Logger;
@@ -66,13 +103,7 @@ export interface EnrichmentDeps {
    * fallback when a file has no resolvable anchors. The per-file scoped list
    * is built on top of this by `buildFileScopedKnownEntities`.
    */
-  knownEntities?: Array<{
-    name: string;
-    type: string;
-    description?: string;
-    mentionCount?: number;
-    recentlyActive?: boolean;
-  }>;
+  knownEntities?: KnownEntityForPrompt[];
   /**
    * Fires once at the start of the run and once after each file is processed
    * (success, skip, or failure), with `completed` and `total` reflecting the
@@ -134,22 +165,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     // org_context column may not exist yet — ignore
   }
 
-  // Load confirmed product/team entities as known context for the extraction prompt
   try {
-    const entities = await db
-      .selectFrom("entities")
-      .select(["name", "source_type", "metadata"])
-      .where("source_type", "in", ["product", "team"])
-      .where("status", "=", "confirmed")
-      .execute();
-    deps.knownEntities = entities.map((e) => {
-      const meta = e.metadata ? (JSON.parse(e.metadata) as Record<string, unknown>) : null;
-      return {
-        name: e.name,
-        type: e.source_type,
-        description: (meta?.description as string) ?? undefined,
-      };
-    });
+    deps.knownEntities = await loadBaselineKnownEntities(db);
   } catch {
     // entities table may not exist yet — ignore
   }
@@ -222,6 +239,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 { db, logger },
                 file.id,
                 deps.knownEntities ?? [],
+                file.content,
               );
               const participantBlock = await buildParticipantBlock(
                 { db },
@@ -438,7 +456,12 @@ async function enrichTextDocument(
   if (deps.geminiApiKey && wordCount >= 100) {
     try {
       const generator = createGeminiGenerator(deps.geminiApiKey);
-      const knownEntities = await buildFileScopedKnownEntities({ db, logger }, file.id, deps.knownEntities ?? []);
+      const knownEntities = await buildFileScopedKnownEntities(
+        { db, logger },
+        file.id,
+        deps.knownEntities ?? [],
+        file.content,
+      );
       const participantBlock = await buildParticipantBlock({ db }, { fileId: file.id, fileContent: file.content });
       await smartEnrichFile(
         {
