@@ -6,16 +6,23 @@ import {
   type EntityMentionRelation,
   createEntityRepository,
 } from "../db/repositories/entities";
-import {
-  type EntityDomainsRepository,
-  type EntityRelationshipType,
-  createEntityDomainsRepository,
-} from "../db/repositories/entity-domains";
+import { type EntityDomainsRepository, createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { inferAffiliationFromEmail } from "./affiliations";
+import {
+  type EntityGraphRelationEndpoint,
+  type MentionType,
+  type NonPersonMentionType,
+  isHighConfidenceEndpoint,
+  isHighConfidenceRelation,
+  normalizeMentionType,
+  normalizeRelationType,
+  readRelationEndpoint,
+  relationDirectionAllowed,
+} from "./graph";
 import { type Entity, type EntityLookup, type ProposeEntityType, proposeEntity } from "./propose";
 import { type RankedCandidate, rankPersonLlmMention } from "./rank";
 
@@ -32,29 +39,6 @@ export function configureMaterializeDefaults(opts: { llmPromotionThreshold?: num
   if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
     configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
   }
-}
-
-const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team"] as const;
-type NonPersonMentionType = (typeof NON_PERSON_MENTION_TYPES)[number];
-type MentionType = "person" | NonPersonMentionType;
-const RELATION_TYPES = [
-  "works_at",
-  "engaged_with",
-  "leads",
-  "contributes_to",
-  "builds",
-  "part_of",
-  "partner_of",
-] as const;
-
-function normalizeMentionType(raw: unknown): MentionType | null {
-  if (typeof raw !== "string") return null;
-  const lowered = raw.trim().toLowerCase();
-  if (lowered === "person") return "person";
-  if ((NON_PERSON_MENTION_TYPES as readonly string[]).includes(lowered)) {
-    return lowered as NonPersonMentionType;
-  }
-  return null;
 }
 
 export interface ReplayFactsSummary {
@@ -647,55 +631,6 @@ async function materializeLlmExtractedFact(
   return materializeNonPersonLlmEntity(deps, fact, mentionType);
 }
 
-interface RelationEndpoint {
-  name: string;
-  type: MentionType;
-  variations: string[];
-}
-
-function normalizeRelationType(raw: unknown): EntityRelationshipType | null {
-  if (typeof raw !== "string") return null;
-  const lowered = raw.trim().toLowerCase();
-  return (RELATION_TYPES as readonly string[]).includes(lowered) ? (lowered as EntityRelationshipType) : null;
-}
-
-function readRelationEndpoint(raw: Record<string, unknown>, key: "source" | "target"): RelationEndpoint | null {
-  const endpoint = raw[key];
-  if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) return null;
-  const record = endpoint as Record<string, unknown>;
-  if (typeof record.name !== "string") return null;
-  const type = normalizeMentionType(record.type);
-  if (!type) return null;
-  const variations = Array.isArray(record.variations) ? record.variations.filter(isString) : [];
-  return { name: record.name, type, variations };
-}
-
-function relationDirectionAllowed(
-  relationType: EntityRelationshipType,
-  sourceType: MentionType,
-  targetType: MentionType,
-): boolean {
-  if (relationType === "works_at") return sourceType === "person" && targetType === "company";
-  if (relationType === "engaged_with") {
-    return (sourceType === "person" || sourceType === "team") && targetType === "company";
-  }
-  if (relationType === "leads") {
-    return sourceType === "person" && (targetType === "project" || targetType === "product" || targetType === "team");
-  }
-  if (relationType === "contributes_to") {
-    return (sourceType === "person" || sourceType === "team") && (targetType === "project" || targetType === "product");
-  }
-  if (relationType === "builds") return sourceType === "company" && targetType === "product";
-  if (relationType === "part_of") {
-    return (
-      (sourceType === "project" && targetType === "project") ||
-      (sourceType === "product" && targetType === "product") ||
-      (sourceType === "team" && targetType === "company")
-    );
-  }
-  return sourceType === "company" && targetType === "company";
-}
-
 async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   const raw = readJsonObject(fact.raw);
   const relationType = normalizeRelationType(raw.relationType ?? fact.relation);
@@ -705,8 +640,8 @@ async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFi
   const sourceConfidence = typeof raw.sourceConfidence === "number" ? raw.sourceConfidence : 0;
   const targetConfidence = typeof raw.targetConfidence === "number" ? raw.targetConfidence : 0;
   if (!relationType || !source || !target) return { kind: "skipped", reason: "invalid_llm_relation" };
-  if (confidenceScore < 0.85) return { kind: "skipped", reason: "low_confidence_relation" };
-  if (sourceConfidence < 0.8 || targetConfidence < 0.8) {
+  if (!isHighConfidenceRelation(confidenceScore)) return { kind: "skipped", reason: "low_confidence_relation" };
+  if (!isHighConfidenceEndpoint(sourceConfidence) || !isHighConfidenceEndpoint(targetConfidence)) {
     return { kind: "skipped", reason: "low_endpoint_confidence" };
   }
   if (!relationDirectionAllowed(relationType, source.type, target.type)) {
@@ -794,7 +729,7 @@ async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFi
 async function materializeRelationEndpoint(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
-  endpoint: RelationEndpoint,
+  endpoint: EntityGraphRelationEndpoint,
   triggeredByUserId: string,
   role: "source" | "target",
 ): Promise<

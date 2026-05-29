@@ -27,6 +27,12 @@ export {
   sweepDomainPromotions,
 } from "../entities/domain-promotion";
 import {
+  isHighConfidenceEndpoint,
+  isHighConfidenceRelation,
+  normalizeMentionType,
+  normalizeRelationType,
+} from "../entities/graph";
+import {
   buildMaterializeDeps,
   cleanupEmptyRelationships,
   cleanupRelationshipEvidenceForFacts,
@@ -896,23 +902,6 @@ async function reconcileLlmExtractionFacts(
   await materializeUnmaterializedFacts(db, deps.logger);
 }
 
-const RELATION_TYPES = [
-  "works_at",
-  "engaged_with",
-  "leads",
-  "contributes_to",
-  "builds",
-  "part_of",
-  "partner_of",
-] as const;
-
-function normalizeRelationType(raw: string): (typeof RELATION_TYPES)[number] | null {
-  const normalized = raw.trim().toLowerCase();
-  return (RELATION_TYPES as readonly string[]).includes(normalized)
-    ? (normalized as (typeof RELATION_TYPES)[number])
-    : null;
-}
-
 function buildRelationFactInput(input: {
   file: FileContext;
   ownerUserId: string | null;
@@ -921,12 +910,12 @@ function buildRelationFactInput(input: {
   mentions: ExtractedMention[];
 }): UpsertIndexedFileFactInput | null {
   const relationType = normalizeRelationType(input.relation.type);
-  if (!relationType || input.relation.confidence < 0.85) return null;
+  if (!relationType || !isHighConfidenceRelation(input.relation.confidence)) return null;
   const sourceName = input.relation.source.name?.trim();
   const targetName = input.relation.target.name?.trim();
   if (!sourceName || !targetName) return null;
-  const sourceType = input.relation.source.type?.trim().toLowerCase();
-  const targetType = input.relation.target.type?.trim().toLowerCase();
+  const sourceType = normalizeMentionType(input.relation.source.type);
+  const targetType = normalizeMentionType(input.relation.target.type);
   if (!sourceType || !targetType) return null;
   if (
     !PROPOSABLE_ENTITY_TYPES.has(sourceType as ProposeEntityType) ||
@@ -936,7 +925,7 @@ function buildRelationFactInput(input: {
   }
   const sourceConfidence = findMentionConfidence(input.mentions, input.relation.source);
   const targetConfidence = findMentionConfidence(input.mentions, input.relation.target);
-  if (sourceConfidence < 0.8 || targetConfidence < 0.8) return null;
+  if (!isHighConfidenceEndpoint(sourceConfidence) || !isHighConfidenceEndpoint(targetConfidence)) return null;
 
   return {
     indexedFileId: input.file.id,
