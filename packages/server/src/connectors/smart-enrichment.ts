@@ -15,7 +15,13 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
+import {
+  type UpsertIndexedFileFactInput,
+  buildIndexedFileFactKey,
+  createIndexedFileFactRepository,
+} from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
+import { materializeUnmaterializedFacts } from "../entities/materialize";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 
@@ -27,6 +33,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
 
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v2";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -61,6 +68,8 @@ interface FileContext {
   contentCategory: string;
   source: string;
   sourcePath: string | null;
+  contentHash: string | null;
+  connectorConfigId: string;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
 }
@@ -439,26 +448,14 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     "smartEnrichFile: stage done",
   );
 
-  const { matched, unmatched } = await matchEntities(db, mentions);
-  const promoted = await handleCandidates(deps, file.id, unmatched);
+  await reconcileLlmExtractionFacts(deps, file, mentions);
 
-  const allMatched = [...matched.map((m) => m.entity), ...promoted];
+  const { matched, unmatched } = await matchEntities(db, mentions);
+  const allMatched = matched.map((m) => m.entity);
   logger.debug(
-    { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length, promotedCount: promoted.length },
+    { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length },
     "smartEnrichFile: entity match results",
   );
-
-  await entityRepo.deleteMentionsForFile(file.id);
-  for (const entity of allMatched) {
-    await entityRepo.createMention({
-      entityId: entity.entityId,
-      indexedFileId: file.id,
-      confidence: "INFERRED",
-      source: "llm_extraction",
-      relation: "mentioned",
-    });
-    await entityRepo.updateHotness(entity.entityId);
-  }
 
   const t1 = Date.now();
   const [summaryResult, factsResult] = await Promise.allSettled([
@@ -539,6 +536,77 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
 
     logger.debug({ entityId, newFactCount: facts.length }, "Updated entity definition");
   }
+}
+
+async function reconcileLlmExtractionFacts(
+  deps: SmartEnrichmentDeps,
+  file: FileContext,
+  mentions: ExtractedMention[],
+): Promise<void> {
+  const { db } = deps;
+  const factRepo = createIndexedFileFactRepository(db);
+  const owner = await db
+    .selectFrom("connector_configs")
+    .select("created_by")
+    .where("id", "=", file.connectorConfigId)
+    .executeTakeFirst();
+  const contentHash = file.contentHash ?? `missing-content-hash:${file.id}`;
+  const emittedKeys: string[] = [];
+
+  for (const mention of mentions) {
+    if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+    const input: UpsertIndexedFileFactInput = {
+      indexedFileId: file.id,
+      connectorConfigId: file.connectorConfigId,
+      createdByUserId: owner?.created_by ?? null,
+      contentHash,
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: mention.mention,
+      subjectSource: "llm_extraction",
+      subjectSourceId: `${file.id}:${contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`,
+      contextSnippet: null,
+      raw: {
+        contentHash,
+        promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+        model: "gemini",
+        mention: mention.mention,
+        type: mention.type,
+        variations: mention.variations,
+      },
+    };
+    emittedKeys.push(buildIndexedFileFactKey(input));
+    await factRepo.upsertFact(input);
+  }
+
+  let tombstone = db
+    .updateTable("indexed_file_facts")
+    .set({ deleted_at: new Date().toISOString(), materialized_at: null, updated_at: new Date().toISOString() })
+    .where("indexed_file_id", "=", file.id)
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null);
+  tombstone =
+    emittedKeys.length > 0
+      ? tombstone.where((eb) =>
+          eb.or([
+            eb("content_hash", "!=", contentHash),
+            eb("content_hash", "is", null),
+            eb("fact_key", "not in", emittedKeys),
+          ]),
+        )
+      : tombstone;
+  await tombstone.execute();
+
+  await db
+    .deleteFrom("entity_mentions")
+    .where("indexed_file_id", "=", file.id)
+    .where("source", "=", "llm_extraction")
+    .where("confidence", "!=", "EXTRACTED")
+    .execute();
+
+  await materializeUnmaterializedFacts(db, deps.logger);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

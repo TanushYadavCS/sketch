@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { createIndexedFileFactRepository } from "./indexed-file-facts";
+import { type UpsertIndexedFileFactInput, createIndexedFileFactRepository } from "./indexed-file-facts";
 
 describe("createIndexedFileFactRepository", () => {
   let db: Kysely<DB>;
@@ -75,6 +75,84 @@ describe("createIndexedFileFactRepository", () => {
 
     const rows = await db.selectFrom("indexed_file_facts").select(["subject_email"]).execute();
     expect(rows).toEqual([{ subject_email: "saurabh@canvasx.ai" }]);
+  });
+
+  it("includes content hash in LLM extraction fact keys", async () => {
+    const repo = createIndexedFileFactRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("users")
+      .values({
+        id: "user-1",
+        name: "Admin",
+        email: "admin@example.com",
+        email_verified_at: now,
+        password_hash: "hash",
+        auth_role: "admin",
+      })
+      .execute();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-1",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "user-1",
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-1",
+        connector_config_id: "connector-1",
+        provider_file_id: "doc-1",
+        file_name: "Notes",
+        file_type: "text",
+        content_category: "document",
+        source: "google_drive",
+        content_hash: "hash-1",
+        synced_at: now,
+      })
+      .execute();
+
+    const base: UpsertIndexedFileFactInput = {
+      indexedFileId: "file-1",
+      connectorConfigId: "connector-1",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Jane Doe",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:Jane Doe",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Jane Doe",
+        type: "person",
+        variations: ["Jane"],
+      },
+    };
+
+    await repo.upsertFact({ ...base, contentHash: "hash-1" });
+    await repo.upsertFact({
+      ...base,
+      contentHash: "hash-2",
+      raw: {
+        contentHash: "hash-2",
+        promptVersion: "llm-extraction-v1",
+        model: "gemini",
+        mention: "Jane Doe",
+        type: "person",
+        variations: ["Jane"],
+      },
+    });
+
+    const rows = await db.selectFrom("indexed_file_facts").select(["content_hash", "fact_key"]).execute();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.content_hash).sort()).toEqual(["hash-1", "hash-2"]);
+    expect(new Set(rows.map((r) => r.fact_key)).size).toBe(2);
   });
 
   it("stores owner state and resets materialization markers when a fact reappears", async () => {

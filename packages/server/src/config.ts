@@ -28,6 +28,9 @@ export const configSchema = z.object({
     .default("false")
     .transform((v) => v === "true" || v === "1"),
 
+  // Entity materialization
+  LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
+
   // Slack mode
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
   SLACK_SIGNING_SECRET: z.string().optional(),

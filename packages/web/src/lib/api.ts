@@ -1140,7 +1140,7 @@ export const api = {
     deleteTentative() {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
     },
-    reset(categories: string[]) {
+    reset(categories: string[], opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean }) {
       return request<{
         message: string;
         entitiesDeleted: number;
@@ -1148,10 +1148,33 @@ export const api = {
         reviewQueueCleared: number;
         reviewEvidenceCleared: number;
         rejectionsCleared: number;
-      }>("/api/entities/reset", {
+        factsMarkedUnmaterialized: number;
+        job?: { id: string; phase: string; startedAt: string };
+      }>("/api/entities/resets", {
         method: "POST",
-        body: JSON.stringify({ categories }),
+        body: JSON.stringify({
+          categories,
+          runAfter: opts?.runAfter ?? false,
+          confirm: opts?.confirm,
+          dryRun: opts?.dryRun,
+        }),
       });
+    },
+    resetJob(id: string) {
+      return request<{
+        id: string;
+        phase: string;
+        startedAt: string;
+        finishedAt: string | null;
+        error?: string;
+      }>(`/api/entities/resets/jobs/${id}`);
+    },
+    resetJobs() {
+      return request<{
+        active: boolean;
+        currentJob: { id: string; phase: string } | null;
+        latestJob: { id: string; phase: string } | null;
+      }>("/api/entities/resets/jobs");
     },
     update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
       return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {

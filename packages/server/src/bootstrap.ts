@@ -26,6 +26,7 @@ import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import type { DB } from "./db/schema";
+import { configureMaterializeDefaults } from "./entities/materialize";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
 import type { IntegrationProvider, IntegrationStatus } from "./integrations/types";
@@ -69,6 +70,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const db = await createDatabase(config);
   await runMigrations(db);
   logger.info("Database ready");
+
+  configureMaterializeDefaults({ llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD });
 
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.
   // If no users exist yet, the row stays owned by 'admin' and never becomes editable

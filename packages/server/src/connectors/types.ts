@@ -148,6 +148,14 @@ export type IndexedFileFactRaw =
   | EntitySeed
   | PersonEntitySeed
   | {
+      contentHash: string;
+      promptVersion: string;
+      model: string;
+      mention: string;
+      type: string;
+      variations: string[];
+    }
+  | {
       providerFileId: string;
       providerUrl?: string | null;
       fileType: string;
