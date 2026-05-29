@@ -16,6 +16,7 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { createTestDb, createTestLogger } from "../test-utils";
+import { clearEnrichmentData } from "./enrichment";
 import { recoverStaleEnrichments, runAllSyncs, runConnectorSync, startSyncScheduler } from "./sync";
 import type { NameResolver, SyncedItem } from "./types";
 
@@ -660,6 +661,72 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
     const unchangedTuples = await loadStableFactTuples(db, "connector-fact-parity");
     expect(unchangedTuples).toEqual(changedTuples);
+  });
+
+  it("clears enrichment data when an existing file's content hash changes", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-clear-enrichment",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-clear-enrichment",
+        connector_config_id: "connector-clear-enrichment",
+        provider_file_id: "provider-clear-enrichment",
+        file_name: "changed.md",
+        file_type: "document",
+        content_category: "document",
+        source: "google_drive",
+        source_path: "/changed.md",
+        provider_url: null,
+        content: "old content",
+        summary: "old summary",
+        context_note: "old note",
+        access_scope_id: null,
+        content_hash: "old-hash",
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+        embedding_status: "done",
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "provider-clear-enrichment",
+        providerUrl: null,
+        fileName: "changed.md",
+        fileType: "document",
+        contentCategory: "document" as const,
+        content: "new content",
+        sourcePath: "/changed.md",
+        contentHash: "new-hash",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+    vi.mocked(clearEnrichmentData).mockClear();
+
+    const result = await runConnectorSync(db, "connector-clear-enrichment", logger);
+
+    expect(result.itemsProcessed).toBe(1);
+    expect(result.itemsUpdated).toBe(1);
+    expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
+    expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-clear-enrichment");
   });
 
   it("re-seeds person entities for attendees even when content hash is unchanged", async () => {
