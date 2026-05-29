@@ -17,21 +17,24 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
-import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
-import {
-  cleanupEmptyRelationships,
-  cleanupRelationshipEvidenceForFacts,
-  materializeUnmaterializedFacts,
-} from "../entities/materialize";
 import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
-import { floorRetryForDomains } from "./engagement-floor";
-import { clearEnrichmentData, runEnrichment } from "./enrichment";
-import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
+import { runEnrichment } from "./enrichment";
+import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
-import { sweepDomainPromotions } from "./smart-enrichment";
-import type { ConnectorCredentials, ConnectorType, NameResolution, NameResolver, SyncResult } from "./types";
+import { emitFactsForSyncedItem } from "./sync-facts";
+import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
+import { buildSyncNameResolver } from "./sync-name-resolution";
+import { reconcileConnectorSync } from "./sync-reconcile";
+import {
+  extractErrorMessage,
+  parseCredentials,
+  runWithConcurrency,
+  serializeCredentials,
+  truncateErrorMessage,
+} from "./sync-utils";
+import type { ConnectorType, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
 export interface SyncProgress {
@@ -84,99 +87,7 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
   }
 }
 
-/**
- * Extract a useful error message from fetch/network errors.
- * Node.js fetch errors bury the real cause (ECONNREFUSED, ETIMEDOUT, etc.)
- * inside err.cause — this pulls it out for display.
- */
-function extractErrorMessage(err: unknown): string {
-  if (!(err instanceof Error)) return String(err);
-
-  const cause = "cause" in err && err.cause instanceof Error ? err.cause.message : null;
-  if (cause && err.message !== cause) {
-    return `${err.message} (${cause})`;
-  }
-  return err.message;
-}
-
-const MAX_ERROR_MESSAGE_LENGTH = 500;
-
-/**
- * Cap the persisted error so an upstream HTML error page (e.g. Cloudflare 504)
- * can't blow up the connectors UI when it renders config.error_message.
- */
-function truncateErrorMessage(message: string): string {
-  const collapsed = message.replace(/\s+/g, " ").trim();
-  return collapsed.length > MAX_ERROR_MESSAGE_LENGTH ? `${collapsed.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : collapsed;
-}
-
-async function deleteMaterializedFactMentions(
-  db: Kysely<DB>,
-  connectorType: string,
-  indexedFileIds: string[],
-): Promise<void> {
-  if (indexedFileIds.length === 0) return;
-  const sources = [
-    `${connectorType}_attendee`,
-    `${connectorType}_assignee`,
-    `${connectorType}_author`,
-    `${connectorType}_parent_entity`,
-    "assignee",
-    "parent_entity",
-  ];
-  await db
-    .deleteFrom("entity_mentions")
-    .where("indexed_file_id", "in", indexedFileIds)
-    .where("confidence", "=", "EXTRACTED")
-    .where("source", "in", sources)
-    .execute();
-}
-
 export { getConnector } from "./registry";
-
-function parseCredentials(encrypted: string): ConnectorCredentials {
-  return JSON.parse(encrypted) as ConnectorCredentials;
-}
-
-function serializeCredentials(credentials: ConnectorCredentials): string {
-  return JSON.stringify(credentials);
-}
-
-/**
- * Read a person entity's email from its JSON metadata column. SQLite and
- * Postgres both store this as a text JSON blob; we parse it once at
- * pre-load time rather than reaching for dialect-specific extraction in
- * the SELECT — the full row is already in memory.
- */
-function readPersonEmail(metadata: string | null): string | null {
-  if (!metadata) return null;
-  try {
-    const parsed = JSON.parse(metadata) as { email?: unknown };
-    if (typeof parsed.email === "string" && parsed.email.length > 0) {
-      return parsed.email.toLowerCase();
-    }
-  } catch {
-    // Corrupt metadata — skip rather than fail the whole sync.
-  }
-  return null;
-}
-
-/**
- * Parse a person entity's aliases column (JSON array of strings). Returns
- * an empty array on null/parse-failure to keep callers branch-free.
- */
-function parseAliases(aliases: string | null): string[] {
-  if (!aliases) return [];
-  try {
-    const parsed = JSON.parse(aliases);
-    if (Array.isArray(parsed)) {
-      return parsed.filter((v): v is string => typeof v === "string");
-    }
-  } catch {
-    // Corrupt aliases — skip.
-  }
-  return [];
-}
 
 /**
  * Run a sync for a single connector config.
@@ -266,116 +177,15 @@ export async function runConnectorSync(
     const seenProviderFileIds = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
 
-    // Pre-load existing content hashes for this connector to skip unchanged items
-    const existingHashes = new Map<string, { id: string; contentHash: string | null }>();
-    const existingFiles = await db
-      .selectFrom("indexed_files")
-      .select(["id", "provider_file_id", "content_hash"])
-      .where("source", "=", config.connector_type)
-      .where("is_archived", "=", 0)
-      .execute();
-    for (const f of existingFiles) {
-      existingHashes.set(f.provider_file_id, { id: f.id, contentHash: f.content_hash });
-    }
-
-    // Pre-load person entities for name→email resolution. Entity/source-ref
-    // writes happen in the materializer after facts are persisted.
-    const allEntities = await db.selectFrom("entities").selectAll().execute();
-    // Ambiguity-aware lookup keyed by normalizeName: name → { email, entityId }.
-    // Covers canonical name AND aliases (alias-confirmation persists merges
-    // there). Conflicting values on the same key drop the key — single
-    // unambiguous match only, matching the rule the in-meeting maps use.
-    const personEmailByName = createAmbiguityAwareMap<string, { email: string; entityId: string }>();
-    for (const p of allEntities.filter((e) => e.source_type === "person")) {
-      const email = readPersonEmail(p.metadata);
-      if (!email) continue;
-      const value = { email, entityId: p.id };
-      personEmailByName.add(normalizeName(p.name), value);
-      for (const alias of parseAliases(p.aliases)) {
-        personEmailByName.add(normalizeName(alias), value);
-      }
-    }
-
-    // Team-directory map. Sketch's users table is the canonical source for
-    // team emails — entity dedup can promote a different stored name, so we
-    // keep this separate from personEmailByName and check it first.
-    const userEmailByName = createAmbiguityAwareMap<string, string>();
-    const userRows = await db
-      .selectFrom("users")
-      .select(["name", "email"])
-      .where("email", "is not", null)
-      .where("type", "!=", "external")
-      .execute();
-    for (const u of userRows) {
-      if (!u.email) continue;
-      userEmailByName.add(normalizeName(u.name), u.email.toLowerCase());
-    }
-
-    // Closure over both maps with users-first precedence. Built once per
-    // sync; snapshot semantics — a user added mid-sync won't appear until
-    // the next run. Connectors that don't need it leave the field unset.
-    const resolveNameToEmail: NameResolver = (name: string): NameResolution | null => {
-      const key = normalizeName(name);
-      const userEmail = userEmailByName.get(key);
-      if (userEmail) return { email: userEmail, source: "users" };
-      const entityHit = personEmailByName.get(key);
-      if (entityHit) return { email: entityHit.email, entityId: entityHit.entityId, source: "entities" };
-      return null;
-    };
-
-    const connectorType = config.connector_type;
+    const connectorType = config.connector_type as ConnectorType;
+    const existingHashes = await loadExistingContentHashes(db, connectorType);
+    const resolveNameToEmail = await buildSyncNameResolver(db);
     const syncRunId = randomUUID();
     const factContext = {
       connectorConfigId: config.id,
       createdByUserId: config.created_by,
       lastSeenSyncRunId: syncRunId,
     };
-
-    async function seedAttendeePerson(
-      attendee: { name?: string; email?: string },
-      providerFileId: string,
-      indexedFileId: string,
-      contentHash: string | null,
-    ): Promise<void> {
-      if (!attendee.name) return;
-      await factRepo.upsertFact({
-        ...factContext,
-        indexedFileId,
-        contentHash,
-        source: connectorType,
-        factType: "attendee",
-        relation: "attended",
-        subjectName: attendee.name,
-        subjectEmail: attendee.email ?? null,
-        subjectSource: connectorType,
-        subjectSourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
-        contextSnippet: `Attended ${providerFileId}`,
-        raw: { providerFileId, attendee },
-      });
-    }
-
-    async function seedAuthorPerson(
-      author: { name?: string; email?: string; sourceId?: string },
-      providerFileId: string,
-      indexedFileId: string,
-      contentHash: string | null,
-    ): Promise<void> {
-      if (!author.email && !author.name) return;
-      await factRepo.upsertFact({
-        ...factContext,
-        indexedFileId,
-        contentHash,
-        source: connectorType,
-        factType: "author",
-        relation: "authored",
-        subjectName: author.name ?? null,
-        subjectEmail: author.email ?? null,
-        subjectSource: connectorType,
-        subjectSourceId: author.sourceId ?? author.email ?? `${providerFileId}:${author.name}`,
-        contextSnippet: `Authored ${providerFileId}`,
-        raw: { providerFileId, author },
-      });
-    }
 
     for await (const item of connector.sync({
       credentials,
@@ -413,122 +223,31 @@ export async function runConnectorSync(
       try {
         seenProviderFileIds.add(item.providerFileId);
 
-        if (!item.fileName && !item.content) {
+        const itemResult = await processSyncedItem({
+          db,
+          repo,
+          connectorConfigId: config.id,
+          connectorType,
+          item,
+          existingHashes,
+        });
+
+        if (itemResult.kind === "skipped_empty") {
           continue;
         }
 
-        // Skip unchanged items early — update metadata and synced_at timestamp.
-        // Content hash matches, so we don't re-process content, but metadata
-        // (file name, path, URL, timestamps) may have changed at the source.
-        const existing = existingHashes.get(item.providerFileId);
-        if (existing && existing.contentHash === item.contentHash) {
-          await db
-            .updateTable("indexed_files")
-            .set({
-              synced_at: new Date().toISOString(),
-              file_name: item.fileName ?? undefined,
-              source_path: item.sourcePath ?? undefined,
-              provider_url: item.providerUrl ?? undefined,
-              file_type: item.fileType ?? undefined,
-              content_category: item.contentCategory ?? undefined,
-              source_created_at: item.sourceCreatedAt ?? undefined,
-              source_updated_at: item.sourceUpdatedAt ?? undefined,
-              mime_type: item.mimeType ?? undefined,
-            })
-            .where("id", "=", existing.id)
-            .execute();
+        affectedIndexedFileIds.add(itemResult.indexedFileId);
 
-          // Track which connector discovered this file (idempotent).
-          // Without this, unchanged files never get linked to a new connector
-          // config, breaking connector-scoped counts/listing and orphan logic.
-          await repo.linkConnectorFile(config.id, existing.id);
-          affectedIndexedFileIds.add(existing.id);
+        await emitFactsForSyncedItem({
+          factRepo,
+          connector,
+          connectorType,
+          factContext,
+          item,
+          indexedFileId: itemResult.indexedFileId,
+        });
 
-          // Sync ACL even when content is unchanged — permissions may have
-          // changed (e.g. attendee removed, scope membership updated).
-          if (item.accessScope) {
-            const scopeId = await repo.upsertAccessScope(config.id, item.accessScope);
-            await repo.setFileAccessScope(existing.id, scopeId);
-          } else if (item.accessEmails && item.accessEmails.length > 0) {
-            await repo.syncFileAccessEmails(existing.id, item.accessEmails);
-          }
-
-          const promotable = connector.promotableFileTypes ?? [];
-          if (item.fileType && promotable.includes(item.fileType)) {
-            await factRepo.upsertFact({
-              ...factContext,
-              indexedFileId: existing.id,
-              contentHash: item.contentHash,
-              source: connectorType,
-              factType: "structural_seed",
-              relation: "seeded",
-              subjectName: item.fileName,
-              subjectSource: connectorType,
-              subjectSourceId: item.providerFileId,
-              contextSnippet: item.sourcePath,
-              raw: {
-                providerFileId: item.providerFileId,
-                providerUrl: item.providerUrl,
-                fileType: item.fileType,
-                sourcePath: item.sourcePath,
-              },
-            });
-          }
-
-          if (item.parentEntities && item.parentEntities.length > 0) {
-            for (const parent of item.parentEntities) {
-              await factRepo.upsertFact({
-                ...factContext,
-                indexedFileId: existing.id,
-                contentHash: item.contentHash,
-                source: connectorType,
-                factType: "parent_entity",
-                relation: "mentioned",
-                subjectSource: parent.source,
-                subjectSourceId: parent.sourceId,
-                contextSnippet: parent.contextSnippet ?? null,
-                raw: { providerFileId: item.providerFileId, parent },
-              });
-            }
-          }
-
-          if (item.attendees) {
-            for (const a of item.attendees) {
-              await seedAttendeePerson(a, item.providerFileId, existing.id, item.contentHash);
-            }
-          }
-
-          if (item.assignees && item.assignees.length > 0) {
-            for (const assignee of item.assignees) {
-              const sourceRefKey = connector.assigneeSourceRefKey
-                ? connector.assigneeSourceRefKey(assignee.name)
-                : `${config.connector_type}:user:${assignee.name}`;
-              await factRepo.upsertFact({
-                ...factContext,
-                indexedFileId: existing.id,
-                contentHash: item.contentHash,
-                source: connectorType,
-                factType: "assignee",
-                relation: "assigned",
-                subjectName: assignee.name,
-                subjectEmail: assignee.email ?? null,
-                subjectSource: sourceRefKey.split(":")[0] ?? connectorType,
-                subjectSourceId: sourceRefKey.split(":").slice(1).join(":") || assignee.name,
-                contextSnippet: `Assigned to ${assignee.name}`,
-                raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
-              });
-            }
-          }
-
-          if (item.authorEmail || item.authorName) {
-            await seedAuthorPerson(
-              { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
-              item.providerFileId,
-              existing.id,
-              item.contentHash,
-            );
-          }
-
+        if (itemResult.kind === "unchanged") {
           result.itemsProcessed++;
           progress.itemsProcessed = result.itemsProcessed;
           progress.itemsSkipped++;
@@ -539,129 +258,7 @@ export async function runConnectorSync(
           continue;
         }
 
-        // Wrap all per-item DB writes in a transaction so a crash mid-item
-        // leaves no partial records.
-        const itemResult = await db.transaction().execute(async (trx) => {
-          const txRepo = createConnectorRepository(trx);
-
-          const upsertResult = await txRepo.upsertFile({
-            connectorConfigId: config.id,
-            source: config.connector_type,
-            providerFileId: item.providerFileId,
-            providerUrl: item.providerUrl,
-            fileName: item.fileName,
-            fileType: item.fileType,
-            contentCategory: item.contentCategory,
-            content: item.content,
-            sourcePath: item.sourcePath,
-            contentHash: item.contentHash,
-            sourceCreatedAt: item.sourceCreatedAt,
-            sourceUpdatedAt: item.sourceUpdatedAt,
-            mimeType: item.mimeType,
-          });
-
-          // Clear enrichment data if content changed (will be re-enriched)
-          if (upsertResult.contentChanged) {
-            await clearEnrichmentData(trx, upsertResult.id);
-          }
-
-          // Track which connector discovered this file
-          await txRepo.linkConnectorFile(config.id, upsertResult.id);
-
-          // Set access: scope-level or per-file emails
-          if (item.accessScope) {
-            const scopeId = await txRepo.upsertAccessScope(config.id, item.accessScope);
-            await txRepo.setFileAccessScope(upsertResult.id, scopeId);
-          } else if (item.accessEmails && item.accessEmails.length > 0) {
-            await txRepo.syncFileAccessEmails(upsertResult.id, item.accessEmails);
-          }
-
-          return upsertResult;
-        });
-
-        // Entity operations AFTER transaction — entityRepo uses the outer db connection.
-        // Calling it inside a transaction deadlocks on better-sqlite3 (single-connection,
-        // exclusive write lock).
-        affectedIndexedFileIds.add(itemResult.id);
-
-        // Promote items to entities based on connector's promotableFileTypes
-        const promotable = connector.promotableFileTypes ?? [];
-        if (item.fileType && promotable.includes(item.fileType)) {
-          await factRepo.upsertFact({
-            ...factContext,
-            indexedFileId: itemResult.id,
-            contentHash: item.contentHash,
-            source: connectorType,
-            factType: "structural_seed",
-            relation: "seeded",
-            subjectName: item.fileName,
-            subjectSource: connectorType,
-            subjectSourceId: item.providerFileId,
-            contextSnippet: item.sourcePath,
-            raw: {
-              providerFileId: item.providerFileId,
-              providerUrl: item.providerUrl,
-              fileType: item.fileType,
-              sourcePath: item.sourcePath,
-            },
-          });
-        }
-
-        if (item.attendees) {
-          for (const a of item.attendees) {
-            await seedAttendeePerson(a, item.providerFileId, itemResult.id, item.contentHash);
-          }
-        }
-
-        if (item.assignees && item.assignees.length > 0) {
-          for (const assignee of item.assignees) {
-            const sourceRefKey = connector.assigneeSourceRefKey
-              ? connector.assigneeSourceRefKey(assignee.name)
-              : `${config.connector_type}:user:${assignee.name}`;
-            await factRepo.upsertFact({
-              ...factContext,
-              indexedFileId: itemResult.id,
-              contentHash: item.contentHash,
-              source: connectorType,
-              factType: "assignee",
-              relation: "assigned",
-              subjectName: assignee.name,
-              subjectEmail: assignee.email ?? null,
-              subjectSource: sourceRefKey.split(":")[0] ?? connectorType,
-              subjectSourceId: sourceRefKey.split(":").slice(1).join(":") || assignee.name,
-              contextSnippet: `Assigned to ${assignee.name}`,
-              raw: { providerFileId: item.providerFileId, assignee, sourceRefKey },
-            });
-          }
-        }
-
-        if (item.authorEmail || item.authorName) {
-          await seedAuthorPerson(
-            { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
-            item.providerFileId,
-            itemResult.id,
-            item.contentHash,
-          );
-        }
-
-        if (item.parentEntities && item.parentEntities.length > 0) {
-          for (const parent of item.parentEntities) {
-            await factRepo.upsertFact({
-              ...factContext,
-              indexedFileId: itemResult.id,
-              contentHash: item.contentHash,
-              source: connectorType,
-              factType: "parent_entity",
-              relation: "mentioned",
-              subjectSource: parent.source,
-              subjectSourceId: parent.sourceId,
-              contextSnippet: parent.contextSnippet ?? null,
-              raw: { providerFileId: item.providerFileId, parent },
-            });
-          }
-        }
-
-        if (itemResult.created) {
+        if (itemResult.kind === "created") {
           result.itemsCreated++;
           progress.itemsCreated++;
         } else {
@@ -682,60 +279,27 @@ export async function runConnectorSync(
     }
 
     if (!config.sync_cursor && seenProviderFileIds.size > 0) {
-      const reconcileResult = await factRepo.reconcileStaleFacts(
-        { kind: "connector", connectorConfigId: config.id, syncRunId },
-        null,
-        {
-          force: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
-          maxDeletionRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
-        },
-      );
-
-      if (reconcileResult.skipped) {
-        syncLogger.warn(
-          {
-            connectorConfigId: config.id,
-            activeBefore: reconcileResult.activeBefore,
-            wouldTombstone: reconcileResult.wouldTombstone,
-            ratio: reconcileResult.skipped.ratio,
-            threshold: reconcileResult.skipped.threshold,
-            override: "SYNC_ALLOW_LARGE_RECONCILE=true",
-          },
-          "Stale-fact reconcile skipped: delta exceeds threshold",
-        );
-      } else {
-        result.itemsArchived = await repo.archiveStaleFiles(config.id, seenProviderFileIds);
-        if (result.itemsArchived > 0) {
-          await entityRepo.archiveEntitiesForArchivedFiles();
-        }
-
-        await cleanupRelationshipEvidenceForFacts(db, reconcileResult.tombstonedFactIds);
-        await cleanupEmptyRelationships(db);
-
-        if (reconcileResult.affectedIndexedFileIds.length > 0) {
-          for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
-          await deleteMaterializedFactMentions(db, connectorType, reconcileResult.affectedIndexedFileIds);
-          await factRepo.clearMaterializedAtForActiveFacts(reconcileResult.affectedIndexedFileIds);
-        }
-      }
+      const reconcileResult = await reconcileConnectorSync({
+        db,
+        factRepo,
+        connectorConfigId: config.id,
+        connectorType,
+        syncRunId,
+        seenProviderFileIds,
+        allowLargeReconcile: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
+        maxReconcileRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
+        logger: syncLogger,
+      });
+      result.itemsArchived = reconcileResult.itemsArchived;
+      for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
     }
 
-    const materializeSummary = await materializeUnmaterializedFacts(db, syncLogger);
-    if (materializeSummary.factsRead > 0) {
-      syncLogger.info({ materializeSummary }, "Post-sync fact materialization complete");
-    }
-
-    const domainSweep = await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));
-    if (domainSweep.promotedDomains.length > 0) {
-      await floorRetryForDomains(
-        { db, logger: syncLogger.child({ component: "domain-floor-retry" }) },
-        domainSweep.promotedDomains,
-        { maxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN },
-      );
-    }
-    await sweepCoMentionContributesTo(db, syncLogger.child({ component: "co-mention-sweep" }), {
-      scope: { kind: "files", indexedFileIds: [...affectedIndexedFileIds] },
-      threshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+    await runPostSyncGraphPipeline({
+      db,
+      syncLogger,
+      affectedIndexedFileIds: [...affectedIndexedFileIds],
+      coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+      floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
     });
 
     result.newCursor = await connector.getCursor({
@@ -795,29 +359,6 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
     >
   >;
-}
-
-/**
- * Bounded-concurrency runner. `Promise.allSettled` semantics — one item failing
- * does not abort the others.
- */
-async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-  if (items.length === 0) return;
-  const queue = [...items];
-  const workers: Promise<void>[] = [];
-  const workerCount = Math.min(limit, queue.length);
-  for (let i = 0; i < workerCount; i++) {
-    workers.push(
-      (async () => {
-        while (queue.length > 0) {
-          const item = queue.shift();
-          if (item === undefined) return;
-          await worker(item);
-        }
-      })(),
-    );
-  }
-  await Promise.all(workers);
 }
 
 const SYNC_CONCURRENCY = 4;
