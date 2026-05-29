@@ -4,12 +4,16 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import type { Config } from "../config";
+import { createGeminiGenerator } from "../connectors/gemini-generate";
 import { isPg } from "../db/dialect";
 import { fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { type RelationListEntry, createEntityRelationshipsRepository } from "../db/repositories/entity-relationships";
+import { createEntityTimelineRepository } from "../db/repositories/entity-timeline";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
+import { computeInputHash, generateAiBrief } from "../entities/ai-brief";
 import type { MaterializeFactsSummary } from "../entities/materialize";
 import {
   type EntityProfileFacts,
@@ -42,6 +46,7 @@ import {
   runReenrichJob,
   tombstoneActiveLlmFacts,
 } from "../entities/reenrich";
+import { createSingleFlight } from "../lib/single-flight";
 import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
 
 const RESET_CONFIRM_TOKEN = "RESET_AND_RECREATE";
@@ -200,14 +205,52 @@ interface EntityRoutesDeps {
   config: Config;
 }
 
+const AI_BRIEF_REFRESH_INTERVAL_MS = 60_000;
+
 export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   const routes = new Hono();
   const repo = createEntityRepository(db);
   const relRepo = createEntityRelationshipsRepository(db);
+  const timelineRepo = createEntityTimelineRepository(db);
+  const settingsRepo = createSettingsRepository(db);
+  const briefSingleFlight = createSingleFlight();
+  const lastBriefRefreshAt = new Map<string, number>();
   const { logger, config } = deps;
 
   const RELATIONS_LIMIT = 200;
   const EVIDENCE_LIMIT = 100;
+  const TIMELINE_LIMIT = 100;
+
+  /**
+   * Loads the structured facts shape the WHAT template + Gemini prompt both
+   * consume. Returns null when the entity doesn't exist. Shared by the detail
+   * read path and the ai-brief refresh route so the inputHash is consistent.
+   */
+  async function loadEntityFactsForId(entityId: string): Promise<EntityProfileFacts | null> {
+    const entity = await repo.getEntity(entityId);
+    if (!entity) return null;
+    const [aggregates, relations] = await Promise.all([
+      repo.getEntityProfileAggregates(entity.id),
+      relRepo.listRelationsForEntity(entity.id, { limit: 10 }),
+    ]);
+    const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
+    const topRelationships = [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10);
+    return {
+      entityId: entity.id,
+      name: entity.name,
+      sourceType: entity.source_type,
+      entityType: mapSourceTypeToEntityType(entity.source_type),
+      metadata: parsedMetadata,
+      mentionCount: aggregates.mentionCount,
+      sourceCounts: aggregates.sourceCounts,
+      firstSeenAt: aggregates.firstSeenAt,
+      lastSeenAt: aggregates.lastSeenAt,
+      domainsForCompany: aggregates.domainsForCompany,
+      topRelationships,
+      incomingCounts: countByType(relations.incoming),
+      outgoingCounts: countByType(relations.outgoing),
+    };
+  }
   const CONFIDENCE_ORDER: Record<string, number> = { AMBIGUOUS: 0, EXTRACTED: 1, INFERRED: 2 };
   const relationCompare = (a: RelationListEntry, b: RelationListEntry): number => {
     const ac = CONFIDENCE_ORDER[a.confidence] ?? 3;
@@ -954,33 +997,19 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
-    const [sourceRefs, aggregates, relations] = await Promise.all([
+    const [sourceRefs, facts] = await Promise.all([
       db.selectFrom("entity_source_refs").selectAll().where("entity_id", "=", entity.id).execute(),
-      repo.getEntityProfileAggregates(entity.id),
-      relRepo.listRelationsForEntity(entity.id, { limit: 10 }),
+      loadEntityFactsForId(entity.id),
     ]);
+    if (!facts) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
 
     const parsedAliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
-    const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
-
     const cachedBrief = parseAiBrief(entity.ai_brief);
-    const facts: EntityProfileFacts = {
-      entityId: entity.id,
-      name: entity.name,
-      sourceType: entity.source_type,
-      entityType: mapSourceTypeToEntityType(entity.source_type),
-      metadata: parsedMetadata,
-      mentionCount: aggregates.mentionCount,
-      sourceCounts: aggregates.sourceCounts,
-      firstSeenAt: aggregates.firstSeenAt,
-      lastSeenAt: aggregates.lastSeenAt,
-      domainsForCompany: aggregates.domainsForCompany,
-      topRelationships: [...relations.outgoing, ...relations.incoming].sort(relationCompare).slice(0, 10),
-      incomingCounts: countByType(relations.incoming),
-      outgoingCounts: countByType(relations.outgoing),
-    };
-
     const what = buildWhatRow(facts);
+    const currentInputHash = computeInputHash(facts);
+    const briefIsStale = cachedBrief ? cachedBrief.stale || cachedBrief.inputHash !== currentInputHash : false;
 
     return c.json({
       entity: {
@@ -989,7 +1018,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         sourceType: entity.source_type,
         subtype: entity.subtype,
         aliases: parsedAliases,
-        metadata: parsedMetadata,
+        metadata: facts.metadata,
         status: entity.status,
         hotness: entity.hotness,
         createdAt: entity.created_at,
@@ -1006,7 +1035,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
             signal: cachedBrief?.signal ?? null,
             soWhat: cachedBrief?.soWhat ?? null,
             generatedAt: cachedBrief?.generatedAt ?? null,
-            stale: cachedBrief?.stale ?? false,
+            stale: briefIsStale,
           },
         },
       },
@@ -1066,6 +1095,91 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const viewer = getFileViewer(c);
     const result = await relRepo.listEvidenceForRelation(relationshipId, { limit: EVIDENCE_LIMIT, viewer });
     return c.json(result);
+  });
+
+  /**
+   * GET /api/entities/:id/timeline
+   * File mentions for an entity, grouped by month newest-first. File RBAC
+   * applied; capped at 100 visible rows.
+   */
+  routes.get("/:id/timeline", async (c) => {
+    if (!config.EXPERIMENTAL_FLAG) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
+    }
+    const entity = await repo.getEntity(c.req.param("id"));
+    if (!entity) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const viewer = getFileViewer(c);
+    const result = await timelineRepo.listTimelineForEntity(entity.id, { limit: TIMELINE_LIMIT, viewer });
+    return c.json(result);
+  });
+
+  /**
+   * POST /api/entities/:id/ai-brief/refresh
+   * Forces regeneration of the Signal / So-what rows via Gemini. Org-shared
+   * cache, single-flight per entity, rate-limited 1/60s for manual triggers.
+   * Returns the brief shape so the drawer can update inline.
+   */
+  routes.post("/:id/ai-brief/refresh", async (c) => {
+    if (!config.EXPERIMENTAL_FLAG) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
+    }
+    const entityId = c.req.param("id");
+    const entity = await repo.getEntity(entityId);
+    if (!entity) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
+    const force = body.force === true;
+
+    const facts = await loadEntityFactsForId(entityId);
+    if (!facts) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+
+    const lastAt = lastBriefRefreshAt.get(entityId) ?? 0;
+    const now = Date.now();
+    if (force && now - lastAt < AI_BRIEF_REFRESH_INTERVAL_MS) {
+      const cached = parseAiBrief(entity.ai_brief);
+      const briefIsStale = cached ? cached.stale || cached.inputHash !== computeInputHash(facts) : false;
+      return c.json(
+        {
+          what: buildWhatRow(facts),
+          signal: cached?.signal ?? null,
+          soWhat: cached?.soWhat ?? null,
+          generatedAt: cached?.generatedAt ?? null,
+          stale: briefIsStale,
+          error: "rate_limited",
+        },
+        200,
+      );
+    }
+
+    const settings = await settingsRepo.get();
+    const apiKey = settings?.gemini_api_key;
+    if (!apiKey) {
+      return c.json({ error: { code: "GEMINI_NOT_CONFIGURED", message: "Gemini API key is not configured" } }, 503);
+    }
+    const gemini = createGeminiGenerator(apiKey);
+
+    if (force) lastBriefRefreshAt.set(entityId, now);
+
+    const result = await generateAiBrief(
+      { db, gemini, singleFlight: briefSingleFlight, logger: logger.child({ component: "ai-brief" }) },
+      facts,
+      { force },
+    );
+
+    return c.json({
+      what: buildWhatRow(facts),
+      signal: result.signal,
+      soWhat: result.soWhat,
+      generatedAt: result.generatedAt,
+      stale: result.stale,
+      ...(result.error ? { error: result.error } : {}),
+    });
   });
 
   /**

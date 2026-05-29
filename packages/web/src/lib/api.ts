@@ -397,6 +397,37 @@ export interface EntityRelationEvidenceResponse {
   truncated: boolean;
 }
 
+export interface EntityTimelineItem {
+  fileId: string;
+  fileName: string;
+  sourceType: string;
+  occurredAt: string;
+  mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+  mentionCount: number;
+  contextSnippet: string | null;
+  url: string | null;
+}
+
+export interface EntityTimelineGroup {
+  month: string;
+  items: EntityTimelineItem[];
+}
+
+export interface EntityTimelineResponse {
+  groups: EntityTimelineGroup[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export interface EntityAiBriefRefreshResponse {
+  what: string;
+  signal: string | null;
+  soWhat: string | null;
+  generatedAt: string | null;
+  stale: boolean;
+  error?: "generation_failed" | "rate_limited";
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1309,6 +1340,15 @@ export const api = {
     },
     relationEvidence(id: string, relationId: string) {
       return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);
+    },
+    timeline(id: string) {
+      return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    refreshAiBrief(id: string, opts?: { force?: boolean }) {
+      return request<EntityAiBriefRefreshResponse>(`/api/entities/${id}/ai-brief/refresh`, {
+        method: "POST",
+        body: JSON.stringify({ force: opts?.force ?? false }),
+      });
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();

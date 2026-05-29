@@ -1344,6 +1344,49 @@ describe("Entity drawer routes", () => {
     expect(body.entity.profile.aiBrief.signal).toBeNull();
   });
 
+  it("GET /api/entities/:id marks cached AI brief stale when facts changed", async () => {
+    await seedEntity("e1", "Sarah Chen", "person", { role: "Engineer" });
+    await seedEntity("e2", "Stripe", "company");
+    await db
+      .updateTable("entities")
+      .set({
+        ai_brief: JSON.stringify({
+          signal: "Old signal",
+          soWhat: "Old next step",
+          generatedAt: "2026-05-22T12:00:00.000Z",
+          inputHash: "old-input-hash",
+          stale: false,
+        }),
+      })
+      .where("id", "=", "e1")
+      .execute();
+    await seedRelation("r1", "e1", "e2", "works_at", "EXTRACTED", 0.95);
+    await seedFile("f1");
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "m1",
+        entity_id: "e1",
+        indexed_file_id: "f1",
+        chunk_index: 0,
+        context_snippet: "Sarah leads things",
+        confidence: "EXTRACTED",
+        source: "google_drive",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
+
+    const res = await app.request("/api/entities/e1", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entity: { profile: { aiBrief: { signal: string | null; soWhat: string | null; stale: boolean } } };
+    };
+    expect(body.entity.profile.aiBrief.signal).toBe("Old signal");
+    expect(body.entity.profile.aiBrief.soWhat).toBe("Old next step");
+    expect(body.entity.profile.aiBrief.stale).toBe(true);
+  });
+
   it("GET /api/entities/:id/relations partitions outgoing/incoming and pins AMBIGUOUS first", async () => {
     await seedEntity("e1", "Sarah", "person");
     await seedEntity("e2", "Atlas", "project");
@@ -1435,5 +1478,146 @@ describe("Entity drawer routes", () => {
       "person",
     ]);
     expect(includeBody.total).toBe(3);
+  });
+
+  it("GET /api/entities/:id/timeline applies file RBAC, collapses per-file mentions, groups by month", async () => {
+    await seedEntity("e1", "Sarah", "person");
+
+    const scopeId = "scope-restricted-tl";
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "cfg-scope-tl",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: scopeId,
+        connector_config_id: "cfg-scope-tl",
+        scope_type: "shared_drive",
+        provider_scope_id: "sd-tl",
+        label: "Restricted",
+      })
+      .execute();
+
+    // f-public mentioned twice (should collapse to one card with mentionCount=2)
+    await seedFile("f-pub-may");
+    await db
+      .updateTable("indexed_files")
+      .set({ source_updated_at: "2026-05-22T00:00:00.000Z", source_created_at: "2026-05-22T00:00:00.000Z" })
+      .where("id", "=", "f-pub-may")
+      .execute();
+    await seedFile("f-pub-apr");
+    await db
+      .updateTable("indexed_files")
+      .set({ source_updated_at: "2026-04-10T00:00:00.000Z", source_created_at: "2026-04-10T00:00:00.000Z" })
+      .where("id", "=", "f-pub-apr")
+      .execute();
+    await seedFile("f-restricted", scopeId);
+    await db
+      .updateTable("indexed_files")
+      .set({ source_updated_at: "2026-05-15T00:00:00.000Z", source_created_at: "2026-05-15T00:00:00.000Z" })
+      .where("id", "=", "f-restricted")
+      .execute();
+
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "m1",
+          entity_id: "e1",
+          indexed_file_id: "f-pub-may",
+          chunk_index: 0,
+          context_snippet: "Sarah leads things",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "m1b",
+          entity_id: "e1",
+          indexed_file_id: "f-pub-may",
+          chunk_index: 1,
+          context_snippet: null,
+          confidence: "INFERRED",
+          source: "google_drive",
+          relation: "authored",
+          mentioned_at: now,
+        },
+        {
+          id: "m2",
+          entity_id: "e1",
+          indexed_file_id: "f-pub-apr",
+          chunk_index: 0,
+          context_snippet: null,
+          confidence: "INFERRED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "m3",
+          entity_id: "e1",
+          indexed_file_id: "f-restricted",
+          chunk_index: 0,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+
+    const res = await app.request("/api/entities/e1/timeline", { headers: { Cookie: memberCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      groups: Array<{
+        month: string;
+        items: Array<{ fileId: string; mentionCount: number; mentionConfidence: string }>;
+      }>;
+      totalCount: number;
+    };
+    // Member can't see f-restricted; expect two files across two months, newest-first.
+    expect(body.groups.map((g) => g.month)).toEqual(["2026-05", "2026-04"]);
+    const mayItems = body.groups[0].items;
+    expect(mayItems).toHaveLength(1);
+    expect(mayItems[0].fileId).toBe("f-pub-may");
+    expect(mayItems[0].mentionCount).toBe(2);
+    expect(mayItems[0].mentionConfidence).toBe("EXTRACTED");
+    expect(body.totalCount).toBe(2);
+  });
+
+  it("POST /api/entities/:id/ai-brief/refresh returns 503 when Gemini API key is not configured", async () => {
+    await seedEntity("e1", "Sarah", "person");
+    const res = await app.request("/api/entities/e1/ai-brief/refresh", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("GEMINI_NOT_CONFIGURED");
+  });
+
+  it("POST /api/entities/:id/ai-brief/refresh is gated by EXPERIMENTAL_FLAG", async () => {
+    const offConfig = createTestConfig({ EXPERIMENTAL_FLAG: false });
+    const offApp = createApp(db, offConfig, { logger });
+    await seedEntity("e1", "Sarah", "person");
+    const offCookie = await login(offApp);
+    const res = await offApp.request("/api/entities/e1/ai-brief/refresh", {
+      method: "POST",
+      headers: { Cookie: offCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    expect(res.status).toBe(404);
   });
 });
