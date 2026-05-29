@@ -323,6 +323,7 @@ export interface EntitiesTable {
   hotness: number;
   created_at: string;
   updated_at: string;
+  ai_brief: string | null;
 }
 
 export interface EntitySourceRefsTable {

@@ -409,6 +409,80 @@ export function createEntityRepository(db: Kysely<DB>) {
       return entities.length;
     },
 
+    // ── Profile aggregates (entity drawer) ──
+
+    /**
+     * One-shot aggregates for the drawer's profile section. Returns mention
+     * count + source breakdown (org aggregate, ignoring per-file RBAC since the
+     * entity itself is already org-visible), first/last-seen timestamps, and
+     * company domains. Does not parse the entity row itself — caller composes
+     * the response from `getEntity` + this.
+     */
+    async getEntityProfileAggregates(entityId: string): Promise<{
+      mentionCount: number;
+      sourceCounts: Record<string, number>;
+      firstSeenAt: string | null;
+      lastSeenAt: string | null;
+      domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+    }> {
+      const mentionRow = await db
+        .selectFrom("entity_mentions")
+        .select(sql<number>`count(*)`.as("c"))
+        .where("entity_id", "=", entityId)
+        .executeTakeFirst();
+      const mentionCount = Number(mentionRow?.c ?? 0);
+
+      const bySource = await db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select(["indexed_files.source", sql<number>`count(*)`.as("c")])
+        .where("entity_mentions.entity_id", "=", entityId)
+        .groupBy("indexed_files.source")
+        .execute();
+      const sourceCounts: Record<string, number> = {};
+      for (const row of bySource) {
+        sourceCounts[row.source] = Number(row.c ?? 0);
+      }
+
+      const range = await db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select([
+          sql<
+            string | null
+          >`MIN(COALESCE(indexed_files.source_created_at, indexed_files.source_updated_at, entity_mentions.mentioned_at))`.as(
+            "first_seen",
+          ),
+          sql<
+            string | null
+          >`MAX(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at))`.as(
+            "last_seen",
+          ),
+        ])
+        .where("entity_mentions.entity_id", "=", entityId)
+        .executeTakeFirst();
+
+      const domainRows = await db
+        .selectFrom("entity_domains")
+        .select(["domain", "confidence", "is_primary"])
+        .where("entity_id", "=", entityId)
+        .orderBy("is_primary", "desc")
+        .orderBy("confidence", "desc")
+        .execute();
+
+      return {
+        mentionCount,
+        sourceCounts,
+        firstSeenAt: range?.first_seen ?? null,
+        lastSeenAt: range?.last_seen ?? null,
+        domainsForCompany: domainRows.map((d) => ({
+          domain: d.domain,
+          confidence: Number(d.confidence ?? 0),
+          isPrimary: d.is_primary === 1,
+        })),
+      };
+    },
+
     // ── Seeding Helpers ──
 
     async upsertEntityFromTool(data: UpsertEntityFromToolData) {
