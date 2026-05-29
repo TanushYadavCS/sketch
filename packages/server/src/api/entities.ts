@@ -4,21 +4,13 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import type { Config } from "../config";
-import { isPg } from "../db/dialect";
 import { type FileViewer, fileVisibilityPredicate } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { type RelationListEntry, createEntityRelationshipsRepository } from "../db/repositories/entity-relationships";
 import { createEntityTimelineRepository } from "../db/repositories/entity-timeline";
-import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
-import type { MaterializeFactsSummary } from "../entities/materialize";
 import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, mapSourceTypeToEntityType } from "../entities/profile-facts";
-import {
-  type RecreateSummary,
-  type ResetSummary,
-  getRecreateConflict,
-  recreateEntityGraph,
-} from "../entities/recreate";
+import { getRecreateConflict, recreateEntityGraph } from "../entities/recreate";
 import {
   beginPendingRebuild,
   beginRecreateLock,
@@ -30,15 +22,39 @@ import {
 } from "../entities/recreate-state";
 import {
   AI_EXTRACTION_FACT_TYPES,
-  type ReenrichDryRunSummary,
   type ReenrichScope,
-  type ReenrichSummary,
   computeReenrichDryRun,
   resolveReenrichFileIds,
   runReenrichJob,
   tombstoneActiveLlmFacts,
 } from "../entities/reenrich";
 import { denyIfNotAdmin, getFileViewer } from "./auth-helpers";
+import {
+  getCurrentRebuildJob,
+  getCurrentReenrichJob,
+  getCurrentResetJob,
+  getLatestRebuildJob,
+  getLatestReenrichJob,
+  getLatestResetJob,
+  newRebuildJob,
+  newReenrichJob,
+  newResetJob,
+  setCurrentRebuildJob,
+  setCurrentReenrichJob,
+  setCurrentResetJob,
+  setLatestRebuildJob,
+  setLatestReenrichJob,
+  setLatestResetJob,
+} from "./entities/jobs";
+import {
+  FACT_TYPES_BY_CATEGORY,
+  type ResetCategory,
+  computeResetCounts,
+  parseReenrichScope,
+  performReset,
+} from "./entities/reset-service";
+
+export { _setCurrentReenrichJobForTests, _setCurrentResetJobForTests } from "./entities/jobs";
 
 const RESET_CONFIRM_TOKEN = "RESET_AND_RECREATE";
 const REENRICH_CONFIRM_TOKEN = "REENRICH";
@@ -49,129 +65,6 @@ function countByType(rows: RelationListEntry[]): Record<string, number> {
     out[r.relationshipType] = (out[r.relationshipType] ?? 0) + 1;
   }
   return out;
-}
-
-type ResetCategory = "manual" | "connectors" | "ai";
-type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
-type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed" | "cancelled";
-type RebuildJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
-
-interface JobProgress {
-  phase: string;
-  completed: number;
-  total: number;
-}
-
-interface ResetRequest {
-  categories: ResetCategory[];
-  runAfter: boolean;
-  wipeLlmFacts?: boolean;
-}
-
-interface ReenrichRequest {
-  scope: ReenrichScope;
-  runAfter: boolean;
-}
-
-interface RebuildRequest {
-  pendingRebuildId: string;
-}
-
-interface ResetJob {
-  id: string;
-  phase: ResetJobPhase;
-  startedAt: string;
-  finishedAt: string | null;
-  request: ResetRequest;
-  progress?: JobProgress;
-  reset?: ResetSummary;
-  replay?: MaterializeFactsSummary;
-  recreate?: RecreateSummary;
-  pendingRebuildId?: string;
-  pendingRebuildExpiresAt?: string;
-  llmFactsWiped?: {
-    factsTombstoned: number;
-    relationshipEvidenceDeleted: number;
-    relationshipsDeleted: number;
-  };
-  error?: string;
-}
-
-interface ReenrichJob {
-  id: string;
-  phase: ReenrichJobPhase;
-  startedAt: string;
-  finishedAt: string | null;
-  request: ReenrichRequest;
-  progress?: JobProgress;
-  dryRun?: ReenrichDryRunSummary;
-  summary?: ReenrichSummary;
-  error?: string;
-  cancelRequested?: boolean;
-}
-
-interface RebuildJob {
-  id: string;
-  phase: RebuildJobPhase;
-  startedAt: string;
-  finishedAt: string | null;
-  request: RebuildRequest;
-  progress?: JobProgress;
-  recreate?: RecreateSummary;
-  error?: string;
-}
-
-const FACT_TYPES_BY_CATEGORY: Record<ResetCategory, IndexedFileFactType[]> = {
-  connectors: ["structural_seed", "person_seed", "attendee", "assignee", "author", "parent_entity"],
-  ai: ["llm_extracted", "llm_relation"],
-  manual: [],
-};
-
-let currentResetJob: ResetJob | null = null;
-let latestResetJob: ResetJob | null = null;
-let currentReenrichJob: ReenrichJob | null = null;
-let latestReenrichJob: ReenrichJob | null = null;
-let currentRebuildJob: RebuildJob | null = null;
-let latestRebuildJob: RebuildJob | null = null;
-
-function newResetJob(request: ResetRequest): ResetJob {
-  return {
-    id: randomUUID(),
-    phase: "idle",
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    request,
-  };
-}
-
-export function _setCurrentResetJobForTests(active: boolean): void {
-  currentResetJob = active ? newResetJob({ categories: ["manual"], runAfter: false }) : null;
-}
-
-function newReenrichJob(request: ReenrichRequest): ReenrichJob {
-  return {
-    id: randomUUID(),
-    phase: "idle",
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    request,
-  };
-}
-
-export function _setCurrentReenrichJobForTests(active: boolean): string | null {
-  currentReenrichJob = active ? newReenrichJob({ scope: { all: true }, runAfter: true }) : null;
-  if (currentReenrichJob) currentReenrichJob.phase = "enriching";
-  return currentReenrichJob?.id ?? null;
-}
-
-function newRebuildJob(request: RebuildRequest): RebuildJob {
-  return {
-    id: randomUUID(),
-    phase: "idle",
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    request,
-  };
 }
 
 interface EntityRoutesDeps {
@@ -552,10 +445,11 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const conflict = await getRecreateConflict(db);
+    const currentResetJob = getCurrentResetJob();
     return c.json({
       active: currentResetJob !== null || isRecreateActive(),
       currentJob: currentResetJob,
-      latestJob: latestResetJob,
+      latestJob: getLatestResetJob(),
       blockedBy: currentResetJob ? null : conflict,
     });
   });
@@ -567,6 +461,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const id = c.req.param("id");
+    const currentResetJob = getCurrentResetJob();
+    const latestResetJob = getLatestResetJob();
     if (currentResetJob?.id === id) return c.json(currentResetJob);
     if (latestResetJob?.id === id) return c.json(latestResetJob);
     return c.json({ error: { code: "NOT_FOUND", message: "Reset job not found" } }, 404);
@@ -576,10 +472,11 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const conflict = await getRecreateConflict(db);
+    const currentReenrichJob = getCurrentReenrichJob();
     return c.json({
       active: currentReenrichJob !== null || isRecreateActive(),
       currentJob: currentReenrichJob,
-      latestJob: latestReenrichJob,
+      latestJob: getLatestReenrichJob(),
       blockedBy: currentReenrichJob ? null : conflict,
     });
   });
@@ -588,6 +485,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const id = c.req.param("id");
+    const currentReenrichJob = getCurrentReenrichJob();
+    const latestReenrichJob = getLatestReenrichJob();
     if (currentReenrichJob?.id === id) return c.json(currentReenrichJob);
     if (latestReenrichJob?.id === id) return c.json(latestReenrichJob);
     return c.json({ error: { code: "NOT_FOUND", message: "Re-enrich job not found" } }, 404);
@@ -597,6 +496,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const id = c.req.param("id");
+    const currentReenrichJob = getCurrentReenrichJob();
     if (!currentReenrichJob || currentReenrichJob.id !== id) {
       return c.json({ error: { code: "NOT_FOUND", message: "Active re-enrich job not found" } }, 404);
     }
@@ -613,10 +513,11 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const conflict = await getRecreateConflict(db);
+    const currentRebuildJob = getCurrentRebuildJob();
     return c.json({
       active: currentRebuildJob !== null || isRecreateActive(),
       currentJob: currentRebuildJob,
-      latestJob: latestRebuildJob,
+      latestJob: getLatestRebuildJob(),
       blockedBy: currentRebuildJob ? null : conflict,
     });
   });
@@ -625,6 +526,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
     const id = c.req.param("id");
+    const currentRebuildJob = getCurrentRebuildJob();
+    const latestRebuildJob = getLatestRebuildJob();
     if (currentRebuildJob?.id === id) return c.json(currentRebuildJob);
     if (latestRebuildJob?.id === id) return c.json(latestRebuildJob);
     return c.json({ error: { code: "NOT_FOUND", message: "Rebuild job not found" } }, 404);
@@ -647,7 +550,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     }
     const pendingRebuildId = body.pendingRebuildId;
 
-    if (currentResetJob || currentReenrichJob || currentRebuildJob) {
+    if (getCurrentResetJob() || getCurrentReenrichJob() || getCurrentRebuildJob()) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Another job is already active" } }, 409);
     }
 
@@ -666,7 +569,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
 
     const job = newRebuildJob({ pendingRebuildId });
     job.phase = "replaying_facts";
-    currentRebuildJob = job;
+    setCurrentRebuildJob(job);
     const triggeredByUserId = (c.get("sub") as string | undefined) ?? "system";
 
     void (async () => {
@@ -692,8 +595,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         job.finishedAt = new Date().toISOString();
         logger.error({ err, jobId: job.id }, "Rebuild job failed");
       } finally {
-        latestRebuildJob = job;
-        currentRebuildJob = null;
+        setLatestRebuildJob(job);
+        setCurrentRebuildJob(null);
         if (isRecreateActive()) endRecreateLock();
       }
     })();
@@ -815,15 +718,15 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
         return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
       }
     }
-    if (currentResetJob) {
+    if (getCurrentResetJob()) {
       if (lockAlreadyHeld) endRecreateLock();
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
     }
-    if (currentReenrichJob) {
+    if (getCurrentReenrichJob()) {
       if (lockAlreadyHeld) endRecreateLock();
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
     }
-    if (currentRebuildJob) {
+    if (getCurrentRebuildJob()) {
       if (lockAlreadyHeld) endRecreateLock();
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
     }
@@ -831,7 +734,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     const runAfter = body.runAfter !== false;
     const job = newReenrichJob({ scope, runAfter });
     job.phase = "wiping";
-    currentReenrichJob = job;
+    setCurrentReenrichJob(job);
 
     void (async () => {
       try {
@@ -867,8 +770,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           logger.error({ err, jobId: job.id }, "Re-enrich job failed");
         }
       } finally {
-        latestReenrichJob = job;
-        currentReenrichJob = null;
+        setLatestReenrichJob(job);
+        setCurrentReenrichJob(null);
         // Promoted pending → active; runReenrichJob doesn't release the
         // caller-held lock, so we release it here.
         if (lockAlreadyHeld && isRecreateActive()) endRecreateLock();
@@ -986,13 +889,13 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
     if (conflict) {
       return c.json({ error: { code: conflict.code, message: conflict.message } }, 409);
     }
-    if (currentResetJob) {
+    if (getCurrentResetJob()) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Reset job already active" } }, 409);
     }
-    if (currentReenrichJob) {
+    if (getCurrentReenrichJob()) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
     }
-    if (currentRebuildJob) {
+    if (getCurrentRebuildJob()) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Rebuild job already active" } }, 409);
     }
 
@@ -1014,7 +917,7 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       job.pendingRebuildId = pendingRebuildId;
       job.pendingRebuildExpiresAt = pendingExpiresAtIso;
     }
-    currentResetJob = job;
+    setCurrentResetJob(job);
     const triggeredByUserId = (c.get("sub") as string | undefined) ?? "system";
 
     void (async () => {
@@ -1067,8 +970,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           cancelPendingRebuild(pendingRebuildId);
         }
       } finally {
-        latestResetJob = job;
-        currentResetJob = null;
+        setLatestResetJob(job);
+        setCurrentResetJob(null);
         // runAfter=true: release the active lock we held.
         // runAfter=false: pending lock stays for step 2 (or TTL releases it).
         if (runAfter && isRecreateActive()) endRecreateLock();
@@ -1448,264 +1351,4 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   });
 
   return routes;
-}
-
-interface ResetExecutionOptions {
-  includeConnectors: boolean;
-  includeAi: boolean;
-  includeManual: boolean;
-  orgSourceTypes: string[];
-  factTypes: IndexedFileFactType[];
-}
-
-function parseReenrichScope(scope: unknown): ReenrichScope | null {
-  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return null;
-  const value = scope as Record<string, unknown>;
-  if (value.all === true) return { all: true };
-  if (Array.isArray(value.fileIds)) {
-    return { fileIds: value.fileIds.filter((id): id is string => typeof id === "string") };
-  }
-  if (Array.isArray(value.sources)) {
-    return { sources: value.sources.filter((source): source is string => typeof source === "string") };
-  }
-  return null;
-}
-
-interface ResetExecutionResult {
-  entitiesDeleted: number;
-  resetSummary: ResetSummary;
-}
-
-const AI_ORIGIN_EXPR = (db: Kysely<DB>) =>
-  isPg(db) ? sql`(metadata::jsonb ->> 'origin')` : sql`json_extract(metadata, '$.origin')`;
-
-async function computeResetCounts(
-  db: Kysely<DB>,
-  flags: { includeConnectors: boolean; includeAi: boolean; includeManual: boolean },
-  orgSourceTypes: string[],
-): Promise<{
-  entitiesDeleted: number;
-  candidatesCleared: number;
-  reviewQueueCleared: number;
-  reviewEvidenceCleared: number;
-  rejectionsCleared: number;
-}> {
-  const toDelete = await selectEntitiesForCategories(db, flags, orgSourceTypes).execute();
-  const candidates =
-    flags.includeConnectors || flags.includeAi
-      ? await db.selectFrom("entity_candidates").select(db.fn.countAll<number>().as("c")).executeTakeFirst()
-      : null;
-  const queue =
-    flags.includeConnectors || flags.includeAi
-      ? await db.selectFrom("entity_review_queue").select(db.fn.countAll<number>().as("c")).executeTakeFirst()
-      : null;
-  const evidence =
-    flags.includeConnectors || flags.includeAi
-      ? await db.selectFrom("entity_review_evidence").select(db.fn.countAll<number>().as("c")).executeTakeFirst()
-      : null;
-  const rejections =
-    flags.includeConnectors || flags.includeAi
-      ? await db.selectFrom("entity_alias_rejections").select(db.fn.countAll<number>().as("c")).executeTakeFirst()
-      : null;
-  return {
-    entitiesDeleted: toDelete.length,
-    candidatesCleared: Number(candidates?.c ?? 0),
-    reviewQueueCleared: Number(queue?.c ?? 0),
-    reviewEvidenceCleared: Number(evidence?.c ?? 0),
-    rejectionsCleared: Number(rejections?.c ?? 0),
-  };
-}
-
-function selectEntitiesForCategories(
-  db: Kysely<DB>,
-  flags: { includeConnectors: boolean; includeAi: boolean; includeManual: boolean },
-  orgSourceTypes: string[],
-) {
-  const aiOrigin = AI_ORIGIN_EXPR(db);
-  return db
-    .selectFrom("entities as e")
-    .select([
-      "e.id as id",
-      sql<number>`(SELECT COUNT(*) FROM entity_source_refs WHERE entity_source_refs.entity_id = e.id AND entity_source_refs.source = 'llm_extraction')`.as(
-        "llm_ref_count",
-      ),
-      sql<number>`(SELECT COUNT(*) FROM entity_source_refs WHERE entity_source_refs.entity_id = e.id AND entity_source_refs.source != 'llm_extraction')`.as(
-        "other_ref_count",
-      ),
-      sql<string | null>`${aiOrigin}`.as("ai_origin"),
-      "e.source_type as source_type",
-    ])
-    .where((eb) => {
-      const parts = [];
-      if (flags.includeConnectors) {
-        parts.push(
-          eb.or([
-            eb("e.source_type", "not in", orgSourceTypes),
-            sql<boolean>`EXISTS (SELECT 1 FROM entity_source_refs WHERE entity_source_refs.entity_id = e.id AND entity_source_refs.source != 'llm_extraction')`,
-          ]),
-        );
-      }
-      if (flags.includeAi) {
-        parts.push(
-          eb.or([
-            eb(aiOrigin, "=", "ai"),
-            sql<boolean>`EXISTS (SELECT 1 FROM entity_source_refs WHERE entity_source_refs.entity_id = e.id AND entity_source_refs.source = 'llm_extraction')`,
-          ]),
-        );
-      }
-      if (flags.includeManual) {
-        parts.push(
-          eb.and([
-            eb("e.source_type", "in", orgSourceTypes),
-            sql<boolean>`NOT EXISTS (SELECT 1 FROM entity_source_refs WHERE entity_source_refs.entity_id = e.id)`,
-            eb.or([eb(aiOrigin, "is", null), eb(aiOrigin, "!=", "ai")]),
-          ]),
-        );
-      }
-      return parts.length === 1 ? parts[0] : eb.or(parts);
-    });
-}
-
-async function performReset(db: Kysely<DB>, opts: ResetExecutionOptions): Promise<ResetExecutionResult> {
-  const rows = await selectEntitiesForCategories(
-    db,
-    { includeConnectors: opts.includeConnectors, includeAi: opts.includeAi, includeManual: opts.includeManual },
-    opts.orgSourceTypes,
-  ).execute();
-
-  // Resolve category membership for each candidate. An entity may match more
-  // than one selected category — apply precedence: connector-owned wins over
-  // ai-only, so connector entities aren't accidentally wiped by an AI reset.
-  const idsForDeletion: string[] = [];
-  const preservedConnectorIds: string[] = [];
-  const preservedAiOnlyIds: string[] = [];
-  for (const row of rows) {
-    const llmRefs = Number(row.llm_ref_count ?? 0);
-    const otherRefs = Number(row.other_ref_count ?? 0);
-    const isConnectorOwned = otherRefs > 0 || !opts.orgSourceTypes.includes(row.source_type);
-    const isAiOnly = !isConnectorOwned && (row.ai_origin === "ai" || llmRefs > 0);
-
-    if (isConnectorOwned && opts.includeConnectors) {
-      idsForDeletion.push(row.id);
-      continue;
-    }
-    if (isAiOnly && opts.includeAi) {
-      idsForDeletion.push(row.id);
-      continue;
-    }
-    if (!isConnectorOwned && !isAiOnly && opts.includeManual) {
-      idsForDeletion.push(row.id);
-      continue;
-    }
-    if (isConnectorOwned && opts.includeAi) preservedConnectorIds.push(row.id);
-    if (isAiOnly && opts.includeConnectors) preservedAiOnlyIds.push(row.id);
-  }
-
-  let candidatesCleared = 0;
-  let reviewQueueCleared = 0;
-  let reviewEvidenceCleared = 0;
-  let rejectionsCleared = 0;
-
-  if (opts.includeConnectors || opts.includeAi) {
-    const candidatesResult = await db.deleteFrom("entity_candidates").execute();
-    candidatesCleared = Number(candidatesResult[0]?.numDeletedRows ?? 0);
-
-    if (opts.includeConnectors) {
-      const evidenceCount = await db
-        .selectFrom("entity_review_evidence")
-        .select(db.fn.count<number>("id").as("c"))
-        .executeTakeFirst();
-      reviewEvidenceCleared = Number(evidenceCount?.c ?? 0);
-
-      const queueResult = await db.deleteFrom("entity_review_queue").execute();
-      reviewQueueCleared = Number(queueResult[0]?.numDeletedRows ?? 0);
-
-      const rejectionsResult = await db.deleteFrom("entity_alias_rejections").execute();
-      rejectionsCleared = Number(rejectionsResult[0]?.numDeletedRows ?? 0);
-    } else if (opts.includeAi) {
-      // AI-only reset: scrub only LLM-sourced review evidence and any queue
-      // rows whose evidence is now empty. Leave connector-driven review state
-      // and alias rejections intact.
-      const evidenceDeleted = await db
-        .deleteFrom("entity_review_evidence")
-        .where("source", "=", "llm_extraction")
-        .execute();
-      reviewEvidenceCleared = Number(evidenceDeleted[0]?.numDeletedRows ?? 0);
-      const emptyQueueRows = await db
-        .selectFrom("entity_review_queue")
-        .select("id")
-        .where("id", "not in", db.selectFrom("entity_review_evidence").select("review_id"))
-        .execute();
-      if (emptyQueueRows.length > 0) {
-        const queueIds = emptyQueueRows.map((r) => r.id);
-        await db.deleteFrom("entity_review_queue").where("id", "in", queueIds).execute();
-        reviewQueueCleared = queueIds.length;
-      }
-    }
-  }
-
-  // Scrub stale source-scoped rows on preserved entities so the post-replay
-  // graph matches what the materializer will produce.
-  if (preservedConnectorIds.length > 0) {
-    // AI reset preserved a connector-owned entity that picked up LLM evidence —
-    // drop its llm_extraction mentions/refs so replay can recreate them.
-    await db
-      .deleteFrom("entity_mentions")
-      .where("entity_id", "in", preservedConnectorIds)
-      .where("source", "=", "llm_extraction")
-      .execute();
-    await db
-      .deleteFrom("entity_source_refs")
-      .where("entity_id", "in", preservedConnectorIds)
-      .where("source", "=", "llm_extraction")
-      .execute();
-  }
-  if (preservedAiOnlyIds.length > 0) {
-    // Connector reset preserved an LLM-only entity — drop its connector-sourced
-    // mentions (rare but possible if a connector fact arrived after promotion).
-    await db
-      .deleteFrom("entity_mentions")
-      .where("entity_id", "in", preservedAiOnlyIds)
-      .where("source", "!=", "llm_extraction")
-      .execute();
-    await db
-      .deleteFrom("entity_source_refs")
-      .where("entity_id", "in", preservedAiOnlyIds)
-      .where("source", "!=", "llm_extraction")
-      .execute();
-  }
-
-  if (idsForDeletion.length > 0) {
-    await db.deleteFrom("entity_mentions").where("entity_id", "in", idsForDeletion).execute();
-    await db.deleteFrom("entity_source_refs").where("entity_id", "in", idsForDeletion).execute();
-    await db.deleteFrom("entities").where("id", "in", idsForDeletion).execute();
-  }
-
-  let factsMarkedUnmaterialized = 0;
-  if (opts.factTypes.length > 0) {
-    const result = await db
-      .updateTable("indexed_file_facts")
-      .set({ materialized_at: null, updated_at: new Date().toISOString() })
-      .where("fact_type", "in", opts.factTypes)
-      .where("deleted_at", "is", null)
-      .where("materialized_at", "is not", null)
-      .executeTakeFirst();
-    factsMarkedUnmaterialized = Number(result.numUpdatedRows ?? 0);
-  }
-
-  const resetSummary: ResetSummary = {
-    dryRun: false,
-    deleted: {
-      entities: idsForDeletion.length,
-      entity_candidates: candidatesCleared,
-      entity_review_queue: reviewQueueCleared,
-      entity_review_evidence: reviewEvidenceCleared,
-      entity_alias_rejections: rejectionsCleared,
-    },
-    filesMarkedPending: 0,
-    factsMarkedUnmaterialized,
-    warnings: [],
-  };
-
-  return { entitiesDeleted: idsForDeletion.length, resetSummary };
 }
