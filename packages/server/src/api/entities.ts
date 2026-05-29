@@ -35,11 +35,29 @@ type ResetCategory = "manual" | "connectors" | "ai";
 type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
 type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
 
+interface JobProgress {
+  phase: string;
+  completed: number;
+  total: number;
+}
+
+interface ResetRequest {
+  categories: ResetCategory[];
+  runAfter: boolean;
+}
+
+interface ReenrichRequest {
+  scope: ReenrichScope;
+  runAfter: boolean;
+}
+
 interface ResetJob {
   id: string;
   phase: ResetJobPhase;
   startedAt: string;
   finishedAt: string | null;
+  request: ResetRequest;
+  progress?: JobProgress;
   reset?: ResetSummary;
   replay?: MaterializeFactsSummary;
   recreate?: RecreateSummary;
@@ -51,6 +69,8 @@ interface ReenrichJob {
   phase: ReenrichJobPhase;
   startedAt: string;
   finishedAt: string | null;
+  request: ReenrichRequest;
+  progress?: JobProgress;
   dryRun?: ReenrichDryRunSummary;
   summary?: ReenrichSummary;
   error?: string;
@@ -58,7 +78,7 @@ interface ReenrichJob {
 
 const FACT_TYPES_BY_CATEGORY: Record<ResetCategory, IndexedFileFactType[]> = {
   connectors: ["structural_seed", "person_seed", "attendee", "assignee", "author", "parent_entity"],
-  ai: ["llm_extracted"],
+  ai: ["llm_extracted", "llm_relation"],
   manual: [],
 };
 
@@ -67,21 +87,23 @@ let latestResetJob: ResetJob | null = null;
 let currentReenrichJob: ReenrichJob | null = null;
 let latestReenrichJob: ReenrichJob | null = null;
 
-function newResetJob(): ResetJob {
+function newResetJob(request: ResetRequest): ResetJob {
   return {
     id: randomUUID(),
     phase: "idle",
     startedAt: new Date().toISOString(),
     finishedAt: null,
+    request,
   };
 }
 
-function newReenrichJob(): ReenrichJob {
+function newReenrichJob(request: ReenrichRequest): ReenrichJob {
   return {
     id: randomUUID(),
     phase: "idle",
     startedAt: new Date().toISOString(),
     finishedAt: null,
+    request,
   };
 }
 
@@ -324,7 +346,8 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
     }
 
-    const job = newReenrichJob();
+    const runAfter = body.runAfter !== false;
+    const job = newReenrichJob({ scope, runAfter });
     job.phase = "wiping";
     currentReenrichJob = job;
 
@@ -337,10 +360,13 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           triggeredByUserId: (c.get("sub") as string | undefined) ?? "system",
           fileIds: resolved.fileIds,
           missingFileIds: resolved.missingFileIds,
-          runAfter: body.runAfter !== false,
+          runAfter,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           onPhase: (phase) => {
             job.phase = phase;
+          },
+          onProgress: (progress) => {
+            job.progress = progress;
           },
         });
         job.summary = summary;
@@ -459,12 +485,15 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
       return c.json({ error: { code: "RECREATE_ACTIVE", message: "Re-enrich job already active" } }, 409);
     }
 
-    if (runAfter) {
-      const job = newResetJob();
-      job.phase = "resetting";
-      beginRecreateLock();
-      currentResetJob = job;
+    const job = newResetJob({ categories: [...categories], runAfter });
+    job.phase = "resetting";
+    if (runAfter) beginRecreateLock();
+    currentResetJob = job;
+    const triggeredByUserId = (c.get("sub") as string | undefined) ?? "system";
+
+    void (async () => {
       try {
+        job.progress = { phase: "resetting", completed: 0, total: 1 };
         const summary = await performReset(db, {
           includeConnectors,
           includeAi,
@@ -473,75 +502,48 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
           factTypes,
         });
         job.reset = summary.resetSummary;
+        job.progress = { phase: "resetting", completed: 1, total: 1 };
+        if (!runAfter) {
+          job.phase = "done";
+          job.finishedAt = new Date().toISOString();
+          return;
+        }
         job.phase = "replaying_facts";
+        const result = await recreateEntityGraph({
+          db,
+          logger: logger.child({ jobId: job.id }),
+          triggeredByUserId,
+          skipReset: true,
+          lockAlreadyHeld: true,
+          llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          materializeFactTypes: factTypes.length > 0 ? factTypes : undefined,
+          onProgress: (progress) => {
+            job.progress = progress;
+          },
+        });
+        job.replay = result.replay;
+        job.recreate = result;
+        job.phase = "done";
+        job.finishedAt = new Date().toISOString();
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.phase = "failed";
         job.finishedAt = new Date().toISOString();
+        logger.error({ err, jobId: job.id, runAfter }, "Reset job failed");
+      } finally {
         latestResetJob = job;
         currentResetJob = null;
-        endRecreateLock();
-        return c.json({ error: { code: "RESET_FAILED", message: job.error } }, 500);
+        if (runAfter && isRecreateActive()) endRecreateLock();
       }
+    })();
 
-      void (async () => {
-        try {
-          const result = await recreateEntityGraph({
-            db,
-            logger: logger.child({ jobId: job.id }),
-            triggeredByUserId: (c.get("sub") as string | undefined) ?? "system",
-            skipReset: true,
-            lockAlreadyHeld: true,
-            llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
-            materializeFactTypes: factTypes.length > 0 ? factTypes : undefined,
-          });
-          job.replay = result.replay;
-          job.recreate = result;
-          job.phase = "done";
-          job.finishedAt = new Date().toISOString();
-        } catch (err) {
-          job.error = err instanceof Error ? err.message : String(err);
-          job.phase = "failed";
-          job.finishedAt = new Date().toISOString();
-          logger.error({ err, jobId: job.id }, "Reset+rebuild job failed");
-        } finally {
-          latestResetJob = job;
-          currentResetJob = null;
-          if (isRecreateActive()) endRecreateLock();
-        }
-      })();
-
-      return c.json(
-        {
-          message: "Reset complete, rebuild started.",
-          entitiesDeleted: job.reset?.deleted.entities ?? 0,
-          candidatesCleared: job.reset?.deleted.entity_candidates ?? 0,
-          reviewQueueCleared: job.reset?.deleted.entity_review_queue ?? 0,
-          reviewEvidenceCleared: job.reset?.deleted.entity_review_evidence ?? 0,
-          rejectionsCleared: job.reset?.deleted.entity_alias_rejections ?? 0,
-          factsMarkedUnmaterialized: job.reset?.factsMarkedUnmaterialized ?? 0,
-          job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
-        },
-        202,
-      );
-    }
-
-    const summary = await performReset(db, {
-      includeConnectors,
-      includeAi,
-      includeManual,
-      orgSourceTypes: ORG_SOURCE_TYPES,
-      factTypes,
-    });
-    return c.json({
-      message: summary.entitiesDeleted > 0 ? `Deleted ${summary.entitiesDeleted} entities.` : "No entities matched.",
-      entitiesDeleted: summary.entitiesDeleted,
-      candidatesCleared: summary.resetSummary.deleted.entity_candidates ?? 0,
-      reviewQueueCleared: summary.resetSummary.deleted.entity_review_queue ?? 0,
-      reviewEvidenceCleared: summary.resetSummary.deleted.entity_review_evidence ?? 0,
-      rejectionsCleared: summary.resetSummary.deleted.entity_alias_rejections ?? 0,
-      factsMarkedUnmaterialized: summary.resetSummary.factsMarkedUnmaterialized,
-    });
+    return c.json(
+      {
+        message: runAfter ? "Reset started, rebuild will follow." : "Reset started.",
+        job: { id: job.id, phase: job.phase, startedAt: job.startedAt },
+      },
+      202,
+    );
   });
 
   /**

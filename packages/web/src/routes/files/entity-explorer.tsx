@@ -12,10 +12,14 @@ import { ConnectorLogo } from "@/components/connector-logos";
  * rows (no suggested candidate) open directly in chooser mode.
  */
 import { EntityPicker } from "@/components/entity-picker";
+import { RebuildBanner } from "@/components/rebuild-banner";
+import { RebuildDialog, type RebuildDialogPrefill } from "@/components/rebuild-dialog";
 import { COUNT_KEY, LIST_KEY, detailKey, useReviewMutations } from "@/components/review-actions";
+import { useRebuildJob } from "@/hooks/use-rebuild-job";
 import type { EntityListItem, EntityMention, EntityReviewEvidenceRow, EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
 import {
+  ArrowClockwiseIcon,
   ArrowLeftIcon,
   ArrowSquareOutIcon,
   CaretDownIcon,
@@ -24,20 +28,9 @@ import {
   DotsThreeIcon,
   MagnifyingGlassIcon,
   PlusIcon,
-  TrashIcon,
   UserIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
@@ -128,11 +121,15 @@ export function EntityExplorer() {
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [showResetDialog, setShowResetDialog] = useState(false);
-  const [resetCategories, setResetCategories] = useState<Set<string>>(new Set(["connectors", "ai"]));
-  const [resetRunAfter, setResetRunAfter] = useState(false);
+  const [showRebuildDialog, setShowRebuildDialog] = useState(false);
+  const [rebuildPrefill, setRebuildPrefill] = useState<RebuildDialogPrefill | null>(null);
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("company");
+
+  const rebuildState = useRebuildJob({ enabled: isAdmin });
+  const overlayRebuilding =
+    rebuildState.activeJob !== null &&
+    (rebuildState.activeJob.job.phase === "resetting" || rebuildState.activeJob.job.phase === "wiping");
 
   const createMutation = useMutation({
     mutationFn: () => api.entities.create({ name: newName.trim(), sourceType: newType }),
@@ -155,54 +152,15 @@ export function EntityExplorer() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  const pollResetJob = async (jobId: string) => {
-    for (let i = 0; i < 300; i++) {
-      try {
-        const job = await api.entities.resetJob(jobId);
-        if (job.phase === "done" || job.phase === "failed") return job;
-      } catch {}
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    return null;
-  };
-
-  const resetMutation = useMutation({
-    mutationFn: ({ categories, runAfter }: { categories: string[]; runAfter: boolean }) =>
-      api.entities.reset(categories, runAfter ? { runAfter: true, confirm: "RESET_AND_RECREATE" } : undefined),
-    onSuccess: async (result) => {
-      const extras: string[] = [];
-      if (result.reviewQueueCleared > 0) {
-        extras.push(`${result.reviewQueueCleared} pending review${result.reviewQueueCleared === 1 ? "" : "s"}`);
-      }
-      if (result.rejectionsCleared > 0) {
-        extras.push(`${result.rejectionsCleared} rejection${result.rejectionsCleared === 1 ? "" : "s"}`);
-      }
-      const tail = extras.length > 0 ? ` (also cleared ${extras.join(" and ")})` : "";
-
-      if (result.job) {
-        toast.success(`Deleted ${result.entitiesDeleted} entities${tail}. Rebuilding…`);
-        setShowResetDialog(false);
-        const finished = await pollResetJob(result.job.id);
-        if (finished?.phase === "done") {
-          toast.success("Entity graph rebuilt.");
-        } else if (finished?.phase === "failed") {
-          toast.error(`Rebuild failed: ${finished.error ?? "unknown error"}`);
-        }
-      } else {
-        const factHint =
-          result.factsMarkedUnmaterialized > 0
-            ? ` Run sync or click "Reset & recreate" to rebuild ${result.factsMarkedUnmaterialized} fact${
-                result.factsMarkedUnmaterialized === 1 ? "" : "s"
-              }.`
-            : "";
-        toast.success(`Deleted ${result.entitiesDeleted} entities${tail}.${factHint}`);
-        setShowResetDialog(false);
-      }
-      queryClient.invalidateQueries({ queryKey: ["entities"] });
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
+
+  const latestJobId = rebuildState.latestJob?.job.id ?? null;
+  const latestJobPhase = rebuildState.latestJob?.job.phase ?? null;
+  useEffect(() => {
+    if (latestJobPhase === "done" && latestJobId !== null) {
+      queryClient.invalidateQueries({ queryKey: ["entities"] });
+    }
+  }, [latestJobId, latestJobPhase, queryClient]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -259,6 +217,15 @@ export function EntityExplorer() {
 
   return (
     <div>
+      {isAdmin ? (
+        <RebuildBanner
+          state={rebuildState}
+          onRetry={(prefill) => {
+            setRebuildPrefill(prefill);
+            setShowRebuildDialog(true);
+          }}
+        />
+      ) : null}
       {/* Toolbar */}
       <div className="mt-4 flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
@@ -302,31 +269,26 @@ export function EntityExplorer() {
         {isAdmin && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 w-7 p-0">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 w-7 p-0"
+                aria-label="Entity admin actions"
+                data-testid="entity-admin-menu"
+              >
                 <DotsThreeIcon size={16} />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
                 onClick={() => {
-                  setResetCategories(new Set(["connectors", "ai"]));
-                  setResetRunAfter(true);
-                  setShowResetDialog(true);
+                  setRebuildPrefill(null);
+                  setShowRebuildDialog(true);
                 }}
+                data-testid="rebuild-entities-menu-item"
               >
-                <TrashIcon size={14} className="mr-1.5" />
-                Reset & recreate...
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                onClick={() => {
-                  setResetCategories(new Set(["connectors", "ai"]));
-                  setResetRunAfter(false);
-                  setShowResetDialog(true);
-                }}
-              >
-                <TrashIcon size={14} className="mr-1.5" />
-                Reset entities...
+                <ArrowClockwiseIcon size={14} className="mr-1.5" />
+                Rebuild entities…
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -353,7 +315,15 @@ export function EntityExplorer() {
       )}
 
       {/* Table */}
-      <div className="mt-2">
+      <div className="relative mt-2">
+        {overlayRebuilding ? (
+          <div
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-background/60 text-xs text-muted-foreground backdrop-blur-sm"
+            data-testid="rebuild-overlay"
+          >
+            Rebuilding — entities will reappear shortly.
+          </div>
+        ) : null}
         {isLoading ? (
           <div className="space-y-2">
             {[1, 2, 3, 4, 5].map((key) => (
@@ -454,76 +424,14 @@ export function EntityExplorer() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={showResetDialog} onOpenChange={setShowResetDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{resetRunAfter ? "Reset & recreate" : "Reset entities"}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {resetRunAfter
-                ? "Delete the selected entity categories and rebuild them from durable facts. Manual entities are preserved unless checked."
-                : "Select which entity categories to delete. Their mentions, source refs, and candidates will also be removed. Facts are re-flagged so the next sync or recreate run rebuilds them."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="space-y-2 py-2">
-            {[
-              {
-                key: "connectors",
-                label: "Connector entities",
-                desc: "Spaces, folders, pages, databases from connected sources",
-              },
-              {
-                key: "ai",
-                label: "AI-discovered entities",
-                desc: "Companies, products, projects, teams found by enrichment",
-              },
-              { key: "manual", label: "Manually created", desc: "Entities you added by hand" },
-            ].map((cat) => (
-              <label
-                key={cat.key}
-                className="flex cursor-pointer items-start gap-3 rounded-md border border-border px-3 py-2.5 hover:bg-muted/30"
-              >
-                <input
-                  type="checkbox"
-                  checked={resetCategories.has(cat.key)}
-                  onChange={() => {
-                    setResetCategories((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(cat.key)) next.delete(cat.key);
-                      else next.add(cat.key);
-                      return next;
-                    });
-                  }}
-                  className="mt-0.5 h-4 w-4 rounded border-border accent-destructive"
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">{cat.label}</p>
-                  <p className="text-xs text-muted-foreground">{cat.desc}</p>
-                </div>
-              </label>
-            ))}
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={resetMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => resetMutation.mutate({ categories: [...resetCategories], runAfter: resetRunAfter })}
-              disabled={
-                resetMutation.isPending ||
-                resetCategories.size === 0 ||
-                (resetRunAfter && resetCategories.size === 1 && resetCategories.has("manual"))
-              }
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {resetMutation.isPending
-                ? resetRunAfter
-                  ? "Rebuilding..."
-                  : "Deleting..."
-                : resetRunAfter
-                  ? "Reset & recreate"
-                  : `Delete${resetCategories.size === 3 ? " All" : ""}`}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <RebuildDialog
+        open={showRebuildDialog}
+        onOpenChange={setShowRebuildDialog}
+        prefill={rebuildPrefill}
+        onSubmitted={() => {
+          rebuildState.refetch();
+        }}
+      />
 
       <EntityDetailSheet entityId={selectedEntityId} onClose={() => setSelectedEntityId(null)} />
       <ReviewDetailSheet reviewId={selectedReviewId} onClose={() => setSelectedReviewId(null)} />

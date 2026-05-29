@@ -59,6 +59,12 @@ export interface EnrichmentDeps {
   orgContext?: { orgName?: string; description?: string; industry?: string } | null;
   /** Known product/team entities for extraction prompt. Populated at start of enrichment run. */
   knownEntities?: Array<{ name: string; type: string; description?: string }>;
+  /**
+   * Fires once at the start of the run and once after each file is processed
+   * (success, skip, or failure), with `completed` and `total` reflecting the
+   * pending-file batch. Used by reset/reenrich jobs to surface live progress.
+   */
+  onProgress?: (progress: { phase: string; completed: number; total: number }) => void;
 }
 
 export interface EnrichmentResult {
@@ -169,6 +175,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   }
 
   logger.info({ count: pendingFiles.length }, "Starting enrichment run");
+  deps.onProgress?.({ phase: "enrich", completed: 0, total: pendingFiles.length });
 
   for (let idx = 0; idx < pendingFiles.length; idx++) {
     const file = pendingFiles[idx];
@@ -300,6 +307,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       result.filesFailed++;
 
       await db.updateTable("indexed_files").set({ embedding_status: "failed" }).where("id", "=", file.id).execute();
+    } finally {
+      deps.onProgress?.({ phase: "enrich", completed: idx + 1, total: pendingFiles.length });
     }
   }
 

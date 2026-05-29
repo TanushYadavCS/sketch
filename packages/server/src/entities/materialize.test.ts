@@ -324,6 +324,7 @@ describe("materializeFromFact — llm_relation typed edges", () => {
 
     expect(summary.entitiesCreated).toBe(2);
     expect(summary.materialized).toBe(1);
+    expect(summary.relationshipsWritten).toBe(1);
     const relationship = await db
       .selectFrom("entity_relationships")
       .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")

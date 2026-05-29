@@ -314,6 +314,96 @@ export interface EntityListItem {
   updatedAt: string;
 }
 
+export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
+
+export type ResetCategory = "manual" | "connectors" | "ai";
+
+export type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
+
+export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed";
+
+export type RebuildJobPhase = ResetJobPhase | ReenrichJobPhase;
+
+export interface RebuildJobProgress {
+  phase: string;
+  completed: number;
+  total: number;
+}
+
+export type RebuildJobKind = "reset" | "reenrich";
+
+export interface RebuildJobRequest {
+  categories?: ResetCategory[];
+  scope?: ReenrichScope;
+  runAfter?: boolean;
+}
+
+export interface RebuildJob {
+  id: string;
+  phase: RebuildJobPhase;
+  startedAt: string;
+  finishedAt: string | null;
+  request?: RebuildJobRequest;
+  progress?: RebuildJobProgress;
+  reset?: {
+    deleted: Record<string, number>;
+    factsMarkedUnmaterialized: number;
+  };
+  replay?: {
+    factsRead: number;
+    entitiesCreated: number;
+    entitiesLinked: number;
+    mentionsWritten: number;
+    relationshipsWritten: number;
+    materialized: number;
+  };
+  recreate?: unknown;
+  summary?: {
+    scope?: { fileIds: string[]; missingFileIds: string[] };
+    wipe?: { files: number; mentions: number; factsTombstoned: number };
+    enrichment?: { filesProcessed: number; filesFailed: number };
+    recreate?: {
+      replay?: {
+        entitiesCreated: number;
+        entitiesLinked: number;
+        mentionsWritten: number;
+        relationshipsWritten: number;
+      };
+    };
+  };
+  error?: string;
+}
+
+export interface RebuildJobsResponse {
+  active: boolean;
+  currentJob: RebuildJob | null;
+  latestJob: RebuildJob | null;
+  blockedBy: { code: string; message: string } | null;
+}
+
+export interface ResetSubmitResponse {
+  message: string;
+  job?: { id: string; phase: string; startedAt: string };
+  /** Present only on dry-run. */
+  dryRun?: boolean;
+  entitiesDeleted?: number;
+  candidatesCleared?: number;
+  reviewQueueCleared?: number;
+  reviewEvidenceCleared?: number;
+  rejectionsCleared?: number;
+  factsMarkedUnmaterialized?: number;
+}
+
+export interface ReenrichSubmitResponse {
+  message?: string;
+  /** Present only on dry-run. */
+  dryRun?: boolean;
+  files?: number;
+  missingFileIds?: string[];
+  factsByType?: Record<string, number>;
+  job?: { id: string; phase: string; startedAt: string };
+}
+
 export interface BrowseFlatItem {
   id: string;
   name: string;
@@ -1141,16 +1231,7 @@ export const api = {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
     },
     reset(categories: string[], opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean }) {
-      return request<{
-        message: string;
-        entitiesDeleted: number;
-        candidatesCleared: number;
-        reviewQueueCleared: number;
-        reviewEvidenceCleared: number;
-        rejectionsCleared: number;
-        factsMarkedUnmaterialized: number;
-        job?: { id: string; phase: string; startedAt: string };
-      }>("/api/entities/resets", {
+      return request<ResetSubmitResponse>("/api/entities/resets", {
         method: "POST",
         body: JSON.stringify({
           categories,
@@ -1161,20 +1242,27 @@ export const api = {
       });
     },
     resetJob(id: string) {
-      return request<{
-        id: string;
-        phase: string;
-        startedAt: string;
-        finishedAt: string | null;
-        error?: string;
-      }>(`/api/entities/resets/jobs/${id}`);
+      return request<RebuildJob>(`/api/entities/resets/jobs/${id}`);
     },
     resetJobs() {
-      return request<{
-        active: boolean;
-        currentJob: { id: string; phase: string } | null;
-        latestJob: { id: string; phase: string } | null;
-      }>("/api/entities/resets/jobs");
+      return request<RebuildJobsResponse>("/api/entities/resets/jobs");
+    },
+    reenrich(scope: ReenrichScope, opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean }) {
+      return request<ReenrichSubmitResponse>("/api/entities/reenrichments", {
+        method: "POST",
+        body: JSON.stringify({
+          scope,
+          runAfter: opts?.runAfter ?? true,
+          confirm: opts?.confirm,
+          dryRun: opts?.dryRun,
+        }),
+      });
+    },
+    reenrichJob(id: string) {
+      return request<RebuildJob>(`/api/entities/reenrichments/jobs/${id}`);
+    },
+    reenrichJobs() {
+      return request<RebuildJobsResponse>("/api/entities/reenrichments/jobs");
     },
     update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
       return request<{ entity: EntityListItem }>(`/api/entities/${id}`, {

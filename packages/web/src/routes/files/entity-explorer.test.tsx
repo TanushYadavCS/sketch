@@ -14,7 +14,7 @@ import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, delay } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { EntityExplorer } from "./entity-explorer";
 
@@ -388,5 +388,134 @@ describe("EntityExplorer ECR-03B inline review", () => {
     const candidate = await screen.findByTestId("reconcile-candidate");
     await waitFor(() => expect(candidate).toHaveTextContent("picked@example.com"));
     expect(candidate).not.toHaveTextContent("original@example.com");
+  });
+});
+
+describe("EntityExplorer rebuild dialog", () => {
+  function setupBaseHandlers() {
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+    );
+  }
+
+  it("admin menu shows a single 'Rebuild entities…' item (no separate reset/recreate items)", async () => {
+    const user = userEvent.setup();
+    setupBaseHandlers();
+    renderWithProviders(<EntityExplorer />);
+
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+
+    expect(await screen.findByTestId("rebuild-entities-menu-item")).toHaveTextContent("Rebuild entities");
+    expect(screen.queryByText(/Reset & recreate/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Reset entities/)).not.toBeInTheDocument();
+  });
+
+  it("steps through Categories → Method → Review with the source picker only on re-extract", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+      http.get("/api/connectors/file-counts-by-source", () =>
+        HttpResponse.json({
+          counts: [
+            { source: "clickup", count: 42 },
+            { source: "fireflies", count: 17 },
+          ],
+        }),
+      ),
+    );
+    renderWithProviders(<EntityExplorer />);
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+    await user.click(await screen.findByTestId("rebuild-entities-menu-item"));
+
+    // Step 1: Categories — defaults selected.
+    expect(await screen.findByTestId("rebuild-stepper")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-category-connectors")).toBeChecked();
+    await user.click(screen.getByTestId("rebuild-next"));
+
+    // Step 2: Method — replay is the default; source picker is hidden.
+    expect(await screen.findByTestId("rebuild-method-replay")).toBeChecked();
+    expect(screen.queryByTestId("rebuild-source-picker")).not.toBeInTheDocument();
+
+    // Switch to re-extract; the source picker appears with the real connector list.
+    await user.click(screen.getByTestId("rebuild-method-reextract"));
+    expect(await screen.findByTestId("rebuild-source-picker")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-source-clickup")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-source-fireflies")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("rebuild-back"));
+    expect(screen.getByTestId("rebuild-category-connectors")).not.toBeChecked();
+    expect(screen.getByTestId("rebuild-category-ai")).toBeChecked();
+  });
+
+  it("keeps re-extract disabled until indexed sources are loaded and non-empty", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+      http.get("/api/connectors/file-counts-by-source", async () => {
+        await delay(100);
+        return HttpResponse.json({ counts: [{ source: "clickup", count: 42 }] });
+      }),
+    );
+    renderWithProviders(<EntityExplorer />);
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+    await user.click(await screen.findByTestId("rebuild-entities-menu-item"));
+    await user.click(await screen.findByTestId("rebuild-next"));
+    await user.click(screen.getByTestId("rebuild-method-reextract"));
+
+    expect(screen.getByTestId("rebuild-next")).toBeDisabled();
+    expect(await screen.findByTestId("rebuild-source-clickup")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-next")).not.toBeDisabled();
+  });
+
+  it("keeps re-extract disabled when no indexed sources exist", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+      http.get("/api/connectors/file-counts-by-source", () => HttpResponse.json({ counts: [] })),
+    );
+    renderWithProviders(<EntityExplorer />);
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+    await user.click(await screen.findByTestId("rebuild-entities-menu-item"));
+    await user.click(await screen.findByTestId("rebuild-next"));
+    await user.click(screen.getByTestId("rebuild-method-reextract"));
+
+    expect(await screen.findByText("No connected sources have indexed files.")).toBeInTheDocument();
+    expect(screen.getByTestId("rebuild-next")).toBeDisabled();
+  });
+
+  it("Replay run posts to /resets with runAfter=true and closes the dialog", async () => {
+    const user = userEvent.setup();
+    const recorded: { categories?: string[]; runAfter?: boolean; confirm?: string }[] = [];
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+      http.post("/api/entities/resets", async ({ request }) => {
+        recorded.push((await request.json()) as { categories?: string[]; runAfter?: boolean; confirm?: string });
+        return HttpResponse.json(
+          { message: "Reset started.", job: { id: "j1", phase: "resetting", startedAt: new Date().toISOString() } },
+          { status: 202 },
+        );
+      }),
+    );
+    renderWithProviders(<EntityExplorer />);
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+    await user.click(await screen.findByTestId("rebuild-entities-menu-item"));
+
+    // Step 1 → 2 → 3 with defaults (connectors+ai categories, replay method).
+    await user.click(await screen.findByTestId("rebuild-next"));
+    await user.click(await screen.findByTestId("rebuild-next"));
+    await user.click(await screen.findByTestId("rebuild-run"));
+
+    await waitFor(() => {
+      expect(recorded.length).toBeGreaterThan(0);
+    });
+    expect(recorded[0].runAfter).toBe(true);
+    expect(recorded[0].confirm).toBe("RESET_AND_RECREATE");
+    expect(recorded[0].categories).toEqual(expect.arrayContaining(["connectors", "ai"]));
+    await waitFor(() => expect(screen.queryByTestId("rebuild-run")).not.toBeInTheDocument());
   });
 });

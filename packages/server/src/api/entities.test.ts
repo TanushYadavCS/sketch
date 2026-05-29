@@ -111,7 +111,7 @@ async function seedConnectorFile(db: Kysely<DB>, ownerId: string) {
 }
 
 async function waitForJobDone(app: ReturnType<typeof createApp>, cookie: string, jobId: string): Promise<string> {
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 100; i++) {
     const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: cookie } });
     if (res.status === 200) {
       const body = (await res.json()) as { phase: string };
@@ -120,6 +120,22 @@ async function waitForJobDone(app: ReturnType<typeof createApp>, cookie: string,
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error("job did not finish");
+}
+
+async function runResetAndWait(
+  app: ReturnType<typeof createApp>,
+  cookie: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; jobId?: string; phase?: string }> {
+  const res = await app.request("/api/entities/resets", {
+    method: "POST",
+    headers: { Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status !== 202) return { status: res.status };
+  const json = (await res.json()) as { job: { id: string } };
+  const phase = await waitForJobDone(app, cookie, json.job.id);
+  return { status: res.status, jobId: json.job.id, phase };
 }
 
 describe("POST /api/entities/resets", () => {
@@ -185,12 +201,9 @@ describe("POST /api/entities/resets", () => {
     // Mark all facts as materialized to simulate post-sync state.
     await db.updateTable("indexed_file_facts").set({ materialized_at: new Date().toISOString() }).execute();
 
-    const res = await app.request("/api/entities/resets", {
-      method: "POST",
-      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: ["connectors"] }),
-    });
-    expect(res.status).toBe(200);
+    const result = await runResetAndWait(app, adminCookie, { categories: ["connectors"] });
+    expect(result.status).toBe(202);
+    expect(result.phase).toBe("done");
 
     const connectorFacts = await db
       .selectFrom("indexed_file_facts")
@@ -260,12 +273,9 @@ describe("POST /api/entities/resets", () => {
     });
     await db.updateTable("indexed_file_facts").set({ materialized_at: now }).execute();
 
-    const res = await app.request("/api/entities/resets", {
-      method: "POST",
-      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: ["manual"] }),
-    });
-    expect(res.status).toBe(200);
+    const result = await runResetAndWait(app, adminCookie, { categories: ["manual"] });
+    expect(result.status).toBe(202);
+    expect(result.phase).toBe("done");
 
     const remaining = (await db.selectFrom("entities").select("id").execute()).map((r) => r.id).sort();
     expect(remaining).toEqual(["connector-1"]);
@@ -323,12 +333,9 @@ describe("POST /api/entities/resets", () => {
       })
       .execute();
 
-    const res = await app.request("/api/entities/resets", {
-      method: "POST",
-      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: ["ai"] }),
-    });
-    expect(res.status).toBe(200);
+    const result = await runResetAndWait(app, adminCookie, { categories: ["ai"] });
+    expect(result.status).toBe(202);
+    expect(result.phase).toBe("done");
 
     const person = await db.selectFrom("entities").select("id").where("id", "=", "person-1").executeTakeFirst();
     expect(person).toBeDefined();
@@ -402,12 +409,9 @@ describe("POST /api/entities/resets", () => {
       })
       .execute();
 
-    const res = await app.request("/api/entities/resets", {
-      method: "POST",
-      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: ["ai"] }),
-    });
-    expect(res.status).toBe(200);
+    const result = await runResetAndWait(app, adminCookie, { categories: ["ai"] });
+    expect(result.status).toBe(202);
+    expect(result.phase).toBe("done");
 
     const queue = (await db.selectFrom("entity_review_queue").select("id").execute()).map((r) => r.id).sort();
     expect(queue).toEqual(["review-connector"]);
@@ -656,6 +660,65 @@ describe("POST /api/entities/resets", () => {
       .where("deleted_at", "is", null)
       .executeTakeFirst();
     expect(oneOffAfter?.materialized_at).toBeNull();
+  });
+
+  it("AI reset unmaterializes both llm_extracted and llm_relation facts", async () => {
+    await seedConnectorFile(db, adminId);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      contentHash: "hash",
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: "Acme",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash:Acme",
+      raw: {
+        contentHash: "hash",
+        promptVersion: "llm-extraction-v2",
+        model: "gemini",
+        mention: "Acme",
+        type: "company",
+        variations: [],
+      },
+    });
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: "cfg",
+      createdByUserId: adminId,
+      contentHash: "hash",
+      source: "llm_extraction",
+      factType: "llm_relation",
+      relation: "works_at",
+      subjectName: "Alice",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash:Alice:Acme",
+      raw: {
+        contentHash: "hash",
+        promptVersion: "llm-extraction-v2",
+        model: "gemini",
+        relationType: "works_at",
+        confidence: 0.9,
+        source: { name: "Alice", type: "person", variations: [] },
+        target: { name: "Acme", type: "company", variations: [] },
+      },
+    });
+    await db.updateTable("indexed_file_facts").set({ materialized_at: new Date().toISOString() }).execute();
+
+    const result = await runResetAndWait(app, adminCookie, { categories: ["ai"] });
+    expect(result.status).toBe(202);
+    expect(result.phase).toBe("done");
+
+    const factsAfter = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "materialized_at"])
+      .where("fact_type", "in", ["llm_extracted", "llm_relation"])
+      .execute();
+    expect(factsAfter).toHaveLength(2);
+    expect(factsAfter.every((f) => f.materialized_at === null)).toBe(true);
   });
 
   it("dry-run returns category-scoped counts without writing", async () => {

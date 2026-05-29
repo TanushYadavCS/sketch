@@ -53,6 +53,7 @@ export interface ReplayFactsSummary {
   entitiesLinked: number;
   queued: number;
   mentionsWritten: number;
+  relationshipsWritten: number;
   skipped: number;
 }
 
@@ -89,7 +90,13 @@ export type MaterializeResult =
   | { kind: "entity_linked"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
   | { kind: "queued"; reviewId: string }
   | { kind: "queued_held"; reviewId: string; reason: "llm_ambiguous" | "non_person_collision" | "relation_endpoint" }
-  | { kind: "relationship_materialized"; entitiesCreated: number; entitiesLinked: number; mentionsWritten: number }
+  | {
+      kind: "relationship_materialized";
+      entitiesCreated: number;
+      entitiesLinked: number;
+      mentionsWritten: number;
+      relationshipsWritten: number;
+    }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
@@ -318,6 +325,7 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     summary.entitiesCreated += result.entitiesCreated;
     summary.entitiesLinked += result.entitiesLinked;
     summary.mentionsWritten += result.mentionsWritten;
+    summary.relationshipsWritten += result.relationshipsWritten;
     return;
   }
   if (
@@ -344,6 +352,7 @@ export async function replaySourceFacts(
     entitiesLinked: 0,
     queued: 0,
     mentionsWritten: 0,
+    relationshipsWritten: 0,
     skipped: 0,
   };
 
@@ -371,9 +380,21 @@ export async function replaySourceFacts(
 
 let materializeQueue: Promise<void> = Promise.resolve();
 
+export interface MaterializeProgress {
+  phase: string;
+  completed: number;
+  total: number;
+}
+
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
   factTypes?: IndexedFileFactType[];
+  /**
+   * Fires before processing each fact with `completed = index, total = facts.length`
+   * and after the loop with `completed = total`. Used by the reset/reenrich job
+   * watcher to surface live progress to the rebuild banner in the UI.
+   */
+  onProgress?: (progress: MaterializeProgress) => void;
 }
 
 export async function materializeUnmaterializedFacts(
@@ -408,6 +429,7 @@ async function materializeUnmaterializedFactsInner(
     entitiesLinked: 0,
     queued: 0,
     mentionsWritten: 0,
+    relationshipsWritten: 0,
     skipped: 0,
     materialized: 0,
     deferred: 0,
@@ -430,8 +452,10 @@ async function materializeUnmaterializedFactsInner(
   );
 
   summary.factsRead = facts.length;
+  opts.onProgress?.({ phase: "materialize", completed: 0, total: facts.length });
 
-  for (const fact of facts) {
+  for (let i = 0; i < facts.length; i++) {
+    const fact = facts[i];
     try {
       const result = await materializeFromFact(deps, fact);
       accumulate(summary, result);
@@ -453,6 +477,7 @@ async function materializeUnmaterializedFactsInner(
       summary.skipped++;
       summary.deferred++;
     }
+    opts.onProgress?.({ phase: "materialize", completed: i + 1, total: facts.length });
   }
 
   await cleanupEmptyRelationships(db);
@@ -730,6 +755,7 @@ async function materializeLlmRelationFact(deps: MaterializeDeps, fact: IndexedFi
     entitiesCreated: Number(sourceResult.created) + Number(targetResult.created),
     entitiesLinked: Number(!sourceResult.created) + Number(!targetResult.created),
     mentionsWritten,
+    relationshipsWritten,
   };
 }
 
