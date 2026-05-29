@@ -177,6 +177,11 @@ function FilesPage() {
 
   const allFiles: UnifiedFile[] = filesData?.files ?? [];
   const totalFiles = filesData?.total ?? 0;
+  // Global count of enriched files under the current filters — the badge
+  // used to derive this from the page slice (`allFiles.filter(f =>
+  // f.hasSummary).length`), which underreported once the slice didn't
+  // contain every enriched file. Backend now returns the filtered global.
+  const enrichedTotal = filesData?.enrichedTotal ?? 0;
   const hasMore = filesData?.hasMore ?? false;
 
   const { data: searchData, isFetching: isSearching } = useQuery({
@@ -196,7 +201,6 @@ function FilesPage() {
   // Filtering is now server-side — allFiles already contains filtered results
   const filteredFiles = allFiles;
 
-  const enrichedCount = allFiles.filter((f) => f.hasSummary).length;
   const localFileCount = allFiles.filter((f) => f.source === "local").length;
   const hasAnyFilter = !!(sourceFilter || typeFilter || statusFilter || accessFilter || search.trim());
   const hasClientOnlyFilter = !!(
@@ -245,12 +249,12 @@ function FilesPage() {
               <span>
                 {totalFiles.toLocaleString()} file{totalFiles !== 1 ? "s" : ""}
               </span>
-              {enrichedCount > 0 && (
+              {enrichedTotal > 0 && (
                 <>
                   <span className="text-border">|</span>
                   <span className="flex items-center gap-1">
                     <SparkleIcon size={12} weight="fill" className="text-primary" />
-                    {enrichedCount} enriched
+                    {enrichedTotal} enriched
                   </span>
                 </>
               )}

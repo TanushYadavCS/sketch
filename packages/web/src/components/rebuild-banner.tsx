@@ -1,6 +1,6 @@
-import type { RebuildDialogPrefill } from "@/components/rebuild-dialog";
+import type { GraphRebuildDialogPrefill } from "@/components/graph-rebuild-dialog";
 import type { ActiveRebuildJob, RebuildJobState } from "@/hooks/use-rebuild-job";
-import type { RebuildJob, ResetCategory } from "@/lib/api";
+import type { RebuildJob } from "@/lib/api";
 import { ArrowsClockwiseIcon, CheckCircleIcon, WarningCircleIcon, XIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
@@ -10,9 +10,15 @@ const SUCCESS_AUTO_DISMISS_MS = 10000;
 
 interface RebuildBannerProps {
   state: RebuildJobState;
-  onRetry: (prefill: RebuildDialogPrefill) => void;
+  onRetry: (prefill: GraphRebuildDialogPrefill) => void;
 }
 
+/**
+ * Sticky banner that follows the merged rebuild-job state. Kind-agnostic
+ * — the banner reads `kind` and `phase` off the polled payload and renders
+ * a label, but doesn't branch on the kind. Three job kinds (reset, reenrich,
+ * rebuild) all feed the same flow, so per-kind UI logic would just be drift.
+ */
 export function RebuildBanner({ state, onRetry }: RebuildBannerProps) {
   const [dismissedSuccessJobId, setDismissedSuccessJobId] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
@@ -253,26 +259,12 @@ function formatProgress(job: RebuildJob): string | null {
 function relationsCount(job: RebuildJob): string | null {
   const replay = job.replay ?? job.summary?.recreate?.replay;
   if (!replay) return null;
-  return `${replay.entitiesCreated} entities, ${replay.mentionsWritten} mentions, ${replay.relationshipsWritten} relations written`;
+  return `${replay.entitiesCreated} entities, ${replay.mentionsWritten ?? 0} mentions, ${replay.relationshipsWritten} relations written`;
 }
 
-function prefillFromJob(job: ActiveRebuildJob): RebuildDialogPrefill {
-  const req = job.job.request;
-  if (!req) return {};
-  if (job.kind === "reenrich") {
-    // `fileIds` scopes can't round-trip through the dialog (it only exposes
-    // source pickers), so fall back to all-sources when the original job
-    // used a file-id scope.
-    const scope = req.scope;
-    const sources = scope && "sources" in scope ? scope.sources : undefined;
-    return {
-      categories: ["ai"],
-      method: "reextract",
-      sources,
-    };
-  }
-  return {
-    categories: (req.categories as ResetCategory[] | undefined) ?? ["connectors", "ai"],
-    method: "replay",
-  };
+function prefillFromJob(job: ActiveRebuildJob): GraphRebuildDialogPrefill {
+  // For reenrich failures, default to the re-extract path on retry — the
+  // operator's last intent was an LLM re-extract. For reset/rebuild
+  // failures, no preference (let the user choose at step 2).
+  return { preferReextract: job.kind === "reenrich" };
 }
