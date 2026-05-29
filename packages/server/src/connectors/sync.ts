@@ -15,6 +15,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Entity, type EntityLookup, proposeEntity } from "../entities/propose";
+import { isRecreateActive } from "../entities/recreate-state";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { clearEnrichmentData, runEnrichment } from "./enrichment";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
@@ -36,6 +37,29 @@ const activeSyncs = new Map<string, SyncProgress>();
 
 export function getSyncProgress(): SyncProgress[] {
   return [...activeSyncs.values()];
+}
+
+export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger): Promise<number> {
+  try {
+    const entityRepo = createEntityRepository(db);
+    const users = await db.selectFrom("users").selectAll().execute();
+    for (const user of users) {
+      await entityRepo.upsertPersonEntity({
+        name: user.name,
+        email: user.email ?? undefined,
+        subtype: "internal",
+        source: "team",
+        sourceId: user.id,
+      });
+    }
+    if (users.length > 0) {
+      logger.debug({ count: users.length }, "Team directory entities seeded");
+    }
+    return users.length;
+  } catch (err) {
+    logger.error({ err }, "Failed to seed team directory entities");
+    return 0;
+  }
 }
 
 /**
@@ -114,6 +138,18 @@ function parseAliases(aliases: string | null): string[] {
  * Run a sync for a single connector config.
  */
 export async function runConnectorSync(db: Kysely<DB>, connectorConfigId: string, logger: Logger): Promise<SyncResult> {
+  if (isRecreateActive()) {
+    logger.info({ connectorId: connectorConfigId }, "Skipping connector sync during entity recreate");
+    return {
+      itemsProcessed: 0,
+      itemsCreated: 0,
+      itemsUpdated: 0,
+      itemsArchived: 0,
+      newCursor: null,
+      errors: [],
+    };
+  }
+
   const repo = createConnectorRepository(db);
   const entityRepo = createEntityRepository(db);
   const factRepo = createIndexedFileFactRepository(db);
@@ -810,6 +846,11 @@ async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Pr
  * Called on a schedule (e.g., every 30 minutes).
  */
 export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSchedulerDeps): Promise<void> {
+  if (isRecreateActive()) {
+    logger.info("Skipping scheduled sync during entity recreate");
+    return;
+  }
+
   const repo = createConnectorRepository(db);
 
   // Auto-recover any connector stuck in `syncing` past the staleness threshold —
@@ -828,25 +869,7 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   logger.info({ connectorCount: configs.length }, "Starting scheduled sync run");
 
-  // Seed person entities from team directory (users table)
-  try {
-    const entityRepo = createEntityRepository(db);
-    const users = await db.selectFrom("users").selectAll().execute();
-    for (const user of users) {
-      await entityRepo.upsertPersonEntity({
-        name: user.name,
-        email: user.email ?? undefined,
-        subtype: "internal",
-        source: "team",
-        sourceId: user.id,
-      });
-    }
-    if (users.length > 0) {
-      logger.debug({ count: users.length }, "Team directory entities seeded");
-    }
-  } catch (err) {
-    logger.error({ err }, "Failed to seed team directory entities");
-  }
+  await seedTeamDirectoryEntities(db, logger);
 
   await runWithConcurrency(configs, SYNC_CONCURRENCY, async (config) => {
     try {
