@@ -28,6 +28,7 @@ const TOOL_EMOJI: Record<string, string> = {
   WebFetch: "🌐",
   Skill: "📚",
   SendFileToChat: "📎",
+  TranscribeAudio: "🎙️",
   ManageScheduledTasks: "⏰",
   SearchEntities: "🔍",
   GetEntityContext: "📊",
@@ -46,6 +47,7 @@ const PRIMARY_ARG: Record<string, string> = {
   WebFetch: "url",
   Skill: "skill",
   SendFileToChat: "file_path",
+  TranscribeAudio: "file_path",
   ManageScheduledTasks: "action",
   SearchEntities: "queries",
 };
@@ -66,6 +68,7 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
   WebFetch: { prefix: "Fetching", keys: ["url"], fallback: "Fetching a web page" },
   Skill: { prefix: "Loading skill", keys: ["skill", "name"], fallback: "Loading a skill" },
   SendFileToChat: { prefix: "Sending file", keys: ["file_path"], fallback: "Sending a file" },
+  TranscribeAudio: { prefix: "Transcribing audio", keys: ["file_path"], fallback: "Transcribing audio" },
   ManageScheduledTasks: {
     prefix: "Managing scheduled tasks:",
     keys: ["action"],

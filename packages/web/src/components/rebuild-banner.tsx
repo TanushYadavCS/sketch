@@ -266,7 +266,7 @@ function prefillFromJob(job: ActiveRebuildJob): RebuildDialogPrefill {
     const scope = req.scope;
     const sources = scope && "sources" in scope ? scope.sources : undefined;
     return {
-      categories: ["connectors", "ai"],
+      categories: ["ai"],
       method: "reextract",
       sources,
     };

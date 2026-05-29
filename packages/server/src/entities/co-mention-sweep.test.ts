@@ -144,6 +144,22 @@ describe("sweepCoMentionContributesTo", () => {
     expect(await evidenceRows(db)).toHaveLength(3);
   });
 
+  it("ignores archived files when counting co-mention support", async () => {
+    const personId = await seedEntity(db, "person-archived", "Riya", "person");
+    const projectId = await seedEntity(db, "project-archived", "Atlas", "project");
+    const fileIds = await seedFiles(db, "archived-support", 3);
+    await seedExtractedCoMentions(db, personId, projectId, fileIds);
+    await sweepCoMentionContributesTo(db, createTestLogger(), { threshold: 3 });
+    expect(await relationshipRows(db)).toHaveLength(1);
+
+    await db.updateTable("indexed_files").set({ is_archived: 1 }).where("id", "=", fileIds[0]).execute();
+    const summary = await sweepCoMentionContributesTo(db, createTestLogger(), { threshold: 3 });
+
+    expect(summary.removedRelationships).toBe(1);
+    expect(await relationshipRows(db)).toHaveLength(0);
+    expect(await evidenceRows(db)).toHaveLength(0);
+  });
+
   it("is idempotent and caps confidence below extracted", async () => {
     const personId = await seedEntity(db, "person-cap", "Priya", "person");
     const projectId = await seedEntity(db, "project-cap", "Launch", "project");
