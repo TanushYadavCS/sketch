@@ -61,8 +61,15 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v3";
-const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v4";
+const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>([
+  "person",
+  "company",
+  "product",
+  "project",
+  "feature",
+  "team",
+]);
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -114,6 +121,19 @@ interface SmartEnrichmentDeps {
     mentionCount?: number;
     recentlyActive?: boolean;
   }>;
+  /**
+   * Pre-built markdown block listing meeting attendees with resolved company
+   * affiliations and action-item-owner flags. Prepended to the extraction
+   * prompt so the model sees cross-company evidence that lives only in
+   * attendee metadata. Caller (enrichment.ts) builds via `buildParticipantBlock`.
+   */
+  participantBlock?: string;
+  /**
+   * When set, every LLM call inside this run writes a dump file (prompt + raw
+   * response + token usage) under this directory. Set only by the per-file
+   * "Enrich File" debug path; never set in bulk sync/reset/reenrich runs.
+   */
+  debugDumpDir?: string;
 }
 
 interface FileContext {
@@ -145,6 +165,8 @@ export async function extractEntities(
     mentionCount?: number;
     recentlyActive?: boolean;
   }>,
+  participantBlock?: string,
+  dumpDir?: string,
 ): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
@@ -175,8 +197,10 @@ export async function extractEntities(
       ? `\nKnown entities likely to appear in this file — match these to mentions instead of creating duplicates, and prefer them as relationship endpoints:\n${knownEntities.map(renderKnown).join("\n")}\n`
       : "";
 
+  const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
+
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
-${orgSection}${knownSection}
+${orgSection}${knownSection}${participantSection}
 File: ${file.fileName}
 Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
@@ -185,7 +209,8 @@ Extract entities that a business team would want to track and reference across d
 - **People**: named individuals (employees, clients, contacts)
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
-- **Projects**: named initiatives, campaigns, or programs with a clear scope (e.g., "Paid Member Migration Phase 2", "K8S Migration")
+- **Projects**: named umbrella engagements or programs with a clear scope (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration")
+- **Features**: named deliverables or workstreams that sit *inside* a project or product (e.g., "Visa Data Integration", "Aviation Edge scraper", "Google Trends Connector"). Classify as a feature — not a project — when the work is one component of a larger named project; use \`part_of\` to link it to its parent.
 - **Teams**: named organizational teams (e.g., "QC team", "Content Team")
 
 DO NOT extract:
@@ -202,20 +227,24 @@ DO NOT extract:
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 
-Most relationships in a business corpus follow this shape: **Companies** are clients, partners, or vendors → **Initiatives** (projects, products, features) are owned by a company or team → **People** work on those initiatives, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
+Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Features** are specific deliverables or workstreams inside a project or product → **People and Teams** work on those features and projects, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down, and prefer \`feature\` over \`project\` when the work is clearly one component of a larger named project.
 
 Also extract direct relationships only when the text explicitly supports them.
 
 Valid relationship types:
 - "works_at": person -> company (the person is employed by the company)
-- "engaged_with": person | team -> company (the person/team is working with or for an external company without being employed by it — vendor, consultancy, or client-engagement context)
-- "leads": person -> project | product | team
-- "contributes_to": person -> project | product
+- "engaged_with": person | team | feature -> company (the person/team/feature is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
+- "leads": person -> project | product | feature | team
+- "contributes_to": person | team -> project | product | feature
 - "builds": company -> product
-- "part_of": project -> project, product -> product, team -> company
+- "part_of": project -> project, product -> product, feature -> project | product, team -> company
 - "partner_of": company -> company
 
 Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
+
+Use "part_of" to link a feature to its parent project (or, less commonly, parent product). Example: the "Aviation Edge scraper" feature is part_of the "OW Tourism Dashboard" project.
+
+When a "Meeting participants" block is present above and lists attendees from multiple companies, the cross-company link is itself relationship evidence even when the prose never names the external company. Emit \`engaged_with\` edges from home-company participants who are marked \`[action-item owner]\` to each external company present in the participants block. Treat silent external attendees (no action items) with caution — only emit when the prose corroborates it. Use the participant name and the external company name exactly as they appear in the block as the relation endpoints.
 
 Return one JSON object:
 {
@@ -234,7 +263,7 @@ Return one JSON object:
   ]
 }
 
-Valid types: "person", "project", "company", "product", "team"
+Valid types: "person", "project", "feature", "company", "product", "team"
 
 If no notable entities or relations are found, return { "mentions": [], "relations": [] }.
 
@@ -243,8 +272,9 @@ ${truncatedContent}
 </content>`;
 
   const parsed = await generator.generateJSON<ExtractedMention[] | EntityExtractionResult>(prompt, {
-    maxTokens: 4096,
+    maxTokens: 8192,
     label: `extractEntities:${file.id}`,
+    dumpDir,
   });
   if (Array.isArray(parsed)) {
     return { mentions: parsed, relations: [] };
@@ -478,6 +508,7 @@ export async function generateSummary(
   generator: GeminiGenerator,
   file: FileContext,
   matchedEntities: MatchedEntity[],
+  dumpDir?: string,
 ): Promise<string> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
   const entityContext = matchedEntities
@@ -501,7 +532,7 @@ Write a 2-3 sentence summary focusing on: what this document is about, key decis
 ${truncatedContent}
 </content>`;
 
-  return generator.generate(prompt, { maxTokens: 256, label: `generateSummary:${file.id}` });
+  return generator.generate(prompt, { maxTokens: 256, label: `generateSummary:${file.id}`, dumpDir });
 }
 
 // ── Entity Fact Extraction ───────────────────────────────────────────────
@@ -518,6 +549,7 @@ export async function extractEntityFacts(
   generator: GeminiGenerator,
   file: FileContext,
   matchedEntities: MatchedEntity[],
+  dumpDir?: string,
 ): Promise<Map<string, LearnedFact[]>> {
   if (matchedEntities.length === 0) return new Map();
 
@@ -546,8 +578,9 @@ ${truncatedContent}
   return new Map(
     Object.entries(
       await generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
-        maxTokens: 4096,
+        maxTokens: 8192,
         label: `extractEntityFacts:${file.id}`,
+        dumpDir,
       }),
     ),
   );
@@ -580,7 +613,14 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const t0 = Date.now();
   let extraction: EntityExtractionResult;
   try {
-    extraction = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
+    extraction = await extractEntities(
+      generator,
+      file,
+      deps.orgContext,
+      deps.knownEntities,
+      deps.participantBlock,
+      deps.debugDumpDir,
+    );
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
     throw err;
@@ -607,8 +647,8 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
 
   const t1 = Date.now();
   const [summaryResult, factsResult] = await Promise.allSettled([
-    generateSummary(generator, file, allMatched),
-    extractEntityFacts(generator, file, allMatched),
+    generateSummary(generator, file, allMatched, deps.debugDumpDir),
+    extractEntityFacts(generator, file, allMatched, deps.debugDumpDir),
   ]);
 
   const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;

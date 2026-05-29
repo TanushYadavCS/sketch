@@ -18,12 +18,15 @@ import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { materializeUnmaterializedFacts } from "../entities/materialize";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
 import type { EmbeddingProvider } from "./embeddings/types";
+import { applyEngagementFloor } from "./engagement-floor";
 import { buildFileScopedKnownEntities } from "./file-scope-context";
 import { createGeminiGenerator } from "./gemini-generate";
 import type { GeminiGenerator } from "./gemini-generate";
+import { buildParticipantBlock } from "./participant-block";
 import { smartEnrichFile } from "./smart-enrichment";
 import { extractDatesFromText } from "./tagging";
 
@@ -76,6 +79,12 @@ export interface EnrichmentDeps {
    * pending-file batch. Used by reset/reenrich jobs to surface live progress.
    */
   onProgress?: (progress: { phase: string; completed: number; total: number }) => void;
+  /**
+   * When set, every LLM call inside this enrichment run writes a dump file
+   * (prompt + raw response + token usage) under this directory. Set only by
+   * the per-file "Enrich File" debug endpoint; never set in bulk runs.
+   */
+  debugDumpDir?: string;
 }
 
 export interface EnrichmentResult {
@@ -214,6 +223,10 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 file.id,
                 deps.knownEntities ?? [],
               );
+              const participantBlock = await buildParticipantBlock(
+                { db },
+                { fileId: file.id, fileContent: file.content },
+              );
               await smartEnrichFile(
                 {
                   db,
@@ -222,6 +235,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   embeddingProvider: deps.embeddingProvider,
                   orgContext: deps.orgContext,
                   knownEntities,
+                  participantBlock,
+                  debugDumpDir: deps.debugDumpDir,
                 },
                 {
                   id: file.id,
@@ -236,6 +251,18 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   sourceUpdatedAt: file.source_updated_at,
                 },
               );
+              const floor = await applyEngagementFloor(
+                { db, logger },
+                {
+                  fileId: file.id,
+                  fileContent: file.content,
+                  connectorConfigId: file.connector_config_id,
+                  contentHash: file.content_hash,
+                },
+              );
+              if (floor.emitted > 0) {
+                await materializeUnmaterializedFacts(db, logger);
+              }
             } catch (err) {
               logger.warn(
                 {
@@ -329,6 +356,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       await db.updateTable("indexed_files").set({ embedding_status: "failed" }).where("id", "=", file.id).execute();
     } finally {
       deps.onProgress?.({ phase: "enrich", completed: idx + 1, total: pendingFiles.length });
+      await yieldToEventLoop();
     }
   }
 
@@ -411,8 +439,18 @@ async function enrichTextDocument(
     try {
       const generator = createGeminiGenerator(deps.geminiApiKey);
       const knownEntities = await buildFileScopedKnownEntities({ db, logger }, file.id, deps.knownEntities ?? []);
+      const participantBlock = await buildParticipantBlock({ db }, { fileId: file.id, fileContent: file.content });
       await smartEnrichFile(
-        { db, logger, generator, embeddingProvider, orgContext: deps.orgContext, knownEntities },
+        {
+          db,
+          logger,
+          generator,
+          embeddingProvider,
+          orgContext: deps.orgContext,
+          knownEntities,
+          participantBlock,
+          debugDumpDir: deps.debugDumpDir,
+        },
         {
           id: file.id,
           fileName: file.file_name,
@@ -426,6 +464,18 @@ async function enrichTextDocument(
           sourceUpdatedAt: file.source_updated_at,
         },
       );
+      const floor = await applyEngagementFloor(
+        { db, logger },
+        {
+          fileId: file.id,
+          fileContent: file.content,
+          connectorConfigId: file.connector_config_id,
+          contentHash: file.content_hash,
+        },
+      );
+      if (floor.emitted > 0) {
+        await materializeUnmaterializedFacts(db, logger);
+      }
       usedSmartEnrichment = true;
     } catch (err) {
       smartEnrichmentFailed = true;
@@ -655,8 +705,20 @@ async function linkEntitiesDeterministic(
         relation: "mentioned",
       });
       await entityRepo.updateHotness(entity.id);
+      await yieldToEventLoop();
     }
   }
+}
+
+/**
+ * better-sqlite3 is synchronous, so `await db.x.execute()` only queues a
+ * microtask. Tight loops of sync-backed awaits starve libuv and block
+ * incoming HTTP requests (e.g. the entity drawer hangs while enrichment
+ * runs). `setImmediate` hands control back to the event loop so I/O
+ * callbacks can fire between iterations.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function normalizeDeterministicName(value: string): string {

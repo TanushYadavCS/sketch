@@ -963,7 +963,7 @@ describe("proposeEntity", () => {
     expect(queue).toHaveLength(0);
   });
 
-  it("19. evidenceDomain queues when the domain maps to multiple token-overlapping companies", async () => {
+  it("19. evidenceDomain disambiguates two confirmed companies via deterministic tie-break instead of queueing", async () => {
     const entityRepo = createEntityRepository(db);
     const first = await entityRepo.upsertEntity({
       name: "Canvas Labs",
@@ -977,6 +977,8 @@ describe("proposeEntity", () => {
       subtype: "external",
       status: "confirmed",
     });
+    await db.updateTable("entities").set({ hotness: 10 }).where("id", "=", first.id).execute();
+    await db.updateTable("entities").set({ hotness: 1 }).where("id", "=", second.id).execute();
     await insertTestFile(db, "file-19");
     const entities = await db.selectFrom("entities").selectAll().execute();
     const deps = {
@@ -1000,9 +1002,121 @@ describe("proposeEntity", () => {
       evidenceDomain: "canvas.example",
     });
 
-    expect(result.kind).toBe("queued");
-    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
-    expect(queue.candidate_entity_id).toBeNull();
-    expect(queue.candidate_reason).toBe("exact-ambiguous");
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(first.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("20. exact-name collision across confirmed companies picks the evidenceDomain-mapped winner (OW dedup)", async () => {
+    // Production shape: three OW entities accumulated across syncs
+    // ("Oliver Wyman", "OW", "Oliverwyman" — normalize to overlapping
+    // keys). When extraction emits `engaged_with` against the normalized
+    // form with evidenceDomain "oliverwyman.com", we must NOT queue —
+    // we land the edge on the domain-mapped canonical so the graph
+    // stays connected. Cleanup of the dupes is a separate problem.
+    const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
+    const canonical = await entityRepo.upsertEntity({
+      name: "Oliverwyman",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const ghost = await entityRepo.upsertEntity({
+      name: "Oliver Wyman",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await domainsRepo.upsertDomain({
+      entityId: canonical.id,
+      domain: "oliverwyman.com",
+      kind: "corporate",
+      source: "manual",
+    });
+    // Force both entities into the SAME normalized-name bucket so the
+    // exact-name fast-path collides them. normalizeName collapses
+    // whitespace, so "Oliver Wyman" and "Oliverwyman" already collide
+    // there; we additionally alias the ghost with the canonical form to
+    // exercise the alias-half of the bucket too.
+    await db
+      .updateTable("entities")
+      .set({ aliases: JSON.stringify(["Oliverwyman"]) })
+      .where("id", "=", ghost.id)
+      .execute();
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        getCompanyIdsByDomain: (domain: string) => (domain === "oliverwyman.com" ? [canonical.id] : []),
+      },
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Oliverwyman",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_relation",
+      sourceId: "rel:vedant->oliverwyman",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      evidenceDomain: "oliverwyman.com",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(canonical.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("21. exact-name collision with no evidenceDomain falls back to higher hotness", async () => {
+    // No domain signal available (e.g. extraction from a meeting that
+    // doesn't carry an explicit evidenceDomain, or proposing a non-company
+    // type). Tie-break by hotness — the more-mentioned entity wins. Still
+    // no queue: the cost of queueing is silent edge loss, the cost of a
+    // wrong link is a recoverable mis-attribution.
+    const entityRepo = createEntityRepository(db);
+    const hot = await entityRepo.upsertEntity({
+      name: "Aviation Edge",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const cold = await entityRepo.upsertEntity({
+      name: "Aviation Edge",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await db.updateTable("entities").set({ hotness: 17 }).where("id", "=", hot.id).execute();
+    await db.updateTable("entities").set({ hotness: 0 }).where("id", "=", cold.id).execute();
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Aviation Edge",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:aviation-edge",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(hot.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
   });
 });

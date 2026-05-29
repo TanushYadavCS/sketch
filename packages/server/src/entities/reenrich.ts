@@ -2,11 +2,16 @@ import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { createEmbeddingProvider } from "../connectors/embeddings";
+import { applyEngagementFloor } from "../connectors/engagement-floor";
 import { type EnrichmentDeps, type EnrichmentResult, MAX_FILES_PER_RUN, runEnrichment } from "../connectors/enrichment";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import type { MaterializeProgress } from "./materialize";
-import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "./materialize";
+import {
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeUnmaterializedFacts,
+} from "./materialize";
 import { type RecreateSummary, recreateEntityGraph } from "./recreate";
 import { beginRecreateLock, endRecreateLock } from "./recreate-state";
 
@@ -38,11 +43,17 @@ export interface ReenrichWipeSummary extends ReenrichDryRunSummary {
   factsTombstoned: number;
 }
 
+export interface PostSweepEngagementFloorSummary {
+  filesScanned: number;
+  emitted: number;
+}
+
 export interface ReenrichSummary {
   scope: ResolvedReenrichScope;
   wipe: ReenrichWipeSummary;
   enrichment: EnrichmentResult;
   recreate?: RecreateSummary;
+  engagementFloor?: PostSweepEngagementFloorSummary;
 }
 
 export interface ReenrichDeps {
@@ -409,6 +420,46 @@ export async function runEnrichmentForFileBatches(
   return result;
 }
 
+/**
+ * Bootstrap-case fix for the engagement floor. During per-file enrichment
+ * the floor needs `entity_domains` to resolve attendee email → company,
+ * but on a fresh corpus (or post-wipe state) those rows don't exist yet —
+ * they're populated by `sweepDomainPromotions`, which only runs after all
+ * files have been enriched. So the per-file floor fires while dormant
+ * and silently emits nothing. This helper retries the floor for every
+ * in-scope file once domain promotion has populated `entity_domains`,
+ * catching up the attendee-action-item edges that were silently lost.
+ */
+async function runPostSweepEngagementFloor(
+  db: Kysely<DB>,
+  logger: Logger,
+  fileIds: string[],
+): Promise<PostSweepEngagementFloorSummary> {
+  let emitted = 0;
+  let scanned = 0;
+  for (const fileId of fileIds) {
+    const file = await db
+      .selectFrom("indexed_files")
+      .select(["id", "connector_config_id", "content", "content_hash"])
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    if (!file || !file.content) continue;
+    scanned += 1;
+    const result = await applyEngagementFloor(
+      { db, logger },
+      {
+        fileId: file.id,
+        fileContent: file.content,
+        connectorConfigId: file.connector_config_id,
+        contentHash: file.content_hash,
+      },
+    );
+    emitted += result.emitted;
+  }
+  logger.info({ filesScanned: scanned, emitted }, "post-sweep engagement floor pass complete");
+  return { filesScanned: scanned, emitted };
+}
+
 export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummary> {
   if (!deps.lockAlreadyHeld) beginRecreateLock();
   try {
@@ -455,6 +506,19 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         onProgress: deps.onProgress,
       });
       summary.recreate = recreate;
+
+      const floor = await runPostSweepEngagementFloor(
+        deps.db,
+        deps.logger.child({ phase: "post-sweep-engagement-floor" }),
+        deps.fileIds,
+      );
+      summary.engagementFloor = floor;
+      if (floor.emitted > 0) {
+        await materializeUnmaterializedFacts(deps.db, deps.logger.child({ phase: "post-floor-materialize" }), {
+          llmPromotionThreshold: deps.llmPromotionThreshold,
+          factTypes: [...AI_EXTRACTION_FACT_TYPES],
+        });
+      }
     }
     return summary;
   } finally {

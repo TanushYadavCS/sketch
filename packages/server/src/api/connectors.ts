@@ -1158,13 +1158,19 @@ export function connectorRoutes(
       ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
       : null;
 
-    // Enrich only this specific file
+    // Enrich only this specific file.
+    // This endpoint is the per-file "Enrich File" debug surface — always dump
+    // LLM calls to disk for inspection. Each call gets its own dated subdir
+    // under data/llm-dumps/ so runs don't clobber each other.
+    const dumpStamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const debugDumpDir = `data/llm-dumps/${fileId}__${dumpStamp}`;
     runEnrichment({
       db,
       logger: logger.child({ component: "enrichment", fileId }),
       embeddingProvider,
       geminiApiKey: settings?.gemini_api_key,
       fileIds: [fileId],
+      debugDumpDir,
     }).catch((err) => {
       logger.error({ err, fileId }, "Single file enrichment failed");
     });
