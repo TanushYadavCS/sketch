@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { resolveVisionConfig, validateWorkspaceImagePath } from "./service";
+import { resolveVisionConfig, resolveVisionConfigFromAppConfig, validateWorkspaceVisualPath } from "./service";
 
 describe("resolveVisionConfig", () => {
   it("returns config only when vision is enabled with model and key", () => {
     const result = resolveVisionConfig({
       VISION_ENABLED: "true",
-      VISION_PROVIDER: "xiaomi/mimo-v2.5",
-      VISION_API_KEY: "sk-or-vision",
+      VISION_MODEL: "xiaomi/mimo-v2.5",
+      OPENROUTER_API_KEY: "sk-or-vision",
     } as NodeJS.ProcessEnv);
 
     expect(result).toEqual({ apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" });
@@ -16,36 +16,57 @@ describe("resolveVisionConfig", () => {
     expect(
       resolveVisionConfig({
         VISION_ENABLED: "false",
-        VISION_PROVIDER: "xiaomi/mimo-v2.5",
-        VISION_API_KEY: "sk-or-vision",
+        VISION_MODEL: "xiaomi/mimo-v2.5",
+        OPENROUTER_API_KEY: "sk-or-vision",
       } as NodeJS.ProcessEnv),
     ).toBeNull();
   });
 
   it("returns null when model or key is missing", () => {
     expect(
-      resolveVisionConfig({ VISION_ENABLED: "true", VISION_API_KEY: "sk-or-vision" } as NodeJS.ProcessEnv),
+      resolveVisionConfig({ VISION_ENABLED: "true", OPENROUTER_API_KEY: "sk-or-vision" } as NodeJS.ProcessEnv),
     ).toBeNull();
     expect(
-      resolveVisionConfig({ VISION_ENABLED: "true", VISION_PROVIDER: "xiaomi/mimo-v2.5" } as NodeJS.ProcessEnv),
+      resolveVisionConfig({ VISION_ENABLED: "true", VISION_MODEL: "xiaomi/mimo-v2.5" } as NodeJS.ProcessEnv),
     ).toBeNull();
+  });
+
+  it("does not use legacy vision-specific API key settings", () => {
+    expect(
+      resolveVisionConfig({
+        VISION_ENABLED: "true",
+        VISION_PROVIDER: "xiaomi/mimo-v2.5",
+        VISION_API_KEY: "sk-or-vision",
+      } as NodeJS.ProcessEnv),
+    ).toBeNull();
+  });
+
+  it("resolves app config from VISION_MODEL and OPENROUTER_API_KEY", () => {
+    const result = resolveVisionConfigFromAppConfig({
+      VISION_ENABLED: true,
+      VISION_MODEL: "xiaomi/mimo-v2.5",
+      OPENROUTER_API_KEY: "sk-or-vision",
+    });
+
+    expect(result).toEqual({ apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" });
   });
 });
 
-describe("validateWorkspaceImagePath", () => {
+describe("validateWorkspaceVisualPath", () => {
   it("rejects paths outside the workspace", () => {
-    expect(validateWorkspaceImagePath("/tmp/other/image.png", "/tmp/workspace")).toContain("must be within");
+    expect(validateWorkspaceVisualPath("/tmp/other/image.png", "/tmp/workspace")).toContain("must be within");
   });
 
   it("rejects sibling paths with the same prefix", () => {
-    expect(validateWorkspaceImagePath("/tmp/workspace-evil/image.png", "/tmp/workspace")).toContain("must be within");
+    expect(validateWorkspaceVisualPath("/tmp/workspace-evil/image.png", "/tmp/workspace")).toContain("must be within");
   });
 
-  it("rejects unsupported extensions", () => {
-    expect(validateWorkspaceImagePath("/tmp/workspace/file.txt", "/tmp/workspace")).toContain("supported image");
+  it("accepts generic paths inside the workspace so file bytes can determine support", () => {
+    expect(validateWorkspaceVisualPath("/tmp/workspace/image.bin", "/tmp/workspace")).toBeNull();
+    expect(validateWorkspaceVisualPath("/tmp/workspace/12345_file", "/tmp/workspace")).toBeNull();
   });
 
   it("accepts supported image extensions inside the workspace", () => {
-    expect(validateWorkspaceImagePath("/tmp/workspace/screenshot.png", "/tmp/workspace")).toBeNull();
+    expect(validateWorkspaceVisualPath("/tmp/workspace/screenshot.png", "/tmp/workspace")).toBeNull();
   });
 });

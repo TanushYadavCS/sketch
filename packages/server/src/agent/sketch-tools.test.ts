@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Selectable } from "kysely";
@@ -179,6 +179,47 @@ describe("createSketchMcpServer", () => {
       question: "What is in this image?",
     });
     expect(result.content[0].text).toContain("must be within");
+  });
+
+  it("VisualAnalysis accepts image files without image extensions", async () => {
+    const imagePath = join(tmpDir, "image.bin");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: "The file is a PNG image." } }],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const collector = new UploadCollector();
+      const server = createSketchMcpServer({
+        uploadCollector: collector,
+        workspaceDir: tmpDir,
+        visionAnalysisEnabled: true,
+        visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+      });
+      const tools = (
+        server.instance as unknown as {
+          _registeredTools: Record<
+            string,
+            { handler: (input: { file_path: string; question: string }) => Promise<{ content: { text: string }[] }> }
+          >;
+        }
+      )._registeredTools;
+
+      const result = await tools.VisualAnalysis.handler({
+        file_path: imagePath,
+        question: "What is this?",
+      });
+
+      expect(result.content[0].text).toBe("The file is a PNG image.");
+      const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+      expect(body.messages[0].content[1].image_url.url).toMatch(/^data:image\/png;base64,/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

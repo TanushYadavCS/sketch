@@ -4,7 +4,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
 import type { Logger } from "../../logger";
 import type { VisionConfig } from "../../vision/service";
-import { analyzeImageFile, validateWorkspaceImagePath } from "../../vision/service";
+import { analyzeImageFile, validateWorkspaceVisualPath } from "../../vision/service";
 
 const fallbackLogger = {
   info: () => {},
@@ -26,7 +26,7 @@ export function createVisualAnalysisTool(deps: VisualAnalysisToolDeps) {
       question: z.string().describe("The specific visual question to answer about the file"),
     },
     async ({ file_path, question }) => {
-      const pathError = validateWorkspaceImagePath(file_path, deps.absWorkspace);
+      const pathError = validateWorkspaceVisualPath(file_path, deps.absWorkspace);
       if (pathError) {
         return { content: [{ type: "text" as const, text: pathError }] };
       }

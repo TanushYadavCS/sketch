@@ -37,14 +37,16 @@ describe("configSchema", () => {
     it("parses vision analysis environment settings", () => {
       const result = configSchema.safeParse({
         VISION_ENABLED: "true",
-        VISION_PROVIDER: "xiaomi/mimo-v2.5",
-        VISION_API_KEY: "sk-or-vision",
+        VISION_MODEL: "xiaomi/mimo-v2.5",
+        OPENROUTER_API_KEY: "sk-or-vision",
       });
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.VISION_ENABLED).toBe(true);
-        expect(result.data.VISION_PROVIDER).toBe("xiaomi/mimo-v2.5");
-        expect(result.data.VISION_API_KEY).toBe("sk-or-vision");
+        expect(result.data.VISION_MODEL).toBe("xiaomi/mimo-v2.5");
+        expect(result.data.OPENROUTER_API_KEY).toBe("sk-or-vision");
+        expect("VISION_PROVIDER" in result.data).toBe(false);
+        expect("VISION_API_KEY" in result.data).toBe(false);
       }
     });
 

@@ -31,8 +31,8 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("false")
     .transform((v) => v === "true" || v === "1"),
-  VISION_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
-  VISION_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Slack mode
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
