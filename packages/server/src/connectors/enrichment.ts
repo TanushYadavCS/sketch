@@ -21,6 +21,7 @@ import type { DB } from "../db/schema";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
 import type { EmbeddingProvider } from "./embeddings/types";
+import { buildFileScopedKnownEntities } from "./file-scope-context";
 import { createGeminiGenerator } from "./gemini-generate";
 import type { GeminiGenerator } from "./gemini-generate";
 import { smartEnrichFile } from "./smart-enrichment";
@@ -57,8 +58,18 @@ export interface EnrichmentDeps {
   fileIds?: string[];
   /** Org context for enrichment prompts. Populated at start of enrichment run. */
   orgContext?: { orgName?: string; description?: string; industry?: string } | null;
-  /** Known product/team entities for extraction prompt. Populated at start of enrichment run. */
-  knownEntities?: Array<{ name: string; type: string; description?: string }>;
+  /**
+   * Org-wide baseline of confirmed entities (products + teams) used as a
+   * fallback when a file has no resolvable anchors. The per-file scoped list
+   * is built on top of this by `buildFileScopedKnownEntities`.
+   */
+  knownEntities?: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }>;
   /**
    * Fires once at the start of the run and once after each file is processed
    * (success, skip, or failure), with `completed` and `total` reflecting the
@@ -167,7 +178,11 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     );
   }
 
-  const pendingFiles = await query.limit(MAX_FILES_PER_RUN).execute();
+  const pendingFiles = await query
+    .orderBy("source_created_at", "asc")
+    .orderBy("id", "asc")
+    .limit(MAX_FILES_PER_RUN)
+    .execute();
 
   if (pendingFiles.length === 0) {
     logger.debug("No files pending enrichment");
@@ -194,6 +209,11 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
           if (wordCount >= 100) {
             try {
               const generator = createGeminiGenerator(deps.geminiApiKey);
+              const knownEntities = await buildFileScopedKnownEntities(
+                { db, logger },
+                file.id,
+                deps.knownEntities ?? [],
+              );
               await smartEnrichFile(
                 {
                   db,
@@ -201,7 +221,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   generator,
                   embeddingProvider: deps.embeddingProvider,
                   orgContext: deps.orgContext,
-                  knownEntities: deps.knownEntities,
+                  knownEntities,
                 },
                 {
                   id: file.id,
@@ -390,8 +410,9 @@ async function enrichTextDocument(
   if (deps.geminiApiKey && wordCount >= 100) {
     try {
       const generator = createGeminiGenerator(deps.geminiApiKey);
+      const knownEntities = await buildFileScopedKnownEntities({ db, logger }, file.id, deps.knownEntities ?? []);
       await smartEnrichFile(
-        { db, logger, generator, embeddingProvider, orgContext: deps.orgContext, knownEntities: deps.knownEntities },
+        { db, logger, generator, embeddingProvider, orgContext: deps.orgContext, knownEntities },
         {
           id: file.id,
           fileName: file.file_name,

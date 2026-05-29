@@ -14,7 +14,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
-import { handleCandidates, smartEnrichFile } from "./smart-enrichment";
+import { extractEntities, handleCandidates, smartEnrichFile } from "./smart-enrichment";
 
 async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
   await db
@@ -415,5 +415,101 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     expect(facts).toHaveLength(3);
     expect(facts.every((f) => f.deleted_at === null)).toBe(true);
     expect(facts.map((f) => f.subject_name).sort()).toEqual(["Acme Corp", "Apollo", "Sarah Chen"]);
+  });
+
+  it("persists and materializes engaged_with (person -> company) via v3 prompt", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "Vedant Parikh", type: "person", variations: ["Vedant"], confidence: 0.95 },
+              { mention: "Oliver Wyman", type: "company", variations: ["OW"], confidence: 0.93 },
+            ],
+            relations: [
+              {
+                type: "engaged_with",
+                source: { name: "Vedant Parikh", type: "person", variations: ["Vedant"] },
+                target: { name: "Oliver Wyman", type: "company", variations: ["OW"] },
+                confidence: 0.92,
+                context: "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-engaged-with",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .select(["relation", "subject_name"])
+      .where("indexed_file_id", "=", fileId)
+      .where("fact_type", "=", "llm_relation")
+      .executeTakeFirstOrThrow();
+    expect(fact).toEqual({ relation: "engaged_with", subject_name: "Vedant Parikh" });
+
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as src", "target.name as tgt"])
+      .executeTakeFirstOrThrow();
+    expect(relationship).toEqual({
+      relationship_type: "engaged_with",
+      src: "Vedant Parikh",
+      tgt: "Oliver Wyman",
+    });
+  });
+});
+
+describe("extractEntities prompt — v3 hierarchy + engaged_with", () => {
+  it("renders the hierarchy paragraph and engaged_with verb in the prompt body", async () => {
+    let capturedPrompt = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        capturedPrompt = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(generator, {
+      id: "f-prompt",
+      fileName: "ow-canvas-standup.txt",
+      content: "transcript body",
+      contentCategory: "document",
+      source: "fireflies",
+      sourcePath: "/",
+      contentHash: null,
+      connectorConfigId: "conn-smart",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+
+    expect(capturedPrompt).toContain("Companies");
+    expect(capturedPrompt).toContain("Initiatives");
+    expect(capturedPrompt).toContain("Prefer extracting from the top down");
+    expect(capturedPrompt).toContain('"engaged_with"');
+    expect(capturedPrompt).toContain("without being employed by it");
   });
 });

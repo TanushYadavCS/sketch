@@ -36,7 +36,15 @@ export function configureMaterializeDefaults(opts: { llmPromotionThreshold?: num
 const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team"] as const;
 type NonPersonMentionType = (typeof NON_PERSON_MENTION_TYPES)[number];
 type MentionType = "person" | NonPersonMentionType;
-const RELATION_TYPES = ["works_at", "leads", "contributes_to", "builds", "part_of", "partner_of"] as const;
+const RELATION_TYPES = [
+  "works_at",
+  "engaged_with",
+  "leads",
+  "contributes_to",
+  "builds",
+  "part_of",
+  "partner_of",
+] as const;
 
 function normalizeMentionType(raw: unknown): MentionType | null {
   if (typeof raw !== "string") return null;
@@ -663,6 +671,9 @@ function relationDirectionAllowed(
   targetType: MentionType,
 ): boolean {
   if (relationType === "works_at") return sourceType === "person" && targetType === "company";
+  if (relationType === "engaged_with") {
+    return (sourceType === "person" || sourceType === "team") && targetType === "company";
+  }
   if (relationType === "leads") {
     return sourceType === "person" && (targetType === "project" || targetType === "product" || targetType === "team");
   }
