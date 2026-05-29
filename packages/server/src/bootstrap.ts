@@ -122,10 +122,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
         allowOrgSharedEnv: params.claudeConfigDir !== undefined,
       }),
     );
+    const loadTranscriptionSettings = params.loadTranscriptionSettings ?? (() => settingsRepo.get());
+    const transcriptionSettings =
+      params.visionConfig === undefined || params.visionConfig === null
+        ? await loadTranscriptionSettings().catch((err) => {
+            logger.warn({ err }, "Failed to load settings for visual analysis config");
+            return null;
+          })
+        : null;
     const enrichedParams = {
       ...params,
-      loadTranscriptionSettings: params.loadTranscriptionSettings ?? (() => settingsRepo.get()),
-      visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config),
+      loadTranscriptionSettings,
+      visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

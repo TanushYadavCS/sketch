@@ -2,6 +2,41 @@ import { describe, expect, it } from "vitest";
 import { resolveVisionConfig, resolveVisionConfigFromAppConfig, validateWorkspaceVisualPath } from "./service";
 
 describe("resolveVisionConfig", () => {
+  it("uses openrouter_bedrock DB key before OPENROUTER_API_KEY", () => {
+    const result = resolveVisionConfig(
+      {
+        VISION_ENABLED: "true",
+        VISION_MODEL: "xiaomi/mimo-v2.5",
+        OPENROUTER_API_KEY: "sk-env",
+      } as NodeJS.ProcessEnv,
+      { llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" },
+    );
+
+    expect(result).toEqual({
+      apiKey: "sk-db",
+      model: "xiaomi/mimo-v2.5",
+      source: "db",
+      providerMode: "openrouter_bedrock",
+    });
+  });
+
+  it("uses openrouter DB key", () => {
+    const result = resolveVisionConfig(
+      {
+        VISION_ENABLED: "true",
+        VISION_MODEL: "xiaomi/mimo-v2.5",
+      } as NodeJS.ProcessEnv,
+      { llm_provider: "openrouter", anthropic_api_key: "sk-db" },
+    );
+
+    expect(result).toEqual({
+      apiKey: "sk-db",
+      model: "xiaomi/mimo-v2.5",
+      source: "db",
+      providerMode: "openrouter",
+    });
+  });
+
   it("returns config only when vision is enabled with model and key", () => {
     const result = resolveVisionConfig({
       VISION_ENABLED: "true",
@@ -9,7 +44,12 @@ describe("resolveVisionConfig", () => {
       OPENROUTER_API_KEY: "sk-or-vision",
     } as NodeJS.ProcessEnv);
 
-    expect(result).toEqual({ apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" });
+    expect(result).toEqual({
+      apiKey: "sk-or-vision",
+      model: "xiaomi/mimo-v2.5",
+      source: "env",
+      providerMode: "env",
+    });
   });
 
   it("returns null when vision is disabled", () => {
@@ -48,7 +88,30 @@ describe("resolveVisionConfig", () => {
       OPENROUTER_API_KEY: "sk-or-vision",
     });
 
-    expect(result).toEqual({ apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" });
+    expect(result).toEqual({
+      apiKey: "sk-or-vision",
+      model: "xiaomi/mimo-v2.5",
+      source: "env",
+      providerMode: "env",
+    });
+  });
+
+  it("resolves app config from DB before OPENROUTER_API_KEY", () => {
+    const result = resolveVisionConfigFromAppConfig(
+      {
+        VISION_ENABLED: true,
+        VISION_MODEL: "xiaomi/mimo-v2.5",
+        OPENROUTER_API_KEY: "sk-env",
+      },
+      { llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" },
+    );
+
+    expect(result).toEqual({
+      apiKey: "sk-db",
+      model: "xiaomi/mimo-v2.5",
+      source: "db",
+      providerMode: "openrouter_bedrock",
+    });
   });
 });
 

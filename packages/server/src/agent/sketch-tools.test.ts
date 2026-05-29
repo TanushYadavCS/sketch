@@ -151,7 +151,12 @@ describe("createSketchMcpServer", () => {
       uploadCollector: collector,
       workspaceDir: tmpDir,
       visionAnalysisEnabled: true,
-      visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+      visionConfig: {
+        apiKey: "sk-or-vision",
+        model: "xiaomi/mimo-v2.5",
+        source: "env",
+        providerMode: "env",
+      },
     });
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(tools.VisualAnalysis).toBeDefined();
@@ -163,7 +168,12 @@ describe("createSketchMcpServer", () => {
       uploadCollector: collector,
       workspaceDir: tmpDir,
       visionAnalysisEnabled: true,
-      visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+      visionConfig: {
+        apiKey: "sk-or-vision",
+        model: "xiaomi/mimo-v2.5",
+        source: "env",
+        providerMode: "env",
+      },
     });
     const tools = (
       server.instance as unknown as {
@@ -198,7 +208,12 @@ describe("createSketchMcpServer", () => {
         uploadCollector: collector,
         workspaceDir: tmpDir,
         visionAnalysisEnabled: true,
-        visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+        visionConfig: {
+          apiKey: "sk-or-vision",
+          model: "xiaomi/mimo-v2.5",
+          source: "env",
+          providerMode: "env",
+        },
       });
       const tools = (
         server.instance as unknown as {

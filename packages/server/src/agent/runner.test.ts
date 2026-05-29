@@ -368,7 +368,12 @@ describe("runAgent", () => {
               sizeBytes: 4,
             },
           ],
-          visionConfig: { apiKey: "sk-or-vision", model: "xiaomi/mimo-v2.5", source: "env" },
+          visionConfig: {
+            apiKey: "sk-or-vision",
+            model: "xiaomi/mimo-v2.5",
+            source: "env",
+            providerMode: "env",
+          },
         }),
       );
 
@@ -380,6 +385,34 @@ describe("runAgent", () => {
       expect(result.nonImageCount).toBe(0);
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves visual analysis config from OpenRouter DB settings", async () => {
+    const { createSketchMcpServer } = await import("./sketch-tools");
+    vi.stubEnv("VISION_ENABLED", "true");
+    vi.stubEnv("VISION_MODEL", "xiaomi/mimo-v2.5");
+    vi.stubEnv("OPENROUTER_API_KEY", "sk-env");
+    vi.mocked(createSketchMcpServer).mockClear();
+
+    try {
+      await runAgent(
+        makeBaseParams({
+          loadTranscriptionSettings: vi.fn().mockResolvedValue({
+            llm_provider: "openrouter_bedrock",
+            anthropic_api_key: "sk-db",
+          }),
+        }),
+      );
+
+      expect(vi.mocked(createSketchMcpServer).mock.calls.at(-1)?.[0].visionConfig).toMatchObject({
+        apiKey: "sk-db",
+        model: "xiaomi/mimo-v2.5",
+        source: "db",
+        providerMode: "openrouter_bedrock",
+      });
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 

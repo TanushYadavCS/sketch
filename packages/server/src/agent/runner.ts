@@ -28,7 +28,7 @@ import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import type { TranscriptionSettings } from "../transcription/service";
-import { resolveTranscriptionConfigFromDeps } from "../transcription/service";
+import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
 import { createCanUseTool } from "./permissions";
@@ -226,13 +226,14 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return [];
   });
 
-  const transcriptionConfig = await resolveTranscriptionConfigFromDeps({
-    loadSettings: params.loadTranscriptionSettings,
-  }).catch((err) => {
-    logger.warn({ err }, "Failed to resolve transcription config");
-    return null;
-  });
-  const visionConfig = params.visionConfig ?? resolveVisionConfig();
+  const transcriptionSettings = params.loadTranscriptionSettings
+    ? await params.loadTranscriptionSettings().catch((err) => {
+        logger.warn({ err }, "Failed to load transcription settings");
+        return null;
+      })
+    : null;
+  const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
+  const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
 
   const systemAppend = buildSystemContext({
     platform: params.platform,
