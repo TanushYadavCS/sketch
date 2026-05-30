@@ -566,6 +566,71 @@ describe("web chat API", () => {
     ]);
   });
 
+  it("preserves overlapping turns in the same conversation", async () => {
+    const admin = await seedAdmin(db);
+    const bothRunsStarted = deferred<void>();
+    let startedRuns = 0;
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      startedRuns += 1;
+      if (startedRuns === 2) bothRunsStarted.resolve();
+      await bothRunsStarted.promise;
+      return makeAgentResult(`Reply to ${params.userMessage.includes("first") ? "first" : "second"}`);
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const first = app.request("/api/web-chat?conversationId=chat-overlap", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "user-msg-first",
+          role: "user",
+          parts: [{ type: "text", text: "first request" }],
+        },
+      }),
+    });
+    const second = app.request("/api/web-chat?conversationId=chat-overlap", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "user-msg-second",
+          role: "user",
+          parts: [{ type: "text", text: "second request" }],
+        },
+      }),
+    });
+
+    const responses = await Promise.all([first, second]);
+    expect(responses.map((res) => res.status)).toEqual([200, 200]);
+    await Promise.all(responses.map((res) => res.text()));
+
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-overlap"), "utf-8"),
+    ) as {
+      messages: Array<{ id: string; role: string; parts: Array<{ type: string; text?: string }> }>;
+    };
+    expect(transcript.messages.map((message) => message.id)).toEqual(
+      expect.arrayContaining(["user-msg-first", "user-msg-second"]),
+    );
+    expect(
+      transcript.messages.filter((message) => message.role === "assistant").map((message) => message.parts[0]),
+    ).toEqual(
+      expect.arrayContaining([
+        { type: "text", text: "Reply to first" },
+        { type: "text", text: "Reply to second" },
+      ]),
+    );
+    expect(transcript.messages.some((message) => message.parts.some((part) => part.type === "data-progress"))).toBe(
+      false,
+    );
+  });
+
   it("returns and updates in-progress web chat state while an agent run is pending", async () => {
     const admin = await seedAdmin(db);
     const paramsSeen = deferred<RunAgentParams>();

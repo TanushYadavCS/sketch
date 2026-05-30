@@ -228,10 +228,32 @@ async function webChatFileForUpload(workspaceDir: string, filePath: string): Pro
 
 const DEFAULT_WEB_CHAT_CONVERSATION_ID = "default";
 const WEB_CHAT_CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+const webChatTranscriptLocks = new Map<string, Promise<void>>();
 
 function normalizeWebChatConversationId(value: string | null | undefined): string | null {
   const id = (value ?? DEFAULT_WEB_CHAT_CONVERSATION_ID).trim();
   return WEB_CHAT_CONVERSATION_ID_RE.test(id) ? id : null;
+}
+
+async function withWebChatTranscriptLock<T>(userId: string, conversationId: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${userId}:${conversationId}`;
+  const previous = webChatTranscriptLocks.get(key) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const current = new Promise<void>((resolveLock) => {
+    release = resolveLock;
+  });
+  const tail = previous.catch(() => undefined).then(() => current);
+  webChatTranscriptLocks.set(key, tail);
+
+  await previous.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (webChatTranscriptLocks.get(key) === tail) {
+      webChatTranscriptLocks.delete(key);
+    }
+  }
 }
 
 function webChatTranscriptDir(config: Config, userId: string): string {
@@ -447,18 +469,20 @@ async function appendWebChatPendingTurn(
   userMessage: WebChatTranscriptMessage,
   progressMessage: WebChatTranscriptMessage,
 ): Promise<void> {
-  const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-  const next = [...existing];
-  if (!next.some((message) => message.id === userMessage.id)) {
-    next.push(userMessage);
-  }
-  const progressIndex = next.findIndex((message) => message.id === progressMessage.id);
-  if (progressIndex === -1) {
-    next.push(progressMessage);
-  } else {
-    next[progressIndex] = progressMessage;
-  }
-  await writeWebChatTranscript(config, userId, conversationId, next);
+  await withWebChatTranscriptLock(userId, conversationId, async () => {
+    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
+    const next = [...existing];
+    if (!next.some((message) => message.id === userMessage.id)) {
+      next.push(userMessage);
+    }
+    const progressIndex = next.findIndex((message) => message.id === progressMessage.id);
+    if (progressIndex === -1) {
+      next.push(progressMessage);
+    } else {
+      next[progressIndex] = progressMessage;
+    }
+    await writeWebChatTranscript(config, userId, conversationId, next);
+  });
 }
 
 async function updateWebChatProgressMessage(
@@ -470,16 +494,18 @@ async function updateWebChatProgressMessage(
   progressMessageId: string,
   lines: string[],
 ): Promise<void> {
-  const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-  if (!existing.some((message) => message.id === progressMessageId)) return;
-  await writeWebChatTranscript(
-    config,
-    userId,
-    conversationId,
-    existing.map((message) =>
-      message.id === progressMessageId ? createProgressTranscriptMessage(progressMessageId, lines) : message,
-    ),
-  );
+  await withWebChatTranscriptLock(userId, conversationId, async () => {
+    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
+    if (!existing.some((message) => message.id === progressMessageId)) return;
+    await writeWebChatTranscript(
+      config,
+      userId,
+      conversationId,
+      existing.map((message) =>
+        message.id === progressMessageId ? createProgressTranscriptMessage(progressMessageId, lines) : message,
+      ),
+    );
+  });
 }
 
 async function completeWebChatProgressMessage(
@@ -491,14 +517,16 @@ async function completeWebChatProgressMessage(
   progressMessageId: string,
   assistantMessage: WebChatTranscriptMessage | null,
 ): Promise<void> {
-  const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-  const withoutProgress = existing.filter((message) => message.id !== progressMessageId);
-  await writeWebChatTranscript(
-    config,
-    userId,
-    conversationId,
-    assistantMessage ? [...withoutProgress, assistantMessage] : withoutProgress,
-  );
+  await withWebChatTranscriptLock(userId, conversationId, async () => {
+    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
+    const withoutProgress = existing.filter((message) => message.id !== progressMessageId);
+    await writeWebChatTranscript(
+      config,
+      userId,
+      conversationId,
+      assistantMessage ? [...withoutProgress, assistantMessage] : withoutProgress,
+    );
+  });
 }
 
 function textFromTranscriptMessage(message: WebChatTranscriptMessage): string {
