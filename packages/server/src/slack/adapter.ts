@@ -28,7 +28,7 @@ import type { createAutomationRunsRepository } from "../db/repositories/automati
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createChannelRepository } from "../db/repositories/channels";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
-import type { createSettingsRepository } from "../db/repositories/settings";
+import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
@@ -44,6 +44,7 @@ import {
 } from "../progress-settings";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
+import { transcribeEagerAttachments } from "../transcription/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile } from "./bot";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
@@ -389,11 +390,15 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       const workspaceDir = await ensureWorkspace(config, user.id);
       const settingsRow = await repos.settings.get();
 
-      const attachments = await downloadMessageAttachments({
+      let attachments = await downloadMessageAttachments({
         files: message.files,
         workspaceDir,
         botToken: settingsRow?.slack_bot_token,
         maxBytes: maxFileBytes,
+        logger,
+      });
+      attachments = await transcribeEagerAttachments(attachments, {
+        loadSettings: () => repos.settings.get(),
         logger,
       });
 
@@ -442,6 +447,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           onProgressEvent,
           ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
           orgName: settingsRow?.org_name,
+          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
@@ -502,7 +508,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
     let downloadedAttachments: Attachment[] = [];
     if (message.files?.length) {
-      const workspaceDir = await ensureChannelWorkspace(config, message.channelId);
+      const channel = await repos.channels.findBySlackChannelId(message.channelId);
+      const boundAgent = channel?.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
+      const workspaceDir = boundAgent
+        ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${message.channelId}`)
+        : await ensureChannelWorkspace(config, message.channelId);
       const attachDir = join(workspaceDir, "attachments");
       const maxBytes = maxFileBytes;
       const settingsRow = await repos.settings.get();
@@ -518,7 +528,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
     slackDeps.threadBuffer.append(message.channelId, message.threadTs, {
       userName: userInfo.realName,
-      text: message.text,
+      text: message.text || (downloadedAttachments.length > 0 ? "See attached files." : ""),
       ts: message.ts,
       ...(downloadedAttachments.length > 0 && { attachments: downloadedAttachments }),
     });
@@ -628,11 +638,15 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
         slackDeps.threadBuffer.register(message.channelId, threadTs);
 
-        const attachments = await downloadMessageAttachments({
+        let attachments = await downloadMessageAttachments({
           files: message.files,
           workspaceDir,
           botToken: settingsRow?.slack_bot_token,
           maxBytes: maxFileBytes,
+          logger,
+        });
+        attachments = await transcribeEagerAttachments(attachments, {
+          loadSettings: () => repos.settings.get(),
           logger,
         });
 
@@ -710,6 +724,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           onProgressEvent,
           threadTs,
           orgName: settingsRow?.org_name,
+          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,

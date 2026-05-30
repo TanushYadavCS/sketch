@@ -1,8 +1,8 @@
-import { api } from "@/lib/api";
 /**
  * App sidebar — navigation, branding, and user actions.
  * Follows the designer's sidebar structure with Phosphor icons.
  */
+import { api } from "@/lib/api";
 import {
   ArrowSquareOutIcon,
   BrainIcon,
@@ -54,6 +54,10 @@ interface NavItem {
   href: string;
   disabled?: boolean;
   adminOnly?: boolean;
+  /** Render only when `setupStatus.experimentalFlag === true`. */
+  experimentalOnly?: boolean;
+  /** Optional render-prop for a trailing element (e.g. a count badge). */
+  trailing?: React.ReactNode;
 }
 
 const allPrimaryNav: NavItem[] = [
@@ -97,7 +101,12 @@ export function AppSidebar({
     queryFn: () => api.setup.status(),
   });
 
-  const primaryNav = allPrimaryNav.filter((item) => !item.adminOnly || role === "admin");
+  const experimentalEnabled = setupStatus?.experimentalFlag === true;
+  const primaryNav = allPrimaryNav.filter((item) => {
+    if (item.adminOnly && role !== "admin") return false;
+    if (item.experimentalOnly && !experimentalEnabled) return false;
+    return true;
+  });
   const roleLabel = formatRole(role);
 
   const logoutMutation = useMutation({
@@ -143,7 +152,7 @@ export function AppSidebar({
                     tooltip={item.label}
                   >
                     {item.icon}
-                    <span>{item.label}</span>
+                    <span className="flex-1">{item.label}</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}

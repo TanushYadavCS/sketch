@@ -218,6 +218,79 @@ describe("Scheduled Tasks API", () => {
     );
   });
 
+  it("returns schedule trigger metadata from canonical schedule columns", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
+
+    await tasks.add({
+      id: "task-stale-trigger",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Check inbox",
+      schedule_type: "cron",
+      schedule_value: "*/10 * * * *",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: member.id,
+      status: "active",
+      next_run_at: null,
+      steps: JSON.stringify([
+        {
+          id: "trigger",
+          type: "trigger",
+          label: "Every 5 minutes",
+          icon: "clock",
+          position: { x: 0, y: 0 },
+          triggerConfig: {
+            type: "schedule",
+            scheduleType: "cron",
+            scheduleValue: "*/5 * * * *",
+            timezone: "UTC",
+          },
+        },
+        {
+          id: "agent1",
+          type: "agent",
+          label: "Check inbox",
+          icon: "sketch-ai",
+          position: { x: 0, y: 100 },
+        },
+      ]),
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    const task = body.tasks[0];
+    const steps = JSON.parse(task.steps);
+    expect(task.scheduleValue).toBe("*/10 * * * *");
+    expect(task.triggerConfig).toEqual(
+      expect.objectContaining({
+        type: "schedule",
+        scheduleType: "cron",
+        scheduleValue: "*/10 * * * *",
+        timezone: "UTC",
+      }),
+    );
+    expect(steps[0].label).toBe("Every 10 minutes");
+    expect(steps[0].triggerConfig.scheduleValue).toBe("*/10 * * * *");
+  });
+
   it("members see only their own tasks; admins see all", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
@@ -236,7 +309,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: alice.id,
       status: "active",
       next_run_at: null,
@@ -251,7 +324,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: bob.id,
       status: "active",
       next_run_at: null,
@@ -333,7 +406,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: alice.id,
       status: "active",
       next_run_at: null,
@@ -384,7 +457,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: bob.id,
       status: "active",
       next_run_at: null,
@@ -436,7 +509,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: bob.id,
       status: "active",
       next_run_at: null,
@@ -484,7 +557,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: alice.id,
       status: "active",
       next_run_at: null,
@@ -523,7 +596,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: alice.id,
       status: "active",
       next_run_at: null,
@@ -571,7 +644,7 @@ describe("Scheduled Tasks API", () => {
         schedule_type: "interval",
         schedule_value: "3600",
         timezone: "UTC",
-        session_mode: "chat",
+        session_mode: "fresh",
         created_by: alice.id,
         status: "active",
         next_run_at: null,
@@ -624,7 +697,7 @@ describe("Scheduled Tasks API", () => {
       schedule_type: "interval",
       schedule_value: "3600",
       timezone: "UTC",
-      session_mode: "chat",
+      session_mode: "fresh",
       created_by: alice.id,
       status: "active",
       next_run_at: null,

@@ -132,6 +132,9 @@ describe("GET /api/entities/:id/mentions — RBAC", () => {
       entity_id: entityId,
       context_snippet: "snippet",
       chunk_index: 0,
+      confidence: "INFERRED",
+      source: "llm_extraction",
+      relation: "mentioned",
       mentioned_at: new Date().toISOString(),
     };
     await db

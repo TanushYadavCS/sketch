@@ -184,4 +184,39 @@ describe("Settings API — security", () => {
       expect(decrypted?.sketch_api_key).toBe(body.apiKey);
     });
   });
+
+  describe("PUT /api/settings/identity — org context", () => {
+    it("round-trips orgContext.description and survives a malformed stored blob", async () => {
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      // Roundtrip: PUT then GET returns the saved value.
+      const putRes = await app.request("/api/settings/identity", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({
+          orgName: "Canvas Labs",
+          orgContext: { description: "AI services company. Sketch is one of our products." },
+        }),
+      });
+      expect(putRes.status).toBe(200);
+      const putBody = (await putRes.json()) as {
+        orgName: string;
+        orgContext: { description?: string } | null;
+      };
+      expect(putBody.orgName).toBe("Canvas Labs");
+      expect(putBody.orgContext?.description).toBe("AI services company. Sketch is one of our products.");
+
+      const getRes = await app.request("/api/settings/identity", { headers: { Cookie: adminCookie } });
+      const getBody = (await getRes.json()) as { orgContext: { description?: string } | null };
+      expect(getBody.orgContext?.description).toBe("AI services company. Sketch is one of our products.");
+
+      // Resilience: bad JSON in the column returns orgContext: null, not 500.
+      await db.updateTable("settings").set({ org_context: "{not valid json" }).where("id", "=", "default").execute();
+      const afterCorruption = await app.request("/api/settings/identity", { headers: { Cookie: adminCookie } });
+      expect(afterCorruption.status).toBe(200);
+      const corruptBody = (await afterCorruption.json()) as { orgContext: unknown };
+      expect(corruptBody.orgContext).toBeNull();
+    });
+  });
 });

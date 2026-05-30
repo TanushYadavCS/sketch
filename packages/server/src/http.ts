@@ -26,6 +26,7 @@ import { settingsRoutes } from "./api/settings";
 import { setupRoutes } from "./api/setup";
 import { skillsRoutes } from "./api/skills";
 import { verifyJwt } from "./auth/jwt";
+import { entityReviewRoutes } from "./entities/review";
 
 import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
@@ -198,6 +199,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/setup",
     setupRoutes(settings, {
       managedUrl: config.MANAGED_URL,
+      experimentalFlag: config.EXPERIMENTAL_FLAG,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
@@ -279,10 +281,13 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
 
   app.route("/api/usage", usageRoutes(db));
-  app.route("/api/entities", entityRoutes(db));
+  app.route("/api/entities", entityRoutes(db, { logger, config }));
+  if (config.EXPERIMENTAL_FLAG) {
+    app.route("/api/entity-review", entityReviewRoutes(db));
+  }
 
   if (deps?.logger) {
-    app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users));
+    app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
   }
 
   const identities = createProviderIdentityRepository(db);

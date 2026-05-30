@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## [0.31.0] -- 2026-05-27
+
+- Team management: allow admins to promote and demote other human users between admin and member from the Team edit modal, with the Access control hidden from non-admins and self-edits.
+- Auth: enforce auth-role changes in the Users API so only admins can change another human user's auth role, and users cannot change their own auth role.
+- Fix(scheduling): force scheduled automations to fresh sessions only, including a migration for legacy `chat` and `persistent` scheduled tasks, so run-now checks from the same Slack thread no longer deadlock behind the active chat queue.
+
+## [0.30.0] -- 2026-05-27
+
+- Audio: add speech-to-text support for Slack and WhatsApp audio attachments using OpenRouter Whisper Large v3 Turbo, preserving the original audio file and passing the transcript into agent context.
+- Agent tools: add `TranscribeAudio` for buffered audio attachments when OpenRouter transcription is configured, while keeping self-hosted/no-key setups non-breaking and tool-free.
+- Context handling: inline transcripts up to the 8K character limit and write longer transcripts as workspace attachment files for the agent to read.
+- Reliability: make transcription failures non-blocking, avoid treating explicit non-audio MIME uploads as audio, and derive OpenRouter audio formats from MIME, whitelisted extensions, or file headers.
+- Maintenance: split the large Sketch MCP tools module into focused tool files.
+
+## [0.29.0] -- 2026-05-21
+
+- Workflows: add authenticated Canvas-triggered Sketch workflow invocation support, including requester attribution, Canvas workflow metadata, silent output mode, normalized run timestamps, and Canvas-managed trigger display in scheduled tasks.
+- Managed auth: add the system API key ensure endpoint so the management plane can provision tenant-level Sketch credentials for Canvas without user-scoped setup.
+- Entity review: add the Entity Creation Review queue for Fireflies attendee ambiguity, with backend confirm/reject flows, alias/rejection handling, evidence replay, and inline review from Files -> Entities.
+- Scheduling: keep scheduled trigger labels and trigger configs fresh when an automation's interval, cron expression, or timezone changes.
+- Reliability: pass task context into agent run targets, clarify delivery target handling, and allow brokered Canvas CLI commands needed by generated workflow automations.
+
 ## [0.28.2] -- 2026-05-17
 
 - Fix(scheduling): run prompt-created scheduled automations through the full Sketch runtime by default, including legacy agent steps without an explicit mode, so shared agent environment variables and normal Sketch tools are available to cron runs.

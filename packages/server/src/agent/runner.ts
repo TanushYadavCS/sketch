@@ -27,6 +27,8 @@ import {
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
+import type { TranscriptionSettings } from "../transcription/service";
+import { resolveTranscriptionConfigFromDeps } from "../transcription/service";
 import { createCanUseTool } from "./permissions";
 import { buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
@@ -116,6 +118,7 @@ export interface RunAgentParams {
   resumeSessionId?: string;
   abortController?: AbortController;
   orgName?: string | null;
+  orgDescription?: string | null;
   botName?: string | null;
   integrationMcpServers?: Record<string, McpServerConfig>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -157,6 +160,7 @@ export interface RunAgentParams {
   };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   agentEnv?: Record<string, string>;
+  loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   /**
    * Free-form instruction set for an agent persona, appended to the system
    * prompt. Set when the run is associated with a /team agent (channel-bound,
@@ -220,9 +224,17 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return [];
   });
 
+  const transcriptionConfig = await resolveTranscriptionConfigFromDeps({
+    loadSettings: params.loadTranscriptionSettings,
+  }).catch((err) => {
+    logger.warn({ err }, "Failed to resolve transcription config");
+    return null;
+  });
+
   const systemAppend = buildSystemContext({
     platform: params.platform,
     orgName: params.orgName,
+    orgDescription: params.orgDescription,
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,
@@ -303,6 +315,9 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
+    loadTranscriptionSettings: params.loadTranscriptionSettings,
+    transcriptionEnabled: Boolean(transcriptionConfig),
+    logger,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);

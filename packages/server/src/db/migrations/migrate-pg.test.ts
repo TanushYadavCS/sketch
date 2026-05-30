@@ -40,7 +40,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(52);
+    expect(rows.rows).toHaveLength(64);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -86,6 +86,18 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[49]).toBe("054-agent-environment-variable-shares");
     expect(names[50]).toBe("055-normalize-automation-run-timestamps");
     expect(names[51]).toBe("056-scheduled-task-output-mode");
+    expect(names[52]).toBe("057-entity-review-queue");
+    expect(names[53]).toBe("058-entity-mentions-unique");
+    expect(names[54]).toBe("059-scheduled-tasks-fresh-session-only");
+    expect(names[55]).toBe("060-mention-provenance");
+    expect(names[56]).toBe("061-indexed-file-facts");
+    expect(names[57]).toBe("062-fact-materialization-state");
+    expect(names[58]).toBe("063-entity-domains");
+    expect(names[59]).toBe("064-entity-domains-seed");
+    expect(names[60]).toBe("065-entity-domains-reserved-seed");
+    expect(names[61]).toBe("066-entity-review-domain-candidates");
+    expect(names[62]).toBe("067-relation-evidence-fact-link");
+    expect(names[63]).toBe("068-entities-ai-brief");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -94,7 +106,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(52);
+    expect(rows.rows).toHaveLength(64);
   });
 
   it("creates the users table", async () => {
@@ -121,6 +133,27 @@ describe("runMigrations on Postgres — full sequence", () => {
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
+  });
+
+  it("creates fact-aware relationship evidence columns and unique index", async () => {
+    const columns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'entity_relationship_evidence'
+    `.execute(db);
+    expect(columns.rows.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(["source_fact_id", "evidence_key"]),
+    );
+
+    const indexes = await sql<{ indexname: string }>`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'entity_relationship_evidence'
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.indexname)).toContain("idx_entity_relationship_evidence_key");
+    expect(indexes.rows.map((row) => row.indexname)).not.toContain("entity_relationship_evidence_unique");
   });
 
   it("creates user_provider_identities table", async () => {

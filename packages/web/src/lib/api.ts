@@ -64,7 +64,7 @@ export interface ScheduledTaskListItem {
   scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
-  sessionMode: "fresh" | "persistent" | "chat";
+  sessionMode: "fresh";
   nextRunAt: string | null;
   lastRunAt: string | null;
   status: "active" | "paused" | "completed";
@@ -144,6 +144,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     throw new ApiRequestError(message, res.status, code, rest);
   }
 
+  // 204 No Content has no body to parse — callers that type the response as
+  // `void` rely on this fast-path.
+  if (res.status === 204) return undefined as T;
+
   return res.json() as Promise<T>;
 }
 
@@ -180,7 +184,123 @@ export interface SetupStatus {
   slackConnected: boolean;
   llmConnected: boolean;
   llmProvider: LlmProvider | null;
+  experimentalFlag?: boolean;
   managedUrl?: string;
+}
+
+export interface EntityReviewQueueRow {
+  id: string;
+  proposed_name: string;
+  normalized_name: string;
+  entity_type: string;
+  proposed_email: string | null;
+  candidate_entity_id: string | null;
+  candidate_score: number | null;
+  candidate_reason: string | null;
+  candidate_generated_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  occurrence_count: number;
+  status: "pending" | "confirmed" | "rejected" | "confirming";
+  triggered_by_user_id: string;
+  review_started_at: string | null;
+  review_started_by: string | null;
+  backfill_cursor: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolved_entity_id: string | null;
+  evidenceCount: number;
+  sourceBreakdown: Array<{ source: string; count: number }>;
+  candidate: { id: string; name: string; email: string | null } | null;
+}
+
+export interface EntityReviewEvidenceRow {
+  id: string;
+  review_id: string;
+  indexed_file_id: string;
+  source: string;
+  note: string | null;
+  seen_at: string;
+  file: {
+    name: string;
+    providerUrl: string | null;
+    sourcePath: string | null;
+  };
+}
+
+export interface EntityMention {
+  id: string;
+  contextSnippet: string | null;
+  chunkIndex: number | null;
+  mentionedAt: string;
+  sourceDate: string;
+  file: {
+    id: string;
+    fileName: string;
+    fileType: string | null;
+    source: string;
+    sourcePath: string | null;
+    providerUrl: string | null;
+  };
+}
+
+export interface EntityReviewListResponse {
+  rows: EntityReviewQueueRow[];
+  total: number;
+}
+
+export interface EntityReviewDetailResponse {
+  row: EntityReviewQueueRow;
+  evidence: EntityReviewEvidenceRow[];
+}
+
+export interface EntityReviewConfirmResult {
+  row: EntityReviewQueueRow;
+  targetEntityId: string;
+  shortCircuited: boolean;
+  mergedStaleEntityId: string | null;
+  idempotent: boolean;
+}
+
+export interface EntityReviewRejectResult {
+  row: EntityReviewQueueRow;
+  targetEntityId: string;
+  reResolvedToExisting: boolean;
+  createdEntityId: string | null;
+  idempotent: boolean;
+}
+
+/**
+ * Closed set of error codes the entity-review API emits. Mirrors
+ * `REVIEW_ERROR_CODES` on the server. The UI switches on these to render
+ * locked copy.
+ */
+export type EntityReviewErrorCode =
+  | "CANDIDATE_DRIFT"
+  | "CANDIDATE_MISSING"
+  | "TARGET_DELETED"
+  | "MULTIPLE_STALE_CANDIDATES"
+  | "MULTIPLE_RE_RESOLVE_MATCHES"
+  | "ALREADY_CONFIRMING"
+  | "EVIDENCE_TOO_LARGE"
+  | "TYPE_MISMATCH"
+  | "ROW_NOT_FOUND"
+  | "OWNER_SCOPE_DENIED";
+
+export function isEntityReviewErrorCode(code: string | undefined): code is EntityReviewErrorCode {
+  if (!code) return false;
+  return (
+    code === "CANDIDATE_DRIFT" ||
+    code === "CANDIDATE_MISSING" ||
+    code === "TARGET_DELETED" ||
+    code === "MULTIPLE_STALE_CANDIDATES" ||
+    code === "MULTIPLE_RE_RESOLVE_MATCHES" ||
+    code === "ALREADY_CONFIRMING" ||
+    code === "EVIDENCE_TOO_LARGE" ||
+    code === "TYPE_MISMATCH" ||
+    code === "ROW_NOT_FOUND" ||
+    code === "OWNER_SCOPE_DENIED"
+  );
 }
 
 export interface EntityListItem {
@@ -196,6 +316,213 @@ export interface EntityListItem {
   lastMentionAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
+
+export interface EntityProfileSummary {
+  identity: string;
+  activity: string;
+}
+
+export interface EntityProfile {
+  entityType: DrawerEntityType;
+  mentionCount: number;
+  sourceCounts: Record<string, number>;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+  summary: EntityProfileSummary;
+}
+
+export interface EntityDetail extends EntityListItem {
+  profile: EntityProfile;
+}
+
+export interface EntitySourceRef {
+  id: string;
+  source: string;
+  sourceId: string;
+  sourceUrl: string | null;
+  lastSeenAt: string;
+}
+
+export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+
+export interface EntityRelationView {
+  id: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  relationshipType: string;
+  confidence: string;
+  confidenceScore: number;
+  source: string;
+  validFrom: string | null;
+  validTo: string | null;
+  other: {
+    id: string;
+    name: string;
+    sourceType: string;
+    aliases: string[];
+  };
+  evidenceCount: number;
+  reviewId?: string;
+}
+
+export interface EntityRelationsResponse {
+  outgoing: EntityRelationView[];
+  incoming: EntityRelationView[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export interface EntityRelationEvidenceRow {
+  fileId: string;
+  fileName: string;
+  sourceType: string;
+  occurredAt: string;
+  chunkIndex: number | null;
+  contextSnippet: string | null;
+  sourceFactId: string | null;
+  note: string | null;
+}
+
+export interface EntityRelationEvidenceResponse {
+  rows: EntityRelationEvidenceRow[];
+  visibleCount: number;
+  totalCount: number;
+  truncated: boolean;
+}
+
+export interface EntityTimelineItem {
+  fileId: string;
+  fileName: string;
+  sourceType: string;
+  occurredAt: string;
+  mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+  mentionCount: number;
+  contextSnippet: string | null;
+  url: string | null;
+}
+
+export interface EntityTimelineGroup {
+  month: string;
+  items: EntityTimelineItem[];
+}
+
+export interface EntityTimelineResponse {
+  groups: EntityTimelineGroup[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
+
+export type ResetCategory = "manual" | "connectors" | "ai";
+
+export type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
+
+export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed" | "cancelled";
+
+export type RebuildOnlyJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
+
+export type RebuildJobPhase = ResetJobPhase | ReenrichJobPhase | RebuildOnlyJobPhase;
+
+export interface RebuildJobProgress {
+  phase: string;
+  completed: number;
+  total: number;
+}
+
+export type RebuildJobKind = "reset" | "reenrich" | "rebuild";
+
+export interface RebuildJobRequest {
+  categories?: ResetCategory[];
+  scope?: ReenrichScope;
+  runAfter?: boolean;
+  wipeLlmFacts?: boolean;
+  pendingRebuildId?: string;
+}
+
+export interface RebuildJob {
+  id: string;
+  phase: RebuildJobPhase;
+  startedAt: string;
+  finishedAt: string | null;
+  request?: RebuildJobRequest;
+  progress?: RebuildJobProgress;
+  reset?: {
+    deleted: Record<string, number>;
+    factsMarkedUnmaterialized: number;
+  };
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
+  llmFactsWiped?: {
+    factsTombstoned: number;
+    relationshipEvidenceDeleted: number;
+    relationshipsDeleted: number;
+  };
+  replay?: {
+    factsRead: number;
+    entitiesCreated: number;
+    entitiesLinked: number;
+    mentionsWritten: number;
+    relationshipsWritten: number;
+    materialized: number;
+  };
+  recreate?: unknown;
+  summary?: {
+    scope?: { fileIds: string[]; missingFileIds: string[] };
+    wipe?: { files: number; mentions: number; factsTombstoned: number };
+    enrichment?: { filesProcessed: number; filesFailed: number };
+    recreate?: {
+      replay?: {
+        entitiesCreated: number;
+        entitiesLinked: number;
+        mentionsWritten: number;
+        relationshipsWritten: number;
+      };
+    };
+  };
+  error?: string;
+}
+
+export interface RebuildJobsResponse {
+  active: boolean;
+  currentJob: RebuildJob | null;
+  latestJob: RebuildJob | null;
+  blockedBy: { code: string; message: string } | null;
+}
+
+export interface ResetSubmitResponse {
+  message: string;
+  job?: { id: string; phase: string; startedAt: string; pendingRebuildId?: string; pendingRebuildExpiresAt?: string };
+  /** Present only when runAfter=false (two-step flow). */
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
+  /** Present only on dry-run. */
+  dryRun?: boolean;
+  entitiesDeleted?: number;
+  candidatesCleared?: number;
+  reviewQueueCleared?: number;
+  reviewEvidenceCleared?: number;
+  rejectionsCleared?: number;
+  factsMarkedUnmaterialized?: number;
+}
+
+export interface RebuildSubmitResponse {
+  message: string;
+  job: { id: string; phase: string; startedAt: string };
+}
+
+export interface ReenrichSubmitResponse {
+  message?: string;
+  /** Present only on dry-run. */
+  dryRun?: boolean;
+  files?: number;
+  missingFileIds?: string[];
+  factsByType?: Record<string, number>;
+  job?: { id: string; phase: string; startedAt: string };
 }
 
 export interface BrowseFlatItem {
@@ -447,7 +774,18 @@ export const api = {
   },
   settings: {
     identity() {
-      return request<{ orgName: string | null; botName: string }>("/api/settings/identity");
+      return request<{
+        orgName: string | null;
+        botName: string;
+        orgContext: { description?: string; industry?: string } | null;
+      }>("/api/settings/identity");
+    },
+    updateIdentity(data: { orgName?: string; orgContext?: { description?: string; industry?: string } }) {
+      return request<{
+        orgName: string | null;
+        botName: string;
+        orgContext: { description?: string; industry?: string } | null;
+      }>("/api/settings/identity", { method: "PUT", body: JSON.stringify(data) });
     },
     apiKey() {
       return request<{ configured: boolean; apiKey: string | null }>("/api/settings/api-key");
@@ -573,7 +911,7 @@ export const api = {
       if (opts?.status) params.set("status", opts.status);
       if (opts?.access) params.set("access", opts.access);
       const qs = params.toString();
-      return request<{ files: UnifiedFile[]; total: number; hasMore: boolean }>(
+      return request<{ files: UnifiedFile[]; total: number; enrichedTotal: number; hasMore: boolean }>(
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
       );
     },
@@ -770,6 +1108,7 @@ export const api = {
         whatsappNumber?: string | null;
         description?: string | null;
         role?: string | null;
+        authRole?: "admin" | "member";
         reportsTo?: string | null;
         allowedTools?: string[] | null;
         slackChannelIds?: string[] | null;
@@ -991,15 +1330,18 @@ export const api = {
   entities: {
     get(id: string) {
       return request<{
-        entity: EntityListItem;
-        sourceRefs: Array<{
-          id: string;
-          source: string;
-          sourceId: string;
-          sourceUrl: string | null;
-          lastSeenAt: string;
-        }>;
+        entity: EntityDetail;
+        sourceRefs: EntitySourceRef[];
       }>(`/api/entities/${id}`);
+    },
+    relations(id: string) {
+      return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);
+    },
+    relationEvidence(id: string, relationId: string) {
+      return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);
+    },
+    timeline(id: string) {
+      return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();
@@ -1009,21 +1351,7 @@ export const api = {
       if (opts?.offset) params.set("offset", String(opts.offset));
       const qs = params.toString();
       return request<{
-        mentions: Array<{
-          id: string;
-          contextSnippet: string | null;
-          chunkIndex: number | null;
-          mentionedAt: string;
-          sourceDate: string;
-          file: {
-            id: string;
-            fileName: string;
-            fileType: string | null;
-            source: string;
-            sourcePath: string | null;
-            providerUrl: string | null;
-          };
-        }>;
+        mentions: EntityMention[];
         total: number;
         hiddenCount: number;
       }>(`/api/entities/${id}/mentions${qs ? `?${qs}` : ""}`);
@@ -1037,10 +1365,68 @@ export const api = {
     deleteTentative() {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
     },
-    reset(categories: string[]) {
-      return request<{ message: string; entitiesDeleted: number; candidatesCleared: number }>("/api/entities/reset", {
+    reset(
+      categories: string[],
+      opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean; wipeLlmFacts?: boolean },
+    ) {
+      return request<ResetSubmitResponse>("/api/entities/resets", {
         method: "POST",
-        body: JSON.stringify({ categories }),
+        body: JSON.stringify({
+          categories,
+          runAfter: opts?.runAfter ?? false,
+          confirm: opts?.confirm,
+          dryRun: opts?.dryRun,
+          wipeLlmFacts: opts?.wipeLlmFacts,
+        }),
+      });
+    },
+    resetJob(id: string) {
+      return request<RebuildJob>(`/api/entities/resets/jobs/${id}`);
+    },
+    resetJobs() {
+      return request<RebuildJobsResponse>("/api/entities/resets/jobs");
+    },
+    reenrich(
+      scope: ReenrichScope,
+      opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean; pendingRebuildId?: string },
+    ) {
+      return request<ReenrichSubmitResponse>("/api/entities/reenrichments", {
+        method: "POST",
+        body: JSON.stringify({
+          scope,
+          runAfter: opts?.runAfter ?? true,
+          confirm: opts?.confirm,
+          dryRun: opts?.dryRun,
+          pendingRebuildId: opts?.pendingRebuildId,
+        }),
+      });
+    },
+    reenrichJob(id: string) {
+      return request<RebuildJob>(`/api/entities/reenrichments/jobs/${id}`);
+    },
+    reenrichJobs() {
+      return request<RebuildJobsResponse>("/api/entities/reenrichments/jobs");
+    },
+    stopReenrichJob(id: string) {
+      return request<{ message: string; job: RebuildJob }>(`/api/entities/reenrichments/jobs/${id}`, {
+        method: "DELETE",
+      });
+    },
+    rebuild(pendingRebuildId: string) {
+      return request<RebuildSubmitResponse>("/api/entities/rebuilds", {
+        method: "POST",
+        body: JSON.stringify({ pendingRebuildId }),
+      });
+    },
+    rebuildJob(id: string) {
+      return request<RebuildJob>(`/api/entities/rebuilds/jobs/${id}`);
+    },
+    rebuildJobs() {
+      return request<RebuildJobsResponse>("/api/entities/rebuilds/jobs");
+    },
+    cancelPendingRebuild(pendingRebuildId: string) {
+      return request<void>(`/api/entities/rebuilds/pending/${pendingRebuildId}`, {
+        method: "DELETE",
       });
     },
     update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
@@ -1052,7 +1438,15 @@ export const api = {
     remove(id: string) {
       return request<{ success: boolean }>(`/api/entities/${id}`, { method: "DELETE" });
     },
-    list(opts?: { type?: string; source?: string; search?: string; sort?: string; limit?: number; offset?: number }) {
+    list(opts?: {
+      type?: string;
+      source?: string;
+      search?: string;
+      sort?: string;
+      limit?: number;
+      offset?: number;
+      includeSystem?: boolean;
+    }) {
       const params = new URLSearchParams();
       if (opts?.type) params.set("type", opts.type);
       if (opts?.source) params.set("source", opts.source);
@@ -1060,11 +1454,39 @@ export const api = {
       if (opts?.sort) params.set("sort", opts.sort);
       if (opts?.limit) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
+      if (opts?.includeSystem) params.set("includeSystem", "true");
       const qs = params.toString();
       return request<{
         entities: EntityListItem[];
         total: number;
       }>(`/api/entities${qs ? `?${qs}` : ""}`);
+    },
+  },
+  entityReview: {
+    list(opts?: { limit?: number; offset?: number; search?: string }) {
+      const params = new URLSearchParams();
+      // `limit=0` is a meaningful value (count-only mode) — send it explicitly.
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const search = opts?.search?.trim();
+      if (search) params.set("q", search);
+      const qs = params.toString();
+      return request<EntityReviewListResponse>(`/api/entity-review${qs ? `?${qs}` : ""}`);
+    },
+    get(id: string) {
+      return request<EntityReviewDetailResponse>(`/api/entity-review/${id}`);
+    },
+    confirm(id: string, body: { candidateGeneratedAt: string; mergeIntoEntityId?: string }) {
+      return request<EntityReviewConfirmResult>(`/api/entity-review/${id}/confirm`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    reject(id: string, body: { candidateGeneratedAt: string; rejectAgainstEntityId?: string }) {
+      return request<EntityReviewRejectResult>(`/api/entity-review/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
     },
   },
   usage: {

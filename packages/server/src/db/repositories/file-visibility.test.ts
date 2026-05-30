@@ -148,6 +148,25 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
     });
   });
 
+  describe("countEnrichedFiles filter parity", () => {
+    it("matches the raw status filter instead of counting enriched files", async () => {
+      await db
+        .updateTable("indexed_files")
+        .set({ embedding_status: "done", summary_status: "done" })
+        .where("id", "in", ["f-unrestricted", "f-scope-a"])
+        .execute();
+      await db.updateTable("indexed_files").set({ summary: "ready" }).where("id", "=", "f-scope-a").execute();
+
+      const repo = createConnectorRepository(db);
+      const list = await repo.listAllFiles({ limit: 50, offset: 0, viewer: adminViewer, status: "raw" });
+      const total = await repo.countAllFiles({ viewer: adminViewer, status: "raw" });
+      const filtered = await repo.countEnrichedFiles({ viewer: adminViewer, status: "raw" });
+
+      expect(list.map((file) => file.id)).toEqual(["f-unrestricted"]);
+      expect(filtered).toBe(total);
+    });
+  });
+
   describe("countFilesByConnector — chip count parity", () => {
     it("chip count for the connector equals list length when filtered by source", async () => {
       const repo = createConnectorRepository(db);
