@@ -387,6 +387,8 @@ export function connectorRoutes(
             },
             access: await (async () => {
               const details = await connectorRepo.getFileAccessDetails(fileId);
+              const manualShares = await fileSharesRepo.listForFile(fileId);
+              const shareWithEveryone = await fileSharesRepo.getOrgWide(fileId);
               return {
                 scope: details.length > 0 ? "restricted" : "unrestricted",
                 members: details.map((a) => ({
@@ -396,6 +398,8 @@ export function connectorRoutes(
                   source: a.source,
                   mapped: !!a.userId,
                 })),
+                manualShares: manualShares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
+                shareWithEveryone,
               };
             })(),
           }

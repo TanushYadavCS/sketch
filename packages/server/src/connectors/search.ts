@@ -54,6 +54,33 @@ export interface SearchOptions {
   userEmails?: string[];
 }
 
+function fileAccessFilterSql(emailList: string[]) {
+  const emailSql = sql.join(
+    emailList.map((e) => sql`${e}`),
+    sql`,`,
+  );
+  return sql<SqlBool>`(
+    (indexed_files.access_scope_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM file_access WHERE file_access.indexed_file_id = indexed_files.id))
+    OR EXISTS (
+      SELECT 1 FROM access_scope_members
+      WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
+      AND access_scope_members.email IN (${emailSql})
+    )
+    OR EXISTS (
+      SELECT 1 FROM file_access
+      WHERE file_access.indexed_file_id = indexed_files.id
+      AND file_access.email IN (${emailSql})
+    )
+    OR EXISTS (
+      SELECT 1 FROM file_share_emails
+      WHERE file_share_emails.indexed_file_id = indexed_files.id
+      AND file_share_emails.email IN (${emailSql})
+    )
+    OR indexed_files.share_with_everyone = 1
+  )`;
+}
+
 /**
  * Search the FTS5 index.
  *
@@ -66,34 +93,8 @@ export interface SearchOptions {
 export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOptions): Promise<SearchResult[]> {
   const limit = opts?.limit ?? 10;
 
-  // Build user-level access filter (3-tier model):
-  // 1. Unrestricted: no scope AND no file_access rows → visible to all
-  // 2. Scope-level: user's email in access_scope_members for the file's scope
-  // 3. Per-file: user's email in file_access
   const emailList = opts?.userEmails ?? [];
-  const userFilter =
-    emailList.length > 0
-      ? sql`AND (
-				(indexed_files.access_scope_id IS NULL
-				 AND NOT EXISTS (SELECT 1 FROM file_access WHERE file_access.indexed_file_id = indexed_files.id))
-				OR EXISTS (
-					SELECT 1 FROM access_scope_members
-					WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
-					AND access_scope_members.email IN (${sql.join(
-            emailList.map((e) => sql`${e}`),
-            sql`,`,
-          )})
-				)
-				OR EXISTS (
-					SELECT 1 FROM file_access
-					WHERE file_access.indexed_file_id = indexed_files.id
-					AND file_access.email IN (${sql.join(
-            emailList.map((e) => sql`${e}`),
-            sql`,`,
-          )})
-				)
-			)`
-      : sql``;
+  const userFilter = emailList.length > 0 ? sql`AND ${fileAccessFilterSql(emailList)}` : sql``;
 
   if (isPg(db)) {
     const tsQuery = sanitizeTsQuery(query);
@@ -909,16 +910,7 @@ export async function hybridSearch(
 
   if (emailList.length > 0 && filteredFiles.length > 0) {
     const fileIds = filteredFiles.map((f) => f.id);
-    const emailSql = sql.join(
-      emailList.map((e) => sql`${e}`),
-      sql`,`,
-    );
 
-    // Single query: returns IDs of files the user can access.
-    // Mirrors the 3-tier model in searchFiles:
-    //   T1 — unrestricted (no scope AND no per-file rows)
-    //   T2 — user is in the file's access scope
-    //   T3 — user has a direct per-file access entry
     const accessRows = await sql<{ id: string }>`
       SELECT indexed_files.id
       FROM indexed_files
@@ -926,20 +918,7 @@ export async function hybridSearch(
         fileIds.map((id) => sql`${id}`),
         sql`,`,
       )})
-      AND (
-        (indexed_files.access_scope_id IS NULL
-         AND NOT EXISTS (SELECT 1 FROM file_access WHERE file_access.indexed_file_id = indexed_files.id))
-        OR EXISTS (
-          SELECT 1 FROM access_scope_members
-          WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
-          AND access_scope_members.email IN (${emailSql})
-        )
-        OR EXISTS (
-          SELECT 1 FROM file_access
-          WHERE file_access.indexed_file_id = indexed_files.id
-          AND file_access.email IN (${emailSql})
-        )
-      )
+      AND ${fileAccessFilterSql(emailList)}
     `.execute(db);
 
     const allowedIds = new Set(accessRows.rows.map((r) => r.id));
@@ -1157,35 +1136,7 @@ async function browseLatest(
 
   if ((opts.userEmails ?? []).length > 0) {
     const userEmails = opts.userEmails ?? [];
-    q = q.where((eb) =>
-      eb.or([
-        eb.and([
-          eb("indexed_files.access_scope_id", "is", null),
-          eb.not(
-            eb.exists(
-              eb
-                .selectFrom("file_access")
-                .select("indexed_file_id")
-                .whereRef("file_access.indexed_file_id", "=", "indexed_files.id"),
-            ),
-          ),
-        ]),
-        eb.exists(
-          eb
-            .selectFrom("access_scope_members")
-            .select("access_scope_id")
-            .whereRef("access_scope_members.access_scope_id", "=", "indexed_files.access_scope_id")
-            .where("access_scope_members.email", "in", userEmails),
-        ),
-        eb.exists(
-          eb
-            .selectFrom("file_access")
-            .select("indexed_file_id")
-            .whereRef("file_access.indexed_file_id", "=", "indexed_files.id")
-            .where("file_access.email", "in", userEmails),
-        ),
-      ]),
-    );
+    q = q.where(fileAccessFilterSql(userEmails));
   }
 
   if (opts.after || opts.before) {

@@ -330,7 +330,16 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
 describe("search — recency browse applies RBAC before limit", () => {
   let db: Kysely<DB>;
 
-  async function insertMeeting(id: string, sourceUpdatedAt: string, opts: { fileAccessEmails?: string[] } = {}) {
+  async function insertMeeting(
+    id: string,
+    sourceUpdatedAt: string,
+    opts: {
+      content?: string | null;
+      fileAccessEmails?: string[];
+      manualShareEmails?: string[];
+      shareWithEveryone?: boolean;
+    } = {},
+  ) {
     await db
       .insertInto("indexed_files")
       .values({
@@ -343,10 +352,11 @@ describe("search — recency browse applies RBAC before limit", () => {
         source: "fireflies",
         source_path: `/meetings/${id}`,
         provider_url: null,
-        content: null,
+        content: opts.content ?? null,
         summary: null,
         context_note: null,
         access_scope_id: null,
+        share_with_everyone: opts.shareWithEveryone ? 1 : 0,
         source_updated_at: sourceUpdatedAt,
         synced_at: sourceUpdatedAt,
       })
@@ -354,6 +364,23 @@ describe("search — recency browse applies RBAC before limit", () => {
 
     for (const email of opts.fileAccessEmails ?? []) {
       await db.insertInto("file_access").values({ indexed_file_id: id, email }).execute();
+    }
+    if ((opts.manualShareEmails ?? []).length > 0) {
+      await db
+        .insertInto("users")
+        .values({ id: "admin", name: "admin", email: "admin@example.com" })
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+      await db
+        .insertInto("file_share_emails")
+        .values(
+          (opts.manualShareEmails ?? []).map((email) => ({
+            indexed_file_id: id,
+            email,
+            granted_by_user_id: "admin",
+          })),
+        )
+        .execute();
     }
   }
 
@@ -393,6 +420,31 @@ describe("search — recency browse applies RBAC before limit", () => {
     });
 
     expect(results.map((r) => r.id)).toEqual(["accessible"]);
+  });
+
+  it("includes manually shared and org-wide files in non-empty search", async () => {
+    await insertMeeting("manual-shared", "2026-04-30T10:00:00.000Z", {
+      content: "manual visibility planning",
+      fileAccessEmails: ["other@example.com"],
+      manualShareEmails: ["alice@example.com"],
+    });
+    await insertMeeting("org-shared", "2026-04-30T09:00:00.000Z", {
+      content: "org visibility planning",
+      fileAccessEmails: ["other@example.com"],
+      shareWithEveryone: true,
+    });
+    await insertMeeting("blocked-shared", "2026-04-30T08:00:00.000Z", {
+      content: "blocked visibility planning",
+      fileAccessEmails: ["other@example.com"],
+    });
+
+    const results = await search(db, "shared", {
+      source: "fireflies",
+      limit: 10,
+      userEmails: ["alice@example.com"],
+    });
+
+    expect(results.map((r) => r.id).sort()).toEqual(["manual-shared", "org-shared"]);
   });
 });
 
