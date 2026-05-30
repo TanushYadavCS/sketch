@@ -6,10 +6,13 @@ import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
+const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
+
 /**
  * Predicate matching entities visible to `viewer`. Composed into queries via `.where(...)`.
  *
  *   admin              = bypasses RBAC (single OR branch resolves to true)
+ *   system entity      = org-curated entities visible to all members
  *   org-wide           = entities.share_with_everyone = 1
  *   manual share       = caller's email is in entity_share_emails for the entity
  *   file co-mention    = caller can see at least one file mentioning the entity
@@ -33,7 +36,11 @@ export function entityVisibilityPredicate(viewer: FileViewer, alias = "entities"
   const email = viewer.email ?? "";
   const fileVis = fileVisibilityPredicate(viewer, "ifs_inner");
   return sql<boolean>`(
-    ${t}.share_with_everyone = 1
+    ${t}.source_type IN (${sql.join(
+      SYSTEM_ENTITY_SOURCE_TYPES.map((sourceType) => sql`${sourceType}`),
+      sql`,`,
+    )})
+    OR ${t}.share_with_everyone = 1
     OR EXISTS (SELECT 1 FROM entity_share_emails ese
                WHERE ese.entity_id = ${t}.id
                  AND ese.email = ${email})
