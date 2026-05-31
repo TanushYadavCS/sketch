@@ -39,12 +39,23 @@ export const settingsRoute = createRoute({
 
 function SettingsPage() {
   const auth = useDashboardAuth();
+  const setupStatusQuery = useQuery({
+    queryKey: ["setup", "status"],
+    queryFn: () => api.setup.status(),
+  });
+  const showApiTokens = setupStatusQuery.data?.experimentalFlag === true;
 
   if (auth.role !== "admin") {
     return (
       <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <h1 className="text-xl font-semibold text-foreground">Settings</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Admin access is required to manage workspace settings.</p>
+        {showApiTokens ? (
+          <div className="mt-6">
+            <ApiTokensSection />
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">Admin access is required to manage workspace settings.</p>
+        )}
       </div>
     );
   }
@@ -58,6 +69,7 @@ function SettingsPage() {
         <OrgContextSection />
         <AccessSection />
         <ApiKeySection />
+        {showApiTokens ? <ApiTokensSection /> : null}
       </div>
     </div>
   );
@@ -398,6 +410,216 @@ function ApiKeySection() {
       </AlertDialog>
     </section>
   );
+}
+
+function ApiTokensSection() {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("Claude Code");
+  const [createdToken, setCreatedToken] = useState<{ plaintext: string; mcpUrl: string | null } | null>(null);
+  const [setupToken, setSetupToken] = useState<{ plaintext?: string; mcpUrl: string | null } | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+
+  const tokensQuery = useQuery({
+    queryKey: ["api-tokens"],
+    queryFn: () => api.apiTokens.list(),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (payload: { name: string }) => api.apiTokens.create(payload),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      setCreatedToken({ plaintext: result.plaintext, mcpUrl: result.mcpUrl });
+      setSetupToken({ plaintext: result.plaintext, mcpUrl: result.mcpUrl });
+      toast.success("Token created");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (id: string) => api.apiTokens.revoke(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      setConfirmRevokeId(null);
+      toast.success("Token revoked");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const trimmedName = name.trim();
+  const tokens = tokensQuery.data?.tokens ?? [];
+  const activeTokens = tokens.filter((token) => !token.revokedAt);
+
+  return (
+    <section>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-muted-foreground">API tokens</p>
+      </div>
+
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="h-9"
+            maxLength={120}
+            aria-label="Token name"
+          />
+          <Button
+            size="sm"
+            className="shrink-0"
+            onClick={() => createMutation.mutate({ name: trimmedName })}
+            disabled={trimmedName.length === 0 || createMutation.isPending}
+          >
+            {createMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : <KeyIcon size={14} />}
+            Create token
+          </Button>
+        </div>
+
+        {createdToken ? (
+          <div className="mt-4 rounded-md border border-brand-accent bg-brand-accent/[0.05] p-3">
+            <p className="text-sm font-medium">New token</p>
+            <div className="mt-2 flex items-center gap-2">
+              <Input value={createdToken.plaintext} readOnly className="h-9 font-mono text-xs" aria-label="New token" />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => copyTextToClipboard(createdToken.plaintext).then(() => toast.success("Token copied"))}
+                aria-label="Copy token"
+              >
+                <CopySimpleIcon size={16} />
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-4 overflow-hidden rounded-md border border-border">
+          {tokensQuery.isLoading ? (
+            <Skeleton className="h-28 rounded-none" />
+          ) : activeTokens.length === 0 ? (
+            <div className="px-4 py-6 text-center text-sm text-muted-foreground">No active tokens</div>
+          ) : (
+            <div className="divide-y divide-border">
+              {activeTokens.map((token) => (
+                <div key={token.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{token.name}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {token.prefix}... · Created {formatDate(token.createdAt)}
+                      {token.lastUsedAt ? ` · Last used ${formatDate(token.lastUsedAt)}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSetupToken({ mcpUrl: tokensQuery.data?.mcpUrl ?? null })}
+                    >
+                      Setup
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="hover:text-destructive"
+                      onClick={() => setConfirmRevokeId(token.id)}
+                      aria-label={`Revoke ${token.name}`}
+                    >
+                      <TrashIcon size={16} />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <AlertDialog open={setupToken !== null} onOpenChange={(open) => !open && setSetupToken(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Claude Code setup</AlertDialogTitle>
+            <AlertDialogDescription>
+              Paste this server entry into your Claude Code MCP configuration.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs">
+            {JSON.stringify(
+              {
+                mcpServers: {
+                  sketch: {
+                    type: "http",
+                    url: setupToken?.mcpUrl ?? "https://<sketch-host>/mcp",
+                    headers: { Authorization: `Bearer ${setupToken?.plaintext ?? "skp_..."}` },
+                  },
+                },
+              },
+              null,
+              2,
+            )}
+          </pre>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Close</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() =>
+                copyTextToClipboard(
+                  JSON.stringify(
+                    {
+                      mcpServers: {
+                        sketch: {
+                          type: "http",
+                          url: setupToken?.mcpUrl ?? "https://<sketch-host>/mcp",
+                          headers: { Authorization: `Bearer ${setupToken?.plaintext ?? "skp_..."}` },
+                        },
+                      },
+                    },
+                    null,
+                    2,
+                  ),
+                ).then(() => toast.success("Setup copied"))
+              }
+            >
+              <CopySimpleIcon size={14} />
+              Copy
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmRevokeId !== null} onOpenChange={(open) => !open && setConfirmRevokeId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke API token?</AlertDialogTitle>
+            <AlertDialogDescription>This token will stop working immediately.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revokeMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => confirmRevokeId && revokeMutation.mutate(confirmRevokeId)}
+              disabled={revokeMutation.isPending}
+            >
+              {revokeMutation.isPending ? (
+                <>
+                  <SpinnerGapIcon size={14} className="animate-spin" />
+                  Revoking...
+                </>
+              ) : (
+                "Revoke"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
+  );
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString();
 }
 
 async function copyTextToClipboard(value: string): Promise<void> {

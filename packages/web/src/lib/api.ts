@@ -21,6 +21,15 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
+export interface ApiTokenRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
 export class ApiRequestError extends Error {
   status: number;
   code: string;
@@ -851,6 +860,20 @@ export const api = {
       return request<{ success: boolean; message: string }>("/api/settings/search/enrichments", {
         method: "POST",
       });
+    },
+  },
+  apiTokens: {
+    list() {
+      return request<{ tokens: ApiTokenRecord[]; mcpUrl: string | null }>("/api/api-tokens");
+    },
+    create(data: { name: string }) {
+      return request<{ token: ApiTokenRecord; plaintext: string; mcpUrl: string | null }>("/api/api-tokens", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    revoke(id: string) {
+      return request<{ success: true }>(`/api/api-tokens/${id}`, { method: "DELETE" });
     },
   },
   integrations: {
