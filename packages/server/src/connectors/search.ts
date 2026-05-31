@@ -158,7 +158,13 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
  * Used by the agent when it wants to load a document into conversation context,
  * and by the frontend file detail sheet.
  *
- * Access control: 3-tier model (unrestricted / scope / per-file) via userEmails.
+ * Access control:
+ *   - `userEmails === undefined` → trusted bypass (server/agent boot paths,
+ *     admin bypass when the org setting is on). Returns the file unfiltered.
+ *   - `userEmails === []`        → caller has no resolvable email → fail closed.
+ *     Returns null regardless of the file's access shape. Prevents an unauth'd
+ *     user from inheriting visibility through the empty-array path.
+ *   - `userEmails.length > 0`    → 3-tier check (unrestricted / scope / per-file).
  */
 export async function getFileContent(
   db: Kysely<DB>,
@@ -196,9 +202,10 @@ export async function getFileContent(
 
   if (!file) return null;
 
-  // User-level RBAC: 3-tier access check
-  if (userEmails && userEmails.length > 0) {
-    // Tier 1: unrestricted — no scope and no file_access rows
+  // userEmails === undefined → trusted bypass; userEmails === [] → fail closed.
+  if (userEmails !== undefined) {
+    if (userEmails.length === 0) return null;
+
     const hasScope = file.access_scope_id != null;
     const hasFileAccess = await db
       .selectFrom("file_access")
@@ -254,16 +261,22 @@ export async function getFileContent(
 
 /**
  * Filter a list of indexed file IDs down to only those the user can access.
- * Applies the 3-tier RBAC model (unrestricted / scope-level / per-file).
- * Returns the input set unchanged when userEmails is empty (no filtering).
+ *
+ * Contract mirrors `getFileContent`:
+ *   - `userEmails === undefined` → trusted bypass (server/agent boot, admin
+ *     bypass): returns the input set unchanged.
+ *   - `userEmails === []`        → caller has no resolvable email → fail closed:
+ *     returns an empty set.
+ *   - `userEmails.length > 0`    → 3-tier check (unrestricted / scope / per-file).
  */
 export async function filterAccessibleFileIds(
   db: Kysely<DB>,
   fileIds: string[],
-  userEmails: string[],
+  userEmails?: string[],
 ): Promise<Set<string>> {
   if (fileIds.length === 0) return new Set();
-  if (userEmails.length === 0) return new Set(fileIds);
+  if (userEmails === undefined) return new Set(fileIds);
+  if (userEmails.length === 0) return new Set();
 
   const files = await db
     .selectFrom("indexed_files")

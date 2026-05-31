@@ -283,13 +283,23 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     }
   });
 
-  it("returns all files when userEmails is empty (no filtering)", async () => {
+  it("returns all files when userEmails is undefined (trusted bypass)", async () => {
+    const accessible = await filterAccessibleFileIds(db, [
+      "file-unrestricted",
+      "file-scope-a",
+      "file-scope-b",
+      "file-per-file",
+    ]);
+    expect(accessible.size).toBe(4);
+  });
+
+  it("returns empty set when userEmails is [] (fail closed)", async () => {
     const accessible = await filterAccessibleFileIds(
       db,
       ["file-unrestricted", "file-scope-a", "file-scope-b", "file-per-file"],
       [],
     );
-    expect(accessible.size).toBe(4);
+    expect(accessible.size).toBe(0);
   });
 
   it("returns unrestricted files for any user", async () => {
@@ -444,10 +454,15 @@ describe("getFileContent — RBAC", () => {
     }
   });
 
-  it("returns file when no userEmails provided (admin/API without auth)", async () => {
+  it("returns file when userEmails is undefined (trusted bypass)", async () => {
     const file = await getFileContent(db, "file-restricted");
     expect(file).toBeTruthy();
     expect(file?.content).toBe("top secret content");
+  });
+
+  it("returns null when userEmails is [] (fail closed)", async () => {
+    const file = await getFileContent(db, "file-restricted", []);
+    expect(file).toBeNull();
   });
 
   it("returns file when user is in the scope", async () => {

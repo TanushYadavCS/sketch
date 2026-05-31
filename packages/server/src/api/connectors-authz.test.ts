@@ -466,6 +466,81 @@ describe("Connectors API — authorization", () => {
     });
   });
 
+  describe("GET /files/:fileId/content — admin content bypass setting", () => {
+    /**
+     * Insert a file restricted to a scope that does NOT include the admin's email,
+     * so the admin would normally be denied content access. Returns the file id.
+     */
+    async function insertRestrictedFile(): Promise<string> {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      await db
+        .insertInto("access_scopes")
+        .values({
+          id: "scope-restricted",
+          connector_config_id: cfg.id,
+          scope_type: "drive",
+          provider_scope_id: "drive-r",
+        })
+        .execute();
+      await db
+        .insertInto("access_scope_members")
+        .values({ access_scope_id: "scope-restricted", email: OTHER_MEMBER_EMAIL })
+        .execute();
+      const repo = createConnectorRepository(db);
+      const result = await repo.upsertFile({
+        source: "fireflies",
+        providerFileId: `pf-restricted-${Math.random().toString(36).slice(2)}`,
+        providerUrl: null,
+        fileName: "restricted.txt",
+        fileType: "text/plain",
+        contentCategory: "document",
+        content: "secret payload",
+        sourcePath: null,
+        contentHash: null,
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        connectorConfigId: cfg.id,
+      });
+      await repo.linkConnectorFile(cfg.id, result.id);
+      await db
+        .updateTable("indexed_files")
+        .set({ access_scope_id: "scope-restricted" })
+        .where("id", "=", result.id)
+        .execute();
+      return result.id;
+    }
+
+    it("admin → 403 when admin_can_read_all_files=0 (default)", async () => {
+      const fileId = await insertRestrictedFile();
+      const res = await app.request(`/api/connectors/files/${fileId}/content`, {
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("admin → 200 with content when admin_can_read_all_files=1", async () => {
+      const fileId = await insertRestrictedFile();
+      await createSettingsRepository(db).update({ adminCanReadAllFiles: 1 });
+
+      const res = await app.request(`/api/connectors/files/${fileId}/content`, {
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.file?.content).toBe("secret payload");
+    });
+
+    it("member without access → 403 even when admin_can_read_all_files=1", async () => {
+      const fileId = await insertRestrictedFile();
+      await createSettingsRepository(db).update({ adminCanReadAllFiles: 1 });
+
+      const res = await app.request(`/api/connectors/files/${fileId}/content`, {
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(403);
+    });
+  });
+
   /**
    * Defense-in-depth: enumerate every gated `/:id/*` route and assert each returns 403
    * for an unauthorized caller. This catches the failure mode where a future route

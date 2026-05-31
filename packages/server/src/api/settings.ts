@@ -24,6 +24,10 @@ const identityUpdateSchema = z.object({
     .optional(),
 });
 
+const accessUpdateSchema = z.object({
+  adminCanReadAllFiles: z.boolean(),
+});
+
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
 function generateSketchApiKey(): string {
@@ -141,6 +145,31 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
     });
 
     return c.json({ success: true, message: "Enrichment started" });
+  });
+
+  routes.get("/access", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const row = await settings.get();
+    return c.json({
+      adminCanReadAllFiles: row?.admin_can_read_all_files === 1,
+    });
+  });
+
+  routes.put("/access", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = accessUpdateSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    await settings.update({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles ? 1 : 0 });
+    return c.json({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles });
   });
 
   routes.get("/api-key", async (c) => {

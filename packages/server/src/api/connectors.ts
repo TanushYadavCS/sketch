@@ -29,7 +29,14 @@ import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { denyIfCannotEdit, denyIfCannotRead, denyIfNotAdmin, getFileViewer, isAdmin } from "./auth-helpers";
+import {
+  denyIfCannotEdit,
+  denyIfCannotRead,
+  denyIfNotAdmin,
+  getContentViewer,
+  getFileViewer,
+  isAdmin,
+} from "./auth-helpers";
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -346,7 +353,11 @@ export function connectorRoutes(
   /** Get full content of a file, including who has access and linked entities. */
   routes.get("/files/:fileId/content", async (c) => {
     const fileId = c.req.param("fileId");
-    const userEmails = await getUserEmails(c);
+    // Admin bypass (admin role + admin_can_read_all_files setting) → undefined
+    // signals trusted bypass to getFileContent; otherwise pass the caller's
+    // resolved emails so the 3-tier RBAC check runs.
+    const contentViewer = getContentViewer(c);
+    const userEmails = contentViewer.isAdmin ? undefined : await getUserEmails(c);
     const exists = await db
       .selectFrom("indexed_files")
       .select(["id", "file_name", "file_type", "source", "source_path", "synced_at", "enrichment_status"])
