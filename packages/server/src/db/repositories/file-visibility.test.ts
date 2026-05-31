@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { type FileViewer, createConnectorRepository } from "./connectors";
+import { createEntityRepository } from "./entities";
 
 describe("file-visibility predicate (RBAC for file list/count)", () => {
   let db: Kysely<DB>;
@@ -251,6 +252,52 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
 
       const eveFiles = await repo.listAllFiles({ limit: 50, offset: 0, viewer: member("eve@example.com") });
       expect(eveFiles.map((f) => f.id).sort()).toEqual(["f-scope-b", "f-unrestricted"]);
+    });
+  });
+
+  describe("system entity visibility", () => {
+    it("keeps system entities visible without granting files that mention them", async () => {
+      const now = new Date().toISOString();
+      await db
+        .insertInto("entities")
+        .values({
+          id: "ent-clickup-space",
+          name: "Engineering Space",
+          source_type: "clickup_space",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+      await db
+        .insertInto("entity_mentions")
+        .values({
+          id: "mention-clickup-space",
+          entity_id: "ent-clickup-space",
+          indexed_file_id: "f-scope-a",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        })
+        .execute();
+
+      const viewer = member("stranger@example.com");
+      const fileRepo = createConnectorRepository(db);
+      const entityRepo = createEntityRepository(db);
+
+      const entity = await entityRepo.getEntity("ent-clickup-space", viewer);
+      const files = await fileRepo.listAllFiles({ limit: 50, offset: 0, viewer });
+
+      expect(entity?.id).toBe("ent-clickup-space");
+      expect(files.map((f) => f.id)).toEqual(["f-unrestricted"]);
     });
   });
 });

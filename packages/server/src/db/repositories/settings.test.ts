@@ -87,10 +87,10 @@ describe("Settings repository", () => {
     const initial = await settings.get();
     expect(initial?.admin_can_read_all_files).toBe(0);
 
-    await settings.update({ adminCanReadAllFiles: 1 });
+    await settings.update({ adminCanReadAllFiles: true });
     expect((await settings.get())?.admin_can_read_all_files).toBe(1);
 
-    await settings.update({ adminCanReadAllFiles: 0 });
+    await settings.update({ adminCanReadAllFiles: false });
     expect((await settings.get())?.admin_can_read_all_files).toBe(0);
   });
 

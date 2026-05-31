@@ -1,11 +1,17 @@
 /**
  * RBAC tests for GET /api/entities/:id/mentions.
  *
- * Mirrors the file-visibility predicate model: admin sees all mentions; a member
- * sees only mentions that point to files they can access (unrestricted /
- * scope-member / per-file share). The hidden-count footer is computed as
- * unfiltered_total - filtered_total and exposed to the frontend so users see
- * "+N mentions in files you don't have access to".
+ * Mirrors the file-visibility predicate model: a member sees only mentions
+ * that point to files they can access (unrestricted / scope-member / per-file
+ * share). Admin sees all mentions only when the org-level setting
+ * `adminCanReadAllFiles` is enabled — the mentions endpoint returns
+ * context_snippet content, so it gates on `getContentViewer`, not the raw
+ * role check. This suite seeds the setting ON so admin tests exercise the
+ * full-visibility path.
+ *
+ * The hidden-count footer is computed as unfiltered_total - filtered_total
+ * and exposed to the frontend so users see "+N mentions in files you don't
+ * have access to".
  */
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -36,7 +42,7 @@ async function seedUsers(db: Kysely<DB>) {
   ] as const) {
     await users.create({ name, email, emailVerified: true, passwordHash: hash, authRole: role });
   }
-  await settings.update({ onboardingCompletedAt: new Date().toISOString() });
+  await settings.update({ onboardingCompletedAt: new Date().toISOString(), adminCanReadAllFiles: true });
 }
 
 async function login(app: ReturnType<typeof createApp>, email: string): Promise<string> {

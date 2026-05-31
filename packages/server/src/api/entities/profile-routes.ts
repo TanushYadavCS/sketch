@@ -1,16 +1,18 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { z } from "zod";
 import { type FileViewer, fileVisibilityPredicate } from "../../db/repositories/connectors";
-import { createEntityRepository } from "../../db/repositories/entities";
+import { createEntityRepository, entityVisibilityPredicate } from "../../db/repositories/entities";
 import {
   type RelationListEntry,
   createEntityRelationshipsRepository,
 } from "../../db/repositories/entity-relationships";
+import { createEntitySharesRepository } from "../../db/repositories/entity-shares";
 import { createEntityTimelineRepository } from "../../db/repositories/entity-timeline";
 import type { DB } from "../../db/schema";
 import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, mapSourceTypeToEntityType } from "../../entities/profile-facts";
-import { denyIfNotAdmin, getFileViewer } from "../auth-helpers";
+import { denyIfNotAdmin, getContentViewer, getFileViewer } from "../auth-helpers";
 import type { EntityRoutesDeps } from "./types";
 
 function countByType(rows: RelationListEntry[]): Record<string, number> {
@@ -25,13 +27,17 @@ function countByType(rows: RelationListEntry[]): Record<string, number> {
  * Loads the structured facts shape the drawer Summary block consumes.
  * Returns null when the entity doesn't exist.
  */
-async function loadEntityFactsForId(db: Kysely<DB>, entityId: string): Promise<EntityProfileFacts | null> {
+async function loadEntityFactsForId(
+  db: Kysely<DB>,
+  entityId: string,
+  viewer: FileViewer,
+): Promise<EntityProfileFacts | null> {
   const repo = createEntityRepository(db);
   const relRepo = createEntityRelationshipsRepository(db);
-  const entity = await repo.getEntity(entityId);
+  const entity = await repo.getEntity(entityId, viewer);
   if (!entity) return null;
   const [aggregates, relations] = await Promise.all([
-    repo.getEntityProfileAggregates(entity.id),
+    repo.getEntityProfileAggregates(entity.id, viewer),
     relRepo.listRelationsForEntity(entity.id, { limit: 50 }),
   ]);
   const parsedMetadata = entity.metadata ? (JSON.parse(entity.metadata) as Record<string, unknown>) : null;
@@ -235,6 +241,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
   const repo = createEntityRepository(db);
   const relRepo = createEntityRelationshipsRepository(db);
   const timelineRepo = createEntityTimelineRepository(db);
+  const sharesRepo = createEntitySharesRepository(db);
   const { config } = deps;
 
   const RELATIONS_LIMIT = 200;
@@ -299,20 +306,38 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
     const includeSystem = c.req.query("includeSystem") === "true";
     const includeArchived = c.req.query("includeArchived") === "true";
     const systemTypes = [...SYSTEM_SOURCE_TYPES];
+    const viewer = getFileViewer(c);
+
+    // For non-admin viewers, the mention_count and last_mention_at subqueries
+    // must only count mentions in files the viewer can actually see —
+    // otherwise an entity row that's visible (via manual share, etc.) leaks
+    // activity from hidden files.
+    const mentionCountSql = viewer.isAdmin
+      ? sql<number>`(SELECT count(*) FROM entity_mentions WHERE entity_mentions.entity_id = entities.id)`
+      : sql<number>`(SELECT count(*) FROM entity_mentions
+                     INNER JOIN indexed_files ON indexed_files.id = entity_mentions.indexed_file_id
+                     WHERE entity_mentions.entity_id = entities.id
+                       AND ${fileVisibilityPredicate(viewer)})`;
+    const lastMentionSql = viewer.isAdmin
+      ? sql<string>`(SELECT COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)
+                     FROM entity_mentions
+                     INNER JOIN indexed_files ON indexed_files.id = entity_mentions.indexed_file_id
+                     WHERE entity_mentions.entity_id = entities.id
+                     ORDER BY COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at) DESC
+                     LIMIT 1)`
+      : sql<string>`(SELECT COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)
+                     FROM entity_mentions
+                     INNER JOIN indexed_files ON indexed_files.id = entity_mentions.indexed_file_id
+                     WHERE entity_mentions.entity_id = entities.id
+                       AND ${fileVisibilityPredicate(viewer)}
+                     ORDER BY COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at) DESC
+                     LIMIT 1)`;
 
     let query = db
       .selectFrom("entities")
       .selectAll("entities")
-      .select(
-        sql<number>`(SELECT count(*) FROM entity_mentions WHERE entity_mentions.entity_id = entities.id)`.as(
-          "mention_count",
-        ),
-      )
-      .select(
-        sql<string>`(SELECT COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at) FROM entity_mentions INNER JOIN indexed_files ON indexed_files.id = entity_mentions.indexed_file_id WHERE entity_mentions.entity_id = entities.id ORDER BY COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at) DESC LIMIT 1)`.as(
-          "last_mention_at",
-        ),
-      );
+      .select(mentionCountSql.as("mention_count"))
+      .select(lastMentionSql.as("last_mention_at"));
 
     if (typeFilter && typeFilter.length > 0) {
       query = query.where("entities.source_type", "in", typeFilter);
@@ -341,6 +366,10 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
       query = query.where("entities.source_type", "not in", systemTypes);
     }
 
+    if (!viewer.isAdmin) {
+      query = query.where(entityVisibilityPredicate(viewer));
+    }
+
     if (sort === "mentions") {
       query = query.orderBy("mention_count", "desc");
     } else if (sort === "name") {
@@ -353,19 +382,24 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
 
     const entities = await query.execute();
 
-    let countQuery = db.selectFrom("entities").select(db.fn.count("id").as("total"));
+    let countQuery = db.selectFrom("entities").select(db.fn.count("entities.id").as("total"));
     if (typeFilter && typeFilter.length > 0) {
-      countQuery = countQuery.where("source_type", "in", typeFilter);
+      countQuery = countQuery.where("entities.source_type", "in", typeFilter);
     }
     if (search) {
       const pattern = `%${search}%`;
-      countQuery = countQuery.where((eb) => eb.or([eb("name", "like", pattern), eb("aliases", "like", pattern)]));
+      countQuery = countQuery.where((eb) =>
+        eb.or([eb("entities.name", "like", pattern), eb("entities.aliases", "like", pattern)]),
+      );
     }
     if (!includeArchived) {
-      countQuery = countQuery.where("status", "!=", "archived");
+      countQuery = countQuery.where("entities.status", "!=", "archived");
     }
     if (!typeFilter && !includeSystem && systemTypes.length > 0) {
-      countQuery = countQuery.where("source_type", "not in", systemTypes);
+      countQuery = countQuery.where("entities.source_type", "not in", systemTypes);
+    }
+    if (!viewer.isAdmin) {
+      countQuery = countQuery.where(entityVisibilityPredicate(viewer));
     }
     const countResult = await countQuery.executeTakeFirst();
 
@@ -465,21 +499,27 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
    * not the response shape.
    */
   routes.get("/:id", async (c) => {
-    const entity = await repo.getEntity(c.req.param("id"));
+    const viewer = getFileViewer(c);
+    const entity = await repo.getEntity(c.req.param("id"), viewer);
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
-    const [sourceRefs, facts] = await Promise.all([
+    const [sourceRefs, facts, manualShares] = await Promise.all([
       db.selectFrom("entity_source_refs").selectAll().where("entity_id", "=", entity.id).execute(),
-      loadEntityFactsForId(db, entity.id),
+      loadEntityFactsForId(db, entity.id, viewer),
+      db
+        .selectFrom("entity_share_emails")
+        .select(["email", "granted_at"])
+        .where("entity_id", "=", entity.id)
+        .orderBy("granted_at", "desc")
+        .execute(),
     ]);
     if (!facts) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
     const parsedAliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];
-    const viewer = getFileViewer(c);
     const activity = await loadActivityStats(db, entity.id, viewer);
     const summary = buildSummary(facts, activity);
 
@@ -493,6 +533,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
         metadata: facts.metadata,
         status: entity.status,
         hotness: entity.hotness,
+        shareWithEveryone: entity.share_with_everyone === 1,
+        manualShares: manualShares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
         createdAt: entity.created_at,
         updatedAt: entity.updated_at,
         profile: {
@@ -524,7 +566,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
     if (!config.EXPERIMENTAL_FLAG) {
       return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
     }
-    const entity = await repo.getEntity(c.req.param("id"));
+    const viewer = getFileViewer(c);
+    const entity = await repo.getEntity(c.req.param("id"), viewer);
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
@@ -550,7 +593,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
     }
     const entityId = c.req.param("id");
     const relationshipId = c.req.param("rid");
-    const entity = await repo.getEntity(entityId);
+    const viewer = getFileViewer(c);
+    const entity = await repo.getEntity(entityId, viewer);
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
@@ -558,7 +602,6 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
     if (!relation || (relation.source_entity_id !== entityId && relation.target_entity_id !== entityId)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Relation not found" } }, 404);
     }
-    const viewer = getFileViewer(c);
     const result = await relRepo.listEvidenceForRelation(relationshipId, { limit: EVIDENCE_LIMIT, viewer });
     return c.json(result);
   });
@@ -572,11 +615,11 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
     if (!config.EXPERIMENTAL_FLAG) {
       return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
     }
-    const entity = await repo.getEntity(c.req.param("id"));
+    const viewer = getFileViewer(c);
+    const entity = await repo.getEntity(c.req.param("id"), viewer);
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
-    const viewer = getFileViewer(c);
     const result = await timelineRepo.listTimelineForEntity(entity.id, { limit: TIMELINE_LIMIT, viewer });
     return c.json(result);
   });
@@ -653,8 +696,9 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
     const limit = Math.min(Number(c.req.query("limit")) || 20, 100);
     const offset = Number(c.req.query("offset")) || 0;
     const viewer = getFileViewer(c);
+    const contentViewer = getContentViewer(c);
 
-    const entity = await repo.getEntity(entityId);
+    const entity = await repo.getEntity(entityId, viewer);
     if (!entity) {
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
@@ -692,8 +736,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
         since,
       );
     }
-    if (!viewer.isAdmin) {
-      query = query.where(fileVisibilityPredicate(viewer));
+    if (!contentViewer.isAdmin) {
+      query = query.where(fileVisibilityPredicate(contentViewer));
     }
 
     query = query.limit(limit).offset(offset);
@@ -715,12 +759,12 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
           since,
         );
       }
-      if (gated) q = q.where(fileVisibilityPredicate(viewer));
+      if (gated) q = q.where(fileVisibilityPredicate(contentViewer));
       return q;
     };
 
-    const visibleCount = Number((await buildCountQuery(!viewer.isAdmin).executeTakeFirst())?.total ?? 0);
-    const hiddenCount = viewer.isAdmin
+    const visibleCount = Number((await buildCountQuery(!contentViewer.isAdmin).executeTakeFirst())?.total ?? 0);
+    const hiddenCount = contentViewer.isAdmin
       ? 0
       : Math.max(0, Number((await buildCountQuery(false).executeTakeFirst())?.total ?? 0) - visibleCount);
 
@@ -742,6 +786,151 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
       })),
       total: visibleCount,
       hiddenCount,
+    });
+  });
+
+  /**
+   * Manual entity share management.
+   *
+   * Authz: all routes are admin-only. Entities have no single owner (unlike
+   * connectors), so members cannot grant or revoke shares.
+   */
+  const shareEmailBodySchema = z.object({ email: z.string().email().toLowerCase() });
+  const shareEveryoneBodySchema = z.object({ enabled: z.boolean() });
+  const shareBatchBodySchema = z.object({
+    emails: z.array(z.string().email().toLowerCase()),
+    shareWithEveryone: z.boolean().optional(),
+  });
+
+  async function entityExists(entityId: string): Promise<boolean> {
+    const row = await db.selectFrom("entities").select("id").where("id", "=", entityId).executeTakeFirst();
+    return !!row;
+  }
+
+  routes.get("/:id/shares", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entityId = c.req.param("id");
+    if (!(await entityExists(entityId))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const [shares, shareWithEveryone] = await Promise.all([
+      sharesRepo.listForEntity(entityId),
+      sharesRepo.getOrgWide(entityId),
+    ]);
+    return c.json({
+      shares: shares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
+      shareWithEveryone,
+    });
+  });
+
+  routes.post("/:id/shares", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entityId = c.req.param("id");
+    if (!(await entityExists(entityId))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = shareEmailBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    const grantedBy = c.get("sub") as string;
+    await sharesRepo.grantToEmail(entityId, parsed.data.email, grantedBy);
+    const shares = await sharesRepo.listForEntity(entityId);
+    return c.json({ shares: shares.map((s) => ({ email: s.email, grantedAt: s.granted_at })) });
+  });
+
+  routes.delete("/:id/shares/:email", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entityId = c.req.param("id");
+    const email = decodeURIComponent(c.req.param("email"));
+    if (!(await entityExists(entityId))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    await sharesRepo.revokeFromEmail(entityId, email);
+    return c.json({ success: true });
+  });
+
+  routes.put("/:id/share-everyone", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entityId = c.req.param("id");
+    if (!(await entityExists(entityId))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = shareEveryoneBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    await sharesRepo.setOrgWide(entityId, parsed.data.enabled);
+    return c.json({ shareWithEveryone: parsed.data.enabled });
+  });
+
+  routes.put("/:id/shares", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+    const entityId = c.req.param("id");
+    if (!(await entityExists(entityId))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = shareBatchBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    const grantedBy = c.get("sub") as string;
+    const targetEmails = new Set(parsed.data.emails);
+    await db.transaction().execute(async (trx) => {
+      const existing = await trx
+        .selectFrom("entity_share_emails")
+        .select("email")
+        .where("entity_id", "=", entityId)
+        .execute();
+      const existingSet = new Set(existing.map((r) => r.email));
+      const toAdd = [...targetEmails].filter((e) => !existingSet.has(e));
+      const toRemove = [...existingSet].filter((e) => !targetEmails.has(e));
+      if (toAdd.length > 0) {
+        await trx
+          .insertInto("entity_share_emails")
+          .values(
+            toAdd.map((email) => ({
+              entity_id: entityId,
+              email,
+              granted_by_user_id: grantedBy,
+            })),
+          )
+          .onConflict((oc) => oc.columns(["entity_id", "email"]).doNothing())
+          .execute();
+      }
+      if (toRemove.length > 0) {
+        await trx
+          .deleteFrom("entity_share_emails")
+          .where("entity_id", "=", entityId)
+          .where("email", "in", toRemove)
+          .execute();
+      }
+      if (parsed.data.shareWithEveryone !== undefined) {
+        await trx
+          .updateTable("entities")
+          .set({ share_with_everyone: parsed.data.shareWithEveryone ? 1 : 0 })
+          .where("id", "=", entityId)
+          .execute();
+      }
+    });
+    const [shares, shareWithEveryone] = await Promise.all([
+      sharesRepo.listForEntity(entityId),
+      sharesRepo.getOrgWide(entityId),
+    ]);
+    return c.json({
+      shares: shares.map((s) => ({ email: s.email, grantedAt: s.granted_at })),
+      shareWithEveryone,
     });
   });
 

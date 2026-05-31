@@ -520,7 +520,7 @@ describe("Connectors API — authorization", () => {
 
     it("admin → 200 with content when admin_can_read_all_files=1", async () => {
       const fileId = await insertRestrictedFile();
-      await createSettingsRepository(db).update({ adminCanReadAllFiles: 1 });
+      await createSettingsRepository(db).update({ adminCanReadAllFiles: true });
 
       const res = await app.request(`/api/connectors/files/${fileId}/content`, {
         headers: { Cookie: adminCookie },
@@ -532,7 +532,7 @@ describe("Connectors API — authorization", () => {
 
     it("member without access → 403 even when admin_can_read_all_files=1", async () => {
       const fileId = await insertRestrictedFile();
-      await createSettingsRepository(db).update({ adminCanReadAllFiles: 1 });
+      await createSettingsRepository(db).update({ adminCanReadAllFiles: true });
 
       const res = await app.request(`/api/connectors/files/${fileId}/content`, {
         headers: { Cookie: memberCookie },
