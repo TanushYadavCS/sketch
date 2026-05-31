@@ -15,6 +15,7 @@ export interface UserRepository {
   findFirstAdmin(): Promise<UserRow | undefined>;
   findFirstLocalAdmin(): Promise<UserRow | undefined>;
   getAllEmailsForUser(id: string): Promise<string[]>;
+  getVerifiedEmailsForUser(id: string): Promise<string[]>;
   findByExactName(name: string, excludeUserId?: string): Promise<UserRow | undefined>;
   searchByNamePrefix(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
   searchByNameSubstring(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
@@ -125,6 +126,31 @@ export function createUserRepository(db: UserDb): UserRepository {
     async getAllEmailsForUser(userId: string): Promise<string[]> {
       const [user, identities] = await Promise.all([
         db.selectFrom("users").select("email").where("id", "=", userId).executeTakeFirst(),
+        db
+          .selectFrom("user_provider_identities")
+          .select("provider_email")
+          .where("user_id", "=", userId)
+          .where("provider_email", "is not", null)
+          .execute(),
+      ]);
+      const emails: string[] = [];
+      if (user?.email) emails.push(user.email);
+      for (const row of identities) {
+        if (row.provider_email && !emails.includes(row.provider_email)) {
+          emails.push(row.provider_email);
+        }
+      }
+      return emails;
+    },
+
+    async getVerifiedEmailsForUser(userId: string): Promise<string[]> {
+      const [user, identities] = await Promise.all([
+        db
+          .selectFrom("users")
+          .select("email")
+          .where("id", "=", userId)
+          .where("email_verified_at", "is not", null)
+          .executeTakeFirst(),
         db
           .selectFrom("user_provider_identities")
           .select("provider_email")
