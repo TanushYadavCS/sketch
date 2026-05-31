@@ -4,14 +4,17 @@
  * trigger button.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
+import { FileShareDialog } from "@/components/file-share-dialog";
 import type { FileAccess, FileContent, LinkedEntity } from "@/lib/api";
 import { ApiRequestError, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
+import { useDashboardAuth } from "@/routes/dashboard";
 import {
   ArrowSquareOutIcon,
   GlobeIcon,
   LinkIcon,
   LockSimpleIcon,
+  ShareNetworkIcon,
   SparkleIcon,
   SpinnerGapIcon,
 } from "@phosphor-icons/react";
@@ -81,7 +84,7 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
           )}
         </div>
 
-        {file && <FileDetailFooter fileId={file.id} />}
+        {file && <FileDetailFooter fileId={file.id} fileName={file.fileName} />}
       </SheetContent>
     </Sheet>
   );
@@ -117,12 +120,21 @@ function FileDetailContent({
         {access && (
           <Badge
             variant="outline"
-            className={`gap-0.5 text-[10px] ${access.scope === "restricted" ? "text-amber-500 border-amber-500/30" : "text-muted-foreground"}`}
+            className={`gap-0.5 text-[10px] ${
+              access.shareWithEveryone || access.scope !== "restricted"
+                ? "text-muted-foreground"
+                : "text-amber-500 border-amber-500/30"
+            }`}
           >
-            {access.scope === "restricted" ? (
+            {access.shareWithEveryone ? (
+              <>
+                <GlobeIcon size={10} />
+                Anyone in org
+              </>
+            ) : access.scope === "restricted" ? (
               <>
                 <LockSimpleIcon size={10} weight="fill" />
-                {access.members.length} users
+                {access.members.length + access.manualShares.length} users
               </>
             ) : (
               <>
@@ -206,7 +218,7 @@ function FileDetailContent({
         </div>
       )}
 
-      {access && access.members.length > 0 && <AccessSection access={access} />}
+      {access && (access.members.length > 0 || access.manualShares.length > 0) && <AccessSection access={access} />}
 
       {file.content && <ContentPreview content={file.content} />}
     </div>
@@ -311,8 +323,11 @@ function ContentPreview({ content }: { content: string }) {
   );
 }
 
-function FileDetailFooter({ fileId }: { fileId: string }) {
+function FileDetailFooter({ fileId, fileName }: { fileId: string; fileName: string }) {
   const queryClient = useQueryClient();
+  const auth = useDashboardAuth();
+  const isAdmin = auth.role === "admin";
+  const [shareOpen, setShareOpen] = useState(false);
 
   const enrichMutation = useMutation({
     mutationFn: () => api.integrations.enrichFile(fileId),
@@ -324,11 +339,17 @@ function FileDetailFooter({ fileId }: { fileId: string }) {
   });
 
   return (
-    <div className="border-t border-border px-4 py-3">
+    <div className="border-t border-border px-4 py-3 flex gap-2">
+      {isAdmin && (
+        <Button size="sm" variant="outline" className="flex-1 gap-1.5 text-xs" onClick={() => setShareOpen(true)}>
+          <ShareNetworkIcon size={12} />
+          Share
+        </Button>
+      )}
       <Button
         size="sm"
         variant="outline"
-        className="w-full gap-1.5 text-xs"
+        className="flex-1 gap-1.5 text-xs"
         onClick={() => enrichMutation.mutate()}
         disabled={enrichMutation.isPending}
       >
@@ -340,10 +361,11 @@ function FileDetailFooter({ fileId }: { fileId: string }) {
         ) : (
           <>
             <SparkleIcon size={12} />
-            Enrich File
+            Enrich
           </>
         )}
       </Button>
+      {isAdmin && <FileShareDialog fileId={fileId} fileName={fileName} open={shareOpen} onOpenChange={setShareOpen} />}
     </div>
   );
 }
@@ -443,6 +465,21 @@ function AccessSection({ access }: { access: FileAccess }) {
           >
             Show less
           </button>
+        </div>
+      )}
+
+      {access.manualShares.length > 0 && (
+        <div className="mt-2">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Manually shared ({access.manualShares.length})
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {access.manualShares.map((share) => (
+              <Badge key={share.email} variant="outline" className="text-[10px]">
+                {share.email}
+              </Badge>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -628,9 +628,21 @@ export interface SearchResult {
   score: number;
 }
 
+export interface FileManualShare {
+  email: string;
+  grantedAt: string;
+}
+
 export interface FileAccess {
   scope: "restricted" | "unrestricted";
   members: FileAccessMember[];
+  manualShares: FileManualShare[];
+  shareWithEveryone: boolean;
+}
+
+export interface FileSharesResponse {
+  shares: FileManualShare[];
+  shareWithEveryone: boolean;
 }
 
 export interface ProviderIdentity {
@@ -936,6 +948,20 @@ export const api = {
       return request<{ file: FileContent; access: FileAccess; entities: LinkedEntity[] }>(
         `/api/connectors/files/${fileId}/content`,
       );
+    },
+    listFileShares(fileId: string) {
+      return request<FileSharesResponse>(`/api/connectors/files/${fileId}/shares`);
+    },
+    updateFileShares(fileId: string, data: { emails: string[]; shareWithEveryone?: boolean }) {
+      return request<FileSharesResponse>(`/api/connectors/files/${fileId}/shares`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
+    revokeFileShare(fileId: string, email: string) {
+      return request<{ success: boolean }>(`/api/connectors/files/${fileId}/shares/${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
     },
     enrich(id: string, data: { fileIds: string[]; instruction: string }) {
       return request<{ enrichment: { jobId: string; connectorId: string; fileCount: number } }>(

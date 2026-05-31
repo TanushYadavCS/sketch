@@ -27,9 +27,11 @@ export interface FileViewer {
 /**
  * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
  *
- *   unrestricted  = no scope AND no per-file shares
- *   scoped        = caller is in access_scope_members for the file's scope
- *   per-file      = caller has a row in file_access for the file
+ *   unrestricted    = no scope AND no per-file shares
+ *   scoped          = caller is in access_scope_members for the file's scope
+ *   per-file        = caller has a row in file_access for the file
+ *   manual share    = caller's email is in file_share_emails for the file
+ *   org-wide        = indexed_files.share_with_everyone = 1
  *
  * v1 matches the caller's primary email only; multi-email users (Slack login email
  * differs from connector-side email) under-see — the safe failure direction. v2 will
@@ -49,6 +51,10 @@ export function fileVisibilityPredicate(viewer: FileViewer) {
     OR EXISTS (SELECT 1 FROM file_access fa
                WHERE fa.indexed_file_id = indexed_files.id
                  AND fa.email = ${email})
+    OR EXISTS (SELECT 1 FROM file_share_emails fse
+               WHERE fse.indexed_file_id = indexed_files.id
+                 AND fse.email = ${email})
+    OR indexed_files.share_with_everyone = 1
   )`;
 }
 

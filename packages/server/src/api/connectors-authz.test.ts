@@ -541,6 +541,71 @@ describe("Connectors API — authorization", () => {
     });
   });
 
+  describe("file shares — POST / PUT share-everyone authz", () => {
+    async function insertSharableFile(): Promise<string> {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const repo = createConnectorRepository(db);
+      const result = await repo.upsertFile({
+        source: "fireflies",
+        providerFileId: `pf-share-${Math.random().toString(36).slice(2)}`,
+        providerUrl: null,
+        fileName: "sharable.txt",
+        fileType: "text/plain",
+        contentCategory: "document",
+        content: null,
+        sourcePath: null,
+        contentHash: null,
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        connectorConfigId: cfg.id,
+      });
+      await repo.linkConnectorFile(cfg.id, result.id);
+      return result.id;
+    }
+
+    it("only admin or connector owner can POST a share; share-everyone is admin-only", async () => {
+      const fileId = await insertSharableFile();
+
+      // memberCookie is the connector owner → 200; otherMemberCookie is not → 403.
+      const ownerRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "POST",
+        headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "alice@example.com" }),
+      });
+      expect(ownerRes.status).toBe(200);
+
+      const strangerRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "POST",
+        headers: { Cookie: otherMemberCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "bob@example.com" }),
+      });
+      expect(strangerRes.status).toBe(403);
+
+      // Admin can also share.
+      const adminRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "POST",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "carol@example.com" }),
+      });
+      expect(adminRes.status).toBe(200);
+
+      // share-everyone is admin-only: the connector owner (member) is denied.
+      const ownerEveryone = await app.request(`/api/connectors/files/${fileId}/share-everyone`, {
+        method: "PUT",
+        headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      expect(ownerEveryone.status).toBe(403);
+
+      const adminEveryone = await app.request(`/api/connectors/files/${fileId}/share-everyone`, {
+        method: "PUT",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      expect(adminEveryone.status).toBe(200);
+    });
+  });
+
   /**
    * Defense-in-depth: enumerate every gated `/:id/*` route and assert each returns 403
    * for an unauthorized caller. This catches the failure mode where a future route

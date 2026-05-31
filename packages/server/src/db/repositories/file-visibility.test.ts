@@ -222,4 +222,35 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
       }
     });
   });
+
+  describe("manual file sharing (file_share_emails + share_with_everyone)", () => {
+    it("a manual share grants list visibility; share_with_everyone fans out to any email", async () => {
+      const repo = createConnectorRepository(db);
+
+      // dana isn't in any scope or per-file ACL; before sharing, she sees only the unrestricted file.
+      const before = await repo.listAllFiles({ limit: 50, offset: 0, viewer: member("dana@example.com") });
+      expect(before.map((f) => f.id)).toEqual(["f-unrestricted"]);
+
+      // Grant dana a manual share to a restricted file → it should show up in her list.
+      await db
+        .insertInto("users")
+        .values({ id: "u-admin", name: "admin", email: "admin@example.com" })
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+      await db
+        .insertInto("file_share_emails")
+        .values({ indexed_file_id: "f-scope-a", email: "dana@example.com", granted_by_user_id: "u-admin" })
+        .execute();
+
+      const afterShare = await repo.listAllFiles({ limit: 50, offset: 0, viewer: member("dana@example.com") });
+      expect(afterShare.map((f) => f.id).sort()).toEqual(["f-scope-a", "f-unrestricted"]);
+
+      // Flip share_with_everyone on a different file → it must be visible to any email
+      // (e.g. an unrelated 'eve@example.com') with no other access path.
+      await db.updateTable("indexed_files").set({ share_with_everyone: 1 }).where("id", "=", "f-scope-b").execute();
+
+      const eveFiles = await repo.listAllFiles({ limit: 50, offset: 0, viewer: member("eve@example.com") });
+      expect(eveFiles.map((f) => f.id).sort()).toEqual(["f-scope-b", "f-unrestricted"]);
+    });
+  });
 });
