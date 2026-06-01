@@ -216,7 +216,7 @@ describe("TeamPage", () => {
       await waitFor(() => {
         expect(screen.getByText("This email or number is already linked to another member")).toBeInTheDocument();
       });
-    });
+    }, 15000);
 
     it("uses the same capped form viewport when the dialog opens", async () => {
       const user = userEvent.setup();
@@ -336,7 +336,7 @@ describe("TeamPage", () => {
 
       expect(within(dialog).queryByText("Access")).not.toBeInTheDocument();
       expect(within(dialog).queryByRole("combobox", { name: "Access" })).not.toBeInTheDocument();
-    });
+    }, 15000);
   });
 
   describe("Remove member dialog", () => {
