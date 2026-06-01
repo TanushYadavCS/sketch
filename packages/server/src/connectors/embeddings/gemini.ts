@@ -6,6 +6,7 @@
  *
  * API reference: https://ai.google.dev/gemini-api/docs/embeddings
  */
+import { type GeminiClientOptions, GeminiHttpError, runGeminiRequest } from "../gemini-control";
 import type { EmbeddingProvider } from "./types";
 
 const GEMINI_EMBED_URL =
@@ -19,27 +20,24 @@ const DIMENSIONS = 3072;
 /** Max texts per batch request. */
 const BATCH_SIZE = 100;
 
-export function createGeminiEmbeddingProvider(apiKey: string): EmbeddingProvider {
-  async function request(url: string, body: unknown, retries = 5): Promise<unknown> {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      const res = await fetch(`${url}?key=${apiKey}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+export function createGeminiEmbeddingProvider(apiKey: string, options?: GeminiClientOptions): EmbeddingProvider {
+  async function request(url: string, body: unknown): Promise<unknown> {
+    return runGeminiRequest(
+      apiKey,
+      async () => {
+        const res = await fetch(`${url}?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
 
-      if (res.ok) return res.json();
+        if (res.ok) return res.json();
 
-      if (res.status === 429 && attempt < retries) {
-        const delay = Math.min(1000 * 2 ** attempt, 30000);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-
-      const text = await res.text();
-      throw new Error(`Gemini Embedding API error (${res.status}): ${text}`);
-    }
-    throw new Error("Gemini: retries exhausted");
+        const text = await res.text();
+        throw new GeminiHttpError(res.status, text);
+      },
+      options,
+    );
   }
 
   return {
@@ -102,23 +100,31 @@ export function createGeminiEmbeddingProvider(apiKey: string): EmbeddingProvider
  * Embed a search query (vs document embedding above which uses RETRIEVAL_DOCUMENT).
  * Separate function because task type differs for queries vs documents.
  */
-export function createGeminiQueryEmbedder(apiKey: string) {
+export function createGeminiQueryEmbedder(apiKey: string, options?: GeminiClientOptions) {
   return async function embedQuery(query: string): Promise<number[]> {
-    const res = await fetch(`${GEMINI_EMBED_URL}?key=${apiKey}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: { parts: [{ text: query }] },
-        taskType: "RETRIEVAL_QUERY",
-      }),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Gemini Embedding API error (${res.status}): ${text}`);
-    }
-
-    const result = (await res.json()) as { embedding: { values: number[] } };
+    const result = (await requestQueryEmbedding(apiKey, query, options)) as { embedding: { values: number[] } };
     return result.embedding.values;
   };
+}
+
+async function requestQueryEmbedding(apiKey: string, query: string, options?: GeminiClientOptions): Promise<unknown> {
+  return runGeminiRequest(
+    apiKey,
+    async () => {
+      const res = await fetch(`${GEMINI_EMBED_URL}?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: { parts: [{ text: query }] },
+          taskType: "RETRIEVAL_QUERY",
+        }),
+      });
+
+      if (res.ok) return res.json();
+
+      const text = await res.text();
+      throw new GeminiHttpError(res.status, text);
+    },
+    options,
+  );
 }

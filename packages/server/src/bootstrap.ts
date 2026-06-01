@@ -127,6 +127,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
     const enrichedParams = {
       ...params,
       loadTranscriptionSettings: params.loadTranscriptionSettings ?? (() => settingsRepo.get()),
+      geminiConfig: params.geminiConfig ?? {
+        maxRpm: config.GEMINI_MAX_RPM,
+        maxRetries: config.GEMINI_MAX_RETRIES,
+      },
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

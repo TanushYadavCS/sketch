@@ -20,4 +20,6 @@ export interface EmbeddingProvider {
 export interface EmbeddingProviderConfig {
   provider: "gemini";
   apiKey: string;
+  maxRpm?: number;
+  maxRetries?: number;
 }

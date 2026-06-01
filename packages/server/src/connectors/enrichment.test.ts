@@ -504,4 +504,48 @@ describe("runEnrichment — chronological pending-files order", () => {
     expect(result.filesProcessed).toBe(4);
     expect(order).toEqual([oldest, middleEarlier, middleLater, newest]);
   });
+
+  it("honors scheduled retry backoff but lets explicit reruns bypass it", async () => {
+    const embeddingFileId = randomUUID();
+    const summaryFileId = randomUUID();
+    await seedFile(db, embeddingFileId, "embedding retry body");
+    await seedFile(db, summaryFileId, "summary retry body");
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    await db
+      .updateTable("indexed_files")
+      .set({ embedding_status: "failed", embedding_attempts: 1, embedding_next_retry_at: future })
+      .where("id", "=", embeddingFileId)
+      .execute();
+    await db
+      .updateTable("indexed_files")
+      .set({
+        embedding_status: "done",
+        summary_status: "failed",
+        summary_attempts: 1,
+        summary_next_retry_at: future,
+      })
+      .where("id", "=", summaryFileId)
+      .execute();
+
+    const scheduled = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null });
+    expect(scheduled.filesProcessed).toBe(0);
+    expect(scheduled.filesFailed).toBe(0);
+
+    const explicitEmbedding = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      fileIds: [embeddingFileId],
+    });
+    const explicitSummary = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      fileIds: [summaryFileId],
+    });
+
+    expect(explicitEmbedding.filesProcessed).toBe(1);
+    expect(explicitSummary.filesProcessed).toBe(1);
+  });
 });

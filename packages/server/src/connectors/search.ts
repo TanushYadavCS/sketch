@@ -1265,6 +1265,8 @@ export async function search(
     sortBy?: "relevance" | "recency";
     /** Suppress search()'s own auto-entity-boost (caller will manage entityFileIds itself). */
     skipAutoEntityBoost?: boolean;
+    geminiMaxRpm?: number;
+    geminiMaxRetries?: number;
   },
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
@@ -1311,7 +1313,12 @@ export async function search(
       .where("id", "=", "default")
       .executeTakeFirst();
     if (settings?.gemini_api_key && settings.enrichment_enabled !== 0) {
-      const embedQuery = createQueryEmbedder({ provider: "gemini", apiKey: settings.gemini_api_key });
+      const embedQuery = createQueryEmbedder({
+        provider: "gemini",
+        apiKey: settings.gemini_api_key,
+        maxRpm: opts?.geminiMaxRpm,
+        maxRetries: opts?.geminiMaxRetries,
+      });
       queryEmbedding = await embedQuery(trimmedQuery);
     }
   } catch {

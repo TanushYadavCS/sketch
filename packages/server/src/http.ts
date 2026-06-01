@@ -205,7 +205,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       userRepo: users,
     }),
   );
-  app.route("/api/settings", settingsRoutes(settings, db, deps?.logger));
+  app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",

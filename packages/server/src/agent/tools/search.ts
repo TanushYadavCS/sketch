@@ -148,6 +148,8 @@ Use this to find information before asking others. Examples:
           sortBy,
           userEmails,
           skipAutoEntityBoost,
+          geminiMaxRpm: deps.geminiConfig?.maxRpm,
+          geminiMaxRetries: deps.geminiConfig?.maxRetries,
         });
 
         const effectiveSortBy = sortBy ?? "relevance";
