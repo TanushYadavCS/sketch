@@ -9,7 +9,7 @@ import { type createSettingsRepository, parseOrgContext } from "../db/repositori
 import type { DB } from "../db/schema";
 
 const searchConfigSchema = z.object({
-  geminiApiKey: z.string().nullable().optional(),
+  geminiApiKey: z.string().trim().nullable().optional(),
   enrichmentEnabled: z.boolean().optional(),
   syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
 });
