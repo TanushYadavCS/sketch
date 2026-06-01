@@ -548,4 +548,46 @@ describe("runEnrichment — chronological pending-files order", () => {
     expect(explicitEmbedding.filesProcessed).toBe(1);
     expect(explicitSummary.filesProcessed).toBe(1);
   });
+
+  it("embedding retries preserve completed summary state", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "retry body ".repeat(120));
+    await db
+      .updateTable("indexed_files")
+      .set({
+        embedding_status: "failed",
+        embedding_attempts: 1,
+        embedding_next_retry_at: new Date(Date.now() - 60 * 1000).toISOString(),
+        summary_status: "done",
+        summary_attempts: 0,
+        summary_next_retry_at: null,
+      })
+      .where("id", "=", fileId)
+      .execute();
+
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: {
+        name: "stub",
+        dimensions: 8,
+        supportsImages: false,
+        async embedTexts(texts: string[]) {
+          return texts.map(() => new Array(8).fill(0));
+        },
+      },
+    });
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary_status", "summary_attempts", "summary_next_retry_at"])
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+
+    expect(result.filesProcessed).toBe(1);
+    expect(row.embedding_status).toBe("done");
+    expect(row.summary_status).toBe("done");
+    expect(row.summary_attempts).toBe(0);
+    expect(row.summary_next_retry_at).toBeNull();
+  });
 });

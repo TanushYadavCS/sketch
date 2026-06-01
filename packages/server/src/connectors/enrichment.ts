@@ -470,6 +470,7 @@ async function enrichTextDocument(
     source_path: string | null;
     source_created_at: string | null;
     source_updated_at: string | null;
+    summary_status: string;
     summary_attempts: number;
   },
   isStructured: boolean,
@@ -520,7 +521,8 @@ async function enrichTextDocument(
   const wordCount = file.content.split(/\s+/).length;
   let usedSmartEnrichment = false;
   let smartEnrichmentFailed = false;
-  if (deps.geminiApiKey && wordCount >= 100) {
+  const summaryAlreadyResolved = file.summary_status === "done" || file.summary_status === "skipped";
+  if (!summaryAlreadyResolved && deps.geminiApiKey && wordCount >= 100) {
     try {
       const generator = createGeminiGenerator(deps.geminiApiKey, {
         maxRpm: deps.geminiMaxRpm,
@@ -577,7 +579,7 @@ async function enrichTextDocument(
     }
   }
 
-  if (!usedSmartEnrichment) {
+  if (!summaryAlreadyResolved && !usedSmartEnrichment) {
     await linkEntitiesDeterministic(db, file.id, file.content, chunks);
     // 'failed' = retryable (Gemini error), 'skipped' = intentional (no key or content too short)
     await db
