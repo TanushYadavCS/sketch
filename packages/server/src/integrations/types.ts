@@ -9,6 +9,8 @@ import { z } from "zod";
 
 export type { IntegrationApp, IntegrationConnection, PageInfo };
 
+export type IntegrationUserOrgRole = "admin" | "member";
+
 export interface BrokerSpec {
   /** Absolute path to the real CLI binary the broker will spawn. */
   cliPath: string;
@@ -22,7 +24,12 @@ export interface IntegrationProvider {
   /** Stable provider type identifier (e.g. "canvas"). */
   readonly type: string;
   listApps(query?: string, limit?: number, after?: string): Promise<{ apps: IntegrationApp[]; pageInfo: PageInfo }>;
-  initiateConnection(userEmail: string, appId: string, callbackUrl: string): Promise<{ redirectUrl: string }>;
+  initiateConnection(
+    userEmail: string,
+    appId: string,
+    callbackUrl: string,
+    userOrgRole?: IntegrationUserOrgRole,
+  ): Promise<{ redirectUrl: string }>;
   listConnections(userEmail: string): Promise<IntegrationConnection[]>;
   removeConnection(userEmail: string, connectionId: string): Promise<void>;
   /**

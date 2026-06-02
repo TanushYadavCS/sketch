@@ -87,6 +87,8 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     FEATURE_ARCHIVE_MIN_MENTIONS: 2,
     FEATURE_ARCHIVE_AGE_DAYS: 30,
     FEATURE_ARCHIVE_MAX_PER_RUN: 1000,
+    GEMINI_MAX_RPM: 60,
+    GEMINI_MAX_RETRIES: 4,
     SYNC_ALLOW_LARGE_RECONCILE: false,
     SYNC_MAX_RECONCILE_RATIO: 0.5,
     DATA_DIR: "./data",

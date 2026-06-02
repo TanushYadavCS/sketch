@@ -106,6 +106,8 @@ export async function runConnectorSync(
       | "FEATURE_ARCHIVE_MIN_MENTIONS"
       | "FEATURE_ARCHIVE_AGE_DAYS"
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
+      | "GEMINI_MAX_RPM"
+      | "GEMINI_MAX_RETRIES"
     >
   >,
 ): Promise<SyncResult> {
@@ -357,6 +359,8 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MIN_MENTIONS"
       | "FEATURE_ARCHIVE_AGE_DAYS"
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
+      | "GEMINI_MAX_RPM"
+      | "GEMINI_MAX_RETRIES"
     >
   >;
 }
@@ -433,7 +437,12 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     }
 
     const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
+      ? createEmbeddingProvider({
+          provider: "gemini",
+          apiKey: settings.gemini_api_key,
+          maxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
+          maxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
+        })
       : null;
 
     const enrichResult = await runEnrichment({
@@ -441,6 +450,8 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
       logger: logger.child({ component: "enrichment" }),
       embeddingProvider,
       geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
       downloadImage: deps?.downloadImage,
     });
 

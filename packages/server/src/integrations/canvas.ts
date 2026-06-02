@@ -9,7 +9,7 @@
  */
 import { join } from "node:path";
 import type { IntegrationApp, PageInfo } from "@sketch/shared";
-import type { BrokerSpec, IntegrationProvider } from "./types";
+import type { BrokerSpec, IntegrationProvider, IntegrationUserOrgRole } from "./types";
 
 export class CanvasProvider implements IntegrationProvider {
   readonly type = "canvas";
@@ -41,12 +41,17 @@ export class CanvasProvider implements IntegrationProvider {
     };
   }
 
-  private headers(userEmail?: string, includeContentType = true): Record<string, string> {
+  private headers(
+    userEmail?: string,
+    includeContentType = true,
+    userOrgRole?: IntegrationUserOrgRole,
+  ): Record<string, string> {
     const h: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
     };
     if (includeContentType) h["Content-Type"] = "application/json";
     if (userEmail) h["X-User-Email"] = userEmail;
+    if (userOrgRole) h["X-User-Org-Role"] = userOrgRole;
     return h;
   }
 
@@ -101,10 +106,15 @@ export class CanvasProvider implements IntegrationProvider {
     return { apps, pageInfo };
   }
 
-  async initiateConnection(userEmail: string, appId: string, callbackUrl: string): Promise<{ redirectUrl: string }> {
+  async initiateConnection(
+    userEmail: string,
+    appId: string,
+    callbackUrl: string,
+    userOrgRole?: IntegrationUserOrgRole,
+  ): Promise<{ redirectUrl: string }> {
     const res = await fetch(`${this.apiUrl}/api/apps/connect-token`, {
       method: "POST",
-      headers: this.headers(userEmail),
+      headers: this.headers(userEmail, true, userOrgRole),
       body: JSON.stringify({ app_slug: appId, callback_url: callbackUrl }),
     });
 

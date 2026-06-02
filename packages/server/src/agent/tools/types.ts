@@ -48,6 +48,7 @@ export interface SketchMcpDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   toolConfig?: { BASE_URL?: string; PORT: number };
+  geminiConfig?: { maxRpm?: number; maxRetries?: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;

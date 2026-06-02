@@ -38,6 +38,14 @@ export const MAX_FILES_PER_RUN = 5000;
 const MIN_ENTITY_NAME_LENGTH = 3;
 
 const DETERMINISTIC_LINK_BATCH_SIZE = 500;
+const ENRICHMENT_BACKOFF_MS = [
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+  4 * 60 * 60 * 1000,
+  8 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+] as const;
 
 let enrichmentActive = false;
 export function isEnrichmentActive(): boolean {
@@ -70,6 +78,37 @@ function parseDescription(raw: string | null): string | undefined {
   }
 }
 
+function nextRetryAt(attempts: number): string {
+  const index = Math.min(Math.max(attempts, 1) - 1, ENRICHMENT_BACKOFF_MS.length - 1);
+  return new Date(Date.now() + ENRICHMENT_BACKOFF_MS[index]).toISOString();
+}
+
+async function markSummaryFailure(db: Kysely<DB>, fileId: string, currentAttempts: number): Promise<void> {
+  const attempts = currentAttempts + 1;
+  await db
+    .updateTable("indexed_files")
+    .set({ summary_status: "failed", summary_attempts: attempts, summary_next_retry_at: nextRetryAt(attempts) })
+    .where("id", "=", fileId)
+    .execute();
+}
+
+async function resetSummaryRetry(db: Kysely<DB>, fileId: string): Promise<void> {
+  await db
+    .updateTable("indexed_files")
+    .set({ summary_attempts: 0, summary_next_retry_at: null })
+    .where("id", "=", fileId)
+    .execute();
+}
+
+async function markEmbeddingFailure(db: Kysely<DB>, fileId: string, currentAttempts: number): Promise<void> {
+  const attempts = currentAttempts + 1;
+  await db
+    .updateTable("indexed_files")
+    .set({ embedding_status: "failed", embedding_attempts: attempts, embedding_next_retry_at: nextRetryAt(attempts) })
+    .where("id", "=", fileId)
+    .execute();
+}
+
 export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
   const entities = await db
     .selectFrom("entities")
@@ -93,6 +132,8 @@ export interface EnrichmentDeps {
   embeddingProvider: EmbeddingProvider | null;
   /** Gemini API key for AI-powered enrichment (summaries, entity extraction). */
   geminiApiKey?: string | null;
+  geminiMaxRpm?: number;
+  geminiMaxRetries?: number;
   /** Download image from Google Drive by provider file ID. Returns buffer + mime type. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
   /** If set, only enrich these specific file IDs (ignoring pending status). */
@@ -192,16 +233,30 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "source_updated_at",
       "embedding_status",
       "summary_status",
+      "embedding_attempts",
+      "embedding_next_retry_at",
+      "summary_attempts",
+      "summary_next_retry_at",
     ])
     .where("is_archived", "=", 0);
 
   if (deps.fileIds && deps.fileIds.length > 0) {
     query = query.where("id", "in", deps.fileIds);
   } else {
+    const now = new Date().toISOString();
     query = query.where((eb) =>
       eb.or([
-        eb("embedding_status", "in", ["pending", "failed"]),
-        eb.and([eb("embedding_status", "=", "done"), eb("summary_status", "in", ["pending", "failed"])]),
+        eb("embedding_status", "=", "pending"),
+        eb.and([
+          eb("embedding_status", "=", "failed"),
+          eb.or([eb("embedding_next_retry_at", "is", null), eb("embedding_next_retry_at", "<=", now)]),
+        ]),
+        eb.and([eb("embedding_status", "=", "done"), eb("summary_status", "=", "pending")]),
+        eb.and([
+          eb("embedding_status", "=", "done"),
+          eb("summary_status", "=", "failed"),
+          eb.or([eb("summary_next_retry_at", "is", null), eb("summary_next_retry_at", "<=", now)]),
+        ]),
       ]),
     );
   }
@@ -237,7 +292,10 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
           const wordCount = file.content.split(/\s+/).length;
           if (wordCount >= 100) {
             try {
-              const generator = createGeminiGenerator(deps.geminiApiKey);
+              const generator = createGeminiGenerator(deps.geminiApiKey, {
+                maxRpm: deps.geminiMaxRpm,
+                maxRetries: deps.geminiMaxRetries,
+              });
               const knownEntities = await buildFileScopedKnownEntities(
                 { db, logger },
                 file.id,
@@ -284,6 +342,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger);
               }
+              await resetSummaryRetry(db, file.id);
             } catch (err) {
               logger.warn(
                 {
@@ -298,23 +357,23 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 },
                 "Summary-only enrichment failed",
               );
-              await db
-                .updateTable("indexed_files")
-                .set({ summary_status: "failed" })
-                .where("id", "=", file.id)
-                .execute();
+              await markSummaryFailure(db, file.id, Number(file.summary_attempts ?? 0));
               result.filesFailed++;
               continue;
             }
           } else {
             await db
               .updateTable("indexed_files")
-              .set({ summary_status: "skipped" })
+              .set({ summary_status: "skipped", summary_attempts: 0, summary_next_retry_at: null })
               .where("id", "=", file.id)
               .execute();
           }
         } else {
-          await db.updateTable("indexed_files").set({ summary_status: "skipped" }).where("id", "=", file.id).execute();
+          await db
+            .updateTable("indexed_files")
+            .set({ summary_status: "skipped", summary_attempts: 0, summary_next_retry_at: null })
+            .where("id", "=", file.id)
+            .execute();
         }
         result.filesProcessed++;
         const elapsed = ((Date.now() - fileStart) / 1000).toFixed(1);
@@ -355,7 +414,11 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       }
 
       // Mark as done
-      await db.updateTable("indexed_files").set({ embedding_status: "done" }).where("id", "=", file.id).execute();
+      await db
+        .updateTable("indexed_files")
+        .set({ embedding_status: "done", embedding_attempts: 0, embedding_next_retry_at: null })
+        .where("id", "=", file.id)
+        .execute();
 
       result.filesProcessed++;
 
@@ -374,7 +437,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       result.errors.push({ fileId: file.id, error: message });
       result.filesFailed++;
 
-      await db.updateTable("indexed_files").set({ embedding_status: "failed" }).where("id", "=", file.id).execute();
+      await markEmbeddingFailure(db, file.id, Number(file.embedding_attempts ?? 0));
     } finally {
       deps.onProgress?.({ phase: "enrich", completed: idx + 1, total: pendingFiles.length });
       await yieldToEventLoop();
@@ -407,6 +470,8 @@ async function enrichTextDocument(
     source_path: string | null;
     source_created_at: string | null;
     source_updated_at: string | null;
+    summary_status: string;
+    summary_attempts: number;
   },
   isStructured: boolean,
   deps: EnrichmentDeps,
@@ -456,9 +521,13 @@ async function enrichTextDocument(
   const wordCount = file.content.split(/\s+/).length;
   let usedSmartEnrichment = false;
   let smartEnrichmentFailed = false;
-  if (deps.geminiApiKey && wordCount >= 100) {
+  const summaryAlreadyResolved = file.summary_status === "done" || file.summary_status === "skipped";
+  if (!summaryAlreadyResolved && deps.geminiApiKey && wordCount >= 100) {
     try {
-      const generator = createGeminiGenerator(deps.geminiApiKey);
+      const generator = createGeminiGenerator(deps.geminiApiKey, {
+        maxRpm: deps.geminiMaxRpm,
+        maxRetries: deps.geminiMaxRetries,
+      });
       const knownEntities = await buildFileScopedKnownEntities(
         { db, logger },
         file.id,
@@ -502,6 +571,7 @@ async function enrichTextDocument(
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger);
       }
+      await resetSummaryRetry(db, file.id);
       usedSmartEnrichment = true;
     } catch (err) {
       smartEnrichmentFailed = true;
@@ -509,22 +579,36 @@ async function enrichTextDocument(
     }
   }
 
-  if (!usedSmartEnrichment) {
+  if (!summaryAlreadyResolved && !usedSmartEnrichment) {
     await linkEntitiesDeterministic(db, file.id, file.content, chunks);
     // 'failed' = retryable (Gemini error), 'skipped' = intentional (no key or content too short)
     await db
       .updateTable("indexed_files")
-      .set({ summary_status: smartEnrichmentFailed ? "failed" : "skipped" })
+      .set(
+        smartEnrichmentFailed
+          ? {
+              summary_status: "failed",
+              summary_attempts: Number(file.summary_attempts ?? 0) + 1,
+              summary_next_retry_at: nextRetryAt(Number(file.summary_attempts ?? 0) + 1),
+            }
+          : { summary_status: "skipped", summary_attempts: 0, summary_next_retry_at: null },
+      )
       .where("id", "=", file.id)
       .execute();
   }
 
   // 5. Embed chunks (best-effort — entity linking still succeeds if embedding fails)
   if (embeddingProvider && chunks.length > 0) {
+    const texts = chunks.map((c) => c.content);
+    let embeddings: number[][];
     try {
-      const texts = chunks.map((c) => c.content);
-      const embeddings = await embeddingProvider.embedTexts(texts);
+      embeddings = await embeddingProvider.embedTexts(texts);
+    } catch (err) {
+      logger.warn({ err, fileId: file.id }, "Embedding provider failed");
+      throw err;
+    }
 
+    try {
       const storedChunks = await db
         .selectFrom("document_chunks")
         .select(["id", "chunk_index"])
@@ -550,7 +634,7 @@ async function enrichTextDocument(
       );
       logger.info({ fileId: file.id, chunks: pairs.length }, "Embeddings created");
     } catch (err) {
-      logger.warn({ err, fileId: file.id }, "Embedding failed, entity linking still saved");
+      logger.warn({ err, fileId: file.id }, "Embedding storage failed, entity linking still saved");
     }
   }
 }

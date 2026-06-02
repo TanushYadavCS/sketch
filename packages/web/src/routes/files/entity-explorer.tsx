@@ -191,22 +191,15 @@ export function EntityExplorer() {
   const total = data?.total ?? 0;
   const tentativeCount = entities.filter((e) => e.status === "tentative").length;
 
-  // ECR-03B inline review surface — gated, two-stage fetch:
+  // ECR-03B inline review surface — two-stage fetch:
   // the cheap count probe gates the (heavier) list query.
-  const { data: setupStatus } = useQuery({
-    queryKey: ["setup", "status"],
-    queryFn: () => api.setup.status(),
-  });
-  const experimentalEnabled = setupStatus?.experimentalFlag === true;
-
   const { data: reviewCount } = useQuery({
     queryKey: countKey(debouncedSearch),
     queryFn: () => api.entityReview.list({ limit: 0, search: debouncedSearch || undefined }),
-    enabled: experimentalEnabled,
-    refetchInterval: experimentalEnabled ? 30000 : false,
+    refetchInterval: 30000,
   });
   const reviewTotal = reviewCount?.total ?? 0;
-  const hasPendingReviews = experimentalEnabled && reviewTotal > 0;
+  const hasPendingReviews = reviewTotal > 0;
 
   const { data: reviewList } = useQuery({
     queryKey: listKey(debouncedSearch),
