@@ -112,6 +112,23 @@ describe("Settings API — security", () => {
     });
   });
 
+  describe("PUT /api/settings/search — input normalization", () => {
+    it("trims surrounding whitespace from a pasted gemini_api_key before storing", async () => {
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const res = await app.request("/api/settings/search", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ geminiApiKey: "  AIza-super-secret-key-12345\n" }),
+      });
+      expect(res.status).toBe(200);
+
+      const stored = await createSettingsRepository(db).get();
+      expect(stored?.gemini_api_key).toBe("AIza-super-secret-key-12345");
+    });
+  });
+
   describe("/api/settings/access", () => {
     it("round-trips adminCanReadAllFiles for admins", async () => {
       const app = createApp(db, config, { logger });

@@ -427,7 +427,7 @@ function ConnectorSettings() {
     const updates: { syncIntervalMinutes?: number; enrichmentEnabled?: boolean; geminiApiKey?: string | null } = {};
     if (syncInterval !== data?.syncIntervalMinutes) updates.syncIntervalMinutes = syncInterval;
     if (enrichmentEnabled !== (data?.enrichmentEnabled === 1)) updates.enrichmentEnabled = enrichmentEnabled;
-    if (geminiKey.trim()) updates.geminiApiKey = geminiKey;
+    if (geminiKey.trim()) updates.geminiApiKey = geminiKey.trim();
     mutation.mutate(updates);
   }
 

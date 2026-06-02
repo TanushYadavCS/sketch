@@ -10,6 +10,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type GenerateContentResponse, GoogleGenAI } from "@google/genai";
+import { type GeminiClientOptions, runGeminiRequest } from "./gemini-control";
 
 const MODEL = "gemini-2.5-flash";
 
@@ -55,7 +56,7 @@ export interface GenerateOptions {
   dumpDir?: string;
 }
 
-export function createGeminiGenerator(apiKey: string) {
+export function createGeminiGenerator(apiKey: string, options?: GeminiClientOptions) {
   const ai = new GoogleGenAI({ apiKey });
 
   /**
@@ -74,14 +75,19 @@ export function createGeminiGenerator(apiKey: string) {
 
     const labelPrefix = opts?.label ? `[${opts.label}] ` : "";
 
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: {
-        ...config,
-        systemInstruction: opts?.systemPrompt,
-      },
-    });
+    const response: GenerateContentResponse = await runGeminiRequest(
+      apiKey,
+      () =>
+        ai.models.generateContent({
+          model: MODEL,
+          contents: prompt,
+          config: {
+            ...config,
+            systemInstruction: opts?.systemPrompt,
+          },
+        }),
+      options,
+    );
 
     const candidate = response.candidates?.[0];
     const finishReason = candidate?.finishReason;

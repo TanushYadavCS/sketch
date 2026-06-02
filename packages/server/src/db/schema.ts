@@ -130,6 +130,10 @@ export interface IndexedFilesTable {
   mime_type: string | null;
   embedding_status: Generated<string>;
   summary_status: Generated<string>;
+  embedding_attempts: Generated<number>;
+  embedding_next_retry_at: string | null;
+  summary_attempts: Generated<number>;
+  summary_next_retry_at: string | null;
   share_with_everyone: Generated<number>;
 }
 
