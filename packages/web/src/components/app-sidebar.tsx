@@ -13,6 +13,7 @@ import {
   DesktopIcon,
   FolderSimpleIcon,
   GearIcon,
+  HouseIcon,
   LinkSimpleIcon,
   MoonIcon,
   SignOutIcon,
@@ -62,6 +63,7 @@ interface NavItem {
 }
 
 const allPrimaryNav: NavItem[] = [
+  { label: "Home", icon: <HouseIcon size={18} />, href: "/home" },
   { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
@@ -82,6 +84,11 @@ function formatRole(role?: "admin" | "member"): string | null {
   if (role === "admin") return "Admin";
   if (role === "member") return "Member";
   return null;
+}
+
+function isNavItemActive(pathname: string, href: string): boolean {
+  if (href === "/home") return pathname === "/home" || pathname === "/chat" || pathname.startsWith("/chat/");
+  return pathname === href;
 }
 
 export function AppSidebar({
@@ -154,7 +161,7 @@ export function AppSidebar({
               {primaryNav.map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
-                    isActive={location.pathname === item.href}
+                    isActive={isNavItemActive(location.pathname, item.href)}
                     onClick={() => !item.disabled && navigate({ to: item.href })}
                     disabled={item.disabled}
                     tooltip={item.label}

@@ -33,7 +33,7 @@ import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
 import { createCanUseTool } from "./permissions";
-import { buildSystemContext } from "./prompt";
+import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
 
@@ -114,6 +114,7 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
+  responseSurface?: ResponseSurface;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
@@ -244,7 +245,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
 
   const systemAppend = buildSystemContext({
-    platform: params.platform,
+    platform: params.responseSurface ?? params.platform,
+    deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
     orgName: params.orgName,
     orgDescription: params.orgDescription,
     botName: params.botName,

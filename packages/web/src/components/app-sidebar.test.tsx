@@ -7,12 +7,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSidebar } from "./app-sidebar";
 
 const mockNavigate = vi.fn();
+let mockPathname = "/channels";
 
 vi.mock("@tanstack/react-router", async () => {
   const actual = await vi.importActual("@tanstack/react-router");
   return {
     ...actual,
-    useLocation: () => ({ pathname: "/channels" }),
+    useLocation: () => ({ pathname: mockPathname }),
     useNavigate: () => mockNavigate,
   };
 });
@@ -28,6 +29,47 @@ function renderSidebar(role?: "admin" | "member") {
 describe("AppSidebar", () => {
   beforeEach(() => {
     mockNavigate.mockReset();
+    mockPathname = "/channels";
+  });
+
+  it("shows Home as the first primary tab and selects it on /home", () => {
+    mockPathname = "/home";
+
+    renderSidebar("admin");
+
+    const primaryLabels = [
+      "Home",
+      "Channels",
+      "Files",
+      "Team",
+      "Automations",
+      "Skills",
+      "Integrations",
+      "Usage",
+      "Settings",
+    ];
+    const navButtons = screen
+      .getAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((label): label is string => Boolean(label && primaryLabels.includes(label)));
+    expect(navButtons[0]).toBe("Home");
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "true");
+  });
+
+  it("keeps Home selected while viewing the dedicated chat screen", () => {
+    mockPathname = "/chat";
+
+    renderSidebar("admin");
+
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "true");
+  });
+
+  it("keeps Home selected while viewing a specific web chat conversation", () => {
+    mockPathname = "/chat/web-chat-2026-05-26-abcdef";
+
+    renderSidebar("admin");
+
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "true");
   });
 
   it("shows Account link for managed admins", async () => {

@@ -101,10 +101,11 @@ describe("buildSystemContext", () => {
   });
 
   describe("memory section", () => {
-    it("includes memory section with persistent memory guidance", () => {
+    it("includes memory section without encouraging unsupported memory claims", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("## Memory");
-      expect(result).toContain("persistent memory across conversations");
+      expect(result).not.toContain("You have persistent memory across conversations");
+      expect(result).toContain("Do not claim to remember past conversations unless");
     });
 
     it("mentions reducing future steering", () => {
@@ -279,6 +280,29 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "whatsapp" });
       expect(result).not.toContain("mrkdwn");
       expect(result).not.toContain("<url|text>");
+    });
+  });
+
+  describe("web chat platform formatting", () => {
+    it("includes GitHub-flavored Markdown rules", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("Sketch web chat");
+      expect(result).toContain("GitHub-flavored Markdown");
+      expect(result).toContain("[descriptive link text](url)");
+      expect(result).toContain("fenced code blocks");
+    });
+
+    it("does not include Slack or WhatsApp link formatting", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).not.toContain("<url|text>");
+      expect(result).not.toContain("write URLs inline");
+    });
+
+    it("can mention delivery context without overriding web reply formatting", () => {
+      const result = buildSystemContext({ platform: "web", deliveryPlatform: "slack" });
+      expect(result).toContain("visible reply is rendered in web chat");
+      expect(result).toContain("must use web Markdown formatting");
+      expect(result).toContain("slack delivery context");
     });
   });
 
