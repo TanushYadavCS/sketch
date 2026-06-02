@@ -229,6 +229,7 @@ async function webChatFileForUpload(workspaceDir: string, filePath: string): Pro
 const DEFAULT_WEB_CHAT_CONVERSATION_ID = "default";
 const WEB_CHAT_CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const webChatTranscriptLocks = new Map<string, Promise<void>>();
+const webChatAgentRunLocks = new Map<string, Promise<void>>();
 
 function normalizeWebChatConversationId(value: string | null | undefined): string | null {
   const id = (value ?? DEFAULT_WEB_CHAT_CONVERSATION_ID).trim();
@@ -252,6 +253,27 @@ async function withWebChatTranscriptLock<T>(userId: string, conversationId: stri
     release();
     if (webChatTranscriptLocks.get(key) === tail) {
       webChatTranscriptLocks.delete(key);
+    }
+  }
+}
+
+async function withWebChatAgentRunLock<T>(userId: string, conversationId: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${userId}:${conversationId}`;
+  const previous = webChatAgentRunLocks.get(key) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const current = new Promise<void>((resolveLock) => {
+    release = resolveLock;
+  });
+  const tail = previous.catch(() => undefined).then(() => current);
+  webChatAgentRunLocks.set(key, tail);
+
+  await previous.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (webChatAgentRunLocks.get(key) === tail) {
+      webChatAgentRunLocks.delete(key);
     }
   }
 }
@@ -781,65 +803,67 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       write({ type: "start-step" });
 
       try {
-        const result = await deps.runAgent({
-          db: deps.db,
-          workspaceKey: currentUser.id,
-          threadTs: conversationId,
-          userMessage,
-          workspaceDir,
-          claudeConfigDir: deps.config.CLAUDE_CONFIG_DIR,
-          userName: currentUser.name,
-          userEmail: currentUser.email,
-          userPhone: currentUser.whatsapp_number,
-          logger: deps.logger,
-          platform: deliveryPlatform,
-          responseSurface: "web",
-          contextType: "dm",
-          onProgressEvent: async (event) => {
-            progressRenderer.renderEvent(event);
-            const lines = progressRenderer.getLines();
-            if (lines.length > 0) {
-              await updateWebChatProgressMessage(
-                deps.config,
-                workspaceDir,
-                currentUser.id,
-                deps.logger,
-                conversationId,
-                progressMessageId,
-                lines,
-              );
-              write({ type: "data-progress", id: "progress", data: { lines } });
-            }
-          },
-          onSessionId: async () => {},
-          abortController,
-          sessionMode: "chat",
-          persistSession: true,
-          orgName: settingsRow?.org_name,
-          botName: settingsRow?.bot_name,
-          integrationMcpServers,
-          loadIntegrationProvider: deps.loadIntegrationProvider,
-          scheduler: deps.scheduler,
-          stepContentRepo: deps.stepContentRepo,
-          automationRunsRepo: deps.automationRunsRepo,
-          queueManager: deps.queueManager,
-          toolConfig,
-          inboxMessagesRepo: deps.inboxMessagesRepo,
-          userRepo: deps.users,
-          currentUserId: currentUser.id,
-          sendDm: deps.sendDm,
-          ...(dmContext
-            ? {
-                taskContext: {
-                  platform: dmContext.platform,
-                  contextType: "dm" as const,
-                  deliveryTarget: dmContext.deliveryTarget,
-                  createdBy: currentUser.id,
-                  creatorTimezone: currentUser.timezone,
-                },
+        const result = await withWebChatAgentRunLock(currentUser.id, conversationId, () =>
+          deps.runAgent({
+            db: deps.db,
+            workspaceKey: currentUser.id,
+            threadTs: conversationId,
+            userMessage,
+            workspaceDir,
+            claudeConfigDir: deps.config.CLAUDE_CONFIG_DIR,
+            userName: currentUser.name,
+            userEmail: currentUser.email,
+            userPhone: currentUser.whatsapp_number,
+            logger: deps.logger,
+            platform: deliveryPlatform,
+            responseSurface: "web",
+            contextType: "dm",
+            onProgressEvent: async (event) => {
+              progressRenderer.renderEvent(event);
+              const lines = progressRenderer.getLines();
+              if (lines.length > 0) {
+                await updateWebChatProgressMessage(
+                  deps.config,
+                  workspaceDir,
+                  currentUser.id,
+                  deps.logger,
+                  conversationId,
+                  progressMessageId,
+                  lines,
+                );
+                write({ type: "data-progress", id: "progress", data: { lines } });
               }
-            : {}),
-        });
+            },
+            onSessionId: async () => {},
+            abortController,
+            sessionMode: "chat",
+            persistSession: true,
+            orgName: settingsRow?.org_name,
+            botName: settingsRow?.bot_name,
+            integrationMcpServers,
+            loadIntegrationProvider: deps.loadIntegrationProvider,
+            scheduler: deps.scheduler,
+            stepContentRepo: deps.stepContentRepo,
+            automationRunsRepo: deps.automationRunsRepo,
+            queueManager: deps.queueManager,
+            toolConfig,
+            inboxMessagesRepo: deps.inboxMessagesRepo,
+            userRepo: deps.users,
+            currentUserId: currentUser.id,
+            sendDm: deps.sendDm,
+            ...(dmContext
+              ? {
+                  taskContext: {
+                    platform: dmContext.platform,
+                    contextType: "dm" as const,
+                    deliveryTarget: dmContext.deliveryTarget,
+                    createdBy: currentUser.id,
+                    creatorTimezone: currentUser.timezone,
+                  },
+                }
+              : {}),
+          }),
+        );
 
         const finalText = result.trace.finalText ?? "";
         if (finalText) {

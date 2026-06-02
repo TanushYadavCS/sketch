@@ -567,12 +567,14 @@ describe("web chat API", () => {
     const secondStarted = deferred<void>();
     const releaseFirst = deferred<void>();
     const releaseSecond = deferred<void>();
+    let secondRunStarted = false;
     const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
       if (params.userMessage.includes("first")) {
         firstStarted.resolve();
         await releaseFirst.promise;
         return makeAgentResult("Reply to first");
       }
+      secondRunStarted = true;
       secondStarted.resolve();
       await releaseSecond.promise;
       return makeAgentResult("Reply to second");
@@ -595,6 +597,10 @@ describe("web chat API", () => {
         },
       }),
     });
+    const firstResponse = await first;
+    expect(firstResponse.status).toBe(200);
+    await firstStarted.promise;
+
     const second = app.request("/api/web-chat?conversationId=chat-overlap", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
@@ -607,13 +613,16 @@ describe("web chat API", () => {
       }),
     });
 
-    const responses = await Promise.all([first, second]);
-    expect(responses.map((res) => res.status)).toEqual([200, 200]);
-    await Promise.all([firstStarted.promise, secondStarted.promise]);
-    releaseSecond.resolve();
-    await responses[1].text();
+    const secondResponse = await second;
+    expect(secondResponse.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(secondRunStarted).toBe(false);
+
     releaseFirst.resolve();
-    await responses[0].text();
+    await firstResponse.text();
+    await secondStarted.promise;
+    releaseSecond.resolve();
+    await secondResponse.text();
 
     const transcript = JSON.parse(
       await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-overlap"), "utf-8"),
