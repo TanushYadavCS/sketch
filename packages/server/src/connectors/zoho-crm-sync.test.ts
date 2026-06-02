@@ -59,6 +59,13 @@ describe("Zoho CRM connector sync integration", () => {
           }),
         );
       }
+      if (url.includes("/settings/fields")) {
+        return Promise.resolve(
+          jsonResponse({
+            fields: [{ api_name: "Account_Name" }, { api_name: "Deal_Name" }, { api_name: "Full_Name" }],
+          }),
+        );
+      }
       if (url.includes("/Accounts?page=1")) {
         expect((init?.headers as Record<string, string>)["If-Modified-Since"]).toBeUndefined();
         return Promise.resolve(

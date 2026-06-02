@@ -181,7 +181,15 @@ describe("Zoho CRM connector", () => {
           }),
         );
       }
+      if (url.includes("/settings/fields")) {
+        return Promise.resolve(
+          jsonResponse({
+            fields: [{ api_name: "Account_Name" }, { api_name: "Deal_Name" }, { api_name: "Full_Name" }],
+          }),
+        );
+      }
       if (url.includes("/Accounts?page=1")) {
+        expect(url).toContain("fields=");
         expect((init?.headers as Record<string, string>)["If-Modified-Since"]).toBe("2026-01-01T00:00:00.000Z");
         return Promise.resolve(
           jsonResponse({

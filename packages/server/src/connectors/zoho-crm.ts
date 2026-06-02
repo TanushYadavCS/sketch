@@ -8,6 +8,8 @@ const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
 const PAGE_SIZE = 200;
 const CONTENT_LIMIT = 2000;
+// Zoho v6 GET records requires an explicit `fields` list, capped at 50 names.
+const ZOHO_MAX_FIELDS = 50;
 
 const STANDARD_MODULES = [
   "Accounts",
@@ -47,6 +49,10 @@ interface ZohoModulesResponse {
 interface ZohoRecordsResponse {
   data?: ZohoRecord[];
   info?: { more_records?: boolean };
+}
+
+interface ZohoFieldsResponse {
+  fields?: Array<{ api_name?: string }>;
 }
 
 type ZohoRecord = Record<string, unknown> & {
@@ -483,6 +489,35 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
   };
 }
 
+/**
+ * Zoho v6 GET records requires an explicit `fields` list. Discover the module's
+ * field API names from /settings/fields, always keep the system fields the sync
+ * relies on, and cap at Zoho's 50-field limit. Falls back to the curated
+ * important-field set if discovery fails or returns nothing.
+ */
+async function resolveModuleFields(
+  credentials: OAuthCredentials,
+  moduleApiName: string,
+  logger: Logger,
+): Promise<string> {
+  let names: string[] = [];
+  try {
+    const response = await zohoApiRequest<ZohoFieldsResponse>(
+      credentials,
+      `/settings/fields?module=${encodeURIComponent(moduleApiName)}`,
+      logger,
+    );
+    names = (response.fields ?? []).map((f) => f.api_name).filter((n): n is string => Boolean(n));
+  } catch (err) {
+    logger.warn({ err, module: moduleApiName }, "Zoho CRM field discovery failed; using important fields");
+  }
+  if (names.length === 0) names = importantFields(moduleApiName);
+  // System fields are valid on every CRM module and are required downstream
+  // (cursor, change detection, owner seeding), so force them to the front.
+  const ordered = [...new Set(["Created_Time", "Modified_Time", "Owner", ...names])];
+  return ordered.slice(0, ZOHO_MAX_FIELDS).join(",");
+}
+
 async function* syncModule(
   credentials: OAuthCredentials,
   module: DiscoveredZohoModule,
@@ -493,9 +528,10 @@ async function* syncModule(
   let page = 1;
   let moreRecords = true;
   const headers = cursor ? { "If-Modified-Since": cursor } : undefined;
+  const fields = await resolveModuleFields(credentials, module.apiName, logger);
 
   while (moreRecords) {
-    const params = new URLSearchParams({ page: String(page), per_page: String(PAGE_SIZE) });
+    const params = new URLSearchParams({ page: String(page), per_page: String(PAGE_SIZE), fields });
     const response = await zohoApiRequest<ZohoRecordsResponse>(
       credentials,
       `/${encodeURIComponent(module.apiName)}?${params.toString()}`,
