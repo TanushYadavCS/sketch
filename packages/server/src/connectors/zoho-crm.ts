@@ -225,7 +225,10 @@ async function zohoApiRequest<T>(
     throw new Error(`Zoho CRM API network error after ${MAX_RETRIES} attempts: ${message}`);
   }
 
-  if (response.status === 204) {
+  // 204 (no records) and 304 (If-Modified-Since: nothing changed) both mean
+  // "no data" — return an empty payload rather than falling through to the
+  // !response.ok throw, which would break incremental sync on unchanged modules.
+  if (response.status === 204 || response.status === 304) {
     return {} as T;
   }
   if (response.status === 401) {
@@ -374,6 +377,13 @@ export function formatCrmRecordContent(moduleApiName: string, record: ZohoRecord
   return content.length <= CONTENT_LIMIT ? content : `${content.slice(0, CONTENT_LIMIT - 12).trimEnd()}\n[truncated]`;
 }
 
+/**
+ * Maps a Zoho record's people (owner, the contact/lead itself, related contact)
+ * to person seeds. Intentionally NOT wired into `sync` yet: this phase ingests
+ * CRM records as plain structured files only. Retained (and unit-tested) for the
+ * forthcoming entity-authority phase, which will seed people/companies with
+ * domain authority and cross-source merge rather than naive promotion.
+ */
 export function extractPeopleFromRecord(moduleApiName: string, record: ZohoRecord): PersonEntitySeed[] {
   const seeds: PersonEntitySeed[] = [];
   const owner = asLookup(record.Owner);
@@ -420,6 +430,13 @@ function parentFromLookup(moduleApiName: string, value: unknown, contextSnippet:
   return [{ source: "zoho_crm", sourceId: makeProviderFileId(moduleApiName, id), contextSnippet }];
 }
 
+/**
+ * Maps a Zoho record's parent links (Deal/Contact -> Account, activity -> parent).
+ * Intentionally NOT emitted on synced items yet: with no entities seeded this
+ * phase, parent_entity facts could never resolve and the materializer would
+ * retry them every sync. Retained (and unit-tested) for the entity-authority
+ * phase, which will emit these as typed, authoritative relationships.
+ */
 export function extractParentEntities(moduleApiName: string, record: ZohoRecord): ParentEntity[] {
   const normalized = normalizeModuleApiName(moduleApiName);
   if (normalized === "deals") {
@@ -453,12 +470,10 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
       JSON.stringify({
         content,
         modifiedTime: record.Modified_Time ?? null,
-        parents: extractParentEntities(module.apiName, record),
       }),
     ),
     sourceCreatedAt: record.Created_Time ?? null,
     sourceUpdatedAt: record.Modified_Time ?? null,
-    parentEntities: extractParentEntities(module.apiName, record),
   };
 }
 
@@ -468,7 +483,7 @@ async function* syncModule(
   cursor: string | null,
   logger: Logger,
   orgName?: string,
-): AsyncGenerator<{ item: SyncedItem; record: ZohoRecord }> {
+): AsyncGenerator<SyncedItem> {
   let page = 1;
   let moreRecords = true;
   const headers = cursor ? { "If-Modified-Since": cursor } : undefined;
@@ -484,7 +499,7 @@ async function* syncModule(
 
     for (const record of response.data ?? []) {
       const item = recordToSyncedItem(module, record, orgName);
-      if (item) yield { item, record };
+      if (item) yield item;
     }
 
     moreRecords = response.info?.more_records === true;
@@ -545,25 +560,19 @@ export function createZohoCrmConnector(): Connector {
     type: "zoho_crm",
     perUserAuth: false,
     requiresOAuthClientSetup: false,
-    promotableFileTypes: ["crm_account", "crm_deal"],
 
     async validateCredentials(credentials) {
       await validateZohoCrmCredentials(credentials);
     },
 
-    async *sync({ credentials, cursor, logger, onPersonSeed }) {
+    async *sync({ credentials, cursor, logger }) {
       const oauth = requireOAuthCredentials(credentials);
       const modules = await discoverStandardModules(oauth, logger);
       const orgName = typeof oauth.region === "string" ? `Zoho ${oauth.region}` : undefined;
 
       for (const module of modules) {
         logger.info({ module: module.apiName }, "Syncing Zoho CRM module");
-        for await (const { item, record } of syncModule(oauth, module, cursor, logger, orgName)) {
-          if (onPersonSeed) {
-            for (const seed of extractPeopleFromRecord(module.apiName, record)) {
-              await onPersonSeed(seed);
-            }
-          }
+        for await (const item of syncModule(oauth, module, cursor, logger, orgName)) {
           yield item;
         }
       }
