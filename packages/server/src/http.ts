@@ -13,6 +13,7 @@ import type { Logger } from "pino";
 import { agentEnvironmentRoutes } from "./api/agent-environment";
 import { agentRunRoutes } from "./api/agent-runs";
 import { agentSessionRoutes } from "./api/agent-sessions";
+import { apiTokenRoutes } from "./api/api-tokens";
 import { type MagicLinkSender, authRoutes } from "./api/auth";
 import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
@@ -56,6 +57,7 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
 import type { IntegrationProvider } from "./integrations/types";
+import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
@@ -283,6 +285,16 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/usage", usageRoutes(db));
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/entity-review", entityReviewRoutes(db));
+  if (config.EXPERIMENTAL_FLAG) {
+    app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
+    mountPublicMcpServer({
+      app,
+      db,
+      userRepo: users,
+      workspaceDir: join(config.DATA_DIR, "external-mcp"),
+      logger,
+    });
+  }
 
   if (deps?.logger) {
     app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
