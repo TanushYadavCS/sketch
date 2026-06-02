@@ -307,6 +307,27 @@ export function createUserRepository(db: UserDb): UserRepository {
     },
 
     async remove(id: string) {
+      await db
+        .deleteFrom("agent_environment_variable_shares")
+        .where("variable_id", "in", db.selectFrom("agent_environment_variables").select("id").where("user_id", "=", id))
+        .execute();
+      await db.deleteFrom("agent_environment_variable_shares").where("created_by", "=", id).execute();
+      await db.deleteFrom("agent_environment_variables").where("user_id", "=", id).execute();
+      await db.deleteFrom("user_provider_identities").where("user_id", "=", id).execute();
+      await db.deleteFrom("email_verification_tokens").where("user_id", "=", id).execute();
+      await db.deleteFrom("magic_link_tokens").where("user_id", "=", id).execute();
+      await db
+        .deleteFrom("inbox_messages")
+        .where((eb) => eb.or([eb("sender_user_id", "=", id), eb("recipient_user_id", "=", id)]))
+        .execute();
+      await db.updateTable("users").set({ reports_to: null }).where("reports_to", "=", id).execute();
+      await db.updateTable("channels").set({ agent_user_id: null }).where("agent_user_id", "=", id).execute();
+      await db.updateTable("whatsapp_groups").set({ agent_user_id: null }).where("agent_user_id", "=", id).execute();
+      await db
+        .updateTable("settings")
+        .set({ whatsapp_fallback_agent_id: null })
+        .where("whatsapp_fallback_agent_id", "=", id)
+        .execute();
       return db.deleteFrom("users").where("id", "=", id).execute();
     },
 
