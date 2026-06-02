@@ -13,7 +13,9 @@ export type EntityRelationshipType =
   | "contributes_to"
   | "builds"
   | "part_of"
-  | "partner_of";
+  | "partner_of"
+  | "deal_for"
+  | "primary_contact";
 
 export interface UpsertDomainInput {
   entityId: string | null;

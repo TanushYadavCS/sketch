@@ -593,7 +593,7 @@ describe("Connectors API — authorization", () => {
       );
 
       expect(callback.status).toBe(302);
-      expect(callback.headers.get("location")).toContain("/connections?oauth=success&connector=zoho_crm");
+      expect(callback.headers.get("location")).toContain("/files?oauth=success&connector=zoho_crm");
 
       const configs = await createConnectorRepository(db).findConfigsByType("zoho_crm");
       expect(configs).toHaveLength(1);

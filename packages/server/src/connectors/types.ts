@@ -104,6 +104,14 @@ export interface SyncedItem {
    * `source` + `sourceId` are used to look up the entity.
    */
   parentEntities?: Array<{ source: string; sourceId: string; contextSnippet?: string }>;
+  entitySeeds?: EntitySeed[];
+  personSeeds?: PersonEntitySeed[];
+  relationships?: Array<{
+    relationType: string;
+    source: { source: string; sourceId: string; name: string; type: string };
+    target: { source: string; sourceId: string; name: string; type: string };
+    contextSnippet?: string;
+  }>;
 }
 
 /**
@@ -173,6 +181,12 @@ export type IndexedFileFactRaw =
       context?: string;
       source: { name: string; type: string; variations: string[] };
       target: { name: string; type: string; variations: string[] };
+    }
+  | {
+      providerFileId: string;
+      relationType: string;
+      source: { source: string; sourceId: string; name: string; type: string };
+      target: { source: string; sourceId: string; name: string; type: string };
     }
   | {
       providerFileId: string;

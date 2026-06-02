@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
-import type { Connector, ConnectorCredentials, OAuthCredentials, PersonEntitySeed, SyncedItem } from "./types";
+import type {
+  Connector,
+  ConnectorCredentials,
+  EntitySeed,
+  OAuthCredentials,
+  PersonEntitySeed,
+  SyncedItem,
+} from "./types";
 
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -63,6 +70,7 @@ type ZohoRecord = Record<string, unknown> & {
 };
 
 type ParentEntity = NonNullable<SyncedItem["parentEntities"]>[number];
+type RelationshipEndpoint = NonNullable<SyncedItem["relationships"]>[number]["source"];
 
 export interface DiscoveredZohoModule {
   logicalName: StandardModule;
@@ -389,13 +397,6 @@ export function formatCrmRecordContent(moduleApiName: string, record: ZohoRecord
   return content.length <= CONTENT_LIMIT ? content : `${content.slice(0, CONTENT_LIMIT - 12).trimEnd()}\n[truncated]`;
 }
 
-/**
- * Maps a Zoho record's people (owner, the contact/lead itself, related contact)
- * to person seeds. Intentionally NOT wired into `sync` yet: this phase ingests
- * CRM records as plain structured files only. Retained (and unit-tested) for the
- * forthcoming entity-authority phase, which will seed people/companies with
- * domain authority and cross-source merge rather than naive promotion.
- */
 export function extractPeopleFromRecord(moduleApiName: string, record: ZohoRecord): PersonEntitySeed[] {
   const seeds: PersonEntitySeed[] = [];
   const owner = asLookup(record.Owner);
@@ -442,13 +443,6 @@ function parentFromLookup(moduleApiName: string, value: unknown, contextSnippet:
   return [{ source: "zoho_crm", sourceId: makeProviderFileId(moduleApiName, id), contextSnippet }];
 }
 
-/**
- * Maps a Zoho record's parent links (Deal/Contact -> Account, activity -> parent).
- * Intentionally NOT emitted on synced items yet: with no entities seeded this
- * phase, parent_entity facts could never resolve and the materializer would
- * retry them every sync. Retained (and unit-tested) for the entity-authority
- * phase, which will emit these as typed, authoritative relationships.
- */
 export function extractParentEntities(moduleApiName: string, record: ZohoRecord): ParentEntity[] {
   const normalized = normalizeModuleApiName(moduleApiName);
   if (normalized === "deals") {
@@ -467,9 +461,100 @@ export function extractParentEntities(moduleApiName: string, record: ZohoRecord)
   return [];
 }
 
+function entitySeedsForRecord(moduleApiName: string, record: ZohoRecord): EntitySeed[] {
+  if (!record.id) return [];
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const name = getRecordName(moduleApiName, record);
+  const metadata = {
+    provider: "zoho_crm",
+    module: moduleApiName,
+    fileType: moduleToFileType(moduleApiName),
+  };
+  if (normalized === "accounts") {
+    return [
+      {
+        name,
+        sourceType: "company",
+        source: "zoho_crm",
+        sourceId: makeProviderFileId(moduleApiName, record.id),
+        metadata,
+      },
+    ];
+  }
+  if (normalized === "deals") {
+    return [
+      {
+        name,
+        sourceType: "deal",
+        source: "zoho_crm",
+        sourceId: makeProviderFileId(moduleApiName, record.id),
+        metadata,
+      },
+    ];
+  }
+  return [];
+}
+
+function crmEndpoint(sourceId: string, name: string | null, type: "company" | "person" | "deal"): RelationshipEndpoint {
+  return { source: "zoho_crm", sourceId, name: name ?? sourceId, type };
+}
+
+function relationshipsForRecord(moduleApiName: string, record: ZohoRecord): NonNullable<SyncedItem["relationships"]> {
+  if (!record.id) return [];
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const relationships: NonNullable<SyncedItem["relationships"]> = [];
+
+  if (normalized === "contacts") {
+    const accountId = lookupId(record.Account_Name);
+    if (accountId) {
+      relationships.push({
+        relationType: "works_at",
+        source: crmEndpoint(
+          makeProviderFileId(moduleApiName, record.id),
+          getRecordName(moduleApiName, record),
+          "person",
+        ),
+        target: crmEndpoint(makeProviderFileId("Accounts", accountId), lookupName(record.Account_Name), "company"),
+        contextSnippet: "Contact account",
+      });
+    }
+  }
+
+  if (normalized === "deals") {
+    const deal = crmEndpoint(
+      makeProviderFileId(moduleApiName, record.id),
+      getRecordName(moduleApiName, record),
+      "deal",
+    );
+    const accountId = lookupId(record.Account_Name);
+    if (accountId) {
+      relationships.push({
+        relationType: "deal_for",
+        source: deal,
+        target: crmEndpoint(makeProviderFileId("Accounts", accountId), lookupName(record.Account_Name), "company"),
+        contextSnippet: "Deal account",
+      });
+    }
+    const contactId = lookupId(record.Contact_Name);
+    if (contactId) {
+      relationships.push({
+        relationType: "primary_contact",
+        source: deal,
+        target: crmEndpoint(makeProviderFileId("Contacts", contactId), lookupName(record.Contact_Name), "person"),
+        contextSnippet: "Deal primary contact",
+      });
+    }
+  }
+
+  return relationships;
+}
+
 function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, orgName?: string): SyncedItem | null {
   if (!record.id) return null;
   const content = formatCrmRecordContent(module.apiName, record);
+  const entitySeeds = entitySeedsForRecord(module.apiName, record);
+  const personSeeds = extractPeopleFromRecord(module.apiName, record);
+  const relationships = relationshipsForRecord(module.apiName, record);
   return {
     providerFileId: makeProviderFileId(module.apiName, record.id),
     providerUrl: null,
@@ -482,10 +567,16 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
       JSON.stringify({
         content,
         modifiedTime: record.Modified_Time ?? null,
+        entitySeeds,
+        personSeeds,
+        relationships,
       }),
     ),
     sourceCreatedAt: record.Created_Time ?? null,
     sourceUpdatedAt: record.Modified_Time ?? null,
+    entitySeeds,
+    personSeeds,
+    relationships,
   };
 }
 

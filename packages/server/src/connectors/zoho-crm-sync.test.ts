@@ -21,13 +21,13 @@ describe("Zoho CRM connector sync integration", () => {
     }
   });
 
-  it("stores Zoho CRM records as structured indexed files without creating entities", async () => {
+  it("stores Zoho CRM records and materializes CRM entities and relationships", async () => {
     db = await createTestDb();
 
     await db
       .insertInto("connector_configs")
       .values({
-        id: "zoho-crm-pr3",
+        id: "zoho-crm-pr4",
         connector_type: "zoho_crm",
         auth_type: "oauth",
         credentials: JSON.stringify({
@@ -93,7 +93,7 @@ describe("Zoho CRM connector sync integration", () => {
                 Full_Name: "Jane Buyer",
                 Email: "jane@acme.test",
                 Account_Name: { id: "a1", name: "Acme Corp" },
-                Owner: { id: "u1", name: "Owner One", email: "owner@sketch.test" },
+                Owner: { id: "u1", name: "Owner One" },
                 Created_Time: "2026-01-01T00:00:00+05:30",
                 Modified_Time: "2026-01-02T00:00:00+05:30",
               },
@@ -124,7 +124,7 @@ describe("Zoho CRM connector sync integration", () => {
       return Promise.resolve(new Response("not found", { status: 404 }));
     });
 
-    const result = await runConnectorSync(db, "zoho-crm-pr3", logger);
+    const result = await runConnectorSync(db, "zoho-crm-pr4", logger);
 
     expect(result).toMatchObject({
       itemsProcessed: 3,
@@ -198,27 +198,107 @@ describe("Zoho CRM connector sync integration", () => {
     const connectorFiles = await db
       .selectFrom("connector_files")
       .select(["connector_config_id", "indexed_file_id"])
-      .where("connector_config_id", "=", "zoho-crm-pr3")
+      .where("connector_config_id", "=", "zoho-crm-pr4")
       .execute();
     expect(connectorFiles).toHaveLength(3);
 
-    // This phase ingests CRM records as plain structured files only: no entity
-    // graph, so no facts (parent_entity facts that can never resolve are not
-    // emitted) and no entities.
     const facts = await db
       .selectFrom("indexed_file_facts")
-      .select(["fact_type", "subject_source", "subject_source_id", "context_snippet"])
-      .where("connector_config_id", "=", "zoho-crm-pr3")
+      .select(["fact_type", "relation", "subject_source", "subject_source_id", "context_snippet"])
+      .where("connector_config_id", "=", "zoho-crm-pr4")
+      .orderBy("fact_type")
+      .orderBy("relation")
+      .orderBy("subject_source_id")
       .execute();
-    expect(facts).toEqual([]);
+    expect(facts).toEqual([
+      {
+        fact_type: "crm_relation",
+        relation: "deal_for",
+        subject_source: "zoho_crm",
+        subject_source_id: "Accounts:a1",
+        context_snippet: "Deal account",
+      },
+      {
+        fact_type: "crm_relation",
+        relation: "primary_contact",
+        subject_source: "zoho_crm",
+        subject_source_id: "Contacts:c1",
+        context_snippet: "Deal primary contact",
+      },
+      {
+        fact_type: "crm_relation",
+        relation: "works_at",
+        subject_source: "zoho_crm",
+        subject_source_id: "Accounts:a1",
+        context_snippet: "Contact account",
+      },
+      {
+        fact_type: "person_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
+        subject_source_id: "Contacts:c1",
+        context_snippet: "Zoho CRM / Zoho in / Contacts",
+      },
+      {
+        fact_type: "person_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
+        subject_source_id: "Contacts:c1",
+        context_snippet: "Zoho CRM / Zoho in / Deals",
+      },
+      {
+        fact_type: "person_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
+        subject_source_id: "user:u1",
+        context_snippet: "Zoho CRM / Zoho in / Contacts",
+      },
+      {
+        fact_type: "structural_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
+        subject_source_id: "Accounts:a1",
+        context_snippet: "Zoho CRM / Zoho in / Accounts",
+      },
+      {
+        fact_type: "structural_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
+        subject_source_id: "Deals:d1",
+        context_snippet: "Zoho CRM / Zoho in / Deals",
+      },
+    ]);
 
-    const entities = await db.selectFrom("entities").select(["id", "name", "source_type"]).execute();
-    expect(entities).toEqual([]);
+    const entities = await db
+      .selectFrom("entities")
+      .select(["name", "source_type", "subtype"])
+      .orderBy("source_type")
+      .orderBy("name")
+      .execute();
+    expect(entities).toEqual([
+      { name: "Acme Corp", source_type: "company", subtype: null },
+      { name: "Acme renewal", source_type: "deal", subtype: null },
+      { name: "Jane Buyer", source_type: "person", subtype: "external" },
+      { name: "Owner One", source_type: "person", subtype: "internal" },
+    ]);
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as source_name", "target.name as target_name", "entity_relationships.relationship_type"])
+      .orderBy("entity_relationships.relationship_type")
+      .execute();
+    expect(relationships).toEqual([
+      { source_name: "Acme renewal", target_name: "Acme Corp", relationship_type: "deal_for" },
+      { source_name: "Acme renewal", target_name: "Jane Buyer", relationship_type: "primary_contact" },
+      { source_name: "Jane Buyer", target_name: "Acme Corp", relationship_type: "works_at" },
+    ]);
 
     const config = await db
       .selectFrom("connector_configs")
       .select(["sync_status", "sync_cursor", "last_synced_at"])
-      .where("id", "=", "zoho-crm-pr3")
+      .where("id", "=", "zoho-crm-pr4")
       .executeTakeFirstOrThrow();
     expect(config.sync_status).toBe("active");
     expect(config.sync_cursor).toEqual(expect.any(String));

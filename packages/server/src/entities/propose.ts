@@ -26,7 +26,7 @@ import type { EntitiesTable } from "../db/schema";
 
 export type Entity = Selectable<EntitiesTable>;
 
-export type ProposeEntityType = "person" | "company" | "product" | "project" | "team";
+export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal";
 export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous";
 
 export interface ProposeInput {
