@@ -188,9 +188,13 @@ describe("Zoho CRM connector", () => {
           }),
         );
       }
-      if (url.includes("/Accounts?page=1")) {
+      if (url.includes("/Accounts?")) {
         expect(url).toContain("fields=");
         expect((init?.headers as Record<string, string>)["If-Modified-Since"]).toBe("2026-01-01T00:00:00.000Z");
+        // Second page (token-based) returns empty to end pagination.
+        if (url.includes("page_token=")) {
+          return Promise.resolve(jsonResponse({ data: [], info: { more_records: false } }));
+        }
         return Promise.resolve(
           jsonResponse({
             data: [
@@ -201,14 +205,11 @@ describe("Zoho CRM connector", () => {
                 Modified_Time: "2026-01-02T00:00:00+05:30",
               },
             ],
-            info: { more_records: true },
+            info: { more_records: true, next_page_token: "accounts-page-2" },
           }),
         );
       }
-      if (url.includes("/Accounts?page=2")) {
-        return Promise.resolve(jsonResponse({ data: [], info: { more_records: false } }));
-      }
-      if (url.includes("/Contacts?page=1")) {
+      if (url.includes("/Contacts?")) {
         return Promise.resolve(
           jsonResponse({
             data: [
@@ -225,7 +226,7 @@ describe("Zoho CRM connector", () => {
           }),
         );
       }
-      if (url.includes("/Deals?page=1")) {
+      if (url.includes("/Deals?")) {
         return Promise.resolve(
           jsonResponse({
             data: [
@@ -278,7 +279,10 @@ describe("Zoho CRM connector", () => {
           }),
         );
       }
-      if (url.includes("/Accounts?page=1")) {
+      if (url.includes("/settings/fields")) {
+        return Promise.resolve(jsonResponse({ fields: [{ api_name: "Account_Name" }] }));
+      }
+      if (url.includes("/Accounts?")) {
         return Promise.resolve(new Response(null, { status: 304 }));
       }
       return Promise.resolve(new Response("not found", { status: 404 }));

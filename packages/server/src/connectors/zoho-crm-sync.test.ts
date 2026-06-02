@@ -66,7 +66,7 @@ describe("Zoho CRM connector sync integration", () => {
           }),
         );
       }
-      if (url.includes("/Accounts?page=1")) {
+      if (url.includes("/Accounts?")) {
         expect((init?.headers as Record<string, string>)["If-Modified-Since"]).toBeUndefined();
         return Promise.resolve(
           jsonResponse({
@@ -84,7 +84,7 @@ describe("Zoho CRM connector sync integration", () => {
           }),
         );
       }
-      if (url.includes("/Contacts?page=1")) {
+      if (url.includes("/Contacts?")) {
         return Promise.resolve(
           jsonResponse({
             data: [
@@ -102,7 +102,7 @@ describe("Zoho CRM connector sync integration", () => {
           }),
         );
       }
-      if (url.includes("/Deals?page=1")) {
+      if (url.includes("/Deals?")) {
         return Promise.resolve(
           jsonResponse({
             data: [

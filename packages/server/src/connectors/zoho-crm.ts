@@ -48,7 +48,7 @@ interface ZohoModulesResponse {
 
 interface ZohoRecordsResponse {
   data?: ZohoRecord[];
-  info?: { more_records?: boolean };
+  info?: { more_records?: boolean; next_page_token?: string | null };
 }
 
 interface ZohoFieldsResponse {
@@ -525,13 +525,18 @@ async function* syncModule(
   logger: Logger,
   orgName?: string,
 ): AsyncGenerator<SyncedItem> {
-  let page = 1;
+  let page = 0;
+  let pageToken: string | null = null;
   let moreRecords = true;
   const headers = cursor ? { "If-Modified-Since": cursor } : undefined;
   const fields = await resolveModuleFields(credentials, module.apiName, logger);
 
+  // Zoho v6 caps offset pagination at the first 2000 records; beyond that the
+  // response's next_page_token must be used. Paginate by token from the start.
   while (moreRecords) {
-    const params = new URLSearchParams({ page: String(page), per_page: String(PAGE_SIZE), fields });
+    page += 1;
+    const params = new URLSearchParams({ per_page: String(PAGE_SIZE), fields });
+    if (pageToken) params.set("page_token", pageToken);
     const response = await zohoApiRequest<ZohoRecordsResponse>(
       credentials,
       `/${encodeURIComponent(module.apiName)}?${params.toString()}`,
@@ -549,8 +554,8 @@ async function* syncModule(
       if (item) yield item;
     }
 
-    moreRecords = response.info?.more_records === true;
-    page += 1;
+    pageToken = response.info?.next_page_token ?? null;
+    moreRecords = response.info?.more_records === true && pageToken !== null;
   }
 }
 
