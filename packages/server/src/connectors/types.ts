@@ -8,7 +8,7 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies";
+export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies" | "zoho_crm";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
@@ -30,6 +30,9 @@ export interface OAuthCredentials {
   expires_at?: string;
   client_id: string;
   client_secret: string;
+  accounts_server?: string;
+  api_domain?: string;
+  region?: string;
 }
 
 export interface ApiKeyCredentials {

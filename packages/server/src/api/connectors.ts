@@ -144,11 +144,16 @@ export function connectorRoutes(
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "EXPERIMENTAL_FLAG"
     >
   >,
 ) {
   const routes = new Hono();
   const fileSharesRepo = createFileSharesRepository(db);
+
+  function connectorEnabled(connectorType: ConnectorType): boolean {
+    return connectorType !== "zoho_crm" || appConfig?.EXPERIMENTAL_FLAG === true;
+  }
 
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
     if (!userRepo) return [];
@@ -216,6 +221,10 @@ export function connectorRoutes(
     }
 
     const connectorType = parsed.data.connectorType as ConnectorType;
+    if (!connectorEnabled(connectorType)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+
     const connectorMeta = getConnector(connectorType);
 
     // Org-wide connectors (perUserAuth: false) are admin-only.
@@ -740,7 +749,12 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const connector = getConnector(parsed.data.connectorType as ConnectorType);
+    const connectorType = parsed.data.connectorType as ConnectorType;
+    if (!connectorEnabled(connectorType)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+
+    const connector = getConnector(connectorType);
     if (!connector.browse) {
       return c.json(
         { error: { code: "NOT_SUPPORTED", message: "This connector does not support scope browsing" } },

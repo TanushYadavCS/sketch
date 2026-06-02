@@ -7,7 +7,7 @@
  * forgotten-helper-call failure mode (`if (denied) return denied;` left out).
  */
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -130,6 +130,7 @@ describe("Connectors API — authorization", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     try {
       await db.destroy();
     } catch {}
@@ -478,6 +479,110 @@ describe("Connectors API — authorization", () => {
       expect(location).toContain("accounts.google.com");
       expect(decodeURIComponent(location)).toContain("https://www.googleapis.com/auth/gmail.readonly");
       expect(decodeURIComponent(location)).not.toContain("https://www.googleapis.com/auth/drive.readonly");
+    });
+  });
+
+  describe("OAuth /api/oauth/zoho — experimental admin-only flow", () => {
+    it("is hidden when EXPERIMENTAL_FLAG is false", async () => {
+      const res = await app.request("/api/oauth/zoho/status", {
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("member cannot start Zoho OAuth when experimental features are enabled", async () => {
+      const flaggedApp = createApp(
+        db,
+        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
+        { logger },
+      );
+
+      const res = await flaggedApp.request("/api/oauth/zoho/authorize?region=in", {
+        headers: { Cookie: memberCookie },
+      });
+
+      expect(res.status).toBe(403);
+    });
+
+    it("admin authorize ignores query-string user_id and redirects to the selected Zoho region", async () => {
+      const flaggedApp = createApp(
+        db,
+        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
+        { logger },
+      );
+
+      const res = await flaggedApp.request("/api/oauth/zoho/authorize?region=in&user_id=attacker", {
+        headers: { Cookie: adminCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = res.headers.get("location");
+      expect(location).toContain("https://accounts.zoho.in/oauth/v2/auth");
+      const state = new URL(location ?? "").searchParams.get("state");
+      expect(state?.startsWith(`${adminId}:`)).toBe(true);
+      expect(state).not.toContain("attacker");
+    });
+
+    it("callback exchanges tokens and stores a Zoho connector config", async () => {
+      const flaggedApp = createApp(
+        db,
+        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
+        { logger },
+      );
+
+      const authorize = await flaggedApp.request("/api/oauth/zoho/authorize?region=in", {
+        headers: { Cookie: adminCookie },
+        redirect: "manual",
+      });
+      const state = new URL(authorize.headers.get("location") ?? "").searchParams.get("state");
+      expect(state).toBeTruthy();
+
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+            api_domain: "https://www.zohoapis.in",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ users: [{ id: "zu-1", email: "admin@zoho.test" }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      const callback = await flaggedApp.request(
+        `/api/oauth/zoho/callback?code=grant-code&state=${encodeURIComponent(state ?? "")}&accounts-server=${encodeURIComponent("https://accounts.zoho.in")}`,
+        { redirect: "manual" },
+      );
+
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("/connections?oauth=success&connector=zoho_crm");
+
+      const configs = await createConnectorRepository(db).findConfigsByType("zoho_crm");
+      expect(configs).toHaveLength(1);
+      expect(configs[0]?.created_by).toBe(adminId);
+      expect(configs[0]?.credential_hint).toBe("admin@zoho.test");
+      const credentials = JSON.parse(configs[0]?.credentials ?? "{}") as {
+        refresh_token?: string;
+        region?: string;
+        api_domain?: string;
+        accounts_server?: string;
+      };
+      expect(credentials).toMatchObject({
+        refresh_token: "refresh-token",
+        region: "in",
+        api_domain: "https://www.zohoapis.in",
+        accounts_server: "https://accounts.zoho.in",
+      });
     });
   });
 
