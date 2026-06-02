@@ -272,6 +272,7 @@ describe("CanvasProvider.initiateConnection", () => {
       "admin@example.com",
       "google-calendar-oauth",
       "https://sketch.example.com/integrations/callback",
+      undefined,
       "admin",
     );
 
