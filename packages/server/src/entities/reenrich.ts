@@ -67,6 +67,8 @@ export interface ReenrichDeps {
   missingFileIds?: string[];
   llmPromotionThreshold?: number;
   coMentionContributesToThreshold?: number;
+  geminiMaxRpm?: number;
+  geminiMaxRetries?: number;
   /**
    * Set when the caller already promoted a pending recreate lock (two-step
    * rebuild flow). Skips the internal beginRecreateLock/endRecreateLock so
@@ -488,7 +490,12 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
       .where("id", "=", "default")
       .executeTakeFirst();
     const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
+      ? createEmbeddingProvider({
+          provider: "gemini",
+          apiKey: settings.gemini_api_key,
+          maxRpm: deps.geminiMaxRpm,
+          maxRetries: deps.geminiMaxRetries,
+        })
       : null;
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const wipe = await wipeLlmEnrichmentForFiles(
@@ -507,6 +514,8 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         logger: deps.logger.child({ phase: "enrichment" }),
         embeddingProvider,
         geminiApiKey: settings?.gemini_api_key,
+        geminiMaxRpm: deps.geminiMaxRpm,
+        geminiMaxRetries: deps.geminiMaxRetries,
         runEnrichmentImpl: deps.runEnrichmentImpl,
         onProgress: deps.onProgress,
         shouldCancel: deps.shouldCancel,

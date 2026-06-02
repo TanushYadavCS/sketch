@@ -145,8 +145,8 @@ async function seedPendingRow(
   return id;
 }
 
-describe("entity-review routes — EXPERIMENTAL_FLAG", () => {
-  it("returns 404 when flag is off (route not mounted)", async () => {
+describe("entity-review routes — mounting", () => {
+  it("returns 200 without EXPERIMENTAL_FLAG (Files is GA, route always mounted)", async () => {
     const db = await createTestDb();
     try {
       await seedUsers(db);
@@ -155,7 +155,7 @@ describe("entity-review routes — EXPERIMENTAL_FLAG", () => {
       });
       const cookie = await login(app, OWNER_EMAIL);
       const res = await app.request("/api/entity-review", { headers: { Cookie: cookie } });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(200);
     } finally {
       await db.destroy();
     }

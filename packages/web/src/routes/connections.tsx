@@ -26,7 +26,7 @@ import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
 import { PlusIcon } from "@phosphor-icons/react";
-import type { AgentEnvironmentVariableRecord, McpServerRecord } from "@sketch/shared";
+import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -70,6 +70,23 @@ function ConnectionsCallback() {
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
 
+export function getPersonallyConnectedAppIds(
+  connections: IntegrationConnection[],
+  accessSettingsEnabled = true,
+): Set<string> {
+  return new Set(
+    connections
+      .filter(
+        (connection) =>
+          !accessSettingsEnabled ||
+          connection.source !== "canvas_user_secrets" ||
+          connection.accessLevel !== "organization" ||
+          connection.isOwnedByViewer !== false,
+      )
+      .map((connection) => connection.appId),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -89,6 +106,11 @@ function ConnectionsPage() {
     queryFn: () => api.mcpServers.list(),
   });
 
+  const setupStatusQuery = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.setup.status(),
+  });
+
   const servers = serversQuery.data ?? [];
   const provider = servers.find((s) => s.type != null) ?? null;
 
@@ -99,6 +121,7 @@ function ConnectionsPage() {
   });
 
   const connections = connectionsQuery.data ?? [];
+  const accessSettingsEnabled = setupStatusQuery.data?.experimentalFlag === true;
 
   const envVarsQuery = useQuery({
     queryKey: ["agent-environment-variables"],
@@ -197,6 +220,8 @@ function ConnectionsPage() {
                   isLoadingConnections={connectionsQuery.isLoading}
                   onAdd={() => setShowAddIntegrationDialog(true)}
                   providerId={provider.id}
+                  orgName={setupStatusQuery.data?.orgName ?? undefined}
+                  accessSettingsEnabled={accessSettingsEnabled}
                   onDisconnect={invalidateAll}
                 />
               </>
@@ -306,7 +331,7 @@ function ConnectionsPage() {
           open={showAddIntegrationDialog}
           onOpenChange={setShowAddIntegrationDialog}
           providerId={provider.id}
-          connectedAppIds={new Set(connections.map((c) => c.appId))}
+          connectedAppIds={getPersonallyConnectedAppIds(connections, accessSettingsEnabled)}
           onSuccess={invalidateAll}
         />
       )}
