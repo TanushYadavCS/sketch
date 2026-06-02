@@ -1056,7 +1056,7 @@ describe("slack/adapter", () => {
       await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
       await flush();
 
-      expect(mockBotInstance.getChannelHistory).toHaveBeenCalledWith("C1");
+      expect(mockBotInstance.getChannelHistory).toHaveBeenCalledWith("C1", 5);
       expect(mockBotInstance.getThreadReplies).not.toHaveBeenCalled();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("<channel_history>");
@@ -1076,7 +1076,7 @@ describe("slack/adapter", () => {
       await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", threadTs: "0.9", type: "channel_mention" });
       await flush();
 
-      expect(mockBotInstance.getThreadReplies).toHaveBeenCalledWith("C1", "0.9");
+      expect(mockBotInstance.getThreadReplies).toHaveBeenCalledWith("C1", "0.9", 50);
       expect(mockBotInstance.getChannelHistory).not.toHaveBeenCalled();
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("<thread>");

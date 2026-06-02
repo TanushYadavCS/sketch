@@ -332,8 +332,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   }): Promise<BufferedMessage[]> => {
     try {
       const rows = params.threadTs
-        ? await slackBot.getThreadReplies(params.channelId, params.threadTs)
-        : await slackBot.getChannelHistory(params.channelId);
+        ? await slackBot.getThreadReplies(params.channelId, params.threadTs, config.SLACK_THREAD_HISTORY_LIMIT)
+        : await slackBot.getChannelHistory(params.channelId, config.SLACK_CHANNEL_HISTORY_LIMIT);
       const history = rows
         .filter((row) => row.ts !== params.currentMessageTs)
         .sort((a, b) => Number(a.ts) - Number(b.ts));
