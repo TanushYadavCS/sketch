@@ -69,7 +69,7 @@ export interface SlackMessage {
   userId: string;
   channelId: string;
   ts: string;
-  type: "dm" | "channel_mention" | "thread_message";
+  type: "dm" | "channel_message" | "channel_mention" | "thread_message";
   threadTs?: string;
   files?: SlackFile[];
 }
@@ -104,6 +104,7 @@ export class SlackBot {
   private mode: "socket" | "http";
   private signingSecret: string | undefined;
   private handler: SlackMessageHandler | null = null;
+  private channelMessageHandler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
   private threadMessageHandler: SlackMessageHandler | null = null;
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
@@ -157,6 +158,10 @@ export class SlackBot {
     this.handler = handler;
   }
 
+  onChannelMessage(handler: SlackMessageHandler): void {
+    this.channelMessageHandler = handler;
+  }
+
   onChannelMention(handler: SlackMessageHandler): void {
     this.mentionHandler = handler;
   }
@@ -184,6 +189,8 @@ export class SlackBot {
 
       const isIm = "channel_type" in message && message.channel_type === "im";
       const threadTs = "thread_ts" in message ? (message.thread_ts as string) : undefined;
+      const text = "text" in message && typeof message.text === "string" ? message.text : "";
+      const mentionsBot = this.botUserId ? text.includes(`<@${this.botUserId}>`) : false;
 
       if (isIm) {
         if (!this.handler) return;
@@ -212,8 +219,10 @@ export class SlackBot {
         return;
       }
 
+      if (mentionsBot) return;
+
       if (threadTs && this.threadMessageHandler) {
-        const hasText = "text" in message && message.text;
+        const hasText = text.length > 0;
         const rawFiles = "files" in message && Array.isArray(message.files) ? message.files : [];
         const hasFiles = rawFiles.length > 0;
         if (!hasText && !hasFiles) return;
@@ -227,11 +236,35 @@ export class SlackBot {
 
         await this.threadMessageHandler({
           type: "thread_message",
-          text: hasText ? (message as { text: string }).text : "",
+          text,
           userId: message.user,
           channelId: message.channel,
           ts: message.ts,
           threadTs,
+          ...(files.length > 0 && { files }),
+        });
+        return;
+      }
+
+      if (this.channelMessageHandler) {
+        const hasText = text.length > 0;
+        const rawFiles = "files" in message && Array.isArray(message.files) ? message.files : [];
+        const hasFiles = rawFiles.length > 0;
+        if (!hasText && !hasFiles) return;
+
+        const files: SlackFile[] = (rawFiles as RawSlackFile[]).map((f) => ({
+          name: f.name || "file",
+          urlPrivate: f.url_private_download || f.url_private || "",
+          mimetype: f.mimetype || "application/octet-stream",
+          size: f.size || 0,
+        }));
+
+        await this.channelMessageHandler({
+          type: "channel_message",
+          text,
+          userId: message.user,
+          channelId: message.channel,
+          ts: message.ts,
           ...(files.length > 0 && { files }),
         });
       }

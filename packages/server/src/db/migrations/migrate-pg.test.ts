@@ -40,7 +40,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(71);
+    expect(rows.rows).toHaveLength(72);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -113,7 +113,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(71);
+    expect(rows.rows).toHaveLength(72);
   });
 
   it("creates the users table", async () => {
@@ -199,6 +199,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       "inbox_messages",
       "conversations",
       "conversation_messages",
+      "conversation_cursors",
     ]) {
       const result = await sql<{ table_name: string }>`
         SELECT table_name FROM information_schema.tables

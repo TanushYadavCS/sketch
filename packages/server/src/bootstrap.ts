@@ -39,7 +39,6 @@ import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
 import { createSlackStartupManager } from "./slack/startup";
-import { ThreadBuffer } from "./slack/thread-buffer";
 import { UserCache } from "./slack/user-cache";
 import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
 import { initTelemetry } from "./telemetry/setup";
@@ -190,7 +189,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const queueManager = new QueueManager();
 
   // 7. Slack infrastructure
-  const threadBuffer = new ThreadBuffer();
   const userCache = new UserCache();
   let slack: SlackBot | null = null;
 
@@ -309,9 +307,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     config,
     logger,
-    repos: { users, channels, settings: settingsRepo },
+    repos: { users, channels, settings: settingsRepo, conversations: conversationsRepo },
     queue: queueManager,
-    slack: { threadBuffer, userCache },
+    slack: { userCache },
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,

@@ -296,6 +296,16 @@ export interface ConversationsTable {
   updated_at: Generated<string>;
 }
 
+export interface ConversationCursorsTable {
+  id: Generated<number>;
+  conversation_id: number;
+  scope_type: string;
+  scope_key: string;
+  last_seen_message_id: number | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ConversationMessagesTable {
   id: Generated<number>;
   conversation_id: number;
@@ -307,6 +317,9 @@ export interface ConversationMessagesTable {
   addressed_to_sketch: Generated<number>;
   text: Generated<string>;
   attachments: string | null;
+  provider_thread_id: string | null;
+  provider_parent_message_id: string | null;
+  is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
   received_at: string;
   created_at: Generated<string>;
@@ -600,6 +613,7 @@ export interface DB {
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   conversations: ConversationsTable;
+  conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;

@@ -182,6 +182,7 @@ export interface RunAgentParams {
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
+    providerThreadId?: string | null;
   };
 }
 

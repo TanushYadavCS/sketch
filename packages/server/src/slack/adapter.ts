@@ -6,9 +6,9 @@
 import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
-import { type InboxMessageContext, buildSketchContext } from "../agent/prompt";
+import { type BufferedMessage, type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
-import { deleteSessionId, getSessionId } from "../agent/sessions";
+import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import {
@@ -27,6 +27,7 @@ import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createChannelRepository } from "../db/repositories/channels";
+import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
@@ -46,17 +47,20 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
 import { slackApiCall } from "./api";
-import { SlackBot, type SlackFile } from "./bot";
+import { SlackBot, type SlackFile, type SlackMessageHandler } from "./bot";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
 import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
-import type { BufferedMessage, ThreadBuffer } from "./thread-buffer";
 import type { UserCache } from "./user-cache";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
+type ConversationRepository = ReturnType<typeof createConversationRepository>;
+
+const INLINE_BACKLOG_LIMIT = 25;
+const SLACK_THREAD_CURSOR_SCOPE = "slack_thread";
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -69,6 +73,34 @@ function parseInboxMetadata(value: string | null): Record<string, unknown> | nul
   }
 }
 
+function providerTimestampFromSlackTs(ts: string | undefined): string | null {
+  if (!ts) return null;
+  const seconds = Number(ts);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(seconds * 1000).toISOString();
+}
+
+function isConversationControlMessage(text: string): boolean {
+  const command = parseSketchCommand(text);
+  if (command === "new_session" || command === "tool_progress_query" || command === "reasoning_text_query") {
+    return true;
+  }
+  if (command?.startsWith("tool_progress_") || command?.startsWith("reasoning_text_")) return true;
+  return isToolProgressCommand(text) || isReasoningTextCommand(text);
+}
+
+function slackConversationRefForMessage(message: { type: string; channelId: string }) {
+  if (message.type === "dm") {
+    return { platform: "slack", kind: "dm", providerConversationId: message.channelId };
+  }
+  return { platform: "slack", kind: "channel", providerConversationId: message.channelId };
+}
+
+function slackProviderThreadId(message: { type: string; ts: string; threadTs?: string }): string | null {
+  if (message.type === "dm") return null;
+  return message.threadTs ?? message.ts;
+}
+
 export interface SlackAdapterDeps {
   db: Kysely<DB>;
   config: Config;
@@ -77,10 +109,10 @@ export interface SlackAdapterDeps {
     users: UserRepository;
     channels: ChannelRepository;
     settings: SettingsRepository;
+    conversations: ConversationRepository;
   };
   queue: QueueManager;
   slack: {
-    threadBuffer: ThreadBuffer;
     userCache: UserCache;
   };
   runAgent: (params: RunAgentParams) => Promise<AgentResult>;
@@ -282,6 +314,132 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     await slackBot.publishHomeView(slackUserId, view);
   };
 
+  const resolvePassiveSender = async (slackUserId: string) => {
+    const [user, userInfo] = await Promise.all([
+      repos.users.findBySlackId(slackUserId),
+      slackDeps.userCache.resolve(slackUserId, (id) => slackBot.getUserInfo(id)),
+    ]);
+    return {
+      senderName: user?.name ?? userInfo.realName,
+      senderUserId: user?.id ?? null,
+    };
+  };
+
+  const loadSlackBootstrapMessages = async (params: {
+    channelId: string;
+    currentMessageTs: string;
+    threadTs?: string;
+  }): Promise<BufferedMessage[]> => {
+    try {
+      const rows = params.threadTs
+        ? await slackBot.getThreadReplies(params.channelId, params.threadTs, config.SLACK_THREAD_HISTORY_LIMIT)
+        : await slackBot.getChannelHistory(params.channelId, config.SLACK_CHANNEL_HISTORY_LIMIT);
+      const history = rows
+        .filter((row) => row.ts !== params.currentMessageTs)
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
+
+      return Promise.all(
+        history.map(async (row) => {
+          const userInfo = await slackDeps.userCache.resolve(row.userId, (id) => slackBot.getUserInfo(id));
+          return {
+            userName: userInfo.realName || userInfo.name || row.userId,
+            text: row.text,
+            ts: row.ts,
+          };
+        }),
+      );
+    } catch (err) {
+      logger.warn(
+        { err, channelId: params.channelId, hasThread: Boolean(params.threadTs) },
+        "Slack bootstrap history fetch failed",
+      );
+      return [];
+    }
+  };
+
+  const ensureChannelRow = async (channelId: string) => {
+    let channel = await repos.channels.findBySlackChannelId(channelId);
+    if (!channel) {
+      const channelInfo = await slackBot.getChannelInfo(channelId);
+      channel = await repos.channels.create({
+        slackChannelId: channelId,
+        name: channelInfo.name,
+        type: channelInfo.type,
+      });
+      logger.info({ channelId: channel.id, name: channel.name }, "New channel created");
+    }
+    return channel;
+  };
+
+  const workspaceDirForChannel = async (channelId: string) => {
+    const channel = await repos.channels.findBySlackChannelId(channelId);
+    const boundAgent = channel?.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
+    return boundAgent
+      ? ensureAgentSubWorkspace(config, boundAgent.id, `channel-${channelId}`)
+      : ensureChannelWorkspace(config, channelId);
+  };
+
+  const captureSlackMessage = async (params: {
+    message: Parameters<SlackMessageHandler>[0];
+    senderName: string;
+    senderUserId?: string | null;
+    addressedToSketch: boolean;
+    attachments?: Attachment[];
+    displayName?: string | null;
+  }) => {
+    const { message } = params;
+    const conversation = await repos.conversations.getOrCreate(
+      slackConversationRefForMessage(message),
+      params.displayName,
+    );
+
+    if (isConversationControlMessage(message.text)) {
+      return { conversation, captured: null, inserted: false, omitted: true };
+    }
+
+    const captured = await repos.conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: message.ts,
+      senderJid: message.userId,
+      senderName: params.senderName,
+      senderUserId: params.senderUserId ?? null,
+      addressedToSketch: params.addressedToSketch,
+      text: message.text || (params.attachments && params.attachments.length > 0 ? "See attached files." : ""),
+      attachments: params.attachments,
+      providerThreadId: slackProviderThreadId(message),
+      providerParentMessageId: message.threadTs ?? null,
+      isThreadReply: Boolean(message.threadTs),
+      providerTimestamp: providerTimestampFromSlackTs(message.ts),
+    });
+
+    return { conversation, captured: captured.row, inserted: captured.inserted, omitted: false };
+  };
+
+  const captureSlackBotReplies = async (params: {
+    conversationId: number;
+    sent: Array<{ messageRef: string; text: string }>;
+    channelId: string;
+    threadTs?: string;
+    botName?: string | null;
+  }) => {
+    for (const sent of params.sent) {
+      if (!sent.messageRef) continue;
+      await repos.conversations.insertMessage({
+        conversationId: params.conversationId,
+        providerMessageId: sent.messageRef,
+        senderJid: "bot",
+        senderName: params.botName ?? "Sketch",
+        isBot: true,
+        addressedToSketch: false,
+        text: sent.text,
+        providerThreadId: params.threadTs ?? null,
+        providerParentMessageId: params.threadTs ?? null,
+        isThreadReply: Boolean(params.threadTs),
+        providerTimestamp: providerTimestampFromSlackTs(sent.messageRef),
+      });
+    }
+  };
+
   slackBot.onAppHomeOpened(async (event) => {
     await publishHomeForUser(event.slackUserId);
   });
@@ -345,8 +503,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing message");
 
       const command = parseSketchCommand(message.text);
+      const dmConversation = await repos.conversations.getOrCreate(slackConversationRefForMessage(message), user.name);
       if (command === "new_session") {
         await deleteSessionId(db, user.id);
+        await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
         await replyToUser(getNewSessionConfirmation());
         return;
       }
@@ -401,6 +561,32 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         loadSettings: () => repos.settings.get(),
         logger,
       });
+      const capture = await captureSlackMessage({
+        message,
+        senderName: user.name,
+        senderUserId: user.id,
+        addressedToSketch: true,
+        attachments,
+        displayName: user.name,
+      });
+      if (!capture.captured) return;
+
+      const backlog = await repos.conversations.listBacklog({
+        conversationId: capture.conversation.id,
+        afterMessageId: dmConversation.last_seen_message_id,
+        beforeMessageId: capture.captured.id,
+        limit: INLINE_BACKLOG_LIMIT,
+      });
+      const conversationBacklog =
+        backlog.messages.length > 0 || backlog.hasMore
+          ? {
+              messages: backlog.messages,
+              afterMessageId: dmConversation.last_seen_message_id,
+              beforeMessageId: capture.captured.id,
+              hasMore: backlog.hasMore,
+              nextCursor: backlog.nextCursor,
+            }
+          : undefined;
 
       const assistantThreadTs = message.threadTs;
       const shimmerThreadTs = message.threadTs ?? message.ts;
@@ -432,6 +618,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           timezone: user.timezone,
           isSharedContext: false,
           inboxMessages: pendingInbox.messages,
+          conversationBacklog,
         });
 
         const result = await runAgent({
@@ -470,10 +657,19 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           userRepo: repos.users,
           currentUserId: user.id,
           sendDm,
+          conversationRepo: repos.conversations,
+          conversationContext: { conversationId: capture.conversation.id },
         });
 
         if (result.trace.finalText) {
-          await onFinalMessage(result.trace.finalText);
+          const sent = await onFinalMessage(result.trace.finalText);
+          await captureSlackBotReplies({
+            conversationId: capture.conversation.id,
+            sent,
+            channelId: message.channelId,
+            threadTs: assistantThreadTs,
+            botName: settingsRow?.bot_name,
+          });
         }
 
         for (const filePath of result.pendingUploads) {
@@ -488,6 +684,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         if (pendingInbox && pendingInbox.ids.length > 0 && inboxMessagesRepo) {
           await inboxMessagesRepo.markConsumed(pendingInbox.ids);
         }
+        if (result.messageSent || result.pendingUploads.length > 0) {
+          await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+        }
         if (!result.trace.finalText) {
           await replyToUser("_No response_");
         }
@@ -499,44 +698,67 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     });
   });
 
+  // Passive top-level channel message handler
+  slackBot.onChannelMessage(async (message) => {
+    try {
+      const channel = await ensureChannelRow(message.channelId);
+      const workspaceDir = await workspaceDirForChannel(message.channelId);
+      const settingsRow = await repos.settings.get();
+      const attachments = await downloadMessageAttachments({
+        files: message.files,
+        workspaceDir,
+        botToken: settingsRow?.slack_bot_token,
+        maxBytes: maxFileBytes,
+        logger,
+      });
+      const sender = await resolvePassiveSender(message.userId);
+      await captureSlackMessage({
+        message,
+        senderName: sender.senderName,
+        senderUserId: sender.senderUserId,
+        addressedToSketch: false,
+        attachments,
+        displayName: channel.name,
+      });
+    } catch (err) {
+      logger.warn({ err, channelId: message.channelId }, "Failed to capture passive Slack channel message");
+    }
+  });
+
   // Passive thread message handler
   slackBot.onThreadMessage(async (message) => {
     if (!message.threadTs) return;
-    if (!slackDeps.threadBuffer.hasThread(message.channelId, message.threadTs)) return;
-
-    const userInfo = await slackDeps.userCache.resolve(message.userId, (id) => slackBot.getUserInfo(id));
-
-    let downloadedAttachments: Attachment[] = [];
-    if (message.files?.length) {
-      const channel = await repos.channels.findBySlackChannelId(message.channelId);
-      const boundAgent = channel?.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
-      const workspaceDir = boundAgent
-        ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${message.channelId}`)
-        : await ensureChannelWorkspace(config, message.channelId);
-      const attachDir = join(workspaceDir, "attachments");
-      const maxBytes = maxFileBytes;
+    try {
+      const channel = await ensureChannelRow(message.channelId);
+      const workspaceDir = await workspaceDirForChannel(message.channelId);
       const settingsRow = await repos.settings.get();
-      downloadedAttachments = await downloadSlackFiles(
-        message.files,
-        settingsRow?.slack_bot_token,
-        attachDir,
-        maxBytes,
+      const attachments = await downloadMessageAttachments({
+        files: message.files,
+        workspaceDir,
+        botToken: settingsRow?.slack_bot_token,
+        maxBytes: maxFileBytes,
         logger,
-        "Failed to download passive thread file",
+      });
+      const sender = await resolvePassiveSender(message.userId);
+      await captureSlackMessage({
+        message,
+        senderName: sender.senderName,
+        senderUserId: sender.senderUserId,
+        addressedToSketch: false,
+        attachments,
+        displayName: channel.name,
+      });
+
+      logger.debug(
+        { channelId: message.channelId, threadTs: message.threadTs, user: sender.senderName },
+        "Captured passive Slack thread message",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, channelId: message.channelId, threadTs: message.threadTs },
+        "Failed to capture passive Slack thread message",
       );
     }
-
-    slackDeps.threadBuffer.append(message.channelId, message.threadTs, {
-      userName: userInfo.realName,
-      text: message.text || (downloadedAttachments.length > 0 ? "See attached files." : ""),
-      ts: message.ts,
-      ...(downloadedAttachments.length > 0 && { attachments: downloadedAttachments }),
-    });
-
-    logger.debug(
-      { channelId: message.channelId, threadTs: message.threadTs, user: userInfo.realName },
-      "Buffered thread message",
-    );
   });
 
   // Channel mention handler
@@ -554,16 +776,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       try {
         user = await resolveUser(message.userId);
 
-        let channel = await repos.channels.findBySlackChannelId(message.channelId);
-        if (!channel) {
-          const channelInfo = await slackBot.getChannelInfo(message.channelId);
-          channel = await repos.channels.create({
-            slackChannelId: message.channelId,
-            name: channelInfo.name,
-            type: channelInfo.type,
-          });
-          logger.info({ channelId: channel.id, name: channel.name }, "New channel created");
-        }
+        let channel = await ensureChannelRow(message.channelId);
 
         const boundAgent = channel.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
         if (channel.agent_user_id && !boundAgent) {
@@ -583,9 +796,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           : `channel-${message.channelId}`;
 
         const command = parseSketchCommand(message.text);
+        const channelConversation = await repos.conversations.getOrCreate(
+          slackConversationRefForMessage(message),
+          channel.name,
+        );
         if (command === "new_session") {
           await deleteSessionId(db, channelWorkspaceKey, threadTs);
-          slackDeps.threadBuffer.reset(message.channelId, threadTs);
+          await repos.conversations.advanceCursorToCurrentMax({
+            conversationId: channelConversation.id,
+            scopeType: SLACK_THREAD_CURSOR_SCOPE,
+            scopeKey: threadTs,
+            providerThreadId: threadTs,
+          });
           await slackBot.postThreadReply(message.channelId, threadTs, getNewSessionConfirmation());
           return;
         }
@@ -634,9 +856,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${message.channelId}`)
           : await ensureChannelWorkspace(config, message.channelId);
         const settingsRow = await repos.settings.get();
-        const hadRegisteredThread = slackDeps.threadBuffer.hasThread(message.channelId, threadTs);
-
-        slackDeps.threadBuffer.register(message.channelId, threadTs);
 
         let attachments = await downloadMessageAttachments({
           files: message.files,
@@ -649,57 +868,61 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           loadSettings: () => repos.settings.get(),
           logger,
         });
+        const capture = await captureSlackMessage({
+          message,
+          senderName: user.name,
+          senderUserId: user.id,
+          addressedToSketch: true,
+          attachments,
+          displayName: channel.name,
+        });
+        if (!capture.captured) return;
 
-        const existingSession = await getSessionId(db, channelWorkspaceKey, threadTs);
+        const cursor = await repos.conversations.getCursor({
+          conversationId: capture.conversation.id,
+          scopeType: SLACK_THREAD_CURSOR_SCOPE,
+          scopeKey: threadTs,
+        });
+        const backlog = await repos.conversations.listBacklog({
+          conversationId: capture.conversation.id,
+          afterMessageId: cursor?.last_seen_message_id,
+          beforeMessageId: capture.captured.id,
+          limit: INLINE_BACKLOG_LIMIT,
+          providerThreadId: message.threadTs ? threadTs : undefined,
+        });
+        const conversationBacklog =
+          backlog.messages.length > 0 || backlog.hasMore
+            ? {
+                messages: backlog.messages,
+                afterMessageId: cursor?.last_seen_message_id,
+                beforeMessageId: capture.captured.id,
+                hasMore: backlog.hasMore,
+                nextCursor: backlog.nextCursor,
+              }
+            : undefined;
+        const bootstrapMessages = !conversationBacklog
+          ? await loadSlackBootstrapMessages({
+              channelId: message.channelId,
+              currentMessageTs: message.ts,
+              ...(message.threadTs ? { threadTs } : {}),
+            })
+          : [];
+        const threadTag = message.threadTs ? "thread" : "channel_history";
+
         const rawText = message.text || "See attached files.";
-        let userMessage: string;
-
-        if (existingSession || hadRegisteredThread) {
-          const buffered = slackDeps.threadBuffer.drain(message.channelId, threadTs);
-          logger.debug({ threadTs, bufferedCount: buffered.length }, "Draining thread buffer for subsequent mention");
-          userMessage = buildSketchContext({
-            messages: buffered,
-            currentUserName: user.name,
-            currentMessage: rawText,
-            currentUserEmail: user.email,
-            workspaceDir,
-            orgDir: config.CLAUDE_CONFIG_DIR,
-            timezone: user.timezone,
-            isSharedContext: true,
-            threadTag: "thread",
-            channelContext: { channelName: channel.name },
-          });
-        } else {
-          const history = message.threadTs
-            ? await slackBot.getThreadReplies(message.channelId, message.threadTs, config.SLACK_THREAD_HISTORY_LIMIT)
-            : await slackBot.getChannelHistory(message.channelId, config.SLACK_CHANNEL_HISTORY_LIMIT);
-
-          const filtered = history.filter((m) => m.ts !== message.ts);
-
-          logger.debug(
-            { source: message.threadTs ? "thread" : "channel", messageCount: filtered.length },
-            "Bootstrap history fetched",
-          );
-
-          const bootstrapMessages: BufferedMessage[] = [];
-          for (const msg of filtered.reverse()) {
-            const info = await slackDeps.userCache.resolve(msg.userId, (id) => slackBot.getUserInfo(id));
-            bootstrapMessages.push({ userName: info.realName, text: msg.text, ts: msg.ts });
-          }
-          const threadTag = message.threadTs ? "thread" : "channel_history";
-          userMessage = buildSketchContext({
-            messages: bootstrapMessages,
-            currentUserName: user.name,
-            currentMessage: rawText,
-            currentUserEmail: user.email,
-            workspaceDir,
-            orgDir: config.CLAUDE_CONFIG_DIR,
-            timezone: user.timezone,
-            isSharedContext: true,
-            threadTag,
-            channelContext: { channelName: channel.name },
-          });
-        }
+        const userMessage = buildSketchContext({
+          messages: bootstrapMessages,
+          currentUserName: user.name,
+          currentMessage: rawText,
+          currentUserEmail: user.email,
+          workspaceDir,
+          orgDir: config.CLAUDE_CONFIG_DIR,
+          timezone: user.timezone,
+          isSharedContext: true,
+          threadTag,
+          channelContext: { channelName: channel.name },
+          conversationBacklog,
+        });
 
         const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, threadTs);
         const shimmer = createShimmer(slackBot, message.channelId, threadTs, resolveProgressDisplaySettings(channel));
@@ -750,10 +973,22 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           sendDm,
           agentInstructions,
           agentAllowedTools,
+          conversationRepo: repos.conversations,
+          conversationContext: {
+            conversationId: capture.conversation.id,
+            providerThreadId: message.threadTs ? threadTs : undefined,
+          },
         });
 
         if (result.trace.finalText) {
-          await onFinalMessage(result.trace.finalText);
+          const sent = await onFinalMessage(result.trace.finalText);
+          await captureSlackBotReplies({
+            conversationId: capture.conversation.id,
+            sent,
+            channelId: message.channelId,
+            threadTs,
+            botName: settingsRow?.bot_name,
+          });
         }
 
         for (const filePath of result.pendingUploads) {
@@ -765,6 +1000,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
 
         await clearAssistantStatus?.();
+        if (result.messageSent || result.pendingUploads.length > 0) {
+          await repos.conversations.updateCursor({
+            conversationId: capture.conversation.id,
+            scopeType: SLACK_THREAD_CURSOR_SCOPE,
+            scopeKey: threadTs,
+            messageId: capture.captured.id,
+          });
+        }
         if (!result.trace.finalText) {
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }

@@ -40,7 +40,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(71);
+    expect(rows.rows).toHaveLength(72);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -108,6 +108,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[68]).toBe("073-api-tokens");
     expect(names[69]).toBe("074-external-mcp-tool-calls");
     expect(names[70]).toBe("075-conversation-messages");
+    expect(names[71]).toBe("076-slack-conversation-thread-metadata");
   });
 
   it("creates the users table", async () => {
@@ -123,7 +124,7 @@ describe("runMigrations — full sequence", () => {
   it("creates conversation capture tables", async () => {
     await runMigrations(db);
 
-    for (const table of ["conversations", "conversation_messages"]) {
+    for (const table of ["conversations", "conversation_messages", "conversation_cursors"]) {
       const result = await sql<{ name: string }>`
         SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
       `.execute(db);
@@ -240,7 +241,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(71);
+    expect(rows.rows).toHaveLength(72);
   });
 });
 
@@ -272,6 +273,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(71);
+    expect(rows.rows).toHaveLength(72);
   });
 });

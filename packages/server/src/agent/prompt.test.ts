@@ -714,7 +714,7 @@ describe("buildSketchContext", () => {
         },
       });
 
-      expect(result).toContain("Missed WhatsApp messages are shown below using durable row ids.");
+      expect(result).toContain("Missed chat messages are shown below using durable row ids.");
       expect(result).toContain("Bob [messageId=11]: first missed message");
       expect(result).toContain("Carol [messageId=12]: See attached files.");
       expect(result).toContain('path="/ws/attachments/note.txt"');
