@@ -72,6 +72,8 @@ import * as m069 from "./migrations/069-admin-can-read-all-files";
 import * as m070 from "./migrations/070-file-shares";
 import * as m071 from "./migrations/071-entity-shares";
 import * as m072 from "./migrations/072-enrichment-retry-backoff";
+import * as m073 from "./migrations/073-api-tokens";
+import * as m074 from "./migrations/074-external-mcp-tool-calls";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -148,6 +150,8 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "070-file-shares": m070,
           "071-entity-shares": m071,
           "072-enrichment-retry-backoff": m072,
+          "073-api-tokens": m073,
+          "074-external-mcp-tool-calls": m074,
         };
       },
     },
