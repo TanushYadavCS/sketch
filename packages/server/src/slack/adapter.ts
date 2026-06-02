@@ -6,7 +6,7 @@
 import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
-import { type InboxMessageContext, buildSketchContext } from "../agent/prompt";
+import { type BufferedMessage, type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
@@ -323,6 +323,38 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       senderName: user?.name ?? userInfo.realName,
       senderUserId: user?.id ?? null,
     };
+  };
+
+  const loadSlackBootstrapMessages = async (params: {
+    channelId: string;
+    currentMessageTs: string;
+    threadTs?: string;
+  }): Promise<BufferedMessage[]> => {
+    try {
+      const rows = params.threadTs
+        ? await slackBot.getThreadReplies(params.channelId, params.threadTs)
+        : await slackBot.getChannelHistory(params.channelId);
+      const history = rows
+        .filter((row) => row.ts !== params.currentMessageTs)
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
+
+      return Promise.all(
+        history.map(async (row) => {
+          const userInfo = await slackDeps.userCache.resolve(row.userId, (id) => slackBot.getUserInfo(id));
+          return {
+            userName: userInfo.realName || userInfo.name || row.userId,
+            text: row.text,
+            ts: row.ts,
+          };
+        }),
+      );
+    } catch (err) {
+      logger.warn(
+        { err, channelId: params.channelId, hasThread: Boolean(params.threadTs) },
+        "Slack bootstrap history fetch failed",
+      );
+      return [];
+    }
   };
 
   const ensureChannelRow = async (channelId: string) => {
@@ -868,10 +900,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
                 nextCursor: backlog.nextCursor,
               }
             : undefined;
+        const bootstrapMessages = !conversationBacklog
+          ? await loadSlackBootstrapMessages({
+              channelId: message.channelId,
+              currentMessageTs: message.ts,
+              ...(message.threadTs ? { threadTs } : {}),
+            })
+          : [];
+        const threadTag = message.threadTs ? "thread" : "channel_history";
 
         const rawText = message.text || "See attached files.";
         const userMessage = buildSketchContext({
-          messages: [],
+          messages: bootstrapMessages,
           currentUserName: user.name,
           currentMessage: rawText,
           currentUserEmail: user.email,
@@ -879,7 +919,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           orgDir: config.CLAUDE_CONFIG_DIR,
           timezone: user.timezone,
           isSharedContext: true,
-          threadTag: "thread",
+          threadTag,
           channelContext: { channelName: channel.name },
           conversationBacklog,
         });

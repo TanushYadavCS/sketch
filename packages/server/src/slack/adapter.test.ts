@@ -1044,16 +1044,44 @@ describe("slack/adapter", () => {
       );
     });
 
-    it("does not fetch Slack bootstrap history for channel mentions", async () => {
+    it("fetches Slack channel bootstrap history when persisted backlog is empty on first mention", async () => {
       const deps = makeDeps();
+      mockBotInstance.getChannelHistory.mockResolvedValueOnce([
+        { userId: "S2", text: "ambient update", ts: "0.9" },
+        { userId: "S1", text: "help", ts: "1" },
+      ]);
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
 
       await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
       await flush();
 
-      expect(mockBotInstance.getChannelHistory).not.toHaveBeenCalled();
+      expect(mockBotInstance.getChannelHistory).toHaveBeenCalledWith("C1");
       expect(mockBotInstance.getThreadReplies).not.toHaveBeenCalled();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("<channel_history>");
+      expect(agentCall.userMessage).toContain("Alice: ambient update");
+      expect(agentCall.userMessage).not.toContain("Alice: help");
+    });
+
+    it("fetches Slack thread bootstrap history when persisted backlog is empty on first threaded mention", async () => {
+      const deps = makeDeps();
+      mockBotInstance.getThreadReplies.mockResolvedValueOnce([
+        { userId: "S2", text: "earlier reply", ts: "0.9" },
+        { userId: "S1", text: "help", ts: "1" },
+      ]);
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", threadTs: "0.9", type: "channel_mention" });
+      await flush();
+
+      expect(mockBotInstance.getThreadReplies).toHaveBeenCalledWith("C1", "0.9");
+      expect(mockBotInstance.getChannelHistory).not.toHaveBeenCalled();
+      const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
+      expect(agentCall.userMessage).toContain("<thread>");
+      expect(agentCall.userMessage).toContain("Alice: earlier reply");
+      expect(agentCall.userMessage).not.toContain("Alice: help");
     });
 
     it("includes user email in channel mention message", async () => {
