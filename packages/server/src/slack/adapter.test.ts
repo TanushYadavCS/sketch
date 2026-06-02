@@ -873,6 +873,11 @@ describe("slack/adapter", () => {
           providerThreadId: undefined,
         }),
       );
+      expect(deps.runAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationContext: { conversationId: 1, providerThreadId: undefined },
+        }),
+      );
     });
 
     it("loads current-thread backlog on threaded mention", async () => {
@@ -898,6 +903,11 @@ describe("slack/adapter", () => {
           afterMessageId: 10,
           beforeMessageId: 1,
           providerThreadId: "1",
+        }),
+      );
+      expect(deps.runAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationContext: { conversationId: 1, providerThreadId: "1" },
         }),
       );
     });

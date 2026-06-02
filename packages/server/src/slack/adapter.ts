@@ -934,7 +934,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           agentInstructions,
           agentAllowedTools,
           conversationRepo: repos.conversations,
-          conversationContext: { conversationId: capture.conversation.id, providerThreadId: threadTs },
+          conversationContext: {
+            conversationId: capture.conversation.id,
+            providerThreadId: message.threadTs ? threadTs : undefined,
+          },
         });
 
         if (result.trace.finalText) {
