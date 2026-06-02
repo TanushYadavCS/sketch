@@ -20,6 +20,7 @@ import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createChannelRepository } from "./db/repositories/channels";
+import { createConversationRepository } from "./db/repositories/conversations";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
@@ -44,7 +45,6 @@ import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } 
 import { initTelemetry } from "./telemetry/setup";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
-import { GroupBuffer } from "./whatsapp/group-buffer";
 
 export interface ServerHandle {
   config: Config;
@@ -104,6 +104,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await runManagedSeed(config, settingsRepo, users);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
+  const conversationsRepo = createConversationRepository(db);
   const automationRunsRepo = createAutomationRunsRepository(db);
   const stepContentRepo = createAutomationStepContentRepository(db);
   const staleCount = await automationRunsRepo.markRunningAsFailed("Interrupted by server restart");
@@ -181,7 +182,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8. WhatsApp
   const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
-  const groupBuffer = new GroupBuffer();
 
   const sendDirectMessage = async ({
     userId,
@@ -334,9 +334,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     config,
     logger,
-    repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo },
+    repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo, conversations: conversationsRepo },
     queue: queueManager,
-    groupBuffer,
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,

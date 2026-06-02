@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { createReadChatHistoryTool } from "./tools/chat-history";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
 import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
@@ -21,6 +22,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
   const tools = [
     createSendFileToChatTool(deps, absWorkspace),
+    createReadChatHistoryTool(deps),
     createProviderConfigTool(deps),
     createManageScheduledTasksTool({
       scheduler: deps.scheduler,

@@ -14,6 +14,7 @@ import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
@@ -174,6 +175,10 @@ export interface RunAgentParams {
    * Null/undefined preserves the runner's default toolset.
    */
   agentAllowedTools?: string[] | null;
+  conversationRepo?: ReturnType<typeof createConversationRepository>;
+  conversationContext?: {
+    conversationId: number;
+  };
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
@@ -318,6 +323,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),
     logger,
+    conversationRepo: params.conversationRepo,
+    conversationContext: params.conversationContext,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);

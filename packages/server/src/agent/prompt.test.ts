@@ -662,6 +662,74 @@ describe("buildSketchContext", () => {
       expect(result).not.toContain("<thread>");
       expect(result).not.toContain("<channel_history>");
     });
+
+    it("renders persisted conversation backlog inside the thread section", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "what did I miss?",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        conversationBacklog: {
+          afterMessageId: 10,
+          beforeMessageId: 13,
+          hasMore: false,
+          messages: [
+            {
+              id: 11,
+              senderName: "Bob",
+              text: "first missed message",
+              attachments: [],
+              providerTimestamp: "2026-01-01T00:00:00.000Z",
+              receivedAt: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              id: 12,
+              senderName: "Carol",
+              text: "",
+              attachments: [
+                {
+                  originalName: "note.txt",
+                  mimeType: "text/plain",
+                  localPath: "/ws/attachments/note.txt",
+                  sizeBytes: 12,
+                },
+              ],
+              providerTimestamp: null,
+              receivedAt: "2026-01-01T00:00:02.000Z",
+            },
+          ],
+        },
+      });
+
+      expect(result).toContain("Missed WhatsApp messages are shown below using durable row ids.");
+      expect(result).toContain("Bob [messageId=11]: first missed message");
+      expect(result).toContain("Carol [messageId=12]: See attached files.");
+      expect(result).toContain('path="/ws/attachments/note.txt"');
+    });
+
+    it("tells the agent how to continue when backlog is truncated", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "summarize",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        conversationBacklog: {
+          afterMessageId: null,
+          beforeMessageId: 50,
+          hasMore: true,
+          nextCursor: 25,
+          messages: [],
+        },
+      });
+
+      expect(result).toContain("<thread>");
+      expect(result).toContain("after messageId 0 and before the current messageId 50");
+      expect(result).toContain(
+        "Use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false to continue.",
+      );
+    });
   });
 
   describe("<inbox> tag", () => {

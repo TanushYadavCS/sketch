@@ -35,6 +35,23 @@ export interface InboxMessageContext {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface ConversationBacklogMessage {
+  id: number;
+  senderName: string;
+  text: string;
+  attachments: Attachment[];
+  providerTimestamp: string | null;
+  receivedAt: string;
+}
+
+export interface ConversationBacklogContext {
+  messages: ConversationBacklogMessage[];
+  afterMessageId?: number | null;
+  beforeMessageId: number;
+  hasMore: boolean;
+  nextCursor?: number;
+}
+
 export interface SketchContextParams {
   messages: BufferedMessage[];
   currentUserName: string;
@@ -55,6 +72,48 @@ export interface SketchContextParams {
     groupName: string;
     groupDescription?: string;
   };
+  conversationBacklog?: ConversationBacklogContext;
+}
+
+function renderBufferedMessageLines(messages: BufferedMessage[]): string[] {
+  const lines: string[] = [];
+  for (const msg of messages) {
+    lines.push(`${msg.userName}: ${msg.text}`);
+    if (msg.attachments?.length) {
+      lines.push(formatAttachmentsForPrompt(msg.attachments));
+    }
+  }
+  return lines;
+}
+
+function formatConversationBacklogMessages(messages: ConversationBacklogMessage[]): BufferedMessage[] {
+  return messages.map((message) => ({
+    userName: `${message.senderName} [messageId=${message.id}]`,
+    text: message.text || (message.attachments.length > 0 ? "See attached files." : ""),
+    ts: message.providerTimestamp ?? message.receivedAt,
+    ...(message.attachments.length > 0 ? { attachments: message.attachments } : {}),
+  }));
+}
+
+function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
+  const lowerBound = params.afterMessageId ?? 0;
+  const lines = [
+    `Missed WhatsApp messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
+  ];
+  if (params.hasMore) {
+    lines.push(
+      `Only ${params.messages.length} missed messages are inlined. Use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false to continue.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderConversationBacklogLines(backlog: ConversationBacklogContext | undefined): string[] {
+  if (!backlog || (backlog.messages.length === 0 && !backlog.hasMore)) return [];
+
+  const lines = [buildConversationBacklogNotice(backlog)];
+  const messageLines = renderBufferedMessageLines(formatConversationBacklogMessages(backlog.messages));
+  return messageLines.length > 0 ? [...lines, "", ...messageLines] : lines;
 }
 
 function renderInboxMessage(message: InboxMessageContext): string[] {
@@ -409,16 +468,14 @@ export function buildSketchContext(params: SketchContextParams): string {
     sectionParts.push(`<user>\n${lines.join("\n")}\n</user>`);
   }
 
-  if (messages.length > 0) {
+  const backlogLines = renderConversationBacklogLines(params.conversationBacklog);
+  const messageLines = renderBufferedMessageLines(messages);
+  const separator = backlogLines.length > 0 && messageLines.length > 0 ? [""] : [];
+  const threadLines = [...backlogLines, ...separator, ...messageLines];
+
+  if (threadLines.length > 0) {
     const tag = params.threadTag ?? "thread";
-    const lines: string[] = [];
-    for (const msg of messages) {
-      lines.push(`${msg.userName}: ${msg.text}`);
-      if (msg.attachments?.length) {
-        lines.push(formatAttachmentsForPrompt(msg.attachments));
-      }
-    }
-    sectionParts.push(`<${tag}>\n${lines.join("\n")}\n</${tag}>`);
+    sectionParts.push(`<${tag}>\n${threadLines.join("\n")}\n</${tag}>`);
   }
 
   if (params.taskPrompt) {
