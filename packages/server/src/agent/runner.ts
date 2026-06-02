@@ -28,7 +28,9 @@ import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import type { TranscriptionSettings } from "../transcription/service";
-import { resolveTranscriptionConfigFromDeps } from "../transcription/service";
+import { resolveTranscriptionConfig } from "../transcription/service";
+import type { VisionConfig } from "../vision/service";
+import { resolveVisionConfig } from "../vision/service";
 import { createCanUseTool } from "./permissions";
 import { buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
@@ -162,6 +164,7 @@ export interface RunAgentParams {
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   agentEnv?: Record<string, string>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
+  visionConfig?: VisionConfig | null;
   /**
    * Free-form instruction set for an agent persona, appended to the system
    * prompt. Set when the run is associated with a /team agent (channel-bound,
@@ -225,12 +228,14 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return [];
   });
 
-  const transcriptionConfig = await resolveTranscriptionConfigFromDeps({
-    loadSettings: params.loadTranscriptionSettings,
-  }).catch((err) => {
-    logger.warn({ err }, "Failed to resolve transcription config");
-    return null;
-  });
+  const transcriptionSettings = params.loadTranscriptionSettings
+    ? await params.loadTranscriptionSettings().catch((err) => {
+        logger.warn({ err }, "Failed to load transcription settings");
+        return null;
+      })
+    : null;
+  const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
+  const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
 
   const systemAppend = buildSystemContext({
     platform: params.platform,
@@ -239,6 +244,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,
+    visionAnalysisEnabled: Boolean(visionConfig),
   });
 
   const sdkBuiltInTools = params.agentAllowedTools
@@ -266,6 +272,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const attachments = params.attachments ?? [];
   const hasImages = attachments.some((a) => isImageAttachment(a));
+  const useVisionToolForImages = hasImages && Boolean(visionConfig);
   let usedExistingSession = existingSessionId !== undefined;
 
   let prompt: string | AsyncIterable<SDKUserMessage>;
@@ -279,12 +286,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       imageCount: images.length,
       nonImageCount: nonImages.length,
       images: images.map((a) => ({ name: a.originalName, mime: a.mimeType })),
-      promptMode: hasImages ? "multimodal" : "text",
+      promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
     },
     "Prompt mode selected",
   );
 
-  if (hasImages) {
+  if (hasImages && !useVisionToolForImages) {
     const content = await buildMultimodalContent(userMessage, attachments);
     prompt = (async function* () {
       yield {
@@ -319,6 +326,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),
+    visionConfig,
+    visionAnalysisEnabled: Boolean(visionConfig),
     logger,
   });
 
@@ -579,7 +588,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     nonImageCount: nonImages.length,
     mimeTypes: attachments.map((a) => a.mimeType),
     fileSizes: attachments.map((a) => a.sizeBytes),
-    promptMode: hasImages ? "multimodal" : "text",
+    promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
     toolCalls,
     trace: {
       progressEvents,

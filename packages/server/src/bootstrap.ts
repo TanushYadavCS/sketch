@@ -42,6 +42,7 @@ import { ThreadBuffer } from "./slack/thread-buffer";
 import { UserCache } from "./slack/user-cache";
 import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
 import { initTelemetry } from "./telemetry/setup";
+import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
 import { GroupBuffer } from "./whatsapp/group-buffer";
@@ -124,9 +125,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
         allowOrgSharedEnv: params.claudeConfigDir !== undefined,
       }),
     );
+    const loadTranscriptionSettings = params.loadTranscriptionSettings ?? (() => settingsRepo.get());
+    const transcriptionSettings =
+      params.visionConfig === undefined || params.visionConfig === null
+        ? await loadTranscriptionSettings().catch((err) => {
+            logger.warn({ err }, "Failed to load settings for visual analysis config");
+            return null;
+          })
+        : null;
     const enrichedParams = {
       ...params,
-      loadTranscriptionSettings: params.loadTranscriptionSettings ?? (() => settingsRepo.get()),
+      loadTranscriptionSettings,
+      visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
       geminiConfig: params.geminiConfig ?? {
         maxRpm: config.GEMINI_MAX_RPM,
         maxRetries: config.GEMINI_MAX_RETRIES,

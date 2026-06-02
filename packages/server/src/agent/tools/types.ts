@@ -8,6 +8,7 @@ import type { Logger } from "../../logger";
 import type { TaskScheduler } from "../../scheduler/service";
 import type { TaskContext } from "../../scheduler/types";
 import type { TranscriptionSettings } from "../../transcription/service";
+import type { VisionConfig } from "../../vision/service";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -61,6 +62,8 @@ export interface SketchMcpDeps {
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   transcriptionEnabled?: boolean;
+  visionConfig?: VisionConfig | null;
+  visionAnalysisEnabled?: boolean;
   logger?: Logger;
   publicMcp?: {
     userEmails?: string[];

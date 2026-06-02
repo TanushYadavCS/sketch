@@ -179,6 +179,18 @@ describe("buildSystemContext", () => {
         "If no transcript is provided and a TranscribeAudio tool is available",
       );
     });
+
+    it("does not mention VisualAnalysis when vision analysis is unavailable", () => {
+      expect(buildSystemContext({ platform: "slack" })).not.toContain("VisualAnalysis");
+    });
+
+    it("mentions VisualAnalysis when vision analysis is available", () => {
+      const result = buildSystemContext({ platform: "slack", visionAnalysisEnabled: true });
+      expect(result).toContain("VisualAnalysis");
+      expect(result).toContain("visual tasks");
+      expect(result).toContain("OCR");
+      expect(result).not.toContain("Image and GIF files");
+    });
   });
 
   describe("context protocol section", () => {
