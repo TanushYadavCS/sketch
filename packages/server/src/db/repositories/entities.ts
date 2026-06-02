@@ -1,8 +1,58 @@
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
 import { isPg } from "../dialect";
-import type { DB } from "../schema";
+import type { DB, EntitiesTable } from "../schema";
+import { type FileViewer, fileVisibilityPredicate } from "./connectors";
+
+const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
+
+/**
+ * Predicate matching entities visible to `viewer`. Composed into queries via `.where(...)`.
+ *
+ *   admin              = bypasses RBAC (single OR branch resolves to true)
+ *   system entity      = org-curated entities visible to all members
+ *   org-wide           = entities.share_with_everyone = 1
+ *   manual share       = caller's email is in entity_share_emails for the entity
+ *   file co-mention    = caller can see at least one file mentioning the entity
+ *                        (delegates to fileVisibilityPredicate via EXISTS)
+ *
+ * Acyclic: this calls fileVisibilityPredicate. fileVisibilityPredicate must
+ * never call back into entityVisibilityPredicate — entity-share propagation
+ * to files is expressed directly there against entity_share_emails / entities.
+ *
+ * `alias` is the SQL identifier for `entities` at the call site (default
+ * "entities"). Pass a different name when the entity table is aliased.
+ */
+export function entityVisibilityPredicate(viewer: FileViewer, alias = "entities") {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(alias)) {
+    throw new Error(`entityVisibilityPredicate: invalid table alias "${alias}"`);
+  }
+  if (viewer.isAdmin) {
+    return sql<boolean>`(1 = 1)`;
+  }
+  const t = sql.raw(alias);
+  const email = viewer.email ?? "";
+  const fileVis = fileVisibilityPredicate(viewer, "ifs_inner");
+  return sql<boolean>`(
+    ${t}.source_type IN (${sql.join(
+      SYSTEM_ENTITY_SOURCE_TYPES.map((sourceType) => sql`${sourceType}`),
+      sql`,`,
+    )})
+    OR ${t}.share_with_everyone = 1
+    OR EXISTS (SELECT 1 FROM entity_share_emails ese
+               WHERE ese.entity_id = ${t}.id
+                 AND ese.email = ${email})
+    OR EXISTS (
+      SELECT 1 FROM entity_mentions em_vis
+      INNER JOIN indexed_files AS ifs_inner ON ifs_inner.id = em_vis.indexed_file_id
+      WHERE em_vis.entity_id = ${t}.id
+        AND ifs_inner.is_archived = 0
+        AND ${fileVis}
+    )
+  )`;
+}
 
 export interface UpsertEntityData {
   name: string;
@@ -32,11 +82,17 @@ export interface UpsertPersonEntityData {
   sourceId: string;
 }
 
+export type EntityMentionConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+export type EntityMentionRelation = "mentioned" | "attended" | "authored" | "assigned" | "organized" | "corresponded";
+
 export interface CreateMentionData {
   entityId: string;
   indexedFileId: string;
   chunkIndex?: number | null;
   contextSnippet?: string | null;
+  confidence: EntityMentionConfidence;
+  source: string;
+  relation: EntityMentionRelation;
 }
 
 export function createEntityRepository(db: Kysely<DB>) {
@@ -89,8 +145,18 @@ export function createEntityRepository(db: Kysely<DB>) {
       return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
     },
 
-    async getEntity(id: string) {
-      return db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirst();
+    /**
+     * Fetch an entity. When `viewer` is omitted the entity is returned without
+     * RBAC — internal/server callers use this to operate on entities directly
+     * (e.g. enrichment, materialization). API handlers must pass a viewer so
+     * callers without access get null (which maps to 404).
+     */
+    async getEntity(id: string, viewer?: FileViewer) {
+      let query = db.selectFrom("entities").selectAll().where("id", "=", id);
+      if (viewer) {
+        query = query.where(entityVisibilityPredicate(viewer));
+      }
+      return query.executeTakeFirst();
     },
 
     async getEntities(ids: string[]) {
@@ -223,17 +289,33 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Mentions ──
 
     async createMention(data: CreateMentionData) {
-      await db
-        .insertInto("entity_mentions")
-        .values({
-          id: randomUUID(),
-          entity_id: data.entityId,
-          indexed_file_id: data.indexedFileId,
-          chunk_index: data.chunkIndex ?? null,
-          context_snippet: data.contextSnippet ?? null,
-          mentioned_at: new Date().toISOString(),
-        })
-        .execute();
+      let insert = db.insertInto("entity_mentions").values({
+        id: randomUUID(),
+        entity_id: data.entityId,
+        indexed_file_id: data.indexedFileId,
+        chunk_index: data.chunkIndex ?? null,
+        context_snippet: data.contextSnippet ?? null,
+        confidence: data.confidence,
+        source: data.source,
+        relation: data.relation,
+        mentioned_at: new Date().toISOString(),
+      });
+
+      if (data.confidence === "EXTRACTED") {
+        insert = insert.onConflict((oc) =>
+          oc.columns(["entity_id", "indexed_file_id", "relation"]).doUpdateSet({
+            chunk_index: data.chunkIndex ?? null,
+            context_snippet: data.contextSnippet ?? null,
+            confidence: data.confidence,
+            source: data.source,
+            mentioned_at: new Date().toISOString(),
+          }),
+        );
+      } else {
+        insert = insert.onConflict((oc) => oc.columns(["entity_id", "indexed_file_id", "relation"]).doNothing());
+      }
+
+      await insert.execute();
     },
 
     async getMentionsForEntity(entityId: string, opts?: { limit?: number; since?: string }) {
@@ -273,8 +355,19 @@ export function createEntityRepository(db: Kysely<DB>) {
       return db.selectFrom("entity_mentions").selectAll().where("indexed_file_id", "=", indexedFileId).execute();
     },
 
+    /**
+     * Delete content-derived mentions for a file. EXTRACTED rows survive
+     * because they come from durable connector facts (attendee/assignee/
+     * parent_entity), not from re-runnable content extraction. Wiping them
+     * here would destroy the fact-driven graph every time enrichment
+     * re-runs (content change, manual re-trigger, recreate orchestrator).
+     */
     async deleteMentionsForFile(indexedFileId: string) {
-      await db.deleteFrom("entity_mentions").where("indexed_file_id", "=", indexedFileId).execute();
+      await db
+        .deleteFrom("entity_mentions")
+        .where("indexed_file_id", "=", indexedFileId)
+        .where("confidence", "!=", "EXTRACTED")
+        .execute();
     },
 
     // ── Search ──
@@ -375,6 +468,97 @@ export function createEntityRepository(db: Kysely<DB>) {
       return entities.length;
     },
 
+    // ── Profile aggregates (entity drawer) ──
+
+    /**
+     * One-shot aggregates for the drawer's profile section. Returns mention
+     * count + source breakdown, first/last-seen timestamps, and company
+     * domains. Mention-derived aggregates are filtered to files visible to
+     * `viewer` when provided and non-admin — otherwise the entity row itself
+     * can be visible (via manual share / share_with_everyone) while leaking
+     * activity from files the viewer cannot see. Server-internal callers may
+     * omit `viewer` for unfiltered aggregates.
+     */
+    async getEntityProfileAggregates(
+      entityId: string,
+      viewer?: FileViewer,
+    ): Promise<{
+      mentionCount: number;
+      sourceCounts: Record<string, number>;
+      firstSeenAt: string | null;
+      lastSeenAt: string | null;
+      domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+    }> {
+      const filterByVisibility = viewer !== undefined && !viewer.isAdmin;
+
+      let mentionQuery = db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select(sql<number>`count(*)`.as("c"))
+        .where("entity_mentions.entity_id", "=", entityId);
+      if (filterByVisibility) {
+        mentionQuery = mentionQuery.where(fileVisibilityPredicate(viewer));
+      }
+      const mentionRow = await mentionQuery.executeTakeFirst();
+      const mentionCount = Number(mentionRow?.c ?? 0);
+
+      let bySourceQuery = db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select(["indexed_files.source", sql<number>`count(*)`.as("c")])
+        .where("entity_mentions.entity_id", "=", entityId)
+        .groupBy("indexed_files.source");
+      if (filterByVisibility) {
+        bySourceQuery = bySourceQuery.where(fileVisibilityPredicate(viewer));
+      }
+      const bySource = await bySourceQuery.execute();
+      const sourceCounts: Record<string, number> = {};
+      for (const row of bySource) {
+        sourceCounts[row.source] = Number(row.c ?? 0);
+      }
+
+      let rangeQuery = db
+        .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+        .select([
+          sql<
+            string | null
+          >`MIN(COALESCE(indexed_files.source_created_at, indexed_files.source_updated_at, entity_mentions.mentioned_at))`.as(
+            "first_seen",
+          ),
+          sql<
+            string | null
+          >`MAX(COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at))`.as(
+            "last_seen",
+          ),
+        ])
+        .where("entity_mentions.entity_id", "=", entityId);
+      if (filterByVisibility) {
+        rangeQuery = rangeQuery.where(fileVisibilityPredicate(viewer));
+      }
+      const range = await rangeQuery.executeTakeFirst();
+
+      const domainRows = await db
+        .selectFrom("entity_domains")
+        .select(["domain", "confidence", "is_primary"])
+        .where("entity_id", "=", entityId)
+        .orderBy("is_primary", "desc")
+        .orderBy("confidence", "desc")
+        .execute();
+
+      return {
+        mentionCount,
+        sourceCounts,
+        firstSeenAt: range?.first_seen ?? null,
+        lastSeenAt: range?.last_seen ?? null,
+        domainsForCompany: domainRows.map((d) => ({
+          domain: d.domain,
+          confidence: Number(d.confidence ?? 0),
+          isPrimary: d.is_primary === 1,
+        })),
+      };
+    },
+
     // ── Seeding Helpers ──
 
     async upsertEntityFromTool(data: UpsertEntityFromToolData) {
@@ -450,6 +634,63 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
 
       return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    },
+
+    /**
+     * Narrow upsert for LLM-extracted non-person entities. Keys by
+     * (normalizeName(name), source_type) with case-insensitive comparison
+     * done client-side so the same path works on SQLite and Postgres.
+     * Returns whether the row was newly created so materialization summaries
+     * don't count updates as new entities.
+     */
+    async upsertLlmExtractedEntity(
+      data: UpsertEntityData,
+    ): Promise<{ entity: Selectable<EntitiesTable>; created: boolean }> {
+      const targetKey = normalizeName(data.name);
+      const candidates = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", data.sourceType)
+        .execute();
+      const match = candidates.find((c) => normalizeName(c.name) === targetKey);
+
+      if (match) {
+        const now = new Date().toISOString();
+        await db
+          .updateTable("entities")
+          .set({
+            aliases: data.aliases ? JSON.stringify(data.aliases) : match.aliases,
+            metadata: data.metadata ? JSON.stringify(data.metadata) : match.metadata,
+            status: data.status ?? match.status,
+            updated_at: now,
+          })
+          .where("id", "=", match.id)
+          .execute();
+        const fresh = await db.selectFrom("entities").selectAll().where("id", "=", match.id).executeTakeFirstOrThrow();
+        return { entity: fresh, created: false };
+      }
+
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      await db
+        .insertInto("entities")
+        .values({
+          id,
+          name: data.name,
+          source_type: data.sourceType,
+          subtype: data.subtype ?? null,
+          aliases: data.aliases ? JSON.stringify(data.aliases) : null,
+          metadata: data.metadata ? JSON.stringify(data.metadata) : null,
+          source_ref_id: null,
+          status: data.status ?? "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+
+      const entity = await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return { entity, created: true };
     },
 
     async upsertPersonEntity(data: UpsertPersonEntityData) {

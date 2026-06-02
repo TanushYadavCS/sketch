@@ -12,10 +12,15 @@ import { ConnectorLogo } from "@/components/connector-logos";
  * rows (no suggested candidate) open directly in chooser mode.
  */
 import { EntityPicker } from "@/components/entity-picker";
-import { COUNT_KEY, LIST_KEY, detailKey, useReviewMutations } from "@/components/review-actions";
+import { GraphRebuildDialog, type GraphRebuildDialogPrefill } from "@/components/graph-rebuild-dialog";
+import { RebuildBanner } from "@/components/rebuild-banner";
+import { countKey, detailKey, listKey, useReviewMutations } from "@/components/review-actions";
+import { useRebuildJob } from "@/hooks/use-rebuild-job";
 import type { EntityListItem, EntityMention, EntityReviewEvidenceRow, EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
+import { useEntityUi } from "@/lib/entity-ui";
 import {
+  ArrowClockwiseIcon,
   ArrowLeftIcon,
   ArrowSquareOutIcon,
   CaretDownIcon,
@@ -24,20 +29,9 @@ import {
   DotsThreeIcon,
   MagnifyingGlassIcon,
   PlusIcon,
-  TrashIcon,
   UserIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
@@ -125,13 +119,19 @@ export function EntityExplorer() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
+  const [showSystem, setShowSystem] = useState(false);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
+  const { openEntity } = useEntityUi();
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [showResetDialog, setShowResetDialog] = useState(false);
-  const [resetCategories, setResetCategories] = useState<Set<string>>(new Set(["connectors", "ai"]));
+  const [showRebuildDialog, setShowRebuildDialog] = useState(false);
+  const [rebuildPrefill, setRebuildPrefill] = useState<GraphRebuildDialogPrefill | null>(null);
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("company");
+
+  const rebuildState = useRebuildJob({ enabled: isAdmin });
+  const overlayRebuilding =
+    rebuildState.activeJob !== null &&
+    (rebuildState.activeJob.job.phase === "resetting" || rebuildState.activeJob.job.phase === "wiping");
 
   const createMutation = useMutation({
     mutationFn: () => api.entities.create({ name: newName.trim(), sourceType: newType }),
@@ -154,24 +154,15 @@ export function EntityExplorer() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  const resetMutation = useMutation({
-    mutationFn: (categories: string[]) => api.entities.reset(categories),
-    onSuccess: (result) => {
-      const extras: string[] = [];
-      if (result.reviewQueueCleared > 0) {
-        extras.push(`${result.reviewQueueCleared} pending review${result.reviewQueueCleared === 1 ? "" : "s"}`);
-      }
-      if (result.rejectionsCleared > 0) {
-        extras.push(`${result.rejectionsCleared} rejection${result.rejectionsCleared === 1 ? "" : "s"}`);
-      }
-      const tail = extras.length > 0 ? ` (also cleared ${extras.join(" and ")})` : "";
-      toast.success(`Deleted ${result.entitiesDeleted} entities${tail}.`);
-      setShowResetDialog(false);
-      queryClient.invalidateQueries({ queryKey: ["entities"] });
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
+
+  const latestJobId = rebuildState.latestJob?.job.id ?? null;
+  const latestJobPhase = rebuildState.latestJob?.job.phase ?? null;
+  useEffect(() => {
+    if (latestJobPhase === "done" && latestJobId !== null) {
+      queryClient.invalidateQueries({ queryKey: ["entities"] });
+    }
+  }, [latestJobId, latestJobPhase, queryClient]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -184,13 +175,14 @@ export function EntityExplorer() {
   }, [search]);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["entities", typeFilter, debouncedSearch],
+    queryKey: ["entities", typeFilter, debouncedSearch, showSystem],
     queryFn: () =>
       api.entities.list({
         type: typeFilter ?? undefined,
         search: debouncedSearch || undefined,
         sort: "hotness",
         limit: 200,
+        includeSystem: showSystem,
       }),
     refetchInterval: 30000,
   });
@@ -208,8 +200,8 @@ export function EntityExplorer() {
   const experimentalEnabled = setupStatus?.experimentalFlag === true;
 
   const { data: reviewCount } = useQuery({
-    queryKey: COUNT_KEY,
-    queryFn: () => api.entityReview.list({ limit: 0 }),
+    queryKey: countKey(debouncedSearch),
+    queryFn: () => api.entityReview.list({ limit: 0, search: debouncedSearch || undefined }),
     enabled: experimentalEnabled,
     refetchInterval: experimentalEnabled ? 30000 : false,
   });
@@ -217,8 +209,8 @@ export function EntityExplorer() {
   const hasPendingReviews = experimentalEnabled && reviewTotal > 0;
 
   const { data: reviewList } = useQuery({
-    queryKey: LIST_KEY,
-    queryFn: () => api.entityReview.list({ limit: 200 }),
+    queryKey: listKey(debouncedSearch),
+    queryFn: () => api.entityReview.list({ limit: 200, search: debouncedSearch || undefined }),
     enabled: hasPendingReviews,
   });
 
@@ -228,6 +220,15 @@ export function EntityExplorer() {
 
   return (
     <div>
+      {isAdmin ? (
+        <RebuildBanner
+          state={rebuildState}
+          onRetry={(prefill) => {
+            setRebuildPrefill(prefill);
+            setShowRebuildDialog(true);
+          }}
+        />
+      ) : null}
       {/* Toolbar */}
       <div className="mt-4 flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
@@ -263,6 +264,16 @@ export function EntityExplorer() {
           </DropdownMenu>
         )}
 
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1.5 text-xs"
+          onClick={() => setShowSystem((v) => !v)}
+          data-testid="show-system-entities-toggle"
+        >
+          {showSystem ? "Hide system entities" : "Show system entities"}
+        </Button>
+
         <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => setShowAddDialog(true)}>
           <PlusIcon size={12} />
           Add Entity
@@ -271,20 +282,26 @@ export function EntityExplorer() {
         {isAdmin && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 w-7 p-0">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 w-7 p-0"
+                aria-label="Entity admin actions"
+                data-testid="entity-admin-menu"
+              >
                 <DotsThreeIcon size={16} />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
                 onClick={() => {
-                  setResetCategories(new Set(["connectors", "ai"]));
-                  setShowResetDialog(true);
+                  setRebuildPrefill(null);
+                  setShowRebuildDialog(true);
                 }}
+                data-testid="rebuild-entities-menu-item"
               >
-                <TrashIcon size={14} className="mr-1.5" />
-                Reset Entities...
+                <ArrowClockwiseIcon size={14} className="mr-1.5" />
+                Rebuild entities…
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -311,7 +328,15 @@ export function EntityExplorer() {
       )}
 
       {/* Table */}
-      <div className="mt-2">
+      <div className="relative mt-2">
+        {overlayRebuilding ? (
+          <div
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-background/60 text-xs text-muted-foreground backdrop-blur-sm"
+            data-testid="rebuild-overlay"
+          >
+            Rebuilding — entities will reappear shortly.
+          </div>
+        ) : null}
         {isLoading ? (
           <div className="space-y-2">
             {[1, 2, 3, 4, 5].map((key) => (
@@ -364,7 +389,7 @@ export function EntityExplorer() {
             ) : null}
 
             {entities.map((entity) => (
-              <EntityRow key={entity.id} entity={entity} onSelect={setSelectedEntityId} />
+              <EntityRow key={entity.id} entity={entity} onSelect={(id) => openEntity(id)} />
             ))}
           </div>
         )}
@@ -412,67 +437,15 @@ export function EntityExplorer() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={showResetDialog} onOpenChange={setShowResetDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Reset entities</AlertDialogTitle>
-            <AlertDialogDescription>
-              Select which entity categories to delete. Their mentions, source refs, and candidates will also be
-              removed.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="space-y-2 py-2">
-            {[
-              {
-                key: "connectors",
-                label: "Connector entities",
-                desc: "Spaces, folders, pages, databases from connected sources",
-              },
-              {
-                key: "ai",
-                label: "AI-discovered entities",
-                desc: "Companies, products, projects, teams found by enrichment",
-              },
-              { key: "manual", label: "Manually created", desc: "Entities you added by hand" },
-            ].map((cat) => (
-              <label
-                key={cat.key}
-                className="flex cursor-pointer items-start gap-3 rounded-md border border-border px-3 py-2.5 hover:bg-muted/30"
-              >
-                <input
-                  type="checkbox"
-                  checked={resetCategories.has(cat.key)}
-                  onChange={() => {
-                    setResetCategories((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(cat.key)) next.delete(cat.key);
-                      else next.add(cat.key);
-                      return next;
-                    });
-                  }}
-                  className="mt-0.5 h-4 w-4 rounded border-border accent-destructive"
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">{cat.label}</p>
-                  <p className="text-xs text-muted-foreground">{cat.desc}</p>
-                </div>
-              </label>
-            ))}
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={resetMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => resetMutation.mutate([...resetCategories])}
-              disabled={resetMutation.isPending || resetCategories.size === 0}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {resetMutation.isPending ? "Deleting..." : `Delete${resetCategories.size === 3 ? " All" : ""}`}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <GraphRebuildDialog
+        open={showRebuildDialog}
+        onOpenChange={setShowRebuildDialog}
+        prefill={rebuildPrefill}
+        onSubmitted={() => {
+          rebuildState.refetch();
+        }}
+      />
 
-      <EntityDetailSheet entityId={selectedEntityId} onClose={() => setSelectedEntityId(null)} />
       <ReviewDetailSheet reviewId={selectedReviewId} onClose={() => setSelectedReviewId(null)} />
     </div>
   );
@@ -605,272 +578,6 @@ function GhostReviewRow({ row, onSelect }: { row: EntityReviewQueueRow; onSelect
   );
 }
 
-function EntityDetailSheet({ entityId, onClose }: { entityId: string | null; onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const { role } = useDashboardAuth();
-  const isAdmin = role === "admin";
-  const [isEditing, setIsEditing] = useState(false);
-  const [editName, setEditName] = useState("");
-  const [editType, setEditType] = useState("");
-
-  const { data: entityData, isLoading: isLoadingEntity } = useQuery({
-    queryKey: ["entity-detail", entityId],
-    queryFn: () => api.entities.get(entityId as string),
-    enabled: !!entityId,
-  });
-
-  const { data: mentionsData, isLoading: isLoadingMentions } = useQuery({
-    queryKey: ["entity-mentions", entityId, { limit: 50 }],
-    queryFn: () => api.entities.mentions(entityId as string, { limit: 50 }),
-    enabled: !!entityData,
-  });
-
-  const entity = entityData?.entity;
-  const mentions = mentionsData?.mentions ?? [];
-  const totalMentions = mentionsData?.total ?? 0;
-  const hiddenMentions = mentionsData?.hiddenCount ?? 0;
-
-  const updateMutation = useMutation({
-    mutationFn: (data: { name?: string; sourceType?: string }) => api.entities.update(entityId as string, data),
-    onSuccess: () => {
-      toast.success("Entity updated.");
-      setIsEditing(false);
-      queryClient.invalidateQueries({ queryKey: ["entity-detail", entityId] });
-      queryClient.invalidateQueries({ queryKey: ["entities"] });
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: () => api.entities.remove(entityId as string),
-    onSuccess: () => {
-      toast.success("Entity deleted.");
-      queryClient.invalidateQueries({ queryKey: ["entities"] });
-      onClose();
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-  const startEditing = () => {
-    if (entity) {
-      setEditName(entity.name);
-      setEditType(entity.sourceType);
-      setIsEditing(true);
-    }
-  };
-
-  const sourceCounts = mentions.reduce(
-    (acc, m) => {
-      const src = m.file.source;
-      acc[src] = (acc[src] ?? 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>,
-  );
-
-  return (
-    <Sheet open={!!entityId} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="flex w-full flex-col sm:max-w-lg">
-        <SheetHeader>
-          <SheetTitle className="text-base">{isLoadingEntity ? "Loading..." : (entity?.name ?? "Entity")}</SheetTitle>
-        </SheetHeader>
-
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6">
-          {isLoadingEntity ? (
-            <div className="space-y-4">
-              <Skeleton className="h-4 w-32" />
-              <Skeleton className="h-24 rounded-lg" />
-            </div>
-          ) : entity ? (
-            <div className="space-y-4">
-              {isEditing ? (
-                <div className="space-y-3 rounded-lg border border-border p-3">
-                  <div>
-                    <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Name</p>
-                    <Input
-                      value={editName}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditName(e.target.value)}
-                      className="mt-1 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Type</p>
-                    <Input
-                      value={editType}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditType(e.target.value)}
-                      className="mt-1 text-sm"
-                      placeholder="e.g. person, clickup_space, company, product"
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      className="text-xs"
-                      onClick={() => updateMutation.mutate({ name: editName, sourceType: editType })}
-                      disabled={updateMutation.isPending || !editName.trim()}
-                    >
-                      {updateMutation.isPending ? "Saving..." : "Save"}
-                    </Button>
-                    <Button size="sm" variant="outline" className="text-xs" onClick={() => setIsEditing(false)}>
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-wrap gap-2">
-                      <Badge variant="outline" className="text-[10px]">
-                        {humanSourceType(entity.sourceType)}
-                      </Badge>
-                      <Badge variant={entity.status === "confirmed" ? "secondary" : "outline"} className="text-[10px]">
-                        {entity.status}
-                      </Badge>
-                      {entity.subtype && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          {entity.subtype}
-                        </Badge>
-                      )}
-                    </div>
-                    <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={startEditing}>
-                      Edit
-                    </Button>
-                  </div>
-                </>
-              )}
-
-              {entity.aliases.length > 0 && (
-                <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Aliases</p>
-                  <p className="mt-1 text-xs text-muted-foreground">{entity.aliases.join(", ")}</p>
-                </div>
-              )}
-
-              {Object.keys(sourceCounts).length > 0 && (
-                <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Sources ({totalMentions} mentions)
-                  </p>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    {Object.entries(sourceCounts).map(([source, count]) => (
-                      <Badge key={source} variant="secondary" className="text-[10px]">
-                        {source} ({count})
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Mention Timeline
-                </p>
-
-                {isLoadingMentions ? (
-                  <div className="mt-2 space-y-2">
-                    {[1, 2, 3].map((k) => (
-                      <Skeleton key={k} className="h-16 rounded-lg" />
-                    ))}
-                  </div>
-                ) : mentions.length === 0 ? (
-                  hiddenMentions > 0 ? (
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      {hiddenMentions} {hiddenMentions === 1 ? "mention" : "mentions"} in files you don't have access
-                      to.
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      No mentions yet. Run enrichment or backfill to populate.
-                    </p>
-                  )
-                ) : (
-                  <div className="mt-2 space-y-1">
-                    {hiddenMentions > 0 && (
-                      <p className="px-1 pb-1 text-[10px] text-muted-foreground/70">
-                        +{hiddenMentions} {hiddenMentions === 1 ? "mention" : "mentions"} in files you don't have access
-                        to
-                      </p>
-                    )}
-                    {mentions.map((mention) => (
-                      <MentionItem key={mention.id} mention={mention} />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">Entity not found.</p>
-          )}
-        </div>
-
-        {entity && isAdmin && (
-          <div className="border-t border-border px-4 py-3">
-            <Button
-              size="sm"
-              variant="outline"
-              className="w-full gap-1.5 text-xs text-destructive hover:bg-destructive/10"
-              onClick={() => {
-                if (window.confirm(`Delete "${entity.name}" and all its mentions?`)) {
-                  deleteMutation.mutate();
-                }
-              }}
-              disabled={deleteMutation.isPending}
-            >
-              {deleteMutation.isPending ? "Deleting..." : "Delete Entity"}
-            </Button>
-          </div>
-        )}
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-function MentionItem({ mention }: { mention: EntityMention }) {
-  return (
-    <div className="rounded-lg border border-border p-3 text-xs hover:bg-muted/30">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <Badge variant="outline" className="shrink-0 text-[9px]">
-            {mention.file.source}
-          </Badge>
-          <span className="truncate font-medium">{mention.file.fileName}</span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0 ml-2">
-          <span className="text-muted-foreground">{formatRelativeTime(mention.sourceDate)}</span>
-          {mention.file.providerUrl && (
-            <a
-              href={mention.file.providerUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <ArrowSquareOutIcon size={12} />
-            </a>
-          )}
-        </div>
-      </div>
-      {mention.contextSnippet && <p className="mt-1.5 text-muted-foreground line-clamp-2">{mention.contextSnippet}</p>}
-      {mention.file.sourcePath && (
-        <p className="mt-1 text-[10px] text-muted-foreground/60">{mention.file.sourcePath}</p>
-      )}
-    </div>
-  );
-}
-
-/**
- * Review-mode drawer — opens when a ghost row is clicked.
- *
- * The right column has two states driven from `<ReconcileBody>`:
- *  - **candidate**: show a candidate card (original suggestion OR a picked
- *    one) with ✓ (confirm merge) and ✗ (flip to chooser) icon-buttons in
- *    the header.
- *  - **chooser**: show a search box + "Create as new" button. Picking from
- *    search returns to candidate mode previewing the picked entity;
- *    Create-as-new fires the reject mutation.
- *
- * Orphan rows (no `candidate_entity_id`) open directly in chooser mode —
- * there's nothing to confirm against, so showing a ✓ would be misleading.
- */
 function ReviewDetailSheet({ reviewId, onClose }: { reviewId: string | null; onClose: () => void }) {
   const { data: detail, isLoading } = useQuery({
     queryKey: reviewId ? detailKey(reviewId) : ["entity-review", "detail", "none"],

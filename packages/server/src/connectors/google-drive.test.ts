@@ -94,6 +94,25 @@ describe("fileToSyncedItem — mimeType field", () => {
   });
 });
 
+describe("fileToSyncedItem — author fields", () => {
+  it("maps the first owner with an email to author metadata", () => {
+    const file = {
+      id: "doc-owner",
+      name: "Owned Doc",
+      mimeType: "application/vnd.google-apps.document",
+      owners: [
+        { displayName: "No Email" },
+        { displayName: "Ada Lovelace", emailAddress: "ada@example.com", permissionId: "perm-ada" },
+      ],
+    };
+
+    const item = fileToSyncedItem(file, "content", "hash", "My Drive", {});
+    expect(item.authorEmail).toBe("ada@example.com");
+    expect(item.authorName).toBe("Ada Lovelace");
+    expect(item.authorSourceId).toBe("perm-ada");
+  });
+});
+
 describe("resolveFolderPath — max depth guard", () => {
   it("stops traversal at 20 levels and returns a partial path", async () => {
     // Build a chain of 25 folder IDs each pointing to the next parent.

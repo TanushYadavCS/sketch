@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.32.0] -- 2026-06-01
+
+- Entity graph: add richer entity materialization with mention provenance, indexed source facts, domain/affiliation inference, typed relationships, relation evidence, and improved graph extraction quality.
+- Entity explorer: add entity drawer profiles, relationship/timeline surfaces, rebuild and re-enrichment jobs with persistent progress, and refactor the large entity API surface into focused route and service modules.
+- Access control: add admin-configurable file-content bypass, manual file sharing, and entity sharing with entity/file RBAC propagation through search and content reads.
+- Search/enrichment: improve relevance ranking, file-scoped context, participant blocks, learned fact selection, and event-loop yielding during long enrichment runs.
+- Reliability: preserve manual domain overrides and ambiguous person reviews, harden reset/recreate flows, avoid stale system entity-share backfill, and keep manual file shares available in search.
+
 ## [0.31.0] -- 2026-05-27
 
 - Team management: allow admins to promote and demote other human users between admin and member from the Team edit modal, with the Access control hidden from non-admins and self-edits.

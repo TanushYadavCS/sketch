@@ -284,23 +284,21 @@ Use this after SearchEntities to dive deeper into a specific entity. The respons
 
         const requestedLimit = limit ?? 20;
         const userEmails = await resolveUserEmails(deps);
+        if (userEmails.length === 0) {
+          return { content: [{ type: "text" as const, text: "No mentions found for this entity." }] };
+        }
         const rawMentions = await entityRepo.getMentionsForEntity(entityId, {
-          limit: userEmails.length > 0 ? Math.max(requestedLimit * 5, 100) : requestedLimit,
+          limit: Math.max(requestedLimit * 5, 100),
           since,
         });
 
-        const accessibleIds =
-          userEmails.length > 0
-            ? await filterAccessibleFileIds(
-                deps.db,
-                rawMentions.map((m) => m.indexed_file_id),
-                userEmails,
-              )
-            : null;
+        const accessibleIds = await filterAccessibleFileIds(
+          deps.db,
+          rawMentions.map((m) => m.indexed_file_id),
+          userEmails,
+        );
 
-        const mentions = (
-          accessibleIds ? rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)) : rawMentions
-        ).slice(0, requestedLimit);
+        const mentions = rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)).slice(0, requestedLimit);
 
         const lines: string[] = [];
         const aliases = entity.aliases ? (JSON.parse(entity.aliases) as string[]) : [];

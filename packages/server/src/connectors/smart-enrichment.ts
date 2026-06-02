@@ -15,9 +15,44 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
+import {
+  type UpsertIndexedFileFactInput,
+  buildIndexedFileFactKey,
+  createIndexedFileFactRepository,
+} from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
+export {
+  DOMAIN_PROMOTION_THRESHOLD,
+  type DomainSweepResult,
+  sweepDomainPromotions,
+} from "../entities/domain-promotion";
+import {
+  isHighConfidenceEndpoint,
+  isHighConfidenceRelation,
+  normalizeMentionType,
+  normalizeRelationType,
+} from "../entities/graph";
+import {
+  buildMaterializeDeps,
+  cleanupEmptyRelationships,
+  cleanupRelationshipEvidenceForFacts,
+  materializeUnmaterializedFacts,
+} from "../entities/materialize";
+import { type ProposeEntityType, proposeEntity } from "../entities/propose";
+import { validateLearnedFact, validateLlmMention } from "../entities/validators";
+import { yieldToEventLoop } from "../lib/event-loop";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
+import {
+  type FactSelectionCache,
+  type FactSelectionContext,
+  type LearnedFactStored,
+  buildFactSelectionContext,
+  createFactSelectionCache,
+  renderFactsForPrompt,
+  selectRelevantFacts,
+} from "./learned-fact-selector";
+import { normalizeName } from "./name-normalize";
 
 /** Max content length (chars) to send to Gemini for entity extraction. ~8k tokens. */
 const MAX_CONTENT_CHARS = 32000;
@@ -25,8 +60,25 @@ const MAX_CONTENT_CHARS = 32000;
 /** Minimum files a candidate must appear in before auto-promotion. */
 const CANDIDATE_PROMOTION_THRESHOLD = 2;
 
+/**
+ * Minimum distinct people sharing an email domain before a
+ * `domain_observation` candidate gets auto-promoted to a real company entity.
+ *
+ * Set to 1 because the realistic sales motion here is single-person prospect
+ * calls (Calendly demos, intro calls) — anything higher leaves 90% of demo
+ * clients invisible to the graph. The false-positive floor is held by two
+ * orthogonal filters that run BEFORE this counter ever increments:
+ *   - personal/shared seed (gmail.com, outlook.com, slack.com, …)
+ *   - role-account local-parts (hello@, info@, support@, …) — see
+ *     `inferAffiliationFromEmail`
+ * Fuzzy-name collisions still pause for ECR-05 review, so an LLM-extracted
+ * company entity that conflicts with a new domain-derived name stays pending
+ * instead of forking.
+ */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v7";
+const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -34,6 +86,26 @@ interface ExtractedMention {
   mention: string;
   type: string;
   variations: string[];
+  confidence?: number;
+}
+
+interface ExtractedRelationEndpoint {
+  name: string;
+  type: string;
+  variations?: string[];
+}
+
+interface ExtractedRelation {
+  type: string;
+  source: ExtractedRelationEndpoint;
+  target: ExtractedRelationEndpoint;
+  confidence: number;
+  context?: string;
+}
+
+interface EntityExtractionResult {
+  mentions: ExtractedMention[];
+  relations: ExtractedRelation[];
 }
 
 interface MatchedEntity {
@@ -41,7 +113,7 @@ interface MatchedEntity {
   name: string;
   sourceType: string;
   definition: string | null;
-  learnedFacts: Array<{ fact: string }>;
+  learnedFacts: LearnedFactStored[];
 }
 
 interface SmartEnrichmentDeps {
@@ -51,7 +123,26 @@ interface SmartEnrichmentDeps {
   embeddingProvider: EmbeddingProvider | null;
   orgContext?: { orgName?: string; description?: string; industry?: string } | null;
   /** Known product/team entities to include in extraction prompt for better matching. */
-  knownEntities?: Array<{ name: string; type: string; description?: string }>;
+  knownEntities?: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }>;
+  /**
+   * Pre-built markdown block listing meeting attendees with resolved company
+   * affiliations and action-item-owner flags. Prepended to the extraction
+   * prompt so the model sees cross-company evidence that lives only in
+   * attendee metadata. Caller (enrichment.ts) builds via `buildParticipantBlock`.
+   */
+  participantBlock?: string;
+  /**
+   * When set, every LLM call inside this run writes a dump file (prompt + raw
+   * response + token usage) under this directory. Set only by the per-file
+   * "Enrich File" debug path; never set in bulk sync/reset/reenrich runs.
+   */
+  debugDumpDir?: string;
 }
 
 interface FileContext {
@@ -61,6 +152,8 @@ interface FileContext {
   contentCategory: string;
   source: string;
   sourcePath: string | null;
+  contentHash: string | null;
+  connectorConfigId: string;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
 }
@@ -74,21 +167,49 @@ export async function extractEntities(
   generator: GeminiGenerator,
   file: FileContext,
   orgContext?: { orgName?: string; description?: string; industry?: string } | null,
-  knownEntities?: Array<{ name: string; type: string; description?: string }>,
-): Promise<ExtractedMention[]> {
+  knownEntities?: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }>,
+  participantBlock?: string,
+  dumpDir?: string,
+): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
   const orgSection = orgContext?.description
     ? `\nOrganization: ${orgContext.orgName ?? "Unknown"}. ${orgContext.description}${orgContext.industry ? ` (Industry: ${orgContext.industry})` : ""}\n`
     : "";
 
+  const renderKnown = (e: {
+    name: string;
+    type: string;
+    description?: string;
+    mentionCount?: number;
+    recentlyActive?: boolean;
+  }) => {
+    const parts: string[] = [`- ${e.name} (${e.type})`];
+    if (e.description) parts.push(`: ${e.description}`);
+    const tags: string[] = [];
+    if (typeof e.mentionCount === "number" && e.mentionCount > 0) {
+      tags.push(`${e.mentionCount} recent files`);
+    }
+    if (e.recentlyActive) tags.push("active in last 2 weeks");
+    if (tags.length > 0) parts.push(` · ${tags.join(" · ")}`);
+    return parts.join("");
+  };
+
   const knownSection =
     knownEntities && knownEntities.length > 0
-      ? `\nKnown entities (match these when mentioned):\n${knownEntities.map((e) => `- ${e.name} (${e.type})${e.description ? `: ${e.description}` : ""}`).join("\n")}\n`
+      ? `\nKnown entities likely to appear in this file — match these to mentions instead of creating duplicates, and prefer them as relationship endpoints:\n${knownEntities.map(renderKnown).join("\n")}\n`
       : "";
 
+  const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
+
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
-${orgSection}${knownSection}
+${orgSection}${knownSection}${participantSection}
 File: ${file.fileName}
 Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
@@ -97,7 +218,7 @@ Extract entities that a business team would want to track and reference across d
 - **People**: named individuals (employees, clients, contacts)
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
-- **Projects**: named initiatives, campaigns, or programs with a clear scope (e.g., "Paid Member Migration Phase 2", "K8S Migration")
+- **Projects**: named umbrella engagements or programs with a clear scope (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration")
 - **Teams**: named organizational teams (e.g., "QC team", "Content Team")
 
 DO NOT extract:
@@ -111,27 +232,80 @@ DO NOT extract:
 - Generic categories (SEO, Marketing, Support, Content)
 - Countries, currencies, or generic locations (India, INR, US)
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
+- Meeting titles or calendar event names — anything containing "<>", "Standup", "Sync", "Weekly", "Daily", or "1:1". These are calendar event names, not projects. Extract the companies and people referenced by the meeting instead.
+- Document, note, or artifact titles as projects (e.g. names ending in "note", "chart", "doc", "spec", "deck"). These are filenames, not engagements.
+- Generic feature descriptions or internal component names as products (e.g. "responder functionality", "conversational model", "X service", "X module", "X pipeline"). Products must be a branded, proper-noun name your org or a client publicly markets — not the internal name of a component you are building.
+- Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns
+- Task fragments or implementation notes with no stable named project/product parent, such as "Vedant's Project Progress", "67 SQL queries on the new database", "limitation note", "UI development", "backend work", or "new database"
 
-For each entity, provide the primary name, type, and name variations.
+Name shape rules (person mentions only):
+- Person mentions must be Title Case with a recognizable first + last name separated by whitespace (e.g. "Sarah Chen", "Ashish Banka"). Reject and omit:
+  - Single first names with no surname or other identifier ("Sarah", "Mohammed", "Manish")
+  - Initials-only strings ("KT", "P C", "SB", "VD")
+  - Email-handle style strings — no spaces, lowercase, or otherwise looks like an email local part ("bhavyasharma", "nancyjain", "ayushgupta")
+  - ALL-CAPS strings ("ASHISH BANKA", "RAJ BHOSLE")
+  - Whitespace-only or non-printing strings
+- When the source uses one of these degraded forms, omit the mention rather than emit the degraded version. If you can recover the proper-name form in Title Case with high confidence from surrounding context, emit the recovered form.
 
-Return a JSON array:
-[
-  { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"] },
-  { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"] }
-]
+Type disambiguation:
+- Any mention ending in "Pvt Ltd", "Private Limited", "Inc", "LLC", "Ltd", "GmbH", "Consulting", "Solutions", or "Technologies" is type "company", never "person", regardless of where it appears (including the participant block).
+
+For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
+
+Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People and Teams** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
+
+Also extract direct relationships only when the text explicitly supports them.
+
+Valid relationship types:
+- "works_at": person -> company (the person is employed by the company)
+- "engaged_with": person | team -> company (the person/team is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
+- "leads": person -> project | product | team
+- "contributes_to": person | team -> project | product
+- "builds": company -> product
+- "part_of": project -> project, product -> product, team -> company
+- "partner_of": company -> company
+
+Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
+
+When a "Meeting participants" block is present above and lists attendees from multiple companies, the cross-company link is itself relationship evidence even when the prose never names the external company. Emit \`engaged_with\` edges from home-company participants who are marked \`[action-item owner]\` to each external company present in the participants block. Treat silent external attendees (no action items) with caution — only emit when the prose corroborates it. Use the participant name and the external company name exactly as they appear in the block as the relation endpoints.
+
+Return one JSON object:
+{
+  "mentions": [
+    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }
+  ],
+  "relations": [
+    {
+      "type": "leads",
+      "source": { "name": "Sarah Chen", "type": "person", "variations": ["Sarah"] },
+      "target": { "name": "Project Atlas", "type": "project", "variations": ["Atlas"] },
+      "confidence": 0.92,
+      "context": "Sarah Chen leads Project Atlas"
+    }
+  ]
+}
 
 Valid types: "person", "project", "company", "product", "team"
 
-If no notable entities are found, return an empty array: []
+If no notable entities or relations are found, return { "mentions": [], "relations": [] }.
 
 <content>
 ${truncatedContent}
 </content>`;
 
-  return generator.generateJSON<ExtractedMention[]>(prompt, {
-    maxTokens: 4096,
+  const parsed = await generator.generateJSON<ExtractedMention[] | EntityExtractionResult>(prompt, {
+    maxTokens: 8192,
     label: `extractEntities:${file.id}`,
+    dumpDir,
   });
+  if (Array.isArray(parsed)) {
+    return { mentions: parsed, relations: [] };
+  }
+  return {
+    mentions: Array.isArray(parsed.mentions) ? parsed.mentions : [],
+    relations: Array.isArray(parsed.relations) ? parsed.relations : [],
+  };
 }
 
 /**
@@ -183,6 +357,7 @@ export async function matchEntities(
     if (!found) {
       unmatched.push(mention);
     }
+    await yieldToEventLoop();
   }
 
   return { matched, unmatched };
@@ -214,6 +389,7 @@ export async function handleCandidates(
   const promoted: MatchedEntity[] = [];
 
   for (const mention of unmatched) {
+    if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) continue;
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
 
     // Check if candidate already exists (case-insensitive name match)
@@ -248,13 +424,42 @@ export async function handleCandidates(
 
       // Promote if threshold met
       if (newCount >= CANDIDATE_PROMOTION_THRESHOLD) {
-        const entity = await entityRepo.upsertEntity({
-          name: mention.mention,
-          sourceType: mention.type,
-          aliases: mention.variations,
-          metadata: { origin: "ai" },
-          status: "confirmed",
-        });
+        const owner = await db
+          .selectFrom("indexed_files")
+          .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
+          .select("connector_configs.created_by")
+          .where("indexed_files.id", "=", fileId)
+          .executeTakeFirst();
+        const materializeDeps = await buildMaterializeDeps(db);
+        const proposal = await proposeEntity(
+          {
+            entityRepo: materializeDeps.entityRepo,
+            reviewRepo: materializeDeps.reviewRepo,
+            lookup: materializeDeps.lookup,
+            readEmail: materializeDeps.readEmail,
+          },
+          {
+            name: mention.mention,
+            entityType: mention.type as ProposeEntityType,
+            subtype: "external",
+            source: "llm_extraction",
+            sourceId: `candidate:${existing.id}`,
+            evidence: seenFileIds.map((indexedFileId) => ({ indexedFileId })),
+            triggeredByUserId: owner?.created_by ?? "system",
+            aliases: mention.variations,
+            metadata: { origin: "ai" },
+          },
+        );
+
+        if (proposal.kind === "queued") {
+          logger.info(
+            { entityName: mention.mention, reviewId: proposal.reviewId },
+            "Queued entity candidate promotion",
+          );
+          continue;
+        }
+
+        const entity = proposal.entity;
 
         await db
           .updateTable("entity_candidates")
@@ -270,7 +475,11 @@ export async function handleCandidates(
           await entityRepo.createMention({
             entityId: entity.id,
             indexedFileId: seenFileId,
+            confidence: "INFERRED",
+            source: "llm_extraction",
+            relation: "mentioned",
           });
+          await yieldToEventLoop();
         }
         if (liveFileIds.length < seenFileIds.length) {
           logger.warn(
@@ -310,6 +519,7 @@ export async function handleCandidates(
         })
         .execute();
     }
+    await yieldToEventLoop();
   }
 
   return promoted;
@@ -324,6 +534,7 @@ export async function generateSummary(
   generator: GeminiGenerator,
   file: FileContext,
   matchedEntities: MatchedEntity[],
+  dumpDir?: string,
 ): Promise<string> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
   const entityContext = matchedEntities
@@ -347,7 +558,7 @@ Write a 2-3 sentence summary focusing on: what this document is about, key decis
 ${truncatedContent}
 </content>`;
 
-  return generator.generate(prompt, { maxTokens: 256, label: `generateSummary:${file.id}` });
+  return generator.generate(prompt, { maxTokens: 256, label: `generateSummary:${file.id}`, dumpDir });
 }
 
 // ── Entity Fact Extraction ───────────────────────────────────────────────
@@ -361,19 +572,42 @@ interface LearnedFact {
  * Returns a map of entity ID → new facts.
  */
 export async function extractEntityFacts(
-  generator: GeminiGenerator,
+  deps: { db: Kysely<DB>; logger?: Logger; generator: GeminiGenerator; now?: () => number },
   file: FileContext,
   matchedEntities: MatchedEntity[],
+  context: FactSelectionContext,
+  cache: FactSelectionCache,
+  dumpDir?: string,
 ): Promise<Map<string, LearnedFact[]>> {
   if (matchedEntities.length === 0) return new Map();
 
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
-  const entityDescriptions = matchedEntities
-    .map((e) => {
-      const facts = e.learnedFacts.map((f) => f.fact).join("; ");
-      return `- ID: ${e.entityId} | Name: ${e.name} (${e.sourceType}) | Definition: ${e.definition || "none"} | Known facts: ${facts || "none"}`;
-    })
-    .join("\n");
+  let candidateFactCount = 0;
+  let selectedFactCount = 0;
+  let knownFactChars = 0;
+  const entityDescriptions = (
+    await Promise.all(
+      matchedEntities.map(async (e) => {
+        candidateFactCount += e.learnedFacts.length;
+        const selectedFacts = await selectRelevantFacts(deps, e, context, cache);
+        const facts = renderFactsForPrompt(selectedFacts);
+        selectedFactCount += selectedFacts.length;
+        knownFactChars += facts.length;
+        return `- ID: ${e.entityId} | Name: ${e.name} (${e.sourceType}) | Definition: ${e.definition || "none"} | Known facts: ${facts || "none"}`;
+      }),
+    )
+  ).join("\n");
+
+  deps.logger?.info(
+    {
+      fileId: file.id,
+      matchedEntityCount: matchedEntities.length,
+      candidateFactCount,
+      selectedFactCount,
+      knownFactChars,
+    },
+    "extractEntityFacts: selected learned facts for prompt",
+  );
 
   const prompt = `Extract NEW facts about these entities from the document below. Max 3 facts per entity, each under 20 words.
 
@@ -391,9 +625,10 @@ ${truncatedContent}
 
   return new Map(
     Object.entries(
-      await generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
-        maxTokens: 4096,
+      await deps.generator.generateJSON<Record<string, LearnedFact[]>>(prompt, {
+        maxTokens: 8192,
         label: `extractEntityFacts:${file.id}`,
+        dumpDir,
       }),
     ),
   );
@@ -424,37 +659,57 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   logger.info(fileMeta, "smartEnrichFile: start");
 
   const t0 = Date.now();
-  let mentions: ExtractedMention[];
+  let extraction: EntityExtractionResult;
   try {
-    mentions = await extractEntities(generator, file, deps.orgContext, deps.knownEntities);
+    extraction = await extractEntities(
+      generator,
+      file,
+      deps.orgContext,
+      deps.knownEntities,
+      deps.participantBlock,
+      deps.debugDumpDir,
+    );
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
     throw err;
   }
   logger.info(
-    { fileId: file.id, stage: "extractEntities", mentionCount: mentions.length, durationMs: Date.now() - t0 },
+    {
+      fileId: file.id,
+      stage: "extractEntities",
+      mentionCount: extraction.mentions.length,
+      relationCount: extraction.relations.length,
+      durationMs: Date.now() - t0,
+    },
     "smartEnrichFile: stage done",
   );
 
-  const { matched, unmatched } = await matchEntities(db, mentions);
-  const promoted = await handleCandidates(deps, file.id, unmatched);
+  await reconcileLlmExtractionFacts(deps, file, extraction);
 
-  const allMatched = [...matched.map((m) => m.entity), ...promoted];
+  const { matched, unmatched } = await matchEntities(db, extraction.mentions);
+  const allMatched = matched.map((m) => m.entity);
   logger.debug(
-    { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length, promotedCount: promoted.length },
+    { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length },
     "smartEnrichFile: entity match results",
   );
 
-  await entityRepo.deleteMentionsForFile(file.id);
-  for (const entity of allMatched) {
-    await entityRepo.createMention({ entityId: entity.entityId, indexedFileId: file.id });
-    await entityRepo.updateHotness(entity.entityId);
-  }
-
   const t1 = Date.now();
+  const factSelectionContext = await buildFactSelectionContext(
+    db,
+    file.id,
+    allMatched.map((entity) => entity.entityId),
+  );
+  const factSelectionCache = createFactSelectionCache();
   const [summaryResult, factsResult] = await Promise.allSettled([
-    generateSummary(generator, file, allMatched),
-    extractEntityFacts(generator, file, allMatched),
+    generateSummary(generator, file, allMatched, deps.debugDumpDir),
+    extractEntityFacts(
+      { db, logger, generator },
+      file,
+      allMatched,
+      factSelectionContext,
+      factSelectionCache,
+      deps.debugDumpDir,
+    ),
   ]);
 
   const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
@@ -518,18 +773,203 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     const metadata = parseEntityMetadata(entity.metadata);
     const existingFacts = metadata.learned_facts ?? [];
 
-    const newFacts = facts.map((f) => ({
-      fact: f.fact,
-      source_file_id: file.id,
-      learned_at: new Date().toISOString().split("T")[0],
-    }));
+    const newFacts = facts
+      .filter((f) => {
+        const validation = validateLearnedFact(f.fact);
+        if (!validation.ok) {
+          logger.info({ fileId: file.id, entityId, reason: validation.reason }, "Dropped invalid learned fact");
+          return false;
+        }
+        return true;
+      })
+      .map((f) => ({
+        fact: f.fact,
+        source_file_id: file.id,
+        learned_at: new Date().toISOString().split("T")[0],
+      }));
+    if (newFacts.length === 0) continue;
 
     metadata.learned_facts = [...existingFacts, ...newFacts];
 
     await entityRepo.updateEntity(entityId, { metadata: JSON.stringify(metadata) });
 
     logger.debug({ entityId, newFactCount: facts.length }, "Updated entity definition");
+    await yieldToEventLoop();
   }
+}
+
+async function reconcileLlmExtractionFacts(
+  deps: SmartEnrichmentDeps,
+  file: FileContext,
+  extraction: EntityExtractionResult,
+): Promise<void> {
+  const { db } = deps;
+  const factRepo = createIndexedFileFactRepository(db);
+  const owner = await db
+    .selectFrom("connector_configs")
+    .select("created_by")
+    .where("id", "=", file.connectorConfigId)
+    .executeTakeFirst();
+  const contentHash = file.contentHash ?? `missing-content-hash:${file.id}`;
+  const emittedMentionKeys: string[] = [];
+  const emittedRelationKeys: string[] = [];
+
+  for (const mention of extraction.mentions) {
+    if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) {
+      deps.logger.info(
+        { fileId: file.id, displayName: mention.mention, entityType: mention.type },
+        "Dropped LLM mention with unsupported type",
+      );
+      continue;
+    }
+    if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+    const validation = validateLlmMention({
+      displayName: mention.mention,
+      entityType: mention.type,
+      aliases: mention.variations,
+      fileContent: file.content,
+      source: "llm_extraction",
+    });
+    if (!validation.ok) {
+      deps.logger.info(
+        { fileId: file.id, displayName: mention.mention, reason: validation.reason },
+        "Dropped invalid LLM mention",
+      );
+      continue;
+    }
+    const input: UpsertIndexedFileFactInput = {
+      indexedFileId: file.id,
+      connectorConfigId: file.connectorConfigId,
+      createdByUserId: owner?.created_by ?? null,
+      contentHash,
+      source: "llm_extraction",
+      factType: "llm_extracted",
+      relation: "mentioned",
+      subjectName: mention.mention,
+      subjectSource: "llm_extraction",
+      subjectSourceId: `${file.id}:${contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`,
+      contextSnippet: null,
+      raw: {
+        contentHash,
+        promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+        model: "gemini",
+        mention: mention.mention,
+        type: mention.type,
+        variations: mention.variations,
+        confidence: typeof mention.confidence === "number" ? mention.confidence : 0.7,
+      },
+    };
+    emittedMentionKeys.push(buildIndexedFileFactKey(input));
+    await factRepo.upsertFact(input);
+    await yieldToEventLoop();
+  }
+
+  for (const relation of extraction.relations) {
+    const input = buildRelationFactInput({
+      file,
+      ownerUserId: owner?.created_by ?? null,
+      contentHash,
+      relation,
+      mentions: extraction.mentions,
+    });
+    if (!input) continue;
+    emittedRelationKeys.push(buildIndexedFileFactKey(input));
+    await factRepo.upsertFact(input);
+    await yieldToEventLoop();
+  }
+
+  const mentionReconcile = await factRepo.reconcileStaleFacts(
+    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
+    new Set(emittedMentionKeys),
+  );
+  const relationReconcile = await factRepo.reconcileStaleFacts(
+    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
+    new Set(emittedRelationKeys),
+  );
+  await cleanupRelationshipEvidenceForFacts(db, [
+    ...mentionReconcile.tombstonedFactIds,
+    ...relationReconcile.tombstonedFactIds,
+  ]);
+  await cleanupEmptyRelationships(db);
+
+  await db
+    .deleteFrom("entity_mentions")
+    .where("indexed_file_id", "=", file.id)
+    .where("source", "=", "llm_extraction")
+    .where("confidence", "!=", "EXTRACTED")
+    .execute();
+
+  await materializeUnmaterializedFacts(db, deps.logger);
+}
+
+function buildRelationFactInput(input: {
+  file: FileContext;
+  ownerUserId: string | null;
+  contentHash: string;
+  relation: ExtractedRelation;
+  mentions: ExtractedMention[];
+}): UpsertIndexedFileFactInput | null {
+  const relationType = normalizeRelationType(input.relation.type);
+  if (!relationType || !isHighConfidenceRelation(input.relation.confidence)) return null;
+  const sourceName = input.relation.source.name?.trim();
+  const targetName = input.relation.target.name?.trim();
+  if (!sourceName || !targetName) return null;
+  const sourceType = normalizeMentionType(input.relation.source.type);
+  const targetType = normalizeMentionType(input.relation.target.type);
+  if (!sourceType || !targetType) return null;
+  if (
+    !PROPOSABLE_ENTITY_TYPES.has(sourceType as ProposeEntityType) ||
+    !PROPOSABLE_ENTITY_TYPES.has(targetType as ProposeEntityType)
+  ) {
+    return null;
+  }
+  const sourceConfidence = findMentionConfidence(input.mentions, input.relation.source);
+  const targetConfidence = findMentionConfidence(input.mentions, input.relation.target);
+  if (!isHighConfidenceEndpoint(sourceConfidence) || !isHighConfidenceEndpoint(targetConfidence)) return null;
+
+  return {
+    indexedFileId: input.file.id,
+    connectorConfigId: input.file.connectorConfigId,
+    createdByUserId: input.ownerUserId,
+    contentHash: input.contentHash,
+    source: "llm_extraction",
+    factType: "llm_relation",
+    relation: relationType,
+    subjectName: sourceName,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${input.file.id}:${input.contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${relationType}:${sourceName}:${targetName}`,
+    contextSnippet: input.relation.context ?? null,
+    raw: {
+      contentHash: input.contentHash,
+      promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+      model: "gemini",
+      relationType,
+      confidence: input.relation.confidence,
+      sourceConfidence,
+      targetConfidence,
+      context: input.relation.context,
+      source: {
+        name: sourceName,
+        type: sourceType,
+        variations: input.relation.source.variations ?? [],
+      },
+      target: {
+        name: targetName,
+        type: targetType,
+        variations: input.relation.target.variations ?? [],
+      },
+    },
+  };
+}
+
+function findMentionConfidence(mentions: ExtractedMention[], endpoint: ExtractedRelationEndpoint): number {
+  const names = [endpoint.name, ...(endpoint.variations ?? [])].map(normalizeName).filter((name) => name.length > 0);
+  for (const mention of mentions) {
+    const mentionNames = [mention.mention, ...mention.variations].map(normalizeName);
+    if (!names.some((name) => mentionNames.includes(name))) continue;
+    return typeof mention.confidence === "number" ? mention.confidence : 0.7;
+  }
+  return 0;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

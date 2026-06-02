@@ -390,3 +390,24 @@ describe("EntityExplorer ECR-03B inline review", () => {
     expect(candidate).not.toHaveTextContent("original@example.com");
   });
 });
+
+describe("EntityExplorer rebuild dialog", () => {
+  function setupBaseHandlers() {
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+    );
+  }
+
+  it("admin menu shows a single 'Rebuild entities…' item (no separate reset/recreate items)", async () => {
+    const user = userEvent.setup();
+    setupBaseHandlers();
+    renderWithProviders(<EntityExplorer />);
+
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+
+    expect(await screen.findByTestId("rebuild-entities-menu-item")).toHaveTextContent("Rebuild entities");
+    expect(screen.queryByText(/Reset & recreate/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Reset entities/)).not.toBeInTheDocument();
+  });
+});

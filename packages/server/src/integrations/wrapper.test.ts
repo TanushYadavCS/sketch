@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../test-utils";
 import { CanvasProvider } from "./canvas";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "./wrapper";
@@ -247,5 +247,47 @@ describe("CanvasProvider.getBrokerSpec", () => {
     const provider = new CanvasProvider("https://canvas.example.com", "", "p1");
     const spec = provider.getBrokerSpec({ userEmail: "u@example.com", claudeConfigDir: "/etc/claude" });
     expect(spec.credentialEnv).toEqual({ CANVAS_USER_EMAIL: "u@example.com" });
+  });
+});
+
+describe("CanvasProvider.initiateConnection", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends Sketch role hint with Canvas connect-token request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: { connect_link_url: "https://canvas.example.com/connect/secrets?token=abc" },
+        }),
+        { status: 201 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new CanvasProvider("https://canvas.example.com", "key-1", "p1");
+    await provider.initiateConnection(
+      "admin@example.com",
+      "google-calendar-oauth",
+      "https://sketch.example.com/integrations/callback",
+      undefined,
+      "admin",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith("https://canvas.example.com/api/apps/connect-token", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer key-1",
+        "Content-Type": "application/json",
+        "X-User-Email": "admin@example.com",
+        "X-User-Org-Role": "admin",
+      },
+      body: JSON.stringify({
+        app_slug: "google-calendar-oauth",
+        callback_url: "https://sketch.example.com/integrations/callback",
+      }),
+    });
   });
 });

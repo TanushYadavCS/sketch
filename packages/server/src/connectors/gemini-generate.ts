@@ -7,9 +7,35 @@
  * For thinking models, maxOutputTokens only covers the response (not thinking).
  * We set thinkingBudget separately to control thinking token usage.
  */
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { type GenerateContentResponse, GoogleGenAI } from "@google/genai";
 
 const MODEL = "gemini-2.5-flash";
+
+async function dumpCall(
+  dumpDir: string,
+  payload: {
+    label: string;
+    prompt: string;
+    systemPrompt?: string;
+    maxTokens: number;
+    text: string | undefined;
+    finishReason: string | undefined;
+    promptTokens: number | undefined;
+    candidatesTokens: number | undefined;
+  },
+): Promise<void> {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeLabel = payload.label.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const filename = `${ts}__${safeLabel}.json`;
+  try {
+    await mkdir(dumpDir, { recursive: true });
+    await writeFile(join(dumpDir, filename), JSON.stringify(payload, null, 2), "utf8");
+  } catch {
+    // best-effort; never throw from the dump path
+  }
+}
 
 /** Max output tokens for the response. Set high because thinking models may
  *  count thinking tokens against this budget depending on API version. */
@@ -24,6 +50,9 @@ export interface GenerateOptions {
   responseMimeType?: string;
   /** Caller label included in error messages and diagnostic logs (e.g. "extractEntities"). */
   label?: string;
+  /** When set, write a JSON file capturing prompt + raw response under this dir.
+   *  Used by the per-file "Enrich File" debug path. Never set in bulk runs. */
+  dumpDir?: string;
 }
 
 export function createGeminiGenerator(apiKey: string) {
@@ -58,6 +87,19 @@ export function createGeminiGenerator(apiKey: string) {
     const finishReason = candidate?.finishReason;
     const text = response.text;
     const usage = response.usageMetadata;
+
+    if (opts?.dumpDir) {
+      await dumpCall(opts.dumpDir, {
+        label: opts?.label ?? "unlabeled",
+        prompt,
+        systemPrompt: opts?.systemPrompt,
+        maxTokens,
+        text,
+        finishReason,
+        promptTokens: usage?.promptTokenCount,
+        candidatesTokens: usage?.candidatesTokenCount,
+      });
+    }
 
     if (!text) {
       throw new Error(

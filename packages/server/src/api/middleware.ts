@@ -22,6 +22,8 @@ declare module "hono" {
     sub: string;
     /** Caller's primary email — used by file-access RBAC. Null if the user row has no email. */
     email: string | null;
+    /** Org setting: when true, admins bypass per-file content RBAC for direct HTTP reads. */
+    adminCanReadAllFiles: boolean;
   }
 }
 
@@ -98,12 +100,14 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     let setupComplete = false;
     let hasAdmin = false;
     let jwtSecret: string | null = null;
+    let adminCanReadAllFiles = false;
     try {
       const row = await settings.get();
       setupComplete = Boolean(row?.onboarding_completed_at);
       hasAdmin = opts?.hasLocalAdmin ? await opts.hasLocalAdmin() : Boolean(row?.admin_email);
       jwtSecret = row?.jwt_secret ?? null;
       if (jwtSecret) cachedSecret = jwtSecret;
+      adminCanReadAllFiles = row?.admin_can_read_all_files === 1;
     } catch {
       // DB unavailable — let public paths through, block everything else
     }
@@ -141,6 +145,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
         c.set("role", "admin");
         c.set("sub", "sketch-api-key");
         c.set("email", null);
+        c.set("adminCanReadAllFiles", adminCanReadAllFiles);
         return next();
       }
     }
@@ -166,6 +171,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
         c.set("role", toAuthRole(user.authRole));
         c.set("sub", user.id);
         c.set("email", user.email ?? payload.email ?? null);
+        c.set("adminCanReadAllFiles", adminCanReadAllFiles);
         return next();
       }
     }
@@ -199,6 +205,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       c.set("sub", payload.sub);
       c.set("email", payload.email ?? null);
     }
+    c.set("adminCanReadAllFiles", adminCanReadAllFiles);
 
     return next();
   };

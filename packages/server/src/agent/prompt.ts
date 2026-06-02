@@ -160,6 +160,7 @@ function sourceLabel(source: string): { label: string; noun: string } {
 export function buildSystemContext(params: {
   platform: "slack" | "whatsapp";
   orgName?: string | null;
+  orgDescription?: string | null;
   botName?: string | null;
   indexedSources?: Array<{ source: string; fileCount: number }>;
   agentInstructions?: string | null;
@@ -174,6 +175,10 @@ export function buildSystemContext(params: {
     sections.push(`You are ${params.botName}, an intelligent agent powered by Sketch, created by Canvas AI.`);
   } else {
     sections.push("You are Sketch, an intelligent agent created by Canvas AI.");
+  }
+
+  if (params.orgDescription && params.orgDescription.trim().length > 0) {
+    sections.push("", `About ${params.orgName ?? "the organization"}: ${params.orgDescription.trim()}`);
   }
 
   sections.push(

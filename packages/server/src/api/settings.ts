@@ -5,13 +5,27 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { runEnrichment } from "../connectors/enrichment";
-import type { createSettingsRepository } from "../db/repositories/settings";
+import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 
 const searchConfigSchema = z.object({
   geminiApiKey: z.string().nullable().optional(),
   enrichmentEnabled: z.boolean().optional(),
   syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
+});
+
+const identityUpdateSchema = z.object({
+  orgName: z.string().trim().min(1).max(200).optional(),
+  orgContext: z
+    .object({
+      description: z.string().trim().max(2000).optional(),
+      industry: z.string().trim().max(80).optional(),
+    })
+    .optional(),
+});
+
+const accessUpdateSchema = z.object({
+  adminCanReadAllFiles: z.boolean(),
 });
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -36,6 +50,42 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
     return c.json({
       orgName: row?.org_name ?? null,
       botName: row?.bot_name ?? "Sketch",
+      orgContext: parseOrgContext(row?.org_context),
+    });
+  });
+
+  routes.put("/identity", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = identityUpdateSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const updates: Parameters<typeof settings.update>[0] = {};
+    if (parsed.data.orgName !== undefined) updates.orgName = parsed.data.orgName;
+    if (parsed.data.orgContext !== undefined) {
+      const description = parsed.data.orgContext.description ?? "";
+      const industry = parsed.data.orgContext.industry ?? "";
+      const next: Record<string, string> = {};
+      if (description.length > 0) next.description = description;
+      if (industry.length > 0) next.industry = industry;
+      updates.orgContext = Object.keys(next).length > 0 ? JSON.stringify(next) : null;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "No updates provided" } }, 400);
+    }
+
+    await settings.update(updates);
+    const row = await settings.get();
+    return c.json({
+      orgName: row?.org_name ?? null,
+      botName: row?.bot_name ?? "Sketch",
+      orgContext: parseOrgContext(row?.org_context),
     });
   });
 
@@ -95,6 +145,31 @@ export function settingsRoutes(settings: SettingsRepo, db?: Kysely<DB>, logger?:
     });
 
     return c.json({ success: true, message: "Enrichment started" });
+  });
+
+  routes.get("/access", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const row = await settings.get();
+    return c.json({
+      adminCanReadAllFiles: row?.admin_can_read_all_files === 1,
+    });
+  });
+
+  routes.put("/access", async (c) => {
+    const forbidden = requireAdmin(c);
+    if (forbidden) return c.json(forbidden, 403);
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = accessUpdateSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    await settings.update({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles });
+    return c.json({ adminCanReadAllFiles: parsed.data.adminCanReadAllFiles });
   });
 
   routes.get("/api-key", async (c) => {

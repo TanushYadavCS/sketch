@@ -9,6 +9,8 @@ import { z } from "zod";
 
 export type { IntegrationApp, IntegrationConnection, PageInfo };
 
+export type IntegrationUserOrgRole = "admin" | "member";
+
 export interface BrokerSpec {
   /** Absolute path to the real CLI binary the broker will spawn. */
   cliPath: string;
@@ -27,6 +29,7 @@ export interface IntegrationProvider {
     appId: string,
     callbackUrl: string,
     userName?: string,
+    userOrgRole?: IntegrationUserOrgRole,
   ): Promise<{ redirectUrl: string }>;
   listConnections(userEmail: string, userName?: string): Promise<IntegrationConnection[]>;
   removeConnection(userEmail: string, connectionId: string, userName?: string): Promise<void>;

@@ -466,6 +466,7 @@ export function mcpServerRoutes(
       parsed.data.appId,
       parsed.data.callbackUrl ?? "",
       userResult.name,
+      c.get("role"),
     );
     return c.json(result);
   });

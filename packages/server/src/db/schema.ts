@@ -78,6 +78,7 @@ export interface SettingsTable {
   google_oauth_client_secret: string | null;
   gemini_api_key: string | null;
   enrichment_enabled: Generated<number>;
+  admin_can_read_all_files: Generated<number>;
   sync_interval_minutes: Generated<number>;
   org_context: string | null;
   sketch_api_key: string | null;
@@ -129,6 +130,7 @@ export interface IndexedFilesTable {
   mime_type: string | null;
   embedding_status: Generated<string>;
   summary_status: Generated<string>;
+  share_with_everyone: Generated<number>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -190,6 +192,13 @@ export interface UserProviderIdentitiesTable {
 export interface FileAccessTable {
   indexed_file_id: string;
   email: string;
+}
+
+export interface FileShareEmailsTable {
+  indexed_file_id: string;
+  email: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface EmailVerificationTokensTable {
@@ -323,6 +332,15 @@ export interface EntitiesTable {
   hotness: number;
   created_at: string;
   updated_at: string;
+  ai_brief: string | null;
+  share_with_everyone: Generated<number>;
+}
+
+export interface EntityShareEmailsTable {
+  entity_id: string;
+  email: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface EntitySourceRefsTable {
@@ -340,6 +358,9 @@ export interface EntityMentionsTable {
   indexed_file_id: string;
   chunk_index: number | null;
   context_snippet: string | null;
+  confidence: string;
+  source: string;
+  relation: string;
   mentioned_at: string;
 }
 
@@ -385,6 +406,47 @@ export interface EntityCandidatesTable {
   promoted_entity_id: string | null;
   created_at: string;
   updated_at: string;
+  domain: string | null;
+  proposed_company_name: string | null;
+  first_observed_by_user_id: string | null;
+  observed_person_entity_ids: string | null;
+  evidence_file_ids: string | null;
+}
+
+export interface EntityDomainsTable {
+  id: string;
+  entity_id: string | null;
+  domain: string;
+  kind: string;
+  is_primary: number;
+  confidence: number;
+  source: string;
+  created_at: Generated<string>;
+}
+
+export interface EntityRelationshipsTable {
+  id: string;
+  source_entity_id: string;
+  target_entity_id: string;
+  relationship_type: string;
+  confidence: string;
+  confidence_score: number;
+  source: string;
+  valid_from: Generated<string>;
+  valid_to: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface EntityRelationshipEvidenceTable {
+  id: string;
+  relationship_id: string;
+  indexed_file_id: string;
+  chunk_index: Generated<number>;
+  note: string | null;
+  source_fact_id: string | null;
+  evidence_key: Generated<string>;
+  created_at: Generated<string>;
 }
 
 export interface EntityReviewQueueTable {
@@ -419,6 +481,12 @@ export interface EntityReviewEvidenceTable {
   seen_at: Generated<string>;
 }
 
+export interface EntityReviewDomainCandidatesTable {
+  review_id: string;
+  domain_candidate_id: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityAliasRejectionsTable {
   id: string;
   entity_id: string;
@@ -426,6 +494,29 @@ export interface EntityAliasRejectionsTable {
   normalized_rejected_name: string;
   rejected_by: string;
   rejected_at: Generated<string>;
+}
+
+export interface IndexedFileFactsTable {
+  id: string;
+  indexed_file_id: string | null;
+  connector_config_id: string | null;
+  created_by_user_id: string | null;
+  source: string;
+  fact_type: string;
+  relation: string;
+  subject_name: string | null;
+  subject_email: string | null;
+  subject_source: string | null;
+  subject_source_id: string | null;
+  context_snippet: string | null;
+  raw: string | null;
+  fact_key: string;
+  last_seen_sync_run_id: string | null;
+  deleted_at: string | null;
+  content_hash: string | null;
+  materialized_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface DB {
@@ -446,6 +537,7 @@ export interface DB {
   file_embeddings: FileEmbeddingsTable;
   user_provider_identities: UserProviderIdentitiesTable;
   file_access: FileAccessTable;
+  file_share_emails: FileShareEmailsTable;
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
@@ -457,6 +549,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
@@ -464,5 +557,10 @@ export interface DB {
   entity_candidates: EntityCandidatesTable;
   entity_review_queue: EntityReviewQueueTable;
   entity_review_evidence: EntityReviewEvidenceTable;
+  entity_review_domain_candidates: EntityReviewDomainCandidatesTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
+  indexed_file_facts: IndexedFileFactsTable;
+  entity_domains: EntityDomainsTable;
+  entity_relationships: EntityRelationshipsTable;
+  entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }

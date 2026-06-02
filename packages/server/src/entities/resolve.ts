@@ -20,10 +20,25 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
+import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
-import { createEntityRepository } from "../db/repositories/entities";
+import {
+  type EntityMentionConfidence,
+  type EntityMentionRelation,
+  createEntityRepository,
+} from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable } from "../db/schema";
+import { inferAffiliationFromEmail } from "./affiliations";
+import { finalizeLinkedDomainCandidates } from "./domain-promotion";
+import {
+  type MaterializeResult,
+  buildMaterializeDeps,
+  materializeFromFact,
+  shouldMarkMaterialized,
+} from "./materialize";
 
 type Entity = Selectable<EntitiesTable>;
 
@@ -56,6 +71,7 @@ export interface ResolveCtx {
   userId: string;
   /** Override `Date.now()` ISO for tests. Defaults to current time. */
   now?: string;
+  logger?: Logger;
 }
 
 interface ResolveTxnCtx {
@@ -64,6 +80,7 @@ interface ResolveTxnCtx {
   entityRepo: ReturnType<typeof createEntityRepository>;
   userId: string;
   now: string;
+  logger?: Logger;
 }
 
 export interface ConfirmOptions {
@@ -107,14 +124,18 @@ export interface RejectResult {
  * Codified here so the same constants drive both Confirm and Reject. Falls
  * back to `'mentioned'` for unknown sources.
  */
-const RELATION_BY_SOURCE: Record<string, string> = {
+const RELATION_BY_SOURCE: Record<string, EntityMentionRelation> = {
   fireflies: "attended",
   gmail: "corresponded",
   "smart-enrichment": "mentioned",
 };
 
-function resolveRelation(source: string): string {
+function resolveRelation(source: string): EntityMentionRelation {
   return RELATION_BY_SOURCE[source] ?? "mentioned";
+}
+
+function resolveConfidence(confidence: "confirmed" | "inferred"): EntityMentionConfidence {
+  return confidence === "confirmed" ? "EXTRACTED" : "INFERRED";
 }
 
 function readEmail(metadata: string | null): string | null {
@@ -125,6 +146,50 @@ function readEmail(metadata: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+function readJsonObject(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseAliases(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeEntityMatchName(entityType: string, name: string): string {
+  if (entityType !== "product") return normalizeName(name);
+  return normalizeName(
+    name
+      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+      .replace(/[-_]+/g, " "),
+  );
+}
+
+function shouldMarkHeldFactMaterialized(result: MaterializeResult): boolean {
+  if (result.kind === "entity_created" || result.kind === "entity_linked" || result.kind === "structural") return true;
+  if (result.kind === "queued" || result.kind === "queued_held") return false;
+  if (result.kind === "skipped_missing_owner" || result.kind === "deferred_below_threshold") return false;
+  if (result.kind === "skipped") {
+    return (
+      result.reason !== "missing_parent_seed" &&
+      result.reason !== "unknown_fact_type" &&
+      result.reason !== "missing_or_invalid_mention_type"
+    );
+  }
+  return false;
 }
 
 async function fetchRow(ctx: ResolveTxnCtx, reviewId: string): Promise<QueueRow> {
@@ -164,31 +229,44 @@ async function markResolvedOrThrow(
 }
 
 /**
- * Insert one entity_mentions row for (entityId, fileId). Idempotent via the
- * UNIQUE index from migration 056. `chunk_index` and `context_snippet` left
- * null — held mentions don't carry chunk-level info (that's a connector's
- * concern; here we're only re-creating the entity↔file link).
+ * Insert one entity_mentions row for (entityId, fileId, relation). `chunk_index`
+ * and `context_snippet` stay null because held mentions don't carry chunk-level
+ * info; here we're only re-creating the entity↔file edge.
  */
 async function insertHeldMention(
   ctx: ResolveTxnCtx,
   entityId: string,
   indexedFileId: string,
-  _source: string,
-  _confidence: "confirmed" | "inferred",
+  source: string,
+  confidence: "confirmed" | "inferred",
 ): Promise<void> {
+  const relation = resolveRelation(source);
+  const mentionConfidence = resolveConfidence(confidence);
   await sql`
-    INSERT INTO entity_mentions (id, entity_id, indexed_file_id, chunk_index, context_snippet, mentioned_at)
-    VALUES (${randomUUID()}, ${entityId}, ${indexedFileId}, NULL, NULL, ${ctx.now})
-    ON CONFLICT (entity_id, indexed_file_id) DO NOTHING
+    INSERT INTO entity_mentions (
+      id,
+      entity_id,
+      indexed_file_id,
+      chunk_index,
+      context_snippet,
+      confidence,
+      source,
+      relation,
+      mentioned_at
+    )
+    VALUES (
+      ${randomUUID()},
+      ${entityId},
+      ${indexedFileId},
+      NULL,
+      NULL,
+      ${mentionConfidence},
+      ${source},
+      ${relation},
+      ${ctx.now}
+    )
+    ON CONFLICT (entity_id, indexed_file_id, relation) DO NOTHING
   `.execute(ctx.db);
-  // `relation` / `confidence` columns land with ENTITY_LINKAGE_PROVENANCE
-  // PR-1. When they exist the resolve module's INSERT shape must be widened
-  // to populate them (relation = resolveRelation(_source), confidence =
-  // _confidence). The relation map is centralized in RELATION_BY_SOURCE
-  // above and the confidence vocabulary mirrors that PR's choices. Until
-  // those columns ship, the underscore-prefixed args here are unused on
-  // purpose — they're already plumbed so the migration that adds the
-  // columns is the only place needing edits.
 }
 
 /**
@@ -216,11 +294,92 @@ async function materializeEvidence(
 ): Promise<void> {
   const targetEmail = target.source_type === "person" ? readEmail(target.metadata) : null;
   for (const ev of evidence) {
+    if (ev.source === "llm_extraction") continue;
     if (targetEmail) {
       await ensureFileAccess(ctx, ev.indexed_file_id, targetEmail);
     }
     await insertHeldMention(ctx, target.id, ev.indexed_file_id, ev.source, confidence);
   }
+}
+
+async function rematerializeHeldLlmEvidence(ctx: ResolveTxnCtx, row: QueueRow, evidence: EvidenceRow[]): Promise<void> {
+  const llmEvidence = evidence.filter((ev) => ev.source === "llm_extraction");
+  if (llmEvidence.length === 0) return;
+  const deps = await buildMaterializeDeps(ctx.db);
+  const fileIds = [...new Set(llmEvidence.map((ev) => ev.indexed_file_id))];
+  const facts = await ctx.db
+    .selectFrom("indexed_file_facts")
+    .selectAll()
+    .where("indexed_file_id", "in", fileIds)
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .execute();
+
+  for (const fact of facts) {
+    if (!fact.subject_name) continue;
+    if (normalizeEntityMatchName(row.entity_type, fact.subject_name) !== row.normalized_name) continue;
+    const raw = readJsonObject(fact.raw);
+    if (raw.type !== row.entity_type) continue;
+    const result = await materializeFromFact(deps, fact);
+    if (shouldMarkHeldFactMaterialized(result)) {
+      await ctx.db
+        .updateTable("indexed_file_facts")
+        .set({ materialized_at: ctx.now })
+        .where("id", "=", fact.id)
+        .where("materialized_at", "is", null)
+        .execute();
+    }
+  }
+}
+
+async function reviveDeferredRelationsForEntity(
+  ctx: ResolveTxnCtx,
+  resolvedEntity: Entity,
+): Promise<{ revived: number; overflowed: boolean }> {
+  const candidates = [
+    normalizeName(resolvedEntity.name),
+    ...parseAliases(resolvedEntity.aliases).map((alias) => normalizeName(alias)),
+  ].filter((name) => name.length > 0);
+  const names = [...new Set(candidates)];
+  if (names.length === 0) return { revived: 0, overflowed: false };
+
+  const maxScan = 100;
+  const factRepo = createIndexedFileFactRepository(ctx.db);
+  const facts = await factRepo.findUnmaterializedRelationFactsByEndpointName(names, maxScan + 1);
+  const overflowed = facts.length > maxScan;
+  const toRevive = overflowed ? facts.slice(0, maxScan) : facts;
+  if (overflowed) {
+    ctx.logger?.warn(
+      { entityId: resolvedEntity.id, scanCap: maxScan, aliasCount: names.length - 1 },
+      "Deferred relation revival cap reached",
+    );
+  }
+
+  const deps = await buildMaterializeDeps(ctx.db);
+  let revived = 0;
+  for (const fact of toRevive) {
+    const result = await materializeFromFact(deps, fact);
+    if (result.kind === "relationship_materialized") {
+      await ctx.db
+        .updateTable("indexed_file_facts")
+        .set({ materialized_at: ctx.now })
+        .where("id", "=", fact.id)
+        .where("materialized_at", "is", null)
+        .execute();
+      revived++;
+      continue;
+    }
+    if (shouldMarkMaterialized(result)) {
+      await ctx.db
+        .updateTable("indexed_file_facts")
+        .set({ materialized_at: ctx.now })
+        .where("id", "=", fact.id)
+        .where("materialized_at", "is", null)
+        .execute();
+    }
+  }
+
+  return { revived, overflowed };
 }
 
 /**
@@ -282,9 +441,29 @@ async function mergeStaleEntityPortable(ctx: ResolveTxnCtx, stale: Entity, targe
     .execute();
   for (const m of staleMentions) {
     await sql`
-      INSERT INTO entity_mentions (id, entity_id, indexed_file_id, chunk_index, context_snippet, mentioned_at)
-      VALUES (${randomUUID()}, ${target.id}, ${m.indexed_file_id}, ${m.chunk_index}, ${m.context_snippet}, ${m.mentioned_at})
-      ON CONFLICT (entity_id, indexed_file_id) DO NOTHING
+      INSERT INTO entity_mentions (
+        id,
+        entity_id,
+        indexed_file_id,
+        chunk_index,
+        context_snippet,
+        confidence,
+        source,
+        relation,
+        mentioned_at
+      )
+      VALUES (
+        ${randomUUID()},
+        ${target.id},
+        ${m.indexed_file_id},
+        ${m.chunk_index},
+        ${m.context_snippet},
+        ${m.confidence},
+        ${m.source},
+        ${m.relation},
+        ${m.mentioned_at}
+      )
+      ON CONFLICT (entity_id, indexed_file_id, relation) DO NOTHING
     `.execute(ctx.db);
   }
 
@@ -328,6 +507,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
       entityRepo: createEntityRepository(trx),
       userId: ctx.userId,
       now: ctx.now ?? new Date().toISOString(),
+      logger: ctx.logger,
     };
     const row = await fetchRow(trxCtx, reviewId);
 
@@ -423,12 +603,28 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
 
     // 6. Held-mention materialization + ACL backfill.
     await materializeEvidence(trxCtx, target, evidence, "confirmed");
+    await rematerializeHeldLlmEvidence(trxCtx, row, evidence);
 
     // Held-email path. Rare in v1 (no caller currently populates proposed_email),
     // but column exists so handle it here.
     if (row.proposed_email && row.entity_type === "person") {
       await trxCtx.entityRepo.attachEmailIfAbsent(target.id, row.proposed_email);
+      const evidenceFileId = evidence.find((e) => e.indexed_file_id)?.indexed_file_id ?? null;
+      await inferAffiliationFromEmail(
+        { db: trxCtx.db, domainsRepo: createEntityDomainsRepository(trxCtx.db) },
+        {
+          personEntityId: target.id,
+          email: row.proposed_email,
+          evidenceFileId,
+          firstObservedByUserId: trxCtx.userId,
+        },
+      );
     }
+
+    if (row.entity_type === "company") {
+      await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
+    }
+    await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // Pick-different: write rejection against original candidate so it isn't re-suggested.
     if (pickedDifferent && row.candidate_entity_id) {
@@ -481,6 +677,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
       entityRepo: createEntityRepository(trx),
       userId: ctx.userId,
       now: ctx.now ?? new Date().toISOString(),
+      logger: ctx.logger,
     };
     const row = await fetchRow(trxCtx, reviewId);
 
@@ -592,6 +789,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
 
     // 4. Held-mention materialization + ACL backfill (confidence='inferred').
     await materializeEvidence(trxCtx, target, evidence, "inferred");
+    await rematerializeHeldLlmEvidence(trxCtx, row, evidence);
 
     // 5. Sticky rejection.
     if (row.candidate_entity_id) {
@@ -608,6 +806,11 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
         rejectedBy: trxCtx.userId,
       });
     }
+
+    if (row.entity_type === "company") {
+      await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
+    }
+    await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // 6. Mark resolved.
     const refreshedRow = await markResolvedOrThrow(trxCtx, row, "rejected", target.id);

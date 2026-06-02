@@ -30,6 +30,33 @@ describe("configSchema", () => {
         expect(result.data.SLACK_CHANNEL_HISTORY_LIMIT).toBe(5);
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
+        expect(result.data.SYNC_ALLOW_LARGE_RECONCILE).toBe(false);
+        expect(result.data.SYNC_MAX_RECONCILE_RATIO).toBe(0.5);
+        expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(3);
+      }
+    });
+
+    it("parses entity graph heuristic thresholds", () => {
+      const result = configSchema.safeParse({
+        LLM_PROMOTION_THRESHOLD: "4",
+        CO_MENTION_CONTRIBUTES_TO_THRESHOLD: "5",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.LLM_PROMOTION_THRESHOLD).toBe(4);
+        expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(5);
+      }
+    });
+
+    it("parses sync reconcile guard configuration", () => {
+      const result = configSchema.safeParse({
+        SYNC_ALLOW_LARGE_RECONCILE: "1",
+        SYNC_MAX_RECONCILE_RATIO: "0.75",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.SYNC_ALLOW_LARGE_RECONCILE).toBe(true);
+        expect(result.data.SYNC_MAX_RECONCILE_RATIO).toBe(0.75);
       }
     });
 
@@ -66,6 +93,16 @@ describe("configSchema", () => {
 
     it("rejects invalid LOG_LEVEL", () => {
       const result = configSchema.safeParse({ LOG_LEVEL: "trace" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects sync reconcile ratios outside 0..1", () => {
+      const result = configSchema.safeParse({ SYNC_MAX_RECONCILE_RATIO: "1.2" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects co-mention thresholds below 2", () => {
+      const result = configSchema.safeParse({ CO_MENTION_CONTRIBUTES_TO_THRESHOLD: "1" });
       expect(result.success).toBe(false);
     });
   });

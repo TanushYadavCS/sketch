@@ -118,6 +118,7 @@ export interface RunAgentParams {
   resumeSessionId?: string;
   abortController?: AbortController;
   orgName?: string | null;
+  orgDescription?: string | null;
   botName?: string | null;
   integrationMcpServers?: Record<string, McpServerConfig>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -233,6 +234,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   const systemAppend = buildSystemContext({
     platform: params.platform,
     orgName: params.orgName,
+    orgDescription: params.orgDescription,
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,

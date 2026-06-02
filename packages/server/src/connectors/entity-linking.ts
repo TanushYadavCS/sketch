@@ -5,7 +5,7 @@
  * - Person resolution: matches LLM-discovered people to existing entities
  * - Fuzzy matching via Talisman Jaro-Winkler
  */
-import type { Kysely } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 // @ts-expect-error talisman has no type declarations
 import jaroWinklerModule from "talisman/metrics/jaro-winkler";
 import { createEntityRepository } from "../db/repositories/entities";
@@ -19,7 +19,7 @@ const jaroWinkler: (a: string, b: string) => number =
 
 const JARO_WINKLER_THRESHOLD = 0.85;
 
-type Entity = EntitiesTable;
+type Entity = Selectable<EntitiesTable>;
 
 /**
  * Get entities relevant to a document's content for LLM prompt injection.

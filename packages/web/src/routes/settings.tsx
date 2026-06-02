@@ -21,6 +21,8 @@ import {
 import { Button } from "@sketch/ui/components/button";
 import { Input } from "@sketch/ui/components/input";
 import { Skeleton } from "@sketch/ui/components/skeleton";
+import { Switch } from "@sketch/ui/components/switch";
+import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
 import { useState } from "react";
@@ -53,9 +55,154 @@ function SettingsPage() {
       <p className="mt-2 text-sm text-muted-foreground">Manage workspace-level configuration.</p>
 
       <div className="mt-6 space-y-8">
+        <OrgContextSection />
+        <AccessSection />
         <ApiKeySection />
       </div>
     </div>
+  );
+}
+
+function OrgContextSection() {
+  const queryClient = useQueryClient();
+  const identityQuery = useQuery({
+    queryKey: ["settings", "identity"],
+    queryFn: () => api.settings.identity(),
+  });
+
+  const [orgName, setOrgName] = useState("");
+  const [description, setDescription] = useState("");
+  const [initialised, setInitialised] = useState(false);
+
+  if (!initialised && identityQuery.data) {
+    setOrgName(identityQuery.data.orgName ?? "");
+    setDescription(identityQuery.data.orgContext?.description ?? "");
+    setInitialised(true);
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: { orgName: string; description: string }) =>
+      api.settings.updateIdentity({
+        orgName: payload.orgName,
+        orgContext: { description: payload.description },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings", "identity"] });
+      toast.success("Saved");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const trimmedName = orgName.trim();
+  const trimmedDescription = description.trim();
+  const initialName = identityQuery.data?.orgName ?? "";
+  const initialDescription = identityQuery.data?.orgContext?.description ?? "";
+  const dirty = trimmedName !== initialName.trim() || trimmedDescription !== initialDescription.trim();
+  const canSave = dirty && trimmedName.length > 0 && trimmedDescription.length <= 2000;
+
+  return (
+    <section>
+      <p className="mb-3 text-sm font-medium text-muted-foreground">Company profile</p>
+      {identityQuery.isLoading ? (
+        <Skeleton className="h-48 rounded-lg" />
+      ) : (
+        <div className="rounded-lg border border-border bg-card p-4">
+          <label htmlFor="org-name" className="text-sm font-medium">
+            Company name
+          </label>
+          <Input
+            id="org-name"
+            className="mt-1.5 h-9"
+            value={orgName}
+            onChange={(e) => setOrgName(e.target.value)}
+            placeholder="Canvas Labs"
+          />
+
+          <label htmlFor="org-description" className="mt-4 block text-sm font-medium">
+            Company description
+          </label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Tell Sketch what your company does — what you build, who you serve, and any flagship products. A paragraph
+            is fine. This is used to recognise the right companies and projects when reading your files, and to ground
+            Sketch's responses in chat.
+          </p>
+          <Textarea
+            id="org-description"
+            className="mt-2 min-h-32"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Canvas Labs is an AI services company working with multiple clients to ship custom AI products. We also build Sketch, an AI assistant for organisations."
+            maxLength={2000}
+          />
+          <div className="mt-1.5 text-right text-xs text-muted-foreground">{trimmedDescription.length} / 2000</div>
+
+          <div className="mt-3 flex justify-end">
+            <Button
+              size="sm"
+              onClick={() => saveMutation.mutate({ orgName: trimmedName, description: trimmedDescription })}
+              disabled={!canSave || saveMutation.isPending}
+            >
+              {saveMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AccessSection() {
+  const queryClient = useQueryClient();
+  const accessQuery = useQuery({
+    queryKey: ["settings", "access"],
+    queryFn: () => api.settings.access(),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (value: boolean) => api.settings.updateAccess({ adminCanReadAllFiles: value }),
+    onMutate: async (value) => {
+      await queryClient.cancelQueries({ queryKey: ["settings", "access"] });
+      const previous = queryClient.getQueryData<{ adminCanReadAllFiles: boolean }>(["settings", "access"]);
+      queryClient.setQueryData(["settings", "access"], { adminCanReadAllFiles: value });
+      return { previous };
+    },
+    onError: (err: Error, _value, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(["settings", "access"], ctx.previous);
+      toast.error(err.message);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings", "access"] });
+      toast.success("Saved");
+    },
+  });
+
+  const value = accessQuery.data?.adminCanReadAllFiles ?? false;
+
+  return (
+    <section>
+      <p className="mb-3 text-sm font-medium text-muted-foreground">Access</p>
+      {accessQuery.isLoading ? (
+        <Skeleton className="h-20 rounded-lg" />
+      ) : (
+        <div className="flex items-start justify-between gap-4 rounded-lg border border-border bg-card p-4">
+          <div>
+            <p className="text-sm font-medium">Admins can read all file content</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              When off, admins manage connectors and see file metadata but not file content unless explicitly shared.
+              When on, admins can read any file's content. The agent's file-content tool stays on email rails either
+              way.
+            </p>
+          </div>
+          <Switch
+            checked={value}
+            onCheckedChange={(next) => updateMutation.mutate(next)}
+            disabled={updateMutation.isPending}
+            aria-label="Allow admins to read all file content"
+          />
+        </div>
+      )}
+    </section>
   );
 }
 

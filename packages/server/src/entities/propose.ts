@@ -26,7 +26,8 @@ import type { EntitiesTable } from "../db/schema";
 
 export type Entity = Selectable<EntitiesTable>;
 
-export type ProposeEntityType = "person" | "company";
+export type ProposeEntityType = "person" | "company" | "product" | "project" | "team";
+export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous";
 
 export interface ProposeInput {
   name: string;
@@ -45,6 +46,11 @@ export interface ProposeInput {
   evidence: Array<{ indexedFileId: string; note?: string }>;
   /** Owner of the sync / call that proposed this entity. Required. */
   triggeredByUserId: string;
+  aliases?: string[];
+  metadata?: Record<string, unknown>;
+  evidenceDomain?: string | null;
+  precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
+  skipFuzzy?: boolean;
 }
 
 export type ProposeResult =
@@ -75,6 +81,8 @@ export type EntityLookup = {
   getByAlias?(normalized: string): Entity[];
   /** All entities of the given type (used for prefix/token-superset scan). */
   listByType(entityType: ProposeEntityType): Entity[];
+  /** Company ids associated with a normalized corporate domain. */
+  getCompanyIdsByDomain?(domain: string): string[];
 };
 
 export interface ProposeDeps {
@@ -88,7 +96,7 @@ export interface ProposeDeps {
 interface RankedCandidate {
   entity: Entity;
   score: number;
-  reason: "token-superset" | "prefix";
+  reason: CandidateReason;
 }
 
 /**
@@ -103,12 +111,38 @@ function tokenize(name: string): string[] {
     .filter((t) => t.length > 0);
 }
 
+function normalizeMatchName(entityType: ProposeEntityType, name: string): string {
+  if (entityType !== "product") return normalizeName(name);
+  return normalizeName(
+    name
+      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+      .replace(/[-_]+/g, " "),
+  );
+}
+
+function parseAliases(aliases: string | null): string[] {
+  if (!aliases) return [];
+  try {
+    const parsed = JSON.parse(aliases);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function isTokenSupersetOrSubset(a: string[], b: string[]): boolean {
   if (a.length === 0 || b.length === 0) return false;
   if (a.length === b.length) return false;
   const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
   const longerSet = new Set(longer);
   return shorter.every((t) => longerSet.has(t));
+}
+
+function hasTokenOverlap(a: string[], b: string[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  const bSet = new Set(b);
+  return a.some((token) => bSet.has(token));
 }
 
 /**
@@ -147,13 +181,13 @@ function isPrefixMatch(proposed: string[], existing: string[]): boolean {
  * match — multi-candidate at that tier signals "human pick" rather than
  * falling through to a weaker rule.
  */
-function rank(name: string, candidates: Entity[]): RankedCandidate[] {
-  const proposedTokens = tokenize(name);
+function rank(entityType: ProposeEntityType, name: string, candidates: Entity[]): RankedCandidate[] {
+  const proposedTokens = tokenize(normalizeMatchName(entityType, name));
   if (proposedTokens.length === 0) return [];
 
   const tokenSuperset: RankedCandidate[] = [];
   for (const c of candidates) {
-    if (isTokenSupersetOrSubset(proposedTokens, tokenize(c.name))) {
+    if (isTokenSupersetOrSubset(proposedTokens, tokenize(normalizeMatchName(entityType, c.name)))) {
       tokenSuperset.push({ entity: c, score: 0.9, reason: "token-superset" });
     }
   }
@@ -161,118 +195,120 @@ function rank(name: string, candidates: Entity[]): RankedCandidate[] {
 
   const prefix: RankedCandidate[] = [];
   for (const c of candidates) {
-    if (isPrefixMatch(proposedTokens, tokenize(c.name))) {
+    if (isPrefixMatch(proposedTokens, tokenize(normalizeMatchName(entityType, c.name)))) {
       prefix.push({ entity: c, score: 0.7, reason: "prefix" });
     }
   }
   return prefix;
 }
 
-export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
-  const normalized = normalizeName(input.name);
+async function persistEntity(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  matched?: Entity,
+): Promise<{ entity: Entity; created: boolean }> {
+  if (input.entityType === "person") {
+    const personData: UpsertPersonEntityData = {
+      name: matched?.name ?? input.name,
+      email: input.email ?? undefined,
+      subtype: input.subtype,
+      source: input.source,
+      sourceId: input.sourceId,
+    };
+    const entity = await deps.entityRepo.upsertPersonEntity(personData);
+    return { entity, created: !matched };
+  }
 
-  // 1) Email fast-path — exact match against existing entity's stored email.
-  if (input.email) {
-    const lowered = input.email.toLowerCase();
-    const candidates = deps.lookup.listByType(input.entityType);
-    for (const c of candidates) {
-      const stored = deps.readEmail(c);
-      if (stored && stored.toLowerCase() === lowered) {
-        const personData: UpsertPersonEntityData = {
-          name: input.name,
-          email: input.email,
-          subtype: input.subtype,
-          source: input.source,
-          sourceId: input.sourceId,
-        };
-        const entity = await deps.entityRepo.upsertPersonEntity(personData);
-        return { kind: "linked", entity };
+  if (matched) {
+    await deps.entityRepo.upsertSourceRef({
+      entityId: matched.id,
+      source: input.source,
+      sourceId: input.sourceId,
+    });
+    return { entity: matched, created: false };
+  }
+
+  const entity = await deps.entityRepo.upsertEntity({
+    name: input.name,
+    sourceType: input.entityType,
+    subtype: input.subtype,
+    aliases: input.aliases,
+    metadata: input.metadata,
+    status: "confirmed",
+  });
+  await deps.entityRepo.upsertSourceRef({
+    entityId: entity.id,
+    source: input.source,
+    sourceId: input.sourceId,
+  });
+  return { entity, created: true };
+}
+
+/**
+ * Tie-break among confirmed duplicate candidates so dedup gaps in production
+ * data don't silently stall relation materialization. Production corpora
+ * accumulate near-duplicates ("Oliver Wyman" / "OW" / "Oliverwyman") across
+ * syncs; queueing every cross-duplicate proposal blocks edges until a human
+ * merges them. For non-person types we land the edge on a deterministic
+ * winner and leave the duplicate as a separate data-quality cleanup. Persons
+ * keep the queueing behaviour — two real people can share a name, and the
+ * email fast-path upstream already handles the identity-grade case.
+ *
+ * Returns null to mean "fall through to queue" (person type, no confirmed
+ * candidate, or the rare case where the pool empties under filtering).
+ */
+function pickConfirmedCanonical(candidates: Entity[], input: ProposeInput, lookup: EntityLookup): Entity | null {
+  if (input.entityType === "person") return null;
+  const confirmed = candidates.filter((c) => c.status === "confirmed");
+  if (confirmed.length === 0) return null;
+  if (confirmed.length === 1) return confirmed[0];
+
+  let pool = confirmed;
+  let matchedByDomain = false;
+  const evidenceDomain = input.evidenceDomain?.trim().toLowerCase();
+  if (evidenceDomain && input.entityType === "company") {
+    const domainIds = new Set(lookup.getCompanyIdsByDomain?.(evidenceDomain) ?? []);
+    if (domainIds.size > 0) {
+      const withDomain = confirmed.filter((c) => domainIds.has(c.id));
+      if (withDomain.length > 0) {
+        pool = withDomain;
+        matchedByDomain = true;
       }
     }
-
-    // 2) Email present but no entity matched it. An email is identity-grade;
-    //    a name collision against a different email is a different person.
-    //    Auto-create instead of queuing.
-    const created = await deps.entityRepo.upsertPersonEntity({
-      name: input.name,
-      email: input.email,
-      subtype: input.subtype,
-      source: input.source,
-      sourceId: input.sourceId,
-    });
-    return { kind: "created", entity: created };
   }
-
-  // 3) Exact-name / alias fast-path — an entity already shares this canonical
-  //    name OR carries it as an alias (case-insensitively, via normalizeName).
-  //    Without this, the fuzzy ranker can silently route around the obvious
-  //    match — e.g. a name-only "Saurabh Kumar" attendee gets queued against
-  //    "Saurabh Kumar Singh" instead of linking to the existing "Saurabh
-  //    Kumar" entity. The alias half catches the post-Confirm case: an
-  //    entity whose canonical name is "Simran Suri" and whose aliases include
-  //    "Simran Suri Neeli" (because a reviewer Confirmed the merge) — a
-  //    future propose for "Simran Suri Neeli" should auto-link rather than
-  //    re-queue. Ambiguity-aware: ≥2 distinct entities sharing the name or
-  //    holding it as an alias fall through to the ranker (which queues with
-  //    NULL candidate).
-  const nameMatches = deps.lookup.getByNormalizedName(normalized);
-  const aliasMatches = deps.lookup.getByAlias?.(normalized) ?? [];
-  const exactById = new Map<string, Entity>();
-  for (const e of nameMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
-  for (const e of aliasMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
-  if (exactById.size === 1) {
-    const matched = exactById.values().next().value as Entity;
-    // Pass the matched entity's canonical name (not the proposed one) so
-    // upsertPersonEntity's name comparison hits exactly even if the
-    // attendee's casing drifted from the stored entity's. The matched name
-    // may differ from `input.name` when the hit came from an alias.
-    const entity = await deps.entityRepo.upsertPersonEntity({
-      name: matched.name,
-      subtype: input.subtype,
-      source: input.source,
-      sourceId: input.sourceId,
-    });
-    return { kind: "linked", entity };
+  const sorted = [...pool].sort((a, b) => {
+    if (b.hotness !== a.hotness) return b.hotness - a.hotness;
+    if (a.created_at !== b.created_at) return a.created_at.localeCompare(b.created_at);
+    return a.id.localeCompare(b.id);
+  });
+  if (!matchedByDomain && input.entityType === "company" && sorted.length >= 2) {
+    const topHotness = Number(sorted[0].hotness ?? 0);
+    const secondHotness = Number(sorted[1].hotness ?? 0);
+    const strongEnough = secondHotness <= 0 ? topHotness > 0 : topHotness >= 3 * secondHotness;
+    if (!strongEnough) return null;
   }
+  return sorted[0];
+}
 
-  // 4) Fuzzy-rank against same-type entities.
-  const candidates = deps.lookup.listByType(input.entityType);
-  let ranked = rank(input.name, candidates);
-
-  // 5) Drop candidates that have a sticky rejection for this normalized name.
-  if (ranked.length > 0) {
-    const filtered: RankedCandidate[] = [];
-    for (const r of ranked) {
-      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
-      if (!rejected) filtered.push(r);
-    }
-    ranked = filtered;
-  }
-
-  // 6) Decide.
-  if (ranked.length === 0) {
-    const created = await deps.entityRepo.upsertPersonEntity({
-      name: input.name,
-      subtype: input.subtype,
-      source: input.source,
-      sourceId: input.sourceId,
-    });
-    return { kind: "created", entity: created };
-  }
-
+async function queueProposal(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  ranked: RankedCandidate[],
+  reason: CandidateReason,
+): Promise<ProposeResult> {
   const isSingle = ranked.length === 1;
   const candidateEntityId = isSingle ? ranked[0].entity.id : null;
   const candidateScore = isSingle ? ranked[0].score : null;
-  const candidateReason = ranked[0].reason;
 
   const upsertResult = await deps.reviewRepo.upsertQueueRow({
     proposedName: input.name,
     normalizedName: normalized,
     entityType: input.entityType,
-    proposedEmail: null,
+    proposedEmail: input.email ?? null,
     candidateEntityId,
     candidateScore,
-    candidateReason,
+    candidateReason: reason,
     triggeredByUserId: input.triggeredByUserId,
   });
 
@@ -292,4 +328,144 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     reviewId: upsertResult.row.id,
     candidateEntityId,
   };
+}
+
+export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
+  const normalized = normalizeMatchName(input.entityType, input.name);
+
+  // 1) Email fast-path — exact match against existing entity's stored email.
+  if (input.entityType === "person" && input.email) {
+    const lowered = input.email.toLowerCase();
+    const candidates = deps.lookup.listByType(input.entityType);
+    for (const c of candidates) {
+      const stored = deps.readEmail(c);
+      if (stored && stored.toLowerCase() === lowered) {
+        const { entity } = await persistEntity(deps, input, c);
+        return { kind: "linked", entity };
+      }
+    }
+
+    // 2) Email present but no entity matched it. An email is identity-grade;
+    //    a name collision against a different email is a different person.
+    //    Auto-create instead of queuing.
+    const { entity } = await persistEntity(deps, input);
+    return { kind: "created", entity };
+  }
+
+  // 3) Exact-name / alias fast-path — an entity already shares this canonical
+  //    name OR carries it as an alias (case-insensitively, via normalizeName).
+  //    Without this, the fuzzy ranker can silently route around the obvious
+  //    match — e.g. a name-only "Saurabh Kumar" attendee gets queued against
+  //    "Saurabh Kumar Singh" instead of linking to the existing "Saurabh
+  //    Kumar" entity. The alias half catches the post-Confirm case: an
+  //    entity whose canonical name is "Simran Suri" and whose aliases include
+  //    "Simran Suri Neeli" (because a reviewer Confirmed the merge) — a
+  //    future propose for "Simran Suri Neeli" should auto-link rather than
+  //    re-queue. Ambiguity-aware: ≥2 distinct entities sharing the name or
+  //    holding it as an alias fall through to the ranker (which queues with
+  //    NULL candidate).
+  const nameMatches = deps.lookup.getByNormalizedName(normalized);
+  const aliasMatches = deps.lookup.getByAlias?.(normalized) ?? [];
+  const exactById = new Map<string, Entity>();
+  for (const e of nameMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
+  for (const e of aliasMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
+  for (const e of deps.lookup.listByType(input.entityType)) {
+    if (normalizeMatchName(input.entityType, e.name) === normalized) exactById.set(e.id, e);
+    for (const alias of parseAliases(e.aliases)) {
+      if (normalizeMatchName(input.entityType, alias) === normalized) exactById.set(e.id, e);
+    }
+  }
+  if (exactById.size === 1) {
+    const matched = exactById.values().next().value as Entity;
+    const { entity } = await persistEntity(deps, input, matched);
+    return { kind: "linked", entity };
+  }
+  if (exactById.size > 1) {
+    const winner = pickConfirmedCanonical([...exactById.values()], input, deps.lookup);
+    if (winner) {
+      const { entity } = await persistEntity(deps, input, winner);
+      return { kind: "linked", entity };
+    }
+    return queueProposal(
+      deps,
+      input,
+      normalized,
+      [...exactById.values()].map((entity) => ({ entity, score: 1, reason: "exact-ambiguous" })),
+      "exact-ambiguous",
+    );
+  }
+
+  if (input.entityType === "company" && input.evidenceDomain) {
+    const domain = input.evidenceDomain.trim().toLowerCase();
+    const companyIds = new Set(deps.lookup.getCompanyIdsByDomain?.(domain) ?? []);
+    if (companyIds.size > 0) {
+      const proposedTokens = tokenize(normalizeMatchName(input.entityType, input.name));
+      const domainMatches = deps.lookup
+        .listByType("company")
+        .filter((entity) => companyIds.has(entity.id))
+        .filter((entity) => hasTokenOverlap(proposedTokens, tokenize(normalizeMatchName("company", entity.name))));
+
+      if (domainMatches.length === 1) {
+        const { entity } = await persistEntity(deps, input, domainMatches[0]);
+        return { kind: "linked", entity };
+      }
+      if (domainMatches.length > 1) {
+        const winner = pickConfirmedCanonical(domainMatches, input, deps.lookup);
+        if (winner) {
+          const { entity } = await persistEntity(deps, input, winner);
+          return { kind: "linked", entity };
+        }
+        return queueProposal(
+          deps,
+          input,
+          normalized,
+          domainMatches.map((entity) => ({ entity, score: 1, reason: "exact-ambiguous" })),
+          "exact-ambiguous",
+        );
+      }
+    }
+  }
+
+  if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
+    let ranked = input.precomputedCandidates.map((c) => ({
+      entity: c.entity,
+      score: c.score,
+      reason: c.reason ?? ("llm-ambiguous" as const),
+    }));
+    const filtered: RankedCandidate[] = [];
+    for (const r of ranked) {
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      if (!rejected) filtered.push(r);
+    }
+    ranked = filtered;
+    if (ranked.length > 0) {
+      return queueProposal(deps, input, normalized, ranked, "llm-ambiguous");
+    }
+  }
+
+  if (input.skipFuzzy) {
+    const { entity } = await persistEntity(deps, input);
+    return { kind: "created", entity };
+  }
+
+  // 4) Fuzzy-rank against same-type entities.
+  const candidates = deps.lookup.listByType(input.entityType);
+  let ranked = rank(input.entityType, input.name, candidates);
+
+  // 5) Drop candidates that have a sticky rejection for this normalized name.
+  if (ranked.length > 0) {
+    const filtered: RankedCandidate[] = [];
+    for (const r of ranked) {
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      if (!rejected) filtered.push(r);
+    }
+    ranked = filtered;
+  }
+
+  // 6) Decide.
+  if (ranked.length === 0) {
+    const { entity } = await persistEntity(deps, input);
+    return { kind: "created", entity };
+  }
+  return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
 }
