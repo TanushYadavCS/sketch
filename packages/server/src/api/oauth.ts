@@ -408,16 +408,16 @@ export function oauthRoutes(
 
       if (error) {
         logger.warn({ error }, "Zoho CRM OAuth denied");
-        return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=denied");
+        return c.redirect("/files?oauth=error&connector=zoho_crm&reason=denied");
       }
 
       if (!code || !state) {
-        return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=missing_params");
+        return c.redirect("/files?oauth=error&connector=zoho_crm&reason=missing_params");
       }
 
       const colonIdx = state.indexOf(":");
       if (colonIdx === -1) {
-        return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=invalid_state");
+        return c.redirect("/files?oauth=error&connector=zoho_crm&reason=invalid_state");
       }
 
       const userId = state.substring(0, colonIdx);
@@ -426,12 +426,12 @@ export function oauthRoutes(
       cleanupExpiredStates();
       const pending = pendingStates.get(nonce);
       if (!pending || pending.userId !== userId || !pending.region) {
-        return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=invalid_state");
+        return c.redirect("/files?oauth=error&connector=zoho_crm&reason=invalid_state");
       }
       pendingStates.delete(nonce);
 
       if (!zohoClientId || !zohoClientSecret) {
-        return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=not_configured");
+        return c.redirect("/files?oauth=error&connector=zoho_crm&reason=not_configured");
       }
 
       const accountsServer =
@@ -442,7 +442,7 @@ export function oauthRoutes(
       try {
         const existingZoho = await connectors.findConfigsByType("zoho_crm");
         if (existingZoho.some((config) => config.sync_status !== "disabled")) {
-          return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=already_connected");
+          return c.redirect("/files?oauth=error&connector=zoho_crm&reason=already_connected");
         }
 
         const tokenRes = await fetch(`${accountsServer}/oauth/v2/token`, {
@@ -460,7 +460,7 @@ export function oauthRoutes(
         if (!tokenRes.ok) {
           const errBody = await tokenRes.text();
           logger.error({ status: tokenRes.status, body: errBody }, "Zoho CRM token exchange failed");
-          return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=token_exchange");
+          return c.redirect("/files?oauth=error&connector=zoho_crm&reason=token_exchange");
         }
 
         const tokenData = (await tokenRes.json()) as {
@@ -473,11 +473,11 @@ export function oauthRoutes(
 
         if (!tokenData.refresh_token) {
           logger.error("No Zoho CRM refresh_token in response");
-          return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=no_refresh_token");
+          return c.redirect("/files?oauth=error&connector=zoho_crm&reason=no_refresh_token");
         }
         if (!tokenData.api_domain) {
           logger.error("No Zoho CRM api_domain in token response");
-          return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=no_api_domain");
+          return c.redirect("/files?oauth=error&connector=zoho_crm&reason=no_api_domain");
         }
 
         const expiresAt = new Date(Date.now() + (tokenData.expires_in ?? 3600) * 1000).toISOString();
@@ -508,10 +508,10 @@ export function oauthRoutes(
 
         logger.info({ userId, connectorId: connectorConfig.id, region: pending.region }, "Zoho CRM OAuth tokens saved");
 
-        return c.redirect(`/connections?oauth=success&connector=zoho_crm&connectorId=${connectorConfig.id}`);
+        return c.redirect(`/files?oauth=success&connector=zoho_crm&connectorId=${connectorConfig.id}`);
       } catch (err) {
         logger.error({ err, userId }, "Zoho CRM OAuth callback failed");
-        return c.redirect("/connections?oauth=error&connector=zoho_crm&reason=internal");
+        return c.redirect("/files?oauth=error&connector=zoho_crm&reason=internal");
       }
     });
 
