@@ -142,6 +142,26 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(['🧩 Canvas web search: "TypeScript best practices"']);
   });
 
+  it("renders delivery target search progress", () => {
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+      ]).lines,
+    ).toEqual(['📍 Searching delivery targets for "engineering"']);
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { platform: "slack" } },
+      ]).lines,
+    ).toEqual(["📍 Listing delivery targets"]);
+  });
+
+  it("renders delivery target search in technical mode", () => {
+    const { lines } = renderEvents({ toolProgress: "technical", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+    ]);
+    expect(lines).toEqual(['📍 SearchDeliveryTargets: "engineering"']);
+  });
+
   it("renders a clear fallback for unknown tools with safe available input", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "mcp__google_drive__list_files", input: { folder: "root" } },

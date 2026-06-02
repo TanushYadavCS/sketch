@@ -460,6 +460,7 @@ describe("workflow invoke API", () => {
       mode: "target",
       platform: "slack",
       target: "C999",
+      threadTs: null,
       messageRef: "1712345678.000000",
     });
   });
@@ -495,6 +496,41 @@ describe("workflow invoke API", () => {
       mode: "target",
       platform: "slack",
       target: "C_OUTPUT",
+      threadTs: null,
+      messageRef: "1712345678.000000",
+    });
+  });
+
+  it("delivers final output to a Slack user DM target", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, {
+      createdBy: requester.id,
+      deliveryTarget: "C_SOURCE",
+      outputTarget: "URECIPIENT",
+    });
+    const slack = {
+      openDmChannel: vi.fn().mockResolvedValue("D_OPENED"),
+      postMessage: vi.fn().mockResolvedValue("1712345678.000000"),
+    } as unknown as SlackBot;
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      getSlack: () => slack,
+    });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({ requesterUserId: requester.id, deliveryMode: "target" }),
+    });
+    expect(res.status).toBe(200);
+    const completed = sseData(await readSse(res), "completed");
+    expect(slack.openDmChannel).toHaveBeenCalledWith("URECIPIENT");
+    expect(slack.postMessage).toHaveBeenCalledWith("D_OPENED", "workflow result");
+    expect(completed.delivery).toEqual({
+      mode: "target",
+      platform: "slack",
+      target: "URECIPIENT",
+      threadTs: null,
       messageRef: "1712345678.000000",
     });
   });

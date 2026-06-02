@@ -30,6 +30,7 @@ const TOOL_EMOJI: Record<string, string> = {
   SendFileToChat: "📎",
   TranscribeAudio: "🎙️",
   ManageScheduledTasks: "⏰",
+  SearchDeliveryTargets: "📍",
   SearchEntities: "🔍",
   GetEntityContext: "📊",
   ReadChatHistory: "💬",
@@ -50,6 +51,7 @@ const PRIMARY_ARG: Record<string, string> = {
   SendFileToChat: "file_path",
   TranscribeAudio: "file_path",
   ManageScheduledTasks: "action",
+  SearchDeliveryTargets: "query",
   SearchEntities: "queries",
 };
 
@@ -74,6 +76,11 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
     prefix: "Managing scheduled tasks:",
     keys: ["action"],
     fallback: "Managing scheduled tasks",
+  },
+  SearchDeliveryTargets: {
+    prefix: "Searching delivery targets for",
+    keys: ["query"],
+    fallback: "Listing delivery targets",
   },
   SearchEntities: { prefix: "Searching entities for", keys: ["queries"], fallback: "Searching entities" },
 };

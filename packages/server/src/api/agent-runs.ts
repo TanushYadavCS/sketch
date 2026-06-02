@@ -148,6 +148,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
         userName: requester.name,
         userEmail: requester.email,
         logger: deps.logger,
+        getSlack: deps.getSlack,
         onProgressEvent: async (event: ProgressEvent) => {
           await writeEvent("progress", event);
         },

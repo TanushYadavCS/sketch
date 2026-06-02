@@ -15,6 +15,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { executeAutomation } from "../workflows/runtime";
 
 const deliveryModeSchema = z.enum(["silent", "target"]).default("silent");
@@ -61,6 +62,7 @@ interface WorkflowRouteDeps {
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
+  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
 }
 
 class WorkflowApiError extends Error {
@@ -118,7 +120,9 @@ function workflowMetadata(task: ScheduledTaskRow, summary?: { runCount: number; 
     deliveryTarget: task.delivery_target,
     outputTarget: task.output_target,
     outputPlatform: task.output_platform,
+    outputThreadTs: task.output_thread_ts,
     outputMode: task.output_mode === "silent" ? "silent" : "deliver",
+    delivery: resolveWorkflowDelivery(task),
     scheduleType: task.schedule_type,
     scheduleValue: task.schedule_value,
     timezone: task.timezone,
@@ -152,30 +156,42 @@ function assertActiveWorkflow(task: ScheduledTaskRow | undefined): ScheduledTask
 }
 
 function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
-  if (task.output_mode === "silent") {
+  const resolved = resolveWorkflowDelivery(task);
+  if (resolved.mode === "silent") {
     return {
       delivery: { mode: "silent" },
       sendMessage: undefined,
     };
   }
 
-  if (task.platform === "slack") {
+  if (resolved.platform === "slack") {
     const slack = deps.getSlack?.() ?? null;
     if (!slack) {
       throw new WorkflowApiError("NOT_CONNECTED", "Slack is not connected");
     }
-    const outputTarget = task.output_target ?? task.delivery_target;
-    const delivery: Record<string, unknown> = { mode: "target", platform: "slack", target: outputTarget };
+    const delivery: Record<string, unknown> = {
+      mode: "target",
+      platform: "slack",
+      target: resolved.targetId,
+      threadTs: resolved.threadTs,
+    };
     return {
       delivery,
       sendMessage: async (text: string) => {
-        if (task.context_type === "channel" && task.thread_ts && outputTarget === task.delivery_target) {
-          const messageRef = await slack.postThreadReply(outputTarget, task.thread_ts, text);
-          delivery.threadId = task.thread_ts;
+        if (resolved.threadTs) {
+          const messageRef = await slack.postThreadReply(resolved.targetId, resolved.threadTs, text);
           delivery.messageRef = messageRef;
           return;
         }
-        const messageRef = await slack.postMessage(outputTarget, text);
+        let targetId = resolved.targetId;
+        if (resolved.targetType === "dm" && isSlackUserId(targetId) && !isSlackDmChannelId(targetId)) {
+          const dmChannelId = await slack.openDmChannel(targetId);
+          if (!dmChannelId) {
+            throw new WorkflowApiError("NOT_CONNECTED", "Could not open Slack DM channel");
+          }
+          targetId = dmChannelId;
+        }
+        const messageRef = await slack.postMessage(targetId, text);
         delivery.messageRef = messageRef;
       },
     };
@@ -185,12 +201,11 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
   if (!whatsapp?.isConnected) {
     throw new WorkflowApiError("NOT_CONNECTED", "WhatsApp is not connected");
   }
-  const outputTarget = task.output_target ?? task.delivery_target;
-  const delivery: Record<string, unknown> = { mode: "target", platform: "whatsapp", target: outputTarget };
+  const delivery: Record<string, unknown> = { mode: "target", platform: "whatsapp", target: resolved.targetId };
   return {
     delivery,
     sendMessage: async (text: string) => {
-      await whatsapp.sendText(outputTarget, text);
+      await whatsapp.sendText(resolved.targetId, text);
     },
   };
 }
@@ -235,6 +250,7 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     userRepo: deps.users,
     runAgent: deps.runAgent,
     buildMcpServers: deps.buildMcpServers,
+    getSlack: deps.getSlack,
     inboxMessagesRepo: deps.inboxMessagesRepo,
     sendDm: deps.sendDm,
     sendMessage: delivery.sendMessage,
@@ -251,6 +267,19 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     stepOutputs: result.stepOutputs,
     delivery: delivery.delivery,
   };
+}
+
+function enqueueWorkflowRun<T>(deps: WorkflowRouteDeps, workflowId: string, run: () => Promise<T>): Promise<T> {
+  if (!deps.queueManager) return run();
+  return new Promise<T>((resolve, reject) => {
+    deps.queueManager?.getQueue(`workflow-${workflowId}`).enqueue(async () => {
+      try {
+        resolve(await run());
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
 }
 
 async function resolveRequesterId(
@@ -325,16 +354,18 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
       const triggerData = buildTriggerData(parsed.data, requesterUserId);
 
       if (parsed.data.responseMode === "json") {
-        const response = await executeWorkflowRun({
-          workflowId,
-          task,
-          triggerData,
-          parsed: parsed.data,
-          deps,
-          runsRepo,
-          stepContentRepo,
-          loadIntegrationProvider,
-        });
+        const response = await enqueueWorkflowRun(deps, workflowId, () =>
+          executeWorkflowRun({
+            workflowId,
+            task,
+            triggerData,
+            parsed: parsed.data,
+            deps,
+            runsRepo,
+            stepContentRepo,
+            loadIntegrationProvider,
+          }),
+        );
         return c.json(response);
       }
 
@@ -345,21 +376,23 @@ export function workflowRoutes(deps: WorkflowRouteDeps) {
         };
 
         try {
-          const response = await executeWorkflowRun({
-            workflowId,
-            task,
-            triggerData,
-            parsed: parsed.data,
-            deps,
-            runsRepo,
-            stepContentRepo,
-            loadIntegrationProvider,
-            onEvent: async (event) => {
-              if (event.type === "completed") return;
-              const { type, ...data } = event;
-              await writeEvent(type, data);
-            },
-          });
+          const response = await enqueueWorkflowRun(deps, workflowId, () =>
+            executeWorkflowRun({
+              workflowId,
+              task,
+              triggerData,
+              parsed: parsed.data,
+              deps,
+              runsRepo,
+              stepContentRepo,
+              loadIntegrationProvider,
+              onEvent: async (event) => {
+                if (event.type === "completed") return;
+                const { type, ...data } = event;
+                await writeEvent(type, data);
+              },
+            }),
+          );
 
           await writeEvent("completed", response);
         } catch (err) {

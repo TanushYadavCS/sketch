@@ -74,6 +74,7 @@ function buildMockSlack() {
   return {
     postMessage: vi.fn().mockResolvedValue("ts-123"),
     postThreadReply: vi.fn().mockResolvedValue("ts-reply"),
+    openDmChannel: vi.fn().mockResolvedValue("D_OPENED"),
     isConnected: true,
   };
 }
@@ -601,6 +602,54 @@ describe("executeTask() delivery routing", () => {
       "D_DM_CHANNEL",
       "Hello from task",
     );
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.openDmChannel).not.toHaveBeenCalled();
+  });
+
+  it("Slack DM user id: sendMessage opens the DM channel before posting", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "URECIPIENT",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    await lastExecuteAutomationParams?.sendMessage?.("Hello from task");
+
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.openDmChannel).toHaveBeenCalledWith(
+      "URECIPIENT",
+      undefined,
+    );
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
+      "D_OPENED",
+      "Hello from task",
+    );
+  });
+
+  it("Slack DM user id: sendMessage fails when the DM channel cannot be opened", async () => {
+    const deps = buildDeps(db);
+    (deps._slack as ReturnType<typeof buildMockSlack>).openDmChannel.mockResolvedValue(null);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "URECIPIENT",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    await expect(lastExecuteAutomationParams?.sendMessage?.("Hello from task")).rejects.toThrow(
+      "Failed to open Slack DM channel",
+    );
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).not.toHaveBeenCalled();
   });
 
   it("Slack channel + fresh: sendMessage calls postMessage", async () => {
@@ -627,7 +676,7 @@ describe("executeTask() delivery routing", () => {
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
   });
 
-  it("Slack channel + fresh + threadTs: sendMessage calls postThreadReply", async () => {
+  it("Slack channel + fresh + source threadTs: sendMessage posts top-level by default", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -638,6 +687,32 @@ describe("executeTask() delivery routing", () => {
       delivery_target: "C_CHANNEL1",
       session_mode: "fresh",
       thread_ts: "1234567890.000100",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    await lastExecuteAutomationParams?.sendMessage?.("Thread reply");
+
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
+      "C_CHANNEL1",
+      "Thread reply",
+    );
+  });
+
+  it("Slack channel + outputThreadTs: sendMessage calls postThreadReply", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "slack",
+      context_type: "channel",
+      delivery_target: "C_CHANNEL1",
+      session_mode: "fresh",
+      thread_ts: "source-thread",
+      output_thread_ts: "1234567890.000100",
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);

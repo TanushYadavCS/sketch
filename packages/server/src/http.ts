@@ -236,6 +236,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         deps?.listAgentEnvForRuntime ?? ((context) => agentEnvVars.listForRuntimeContext(context)),
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
+      queueManager: deps?.queueManager,
     }),
   );
   if (deps?.runAgent) {

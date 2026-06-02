@@ -28,6 +28,7 @@ import {
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
+import type { SlackBot } from "../slack/bot";
 import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
@@ -137,6 +138,7 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
+  getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -318,6 +320,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     uploadCollector,
     workspaceDir: absWorkspace,
     db: params.db,
+    getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,

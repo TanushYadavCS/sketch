@@ -347,6 +347,7 @@ export interface ScheduledTasksTable {
   edges: string | null;
   output_target: string | null;
   output_platform: string | null;
+  output_thread_ts: string | null;
   output_mode: Generated<string>;
 }
 

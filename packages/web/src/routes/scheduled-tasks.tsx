@@ -5,11 +5,13 @@ import {
   CheckCircleIcon,
   CheckIcon,
   ClockIcon,
+  CodeIcon,
   CopySimpleIcon,
   DotsThreeIcon,
   LightningIcon,
   PauseIcon,
   PlayIcon,
+  RobotIcon,
   SlackLogoIcon,
   SpinnerGapIcon,
   TrashIcon,
@@ -105,7 +107,17 @@ function removeTaskFromCache(tasks: ScheduledTaskListItem[] | undefined, taskId:
 }
 
 function isMultiStep(task: ScheduledTaskListItem): boolean {
-  return task.stepCount > 2;
+  if (!task.steps) return false;
+  try {
+    const steps = JSON.parse(task.steps) as Array<{ type: string }>;
+    return steps.filter((step) => step.type !== "trigger").length > 1;
+  } catch {
+    return task.stepCount > 2;
+  }
+}
+
+function hasWorkflowSteps(task: ScheduledTaskListItem): boolean {
+  return Boolean(task.steps);
 }
 
 function isCanvasManaged(task: ScheduledTaskListItem): boolean {
@@ -140,11 +152,17 @@ function getStepSummary(task: ScheduledTaskListItem): string | null {
     const steps = JSON.parse(task.steps) as Array<{ label: string; type: string }>;
     return steps
       .filter((s) => s.type !== "trigger")
-      .map((s) => s.label)
+      .map((s) => `${s.label} (${s.type})`)
       .join(" \u2192 ");
   } catch {
     return null;
   }
+}
+
+function formatDelivery(task: ScheduledTaskListItem): string {
+  if (task.delivery.mode === "silent") return "Silent";
+  const platform = task.delivery.platform === "slack" ? "Slack" : "WhatsApp";
+  return `${platform} · ${task.delivery.label}`;
 }
 
 export function ScheduledTasksPage() {
@@ -423,20 +441,19 @@ function TaskRow({
 }
 
 function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; isAdmin: boolean }) {
-  const multi = isMultiStep(task);
   const targetLabel = task.targetLabel || task.deliveryTarget;
   const canvasManaged = isCanvasManaged(task);
 
   return (
     <div className="border-t border-border bg-muted/20 px-4 py-4 space-y-4">
-      {multi ? <StepsList task={task} /> : null}
+      {hasWorkflowSteps(task) ? <StepsList task={task} /> : null}
 
       <RunHistory taskId={task.id} />
 
       <dl className="grid gap-4 text-sm sm:grid-cols-2">
-        <DetailItem label="Target" value={`${task.targetKindLabel} \u00b7 ${targetLabel}`} />
+        <DetailItem label="Source" value={`${task.targetKindLabel} \u00b7 ${targetLabel}`} />
+        <DetailItem label="Delivery" value={formatDelivery(task)} />
         <DetailItem label="Type" value={canvasManaged ? "Trigger-based" : "Scheduled"} />
-        <DetailItem label="Output" value={task.outputMode === "silent" ? "Silent" : "Send final output"} />
         <DetailItem label={canvasManaged ? "Trigger" : "Schedule"} value={getTriggerDetail(task)} />
         {canvasManaged ? null : <DetailItem label="Timezone" value={task.timezone} />}
         <DetailItem label="Session mode" value={formatSessionMode(task.sessionMode)} />
@@ -471,10 +488,10 @@ function StepsList({ task }: { task: ScheduledTaskListItem }) {
     contentByStepId.set(row.step_id, row);
   }
 
-  const stepTypeIcon = (type: string) => {
-    if (type === "trigger") return "\u26a1";
-    if (type === "agent") return "\ud83e\udd16";
-    return "\u25fb";
+  const StepTypeIcon = ({ type }: { type: string }) => {
+    if (type === "trigger") return <LightningIcon size={14} weight="bold" />;
+    if (type === "agent") return <RobotIcon size={14} weight="bold" />;
+    return <CodeIcon size={14} weight="bold" />;
   };
 
   const stepTypeLabel = (type: string) => {
@@ -517,7 +534,9 @@ function StepsList({ task }: { task: ScheduledTaskListItem }) {
                 aria-expanded={hasContent ? isExpanded : undefined}
               >
                 <span className="w-5 text-right text-xs text-muted-foreground">{i + 1}.</span>
-                <span>{stepTypeIcon(step.type)}</span>
+                <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+                  <StepTypeIcon type={step.type} />
+                </span>
                 <span className="text-xs text-muted-foreground">{stepTypeLabel(step.type)}:</span>
                 <span className="flex-1 text-foreground">{step.label}</span>
                 {hasContent ? (

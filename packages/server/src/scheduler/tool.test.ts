@@ -34,7 +34,15 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     edges: null,
     outputTarget: null,
     outputPlatform: null,
+    outputThreadTs: null,
     outputMode: "deliver",
+    delivery: {
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C123",
+      threadTs: null,
+      mode: "deliver",
+    },
     ...overrides,
   };
 }
@@ -304,6 +312,32 @@ describe("handleManageScheduledTasks — add", () => {
       { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ threadTs: "1234567890.123456" }));
+  });
+
+  it("does not default workflow delivery to the current Slack thread", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ outputThreadTs: undefined }));
+  });
+
+  it("supports explicit delivery to the current Slack thread", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "add",
+        prompt: "Do it",
+        schedule_type: "cron",
+        schedule_value: "0 9 * * 1",
+        delivery: { targetType: "thread" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ outputThreadTs: "1234567890.123456" }));
   });
 
   it("creates simple prompt automations as Sketch-mode agent steps", async () => {
@@ -629,6 +663,89 @@ describe("handleManageScheduledTasks — update", () => {
         scheduleType: "cron",
         scheduleValue: "*/10 * * * *",
         timezone: "UTC",
+      }),
+    );
+  });
+
+  it("can clear Slack thread delivery without changing the channel target", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { platform: "slack", targetType: "channel", targetId: "C456", threadTs: null },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputPlatform: "slack",
+        outputTarget: "C456",
+        outputThreadTs: null,
+      }),
+    );
+  });
+
+  it("clears Slack thread delivery when retargeting to a channel", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { platform: "slack", targetType: "channel", targetId: "COPS" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputPlatform: "slack",
+        outputTarget: "COPS",
+        outputThreadTs: null,
+      }),
+    );
+  });
+
+  it("does not clear Slack thread delivery for mode-only delivery updates", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { mode: "silent" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputMode: "silent",
+      }),
+    );
+    expect((scheduler.updateTask as ReturnType<typeof vi.fn>).mock.calls[0][1]).not.toHaveProperty("outputThreadTs");
+  });
+
+  it("sets the current channel target when updating delivery to the current thread", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { targetType: "thread" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputPlatform: "slack",
+        outputTarget: "C456",
+        outputThreadTs: "1234567890.123456",
       }),
     );
   });

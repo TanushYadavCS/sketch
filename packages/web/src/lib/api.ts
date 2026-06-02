@@ -93,7 +93,16 @@ export interface ScheduledTaskListItem {
   triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
+  delivery: {
+    platform: "slack" | "whatsapp";
+    targetType: "dm" | "channel" | "group" | "thread";
+    targetId: string;
+    threadTs: string | null;
+    mode: "deliver" | "silent";
+    label: string;
+  };
   lastRunStatus: string | null;
   runCount: number;
 }

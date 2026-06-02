@@ -24,6 +24,7 @@ import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "../integrations/wrapper";
 import type { Logger } from "../logger";
+import { resolveWorkflowDelivery } from "./delivery";
 import type { StepOutput, WorkflowStep } from "./types";
 
 export interface ExecuteAutomationParams {
@@ -39,6 +40,7 @@ export interface ExecuteAutomationParams {
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
+  getSlack?: RunAgentParams["getSlack"];
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   sendMessage?: (text: string) => Promise<void>;
@@ -220,13 +222,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           creatorEmail,
           runAgent: params.runAgent,
           buildMcpServers: params.buildMcpServers,
+          getSlack: params.getSlack,
           loadIntegrationProvider: params.loadIntegrationProvider,
           userRepo: params.userRepo,
           inboxMessagesRepo: params.inboxMessagesRepo,
           sendDm: params.sendDm,
           // output_platform lets a workflow deliver to a different channel than
           // its trigger context; fall back to the task's own platform otherwise.
-          outputPlatform: (task.output_platform ?? task.platform) as "slack" | "whatsapp",
+          outputPlatform: resolveWorkflowDelivery(task).platform,
         });
       }
 
@@ -582,6 +585,7 @@ interface AgentStepParams {
   creatorEmail: string | null;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
+  getSlack?: RunAgentParams["getSlack"];
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   userRepo: NonNullable<RunAgentParams["userRepo"]>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
@@ -736,6 +740,7 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     platform: outputPlatform,
     onProgressEvent: async () => {},
     integrationMcpServers,
+    getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
     sessionMode: "fresh",
     contextType: "scheduled_task",

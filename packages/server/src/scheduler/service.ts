@@ -32,6 +32,7 @@ import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
 import { parseOnceSchedule } from "./parse-once";
 import { getScheduledTaskRowQueueKey } from "./queue-key";
@@ -161,9 +162,10 @@ export class TaskScheduler {
 
   private async executeTaskNow(task: ScheduledTaskRow): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
+    const delivery = resolveWorkflowDelivery(task);
     const sendMessage = this.getSendMessage(task);
 
-    if (!sendMessage && task.output_mode !== "silent") {
+    if (!sendMessage && delivery.mode !== "silent") {
       throw new Error(`Delivery target for task ${task.id} is unavailable`);
     }
 
@@ -180,6 +182,7 @@ export class TaskScheduler {
       userRepo: this.deps.userRepo,
       runAgent: this.deps.runAgent,
       buildMcpServers: this.deps.buildMcpServers,
+      getSlack: this.deps.getSlack,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
       sendMessage: sendMessage ?? undefined,
@@ -237,24 +240,33 @@ export class TaskScheduler {
 
   private getSendMessage(task: ScheduledTaskRow): ((text: string) => Promise<void>) | null {
     const { logger, getSlack, whatsapp } = this.deps;
+    const delivery = resolveWorkflowDelivery(task);
 
-    if (task.platform === "slack") {
+    if (delivery.platform === "slack") {
       const slack = getSlack();
       if (!slack) {
         logger.warn({ taskId: task.id }, "TaskScheduler: Slack bot unavailable, skipping task");
         return null;
       }
 
-      const outputTarget = task.output_target ?? task.delivery_target;
-      if (task.context_type === "channel" && task.thread_ts && outputTarget === task.delivery_target) {
-        const threadTs = task.thread_ts;
+      if (delivery.threadTs) {
         return async (text) => {
-          await slack.postThreadReply(outputTarget, threadTs, text);
+          await slack.postThreadReply(delivery.targetId, delivery.threadTs as string, text);
         };
       }
 
       return async (text) => {
-        await slack.postMessage(outputTarget, text);
+        let targetId = delivery.targetId;
+        if (delivery.targetType === "dm" && isSlackUserId(targetId) && !isSlackDmChannelId(targetId)) {
+          const settings = await this.deps.settingsRepo.get();
+          const dmChannelId = await slack.openDmChannel(targetId, settings?.slack_bot_token ?? undefined);
+          if (!dmChannelId) {
+            logger.warn({ taskId: task.id, slackUserId: targetId }, "TaskScheduler: failed to open Slack DM channel");
+            throw new Error(`Failed to open Slack DM channel for task ${task.id}`);
+          }
+          targetId = dmChannelId;
+        }
+        await slack.postMessage(targetId, text);
       };
     }
 
@@ -264,7 +276,7 @@ export class TaskScheduler {
     }
 
     return async (text) => {
-      await whatsapp.sendText(task.output_target ?? task.delivery_target, text);
+      await whatsapp.sendText(delivery.targetId, text);
     };
   }
 
@@ -289,6 +301,7 @@ export class TaskScheduler {
     edges?: string | null;
     outputTarget?: string | null;
     outputPlatform?: string | null;
+    outputThreadTs?: string | null;
     outputMode?: "deliver" | "silent";
   }): Promise<ScheduledTask> {
     const row = await this.repo.add({
@@ -311,6 +324,7 @@ export class TaskScheduler {
       edges: params.edges ?? null,
       output_target: params.outputTarget ?? null,
       output_platform: params.outputPlatform ?? null,
+      output_thread_ts: params.outputThreadTs ?? null,
       output_mode: params.outputMode ?? "deliver",
     });
 
@@ -364,6 +378,7 @@ export class TaskScheduler {
     if (params.edges !== undefined) fields.edges = params.edges;
     if (params.outputTarget !== undefined) fields.output_target = params.outputTarget;
     if (params.outputPlatform !== undefined) fields.output_platform = params.outputPlatform;
+    if (params.outputThreadTs !== undefined) fields.output_thread_ts = params.outputThreadTs;
     if (params.outputMode !== undefined) fields.output_mode = params.outputMode;
 
     const row = await this.repo.update(id, fields);
@@ -437,7 +452,9 @@ export class TaskScheduler {
       edges: row.edges,
       outputTarget: row.output_target,
       outputPlatform: row.output_platform,
+      outputThreadTs: row.output_thread_ts,
       outputMode: row.output_mode === "silent" ? "silent" : "deliver",
+      delivery: resolveWorkflowDelivery(row),
     };
   }
 }
