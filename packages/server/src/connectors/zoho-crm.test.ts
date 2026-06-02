@@ -85,12 +85,15 @@ describe("Zoho CRM connector", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({
         modules: [
-          { api_name: "Deals", plural_label: "Deals", status: "active" },
-          { api_name: "Contacts", plural_label: "Contacts", status: "active" },
-          { api_name: "Accounts", plural_label: "Accounts", status: "active" },
-          { api_name: "Meetings", plural_label: "Meetings", status: "inactive" },
-          { api_name: "Events", plural_label: "Meetings", status: "active" },
-          { api_name: "CustomThings", plural_label: "Custom Things", status: "active" },
+          { api_name: "Deals", plural_label: "Deals", status: "visible", api_supported: true, viewable: true },
+          { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true, viewable: true },
+          { api_name: "Accounts", plural_label: "Accounts", status: "visible", api_supported: true, viewable: true },
+          // Not reachable via the records API → must be skipped.
+          { api_name: "Meetings", plural_label: "Meetings", status: "visible", api_supported: false, viewable: true },
+          // User-hidden standard module → must be skipped.
+          { api_name: "Leads", plural_label: "Leads", status: "user_hidden", api_supported: true, viewable: true },
+          { api_name: "Events", plural_label: "Meetings", status: "visible", api_supported: true, viewable: true },
+          { api_name: "CustomThings", plural_label: "Custom Things", status: "visible", api_supported: true },
         ],
       }),
     );
@@ -171,9 +174,9 @@ describe("Zoho CRM connector", () => {
         return Promise.resolve(
           jsonResponse({
             modules: [
-              { api_name: "Accounts", plural_label: "Accounts", status: "active" },
-              { api_name: "Contacts", plural_label: "Contacts", status: "active" },
-              { api_name: "Deals", plural_label: "Deals", status: "active" },
+              { api_name: "Accounts", plural_label: "Accounts", status: "visible", api_supported: true },
+              { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true },
+              { api_name: "Deals", plural_label: "Deals", status: "visible", api_supported: true },
             ],
           }),
         );
@@ -262,7 +265,9 @@ describe("Zoho CRM connector", () => {
       const url = String(input);
       if (url.endsWith("/settings/modules")) {
         return Promise.resolve(
-          jsonResponse({ modules: [{ api_name: "Accounts", plural_label: "Accounts", status: "active" }] }),
+          jsonResponse({
+            modules: [{ api_name: "Accounts", plural_label: "Accounts", status: "visible", api_supported: true }],
+          }),
         );
       }
       if (url.includes("/Accounts?page=1")) {

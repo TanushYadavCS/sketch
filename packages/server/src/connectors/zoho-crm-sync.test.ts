@@ -52,9 +52,9 @@ describe("Zoho CRM connector sync integration", () => {
         return Promise.resolve(
           jsonResponse({
             modules: [
-              { api_name: "Accounts", plural_label: "Accounts", status: "active" },
-              { api_name: "Contacts", plural_label: "Contacts", status: "active" },
-              { api_name: "Deals", plural_label: "Deals", status: "active" },
+              { api_name: "Accounts", plural_label: "Accounts", status: "visible", api_supported: true },
+              { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true },
+              { api_name: "Deals", plural_label: "Deals", status: "visible", api_supported: true },
             ],
           }),
         );

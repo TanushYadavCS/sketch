@@ -144,8 +144,14 @@ function normalizeModuleApiName(input: string): string {
 }
 
 function isModuleUsable(module: ZohoModuleMetadata): boolean {
-  if (module.status && module.status.toLowerCase() !== "active") return false;
-  if (module.visible === false || module.viewable === false || module.api_supported === false) return false;
+  // Must be reachable via the records API.
+  if (module.api_supported === false) return false;
+  if (module.visible === false || module.viewable === false) return false;
+  // Zoho's `status` is "visible" | "user_hidden" | "system_hidden" (not "active").
+  // Skip modules a user explicitly hid; allow "visible" and "system_hidden"
+  // (the latter covers API-accessible backend modules like Notes). The
+  // logicalModuleFor allowlist decides which modules we actually sync.
+  if (module.status && module.status.toLowerCase() === "user_hidden") return false;
   return Boolean(module.api_name);
 }
 
@@ -497,6 +503,11 @@ async function* syncModule(
       { headers },
     );
 
+    logger.info(
+      { module: module.apiName, page, records: (response.data ?? []).length, moreRecords: response.info?.more_records },
+      "Zoho CRM module page fetched",
+    );
+
     for (const record of response.data ?? []) {
       const item = recordToSyncedItem(module, record, orgName);
       if (item) yield item;
@@ -569,6 +580,10 @@ export function createZohoCrmConnector(): Connector {
       const oauth = requireOAuthCredentials(credentials);
       const modules = await discoverStandardModules(oauth, logger);
       const orgName = typeof oauth.region === "string" ? `Zoho ${oauth.region}` : undefined;
+      logger.info(
+        { cursor, apiDomain: oauth.api_domain, moduleCount: modules.length, modules: modules.map((m) => m.apiName) },
+        "Zoho CRM sync: modules to sync",
+      );
 
       for (const module of modules) {
         logger.info({ module: module.apiName }, "Syncing Zoho CRM module");
