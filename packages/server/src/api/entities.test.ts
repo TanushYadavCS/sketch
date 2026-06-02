@@ -1472,6 +1472,87 @@ describe("Entity drawer routes", () => {
     expect(body.entity.profile.summary.activity).not.toContain("Bob Restricted");
   });
 
+  it("GET /api/entities/:id/mentions gates snippets with admin_can_read_all_files", async () => {
+    await seedEntity("e1", "Sarah", "person");
+
+    const scopeId = "scope-mentions-restricted";
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "cfg-mentions-scope",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: scopeId,
+        connector_config_id: "cfg-mentions-scope",
+        scope_type: "shared_drive",
+        provider_scope_id: "mentions-sd",
+        label: "Mentions Restricted",
+      })
+      .execute();
+
+    await seedFile("f-public");
+    await seedFile("f-restricted", scopeId);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "m-public",
+          entity_id: "e1",
+          indexed_file_id: "f-public",
+          chunk_index: 0,
+          context_snippet: "public snippet",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "m-restricted",
+          entity_id: "e1",
+          indexed_file_id: "f-restricted",
+          chunk_index: 0,
+          context_snippet: "restricted snippet",
+          confidence: "EXTRACTED",
+          source: "google_drive",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+
+    const offRes = await app.request("/api/entities/e1/mentions", { headers: { Cookie: adminCookie } });
+    expect(offRes.status).toBe(200);
+    const offBody = (await offRes.json()) as {
+      mentions: Array<{ contextSnippet: string }>;
+      hiddenCount: number;
+      total: number;
+    };
+    expect(offBody.mentions.map((m) => m.contextSnippet)).toEqual(["public snippet"]);
+    expect(offBody.total).toBe(1);
+    expect(offBody.hiddenCount).toBe(1);
+
+    await createSettingsRepository(db).update({ adminCanReadAllFiles: true });
+    const onRes = await app.request("/api/entities/e1/mentions", { headers: { Cookie: adminCookie } });
+    expect(onRes.status).toBe(200);
+    const onBody = (await onRes.json()) as {
+      mentions: Array<{ contextSnippet: string }>;
+      hiddenCount: number;
+      total: number;
+    };
+    expect(onBody.mentions.map((m) => m.contextSnippet).sort()).toEqual(["public snippet", "restricted snippet"]);
+    expect(onBody.total).toBe(2);
+    expect(onBody.hiddenCount).toBe(0);
+  });
+
   it("GET /api/entities/:id/relations partitions outgoing/incoming and pins AMBIGUOUS first", async () => {
     await seedEntity("e1", "Sarah", "person");
     await seedEntity("e2", "Atlas", "project");
@@ -1492,13 +1573,13 @@ describe("Entity drawer routes", () => {
     expect(body.totalCount).toBe(2);
   });
 
-  it("GET /api/entities/:id/relations is gated by EXPERIMENTAL_FLAG", async () => {
+  it("GET /api/entities/:id/relations works without EXPERIMENTAL_FLAG (Files is GA)", async () => {
     const offConfig = createTestConfig({ EXPERIMENTAL_FLAG: false });
     const offApp = createApp(db, offConfig, { logger });
     await seedEntity("e1", "Sarah", "person");
     const offCookie = await login(offApp);
     const res = await offApp.request("/api/entities/e1/relations", { headers: { Cookie: offCookie } });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
   });
 
   it("GET /api/entities/:id/relations/:rid/evidence applies file RBAC (visibleCount < totalCount)", async () => {
@@ -1535,6 +1616,20 @@ describe("Entity drawer routes", () => {
     await seedEvidence("ev-1", "r1", "f-public");
     await seedEvidence("ev-2", "r1", "f-restricted-1");
     await seedEvidence("ev-3", "r1", "f-restricted-2");
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "m-evidence-visible",
+        entity_id: "e1",
+        indexed_file_id: "f-public",
+        chunk_index: 0,
+        context_snippet: "Sarah in public evidence",
+        confidence: "EXTRACTED",
+        source: "google_drive",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
 
     const res = await app.request("/api/entities/e1/relations/r1/evidence", { headers: { Cookie: memberCookie } });
     expect(res.status).toBe(200);

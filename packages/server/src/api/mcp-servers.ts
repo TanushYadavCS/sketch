@@ -362,6 +362,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       userResult.email,
       parsed.data.appId,
       parsed.data.callbackUrl ?? "",
+      c.get("role"),
     );
     return c.json(result);
   });

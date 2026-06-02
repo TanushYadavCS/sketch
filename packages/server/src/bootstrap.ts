@@ -137,6 +137,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
       ...params,
       loadTranscriptionSettings,
       visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
+      geminiConfig: params.geminiConfig ?? {
+        maxRpm: config.GEMINI_MAX_RPM,
+        maxRetries: config.GEMINI_MAX_RETRIES,
+      },
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

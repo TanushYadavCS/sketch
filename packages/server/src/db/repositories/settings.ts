@@ -140,6 +140,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         googleOauthClientSecret: string | null;
         geminiApiKey: string | null;
         enrichmentEnabled: number | null;
+        adminCanReadAllFiles: boolean;
         syncIntervalMinutes: number | null;
         orgContext: string | null;
         sketchApiKey: string | null;
@@ -172,6 +173,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       if (data.googleOauthClientSecret !== undefined) updates.google_oauth_client_secret = data.googleOauthClientSecret;
       if (data.geminiApiKey !== undefined) updates.gemini_api_key = data.geminiApiKey;
       if (data.enrichmentEnabled !== undefined) updates.enrichment_enabled = data.enrichmentEnabled;
+      if (data.adminCanReadAllFiles !== undefined) updates.admin_can_read_all_files = data.adminCanReadAllFiles ? 1 : 0;
       if (data.syncIntervalMinutes !== undefined) updates.sync_interval_minutes = data.syncIntervalMinutes;
       if (data.sketchApiKey !== undefined) updates.sketch_api_key = data.sketchApiKey;
       if (data.whatsappFallbackAgentId !== undefined) updates.whatsapp_fallback_agent_id = data.whatsappFallbackAgentId;

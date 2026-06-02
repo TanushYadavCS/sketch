@@ -181,6 +181,10 @@ describe("searchFiles — FTS5 query sanitization", () => {
     expect(results[0].fileName).toBe("planning.txt");
   });
 
+  it("returns no results when userEmails is []", async () => {
+    await expect(searchFiles(db, "planning", { userEmails: [] })).resolves.toEqual([]);
+  });
+
   it("search results include providerFileId (needed for integration handoff)", async () => {
     const results = await searchFiles(db, "planning");
     expect(results.length).toBeGreaterThan(0);
@@ -283,13 +287,23 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     }
   });
 
-  it("returns all files when userEmails is empty (no filtering)", async () => {
+  it("returns all files when userEmails is undefined (trusted bypass)", async () => {
+    const accessible = await filterAccessibleFileIds(db, [
+      "file-unrestricted",
+      "file-scope-a",
+      "file-scope-b",
+      "file-per-file",
+    ]);
+    expect(accessible.size).toBe(4);
+  });
+
+  it("returns empty set when userEmails is [] (fail closed)", async () => {
     const accessible = await filterAccessibleFileIds(
       db,
       ["file-unrestricted", "file-scope-a", "file-scope-b", "file-per-file"],
       [],
     );
-    expect(accessible.size).toBe(4);
+    expect(accessible.size).toBe(0);
   });
 
   it("returns unrestricted files for any user", async () => {
@@ -320,7 +334,16 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
 describe("search — recency browse applies RBAC before limit", () => {
   let db: Kysely<DB>;
 
-  async function insertMeeting(id: string, sourceUpdatedAt: string, opts: { fileAccessEmails?: string[] } = {}) {
+  async function insertMeeting(
+    id: string,
+    sourceUpdatedAt: string,
+    opts: {
+      content?: string | null;
+      fileAccessEmails?: string[];
+      manualShareEmails?: string[];
+      shareWithEveryone?: boolean;
+    } = {},
+  ) {
     await db
       .insertInto("indexed_files")
       .values({
@@ -333,10 +356,11 @@ describe("search — recency browse applies RBAC before limit", () => {
         source: "fireflies",
         source_path: `/meetings/${id}`,
         provider_url: null,
-        content: null,
+        content: opts.content ?? null,
         summary: null,
         context_note: null,
         access_scope_id: null,
+        share_with_everyone: opts.shareWithEveryone ? 1 : 0,
         source_updated_at: sourceUpdatedAt,
         synced_at: sourceUpdatedAt,
       })
@@ -344,6 +368,23 @@ describe("search — recency browse applies RBAC before limit", () => {
 
     for (const email of opts.fileAccessEmails ?? []) {
       await db.insertInto("file_access").values({ indexed_file_id: id, email }).execute();
+    }
+    if ((opts.manualShareEmails ?? []).length > 0) {
+      await db
+        .insertInto("users")
+        .values({ id: "admin", name: "admin", email: "admin@example.com" })
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+      await db
+        .insertInto("file_share_emails")
+        .values(
+          (opts.manualShareEmails ?? []).map((email) => ({
+            indexed_file_id: id,
+            email,
+            granted_by_user_id: "admin",
+          })),
+        )
+        .execute();
     }
   }
 
@@ -383,6 +424,57 @@ describe("search — recency browse applies RBAC before limit", () => {
     });
 
     expect(results.map((r) => r.id)).toEqual(["accessible"]);
+  });
+
+  it("includes manually shared and org-wide files in non-empty search", async () => {
+    await insertMeeting("manual-shared", "2026-04-30T10:00:00.000Z", {
+      content: "manual visibility planning",
+      fileAccessEmails: ["other@example.com"],
+      manualShareEmails: ["alice@example.com"],
+    });
+    await insertMeeting("org-shared", "2026-04-30T09:00:00.000Z", {
+      content: "org visibility planning",
+      fileAccessEmails: ["other@example.com"],
+      shareWithEveryone: true,
+    });
+    await insertMeeting("blocked-shared", "2026-04-30T08:00:00.000Z", {
+      content: "blocked visibility planning",
+      fileAccessEmails: ["other@example.com"],
+    });
+
+    const results = await search(db, "shared", {
+      source: "fireflies",
+      limit: 10,
+      userEmails: ["alice@example.com"],
+    });
+
+    expect(results.map((r) => r.id).sort()).toEqual(["manual-shared", "org-shared"]);
+  });
+
+  it("returns no recency results when userEmails is []", async () => {
+    await insertMeeting("accessible", "2026-04-30T07:00:00.000Z");
+
+    const results = await search(db, "", {
+      kindRules: KIND_TO_RULES.meeting,
+      sortBy: "recency",
+      limit: 1,
+      userEmails: [],
+    });
+
+    expect(results).toEqual([]);
+  });
+
+  it("returns no hybrid results when userEmails is []", async () => {
+    await insertMeeting("planning-meeting", "2026-04-30T07:00:00.000Z");
+    await db
+      .updateTable("indexed_files")
+      .set({ content: "quarterly planning details" })
+      .where("id", "=", "planning-meeting")
+      .execute();
+
+    const results = await search(db, "planning", { userEmails: [] });
+
+    expect(results).toEqual([]);
   });
 });
 
@@ -444,10 +536,15 @@ describe("getFileContent — RBAC", () => {
     }
   });
 
-  it("returns file when no userEmails provided (admin/API without auth)", async () => {
+  it("returns file when userEmails is undefined (trusted bypass)", async () => {
     const file = await getFileContent(db, "file-restricted");
     expect(file).toBeTruthy();
     expect(file?.content).toBe("top secret content");
+  });
+
+  it("returns null when userEmails is [] (fail closed)", async () => {
+    const file = await getFileContent(db, "file-restricted", []);
+    expect(file).toBeNull();
   });
 
   it("returns file when user is in the scope", async () => {
@@ -464,6 +561,32 @@ describe("getFileContent — RBAC", () => {
   it("returns null for missing file id", async () => {
     const file = await getFileContent(db, "does-not-exist", ["member@example.com"]);
     expect(file).toBeNull();
+  });
+
+  it("manual share grants content access; revoking removes it immediately", async () => {
+    // outsider isn't in scope-c → blocked.
+    expect(await getFileContent(db, "file-restricted", ["outsider@example.com"])).toBeNull();
+
+    await db
+      .insertInto("users")
+      .values({ id: "u-admin", name: "admin", email: "admin@example.com" })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("file_share_emails")
+      .values({ indexed_file_id: "file-restricted", email: "outsider@example.com", granted_by_user_id: "u-admin" })
+      .execute();
+
+    const granted = await getFileContent(db, "file-restricted", ["outsider@example.com"]);
+    expect(granted?.content).toBe("top secret content");
+
+    await db
+      .deleteFrom("file_share_emails")
+      .where("indexed_file_id", "=", "file-restricted")
+      .where("email", "=", "outsider@example.com")
+      .execute();
+
+    expect(await getFileContent(db, "file-restricted", ["outsider@example.com"])).toBeNull();
   });
 });
 

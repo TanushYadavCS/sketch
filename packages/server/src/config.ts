@@ -41,6 +41,8 @@ export const configSchema = z.object({
   FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),
   FEATURE_ARCHIVE_AGE_DAYS: z.coerce.number().int().min(1).default(30),
   FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
+  GEMINI_MAX_RPM: z.coerce.number().int().min(1).default(60),
+  GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).default(4),
 
   // Sync reconciliation
   SYNC_ALLOW_LARGE_RECONCILE: z

@@ -647,6 +647,49 @@ describe("MCP Servers API", () => {
         "member@test.com",
         "slack",
         "https://sketch.example.com/callback",
+        "member",
+      );
+    });
+
+    it("passes admin role to provider when admin initiates connection", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/connect" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const adminCookie = await loginAdmin(app);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ appId: "google-calendar-oauth" }),
+      });
+      expect(res.status).toBe(200);
+
+      expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
+        "admin@test.com",
+        "google-calendar-oauth",
+        "",
+        "admin",
       );
     });
 

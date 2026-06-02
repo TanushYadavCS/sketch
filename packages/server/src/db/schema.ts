@@ -78,6 +78,7 @@ export interface SettingsTable {
   google_oauth_client_secret: string | null;
   gemini_api_key: string | null;
   enrichment_enabled: Generated<number>;
+  admin_can_read_all_files: Generated<number>;
   sync_interval_minutes: Generated<number>;
   org_context: string | null;
   sketch_api_key: string | null;
@@ -129,6 +130,11 @@ export interface IndexedFilesTable {
   mime_type: string | null;
   embedding_status: Generated<string>;
   summary_status: Generated<string>;
+  embedding_attempts: Generated<number>;
+  embedding_next_retry_at: string | null;
+  summary_attempts: Generated<number>;
+  summary_next_retry_at: string | null;
+  share_with_everyone: Generated<number>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -192,6 +198,13 @@ export interface FileAccessTable {
   email: string;
 }
 
+export interface FileShareEmailsTable {
+  indexed_file_id: string;
+  email: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
+}
+
 export interface EmailVerificationTokensTable {
   token: string;
   user_id: string;
@@ -207,6 +220,28 @@ export interface MagicLinkTokensTable {
   expires_at: string;
   used_at: string | null;
   created_at: Generated<string>;
+}
+
+export interface ApiTokensTable {
+  id: string;
+  user_id: string;
+  name: string;
+  token_hash: string;
+  prefix: string;
+  created_at: Generated<string>;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface ExternalMcpToolCallsTable {
+  id: string;
+  token_id: string;
+  user_id: string;
+  tool_name: string;
+  success: number;
+  duration_ms: number;
+  called_at: Generated<string>;
 }
 
 export interface AgentEnvironmentVariablesTable {
@@ -324,6 +359,14 @@ export interface EntitiesTable {
   created_at: string;
   updated_at: string;
   ai_brief: string | null;
+  share_with_everyone: Generated<number>;
+}
+
+export interface EntityShareEmailsTable {
+  entity_id: string;
+  email: string;
+  granted_by_user_id: string;
+  granted_at: Generated<string>;
 }
 
 export interface EntitySourceRefsTable {
@@ -520,8 +563,11 @@ export interface DB {
   file_embeddings: FileEmbeddingsTable;
   user_provider_identities: UserProviderIdentitiesTable;
   file_access: FileAccessTable;
+  file_share_emails: FileShareEmailsTable;
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
+  api_tokens: ApiTokensTable;
+  external_mcp_tool_calls: ExternalMcpToolCallsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
@@ -531,6 +577,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;

@@ -335,8 +335,20 @@ export interface EntityProfile {
   summary: EntityProfileSummary;
 }
 
+export interface EntityManualShare {
+  email: string;
+  grantedAt: string;
+}
+
 export interface EntityDetail extends EntityListItem {
   profile: EntityProfile;
+  shareWithEveryone: boolean;
+  manualShares: EntityManualShare[];
+}
+
+export interface EntitySharesResponse {
+  shares: EntityManualShare[];
+  shareWithEveryone: boolean;
 }
 
 export interface EntitySourceRef {
@@ -628,9 +640,21 @@ export interface SearchResult {
   score: number;
 }
 
+export interface FileManualShare {
+  email: string;
+  grantedAt: string;
+}
+
 export interface FileAccess {
   scope: "restricted" | "unrestricted";
   members: FileAccessMember[];
+  manualShares: FileManualShare[];
+  shareWithEveryone: boolean;
+}
+
+export interface FileSharesResponse {
+  shares: FileManualShare[];
+  shareWithEveryone: boolean;
 }
 
 export interface ProviderIdentity {
@@ -796,6 +820,15 @@ export const api = {
     revokeApiKey() {
       return request<{ success: true }>("/api/settings/api-key", { method: "DELETE" });
     },
+    access() {
+      return request<{ adminCanReadAllFiles: boolean }>("/api/settings/access");
+    },
+    updateAccess(data: { adminCanReadAllFiles: boolean }) {
+      return request<{ adminCanReadAllFiles: boolean }>("/api/settings/access", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
     searchConfig() {
       return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number; syncIntervalMinutes: number }>(
         "/api/settings/search",
@@ -927,6 +960,20 @@ export const api = {
       return request<{ file: FileContent; access: FileAccess; entities: LinkedEntity[] }>(
         `/api/connectors/files/${fileId}/content`,
       );
+    },
+    listFileShares(fileId: string) {
+      return request<FileSharesResponse>(`/api/connectors/files/${fileId}/shares`);
+    },
+    updateFileShares(fileId: string, data: { emails: string[]; shareWithEveryone?: boolean }) {
+      return request<FileSharesResponse>(`/api/connectors/files/${fileId}/shares`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
+    revokeFileShare(fileId: string, email: string) {
+      return request<{ success: boolean }>(`/api/connectors/files/${fileId}/shares/${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
     },
     enrich(id: string, data: { fileIds: string[]; instruction: string }) {
       return request<{ enrichment: { jobId: string; connectorId: string; fileCount: number } }>(
@@ -1342,6 +1389,20 @@ export const api = {
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    listShares(id: string) {
+      return request<EntitySharesResponse>(`/api/entities/${id}/shares`);
+    },
+    updateShares(id: string, data: { emails: string[]; shareWithEveryone?: boolean }) {
+      return request<EntitySharesResponse>(`/api/entities/${id}/shares`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
+    revokeShare(id: string, email: string) {
+      return request<{ success: boolean }>(`/api/entities/${id}/shares/${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();
