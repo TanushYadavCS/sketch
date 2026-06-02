@@ -32,6 +32,7 @@ const TOOL_EMOJI: Record<string, string> = {
   ManageScheduledTasks: "⏰",
   SearchEntities: "🔍",
   GetEntityContext: "📊",
+  ReadChatHistory: "💬",
 };
 
 const FALLBACK_EMOJI = "⚙️";
@@ -79,6 +80,7 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
 
 const FRIENDLY_STATIC_LINES: Record<string, string> = {
   GetEntityContext: "Getting entity context",
+  ReadChatHistory: "Reading Chat History",
 };
 
 const CANVAS_FRIENDLY_TARGET_PREFIX: Record<string, string> = {

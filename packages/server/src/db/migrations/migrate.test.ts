@@ -40,7 +40,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(70);
+    expect(rows.rows).toHaveLength(71);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -107,6 +107,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[67]).toBe("072-enrichment-retry-backoff");
     expect(names[68]).toBe("073-api-tokens");
     expect(names[69]).toBe("074-external-mcp-tool-calls");
+    expect(names[70]).toBe("075-conversation-messages");
   });
 
   it("creates the users table", async () => {
@@ -117,6 +118,17 @@ describe("runMigrations — full sequence", () => {
     `.execute(db);
 
     expect(result.rows).toHaveLength(1);
+  });
+
+  it("creates conversation capture tables", async () => {
+    await runMigrations(db);
+
+    for (const table of ["conversations", "conversation_messages"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
   });
 
   it("creates the settings table with enrichment_enabled column", async () => {
@@ -228,7 +240,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(70);
+    expect(rows.rows).toHaveLength(71);
   });
 });
 
@@ -260,6 +272,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(70);
+    expect(rows.rows).toHaveLength(71);
   });
 });

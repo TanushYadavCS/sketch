@@ -285,6 +285,33 @@ export interface ChatSessionsTable {
   updated_at: Generated<string>;
 }
 
+export interface ConversationsTable {
+  id: Generated<number>;
+  platform: string;
+  kind: string;
+  provider_conversation_id: string;
+  display_name: string | null;
+  last_seen_message_id: number | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface ConversationMessagesTable {
+  id: Generated<number>;
+  conversation_id: number;
+  provider_message_id: string;
+  sender_jid: Generated<string>;
+  sender_name: string;
+  sender_user_id: string | null;
+  is_bot: Generated<number>;
+  addressed_to_sketch: Generated<number>;
+  text: Generated<string>;
+  attachments: string | null;
+  provider_timestamp: string | null;
+  received_at: string;
+  created_at: Generated<string>;
+}
+
 export interface ScheduledTasksTable {
   id: string;
   platform: string;
@@ -572,6 +599,8 @@ export interface DB {
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
+  conversations: ConversationsTable;
+  conversation_messages: ConversationMessagesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;

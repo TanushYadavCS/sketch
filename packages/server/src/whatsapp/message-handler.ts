@@ -10,16 +10,18 @@ export function createWhatsAppMessageHandler(
   whatsapp: WhatsAppBot,
   jid: string,
   quotedMessage?: WAMessage,
-): (text: string) => Promise<void> {
+): (text: string) => Promise<WAMessage | null> {
   let isFirstMessage = true;
   return async (text: string) => {
-    if (!whatsapp.isConnected) return;
+    if (!whatsapp.isConnected) return null;
+    let sent: WAMessage | null;
     if (isFirstMessage && quotedMessage) {
-      await whatsapp.sendText(jid, text, { quoted: quotedMessage });
+      sent = await whatsapp.sendText(jid, text, { quoted: quotedMessage });
       isFirstMessage = false;
     } else {
-      await whatsapp.sendText(jid, text);
+      sent = await whatsapp.sendText(jid, text);
       isFirstMessage = false;
     }
+    return sent;
   };
 }

@@ -1,6 +1,7 @@
 import type { Kysely, Selectable } from "kysely";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
+import type { createConversationRepository } from "../../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
@@ -65,6 +66,10 @@ export interface SketchMcpDeps {
   visionConfig?: VisionConfig | null;
   visionAnalysisEnabled?: boolean;
   logger?: Logger;
+  conversationRepo?: ReturnType<typeof createConversationRepository>;
+  conversationContext?: {
+    conversationId: number;
+  };
   publicMcp?: {
     userEmails?: string[];
     filterEntityMetadata?: boolean;

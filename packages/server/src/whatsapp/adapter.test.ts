@@ -86,6 +86,18 @@ function makeAgentResult(overrides: Record<string, unknown> = {}) {
 }
 
 function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapterDeps {
+  let nextMessageId = 1;
+  const conversationRow = {
+    id: 1,
+    platform: "whatsapp",
+    kind: "group",
+    provider_conversation_id: "group@g.us",
+    display_name: null,
+    last_seen_message_id: null,
+    created_at: "2025-01-01",
+    updated_at: "2025-01-01",
+  };
+  const messages: unknown[] = [];
   return {
     db: {} as WhatsAppAdapterDeps["db"],
     config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
@@ -113,13 +125,36 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
         upsert: vi.fn().mockResolvedValue(undefined),
         updateProgressSettings: vi.fn().mockResolvedValue(undefined),
       } as unknown as WhatsAppAdapterDeps["repos"]["whatsappGroups"],
+      conversations: {
+        getOrCreate: vi.fn().mockResolvedValue(conversationRow),
+        insertMessage: vi.fn().mockImplementation(async (data) => {
+          const row = {
+            id: nextMessageId++,
+            conversationId: data.conversationId,
+            providerMessageId: data.providerMessageId,
+            senderJid: data.senderJid ?? "",
+            senderName: data.senderName,
+            senderUserId: data.senderUserId ?? null,
+            isBot: Boolean(data.isBot),
+            addressedToSketch: Boolean(data.addressedToSketch),
+            text: data.text ?? "",
+            attachments: data.attachments ?? [],
+            providerTimestamp: data.providerTimestamp ?? null,
+            receivedAt: data.receivedAt ?? "2025-01-01T00:00:00.000Z",
+            createdAt: "2025-01-01T00:00:00.000Z",
+          };
+          messages.push(row);
+          return { row, inserted: true };
+        }),
+        listBacklog: vi.fn().mockResolvedValue({ messages: [], hasMore: false }),
+        listMessages: vi.fn().mockResolvedValue({ messages: [], hasMore: false }),
+        updateWatermark: vi.fn().mockResolvedValue(conversationRow),
+        advanceWatermarkToCurrentMax: vi.fn().mockResolvedValue(conversationRow),
+        getMaxMessageId: vi.fn().mockResolvedValue(null),
+        find: vi.fn().mockResolvedValue(conversationRow),
+      } as unknown as WhatsAppAdapterDeps["repos"]["conversations"],
     },
     queue: new QueueManager(),
-    groupBuffer: {
-      append: vi.fn(),
-      drain: vi.fn().mockReturnValue([]),
-      clear: vi.fn(),
-    } as unknown as WhatsAppAdapterDeps["groupBuffer"],
     runAgent: vi.fn().mockResolvedValue({
       ...makeAgentResult(),
     }),
@@ -792,7 +827,7 @@ describe("whatsapp/adapter", () => {
   });
 
   describe("group handler", () => {
-    it("buffers non-mention group messages", async () => {
+    it("stores non-mention group messages without running the agent", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -810,14 +845,13 @@ describe("whatsapp/adapter", () => {
         senderPhone: "+5555",
       });
 
-      expect(deps.groupBuffer.append).toHaveBeenCalledWith(
-        "group@g.us",
-        expect.objectContaining({ text: "random chat" }),
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "random chat", addressedToSketch: false }),
       );
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
-    it("uses user name from DB when available for buffered messages", async () => {
+    it("uses user name from DB when available for stored passive group messages", async () => {
       const deps = makeDeps();
       vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(makeUser({ name: "DB Alice" }));
       const { mock, getHandler } = createMockWhatsApp();
@@ -836,13 +870,12 @@ describe("whatsapp/adapter", () => {
         senderPhone: "+5555",
       });
 
-      expect(deps.groupBuffer.append).toHaveBeenCalledWith(
-        "group@g.us",
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
         expect.objectContaining({ senderName: "DB Alice" }),
       );
     });
 
-    it("downloads and buffers untagged group audio without running the agent", async () => {
+    it("downloads and stores untagged group audio without running the agent", async () => {
       const deps = makeDeps();
       vi.mocked(downloadWhatsAppMedia).mockClear();
       vi.mocked(downloadWhatsAppMedia).mockResolvedValueOnce({
@@ -869,20 +902,24 @@ describe("whatsapp/adapter", () => {
       });
 
       expect(downloadWhatsAppMedia).toHaveBeenCalledOnce();
-      expect(deps.groupBuffer.append).toHaveBeenCalledWith(
-        "group@g.us",
-        expect.objectContaining({ text: "See attached files." }),
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "See attached files.",
+          attachments: [expect.objectContaining({ originalName: "voice.ogg" })],
+        }),
       );
-      const bufferedMessage = vi.mocked(deps.groupBuffer.append).mock.calls[0]?.[1];
-      expect(bufferedMessage?.attachments).toHaveLength(1);
-      expect(bufferedMessage?.attachments?.[0]).toEqual(expect.objectContaining({ originalName: "voice.ogg" }));
-      expect(bufferedMessage?.attachments?.[0]).not.toHaveProperty("transcription");
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
-    it("ignores untagged group non-audio media", async () => {
+    it("stores untagged group non-audio media metadata", async () => {
       const deps = makeDeps();
       vi.mocked(downloadWhatsAppMedia).mockClear();
+      vi.mocked(downloadWhatsAppMedia).mockResolvedValueOnce({
+        originalName: "photo.jpg",
+        mimeType: "image/jpeg",
+        localPath: "/tmp/test-data/workspaces/wa-group-g1/attachments/photo.jpg",
+        sizeBytes: 100,
+      });
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
       const handler = getHandler();
@@ -900,9 +937,10 @@ describe("whatsapp/adapter", () => {
         senderPhone: "+5555",
       });
 
-      expect(downloadWhatsAppMedia).not.toHaveBeenCalled();
-      const bufferedMessage = vi.mocked(deps.groupBuffer.append).mock.calls[0]?.[1];
-      expect(bufferedMessage).not.toHaveProperty("attachments");
+      expect(downloadWhatsAppMedia).toHaveBeenCalledOnce();
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ attachments: [expect.objectContaining({ originalName: "photo.jpg" })] }),
+      );
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
@@ -932,9 +970,28 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userMessage).toContain("description: A test group");
     });
 
-    it("drains group buffer on mention", async () => {
+    it("injects durable missed messages on mention", async () => {
       const deps = makeDeps();
-      vi.mocked(deps.groupBuffer.drain).mockReturnValue([{ senderName: "Bob", text: "earlier msg", timestamp: 1000 }]);
+      vi.mocked(deps.repos.conversations.listBacklog).mockResolvedValue({
+        messages: [
+          {
+            id: 42,
+            conversationId: 1,
+            providerMessageId: "old",
+            senderJid: "5555@s.whatsapp.net",
+            senderName: "Bob",
+            senderUserId: null,
+            isBot: false,
+            addressedToSketch: false,
+            text: "earlier msg",
+            attachments: [],
+            providerTimestamp: null,
+            receivedAt: "2025-01-01T00:00:00.000Z",
+            createdAt: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+        hasMore: false,
+      });
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
       const handler = getHandler();
@@ -952,7 +1009,9 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(deps.groupBuffer.drain).toHaveBeenCalledWith("group@g.us");
+      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: 1, beforeMessageId: expect.any(Number) }),
+      );
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("Bob");
       expect(agentCall.userMessage).toContain("earlier msg");
@@ -1228,7 +1287,7 @@ describe("whatsapp/adapter", () => {
       await flush();
 
       expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "wa-group-group@g.us");
-      expect(deps.groupBuffer.clear).toHaveBeenCalledWith("group@g.us");
+      expect(deps.repos.conversations.advanceWatermarkToCurrentMax).toHaveBeenCalledWith(1);
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mock.sendText).toHaveBeenCalledWith(
         "group@g.us",
