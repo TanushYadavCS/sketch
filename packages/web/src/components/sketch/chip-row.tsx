@@ -10,7 +10,7 @@ import {
   SparkleIcon,
 } from "@phosphor-icons/react";
 import { cn } from "@sketch/ui/lib/utils";
-import { type ComponentType, useEffect, useRef, useState } from "react";
+import { type ComponentType, type MouseEvent, type PointerEvent, useRef, useState } from "react";
 
 export interface ChipSuggestion {
   label: string;
@@ -35,42 +35,95 @@ export interface ChipRowProps {
   className?: string;
 }
 
-function useEdgeFades(): {
-  scrollerRef: React.RefObject<HTMLDivElement | null>;
-  showLeft: boolean;
-  showRight: boolean;
-} {
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const [showLeft, setShowLeft] = useState(false);
-  const [showRight, setShowRight] = useState(false);
+function useDragScroll(scrollerRef: React.RefObject<HTMLDivElement | null>) {
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startScrollLeft: number;
+    moved: boolean;
+    captured: boolean;
+    suppressClick: boolean;
+  } | null>(null);
+  const [dragging, setDragging] = useState(false);
 
-  useEffect(() => {
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
     const el = scrollerRef.current;
     if (!el) return;
-    const update = () => {
-      const maxScroll = el.scrollWidth - el.clientWidth;
-      setShowLeft(el.scrollLeft > 1);
-      setShowRight(el.scrollLeft < maxScroll - 1);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: el.scrollLeft,
+      moved: false,
+      captured: false,
+      suppressClick: false,
     };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      ro.disconnect();
-    };
-  }, []);
+  }
 
-  return { scrollerRef, showLeft, showRight };
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    const el = scrollerRef.current;
+    if (!drag || !el || drag.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - drag.startX;
+    if (Math.abs(deltaX) > 3) {
+      drag.moved = true;
+      drag.suppressClick = true;
+      if (!drag.captured) {
+        drag.captured = true;
+        el.setPointerCapture?.(event.pointerId);
+      }
+      setDragging(true);
+    }
+    el.scrollLeft = drag.startScrollLeft - deltaX;
+    if (drag.moved) event.preventDefault();
+  }
+
+  function stopDragging(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    const el = scrollerRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.captured) el?.releasePointerCapture?.(event.pointerId);
+    setDragging(false);
+  }
+
+  function handleClickCapture(event: MouseEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag?.suppressClick) {
+      dragRef.current = null;
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = null;
+  }
+
+  return {
+    dragging,
+    dragHandlers: {
+      onPointerDown: handlePointerDown,
+      onPointerMove: handlePointerMove,
+      onPointerUp: stopDragging,
+      onPointerCancel: stopDragging,
+      onClickCapture: handleClickCapture,
+    },
+  };
 }
 
 export function ChipRow({ chips = DEFAULT_CHIPS, onPick, className }: ChipRowProps) {
-  const { scrollerRef, showLeft, showRight } = useEdgeFades();
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const { dragging, dragHandlers } = useDragScroll(scrollerRef);
 
   return (
     <div className={cn("relative w-full", className)}>
-      <div ref={scrollerRef} className="scrollbar-none flex w-full overflow-x-auto" aria-label="Suggested prompts">
+      <div
+        ref={scrollerRef}
+        className={cn(
+          "chip-scrollbar flex w-full overflow-x-auto pb-2 select-none",
+          dragging ? "cursor-grabbing" : "cursor-grab",
+        )}
+        aria-label="Suggested prompts"
+        {...dragHandlers}
+      >
         <div className="flex w-max gap-[8px]">
           {chips.map((chip) => {
             const Icon = chip.icon;
@@ -102,20 +155,6 @@ export function ChipRow({ chips = DEFAULT_CHIPS, onPick, className }: ChipRowPro
           })}
         </div>
       </div>
-      {showLeft && (
-        <div
-          aria-hidden
-          className="pointer-events-none absolute left-0 top-0 h-full w-[20px]"
-          style={{ background: "linear-gradient(to right, var(--background), transparent)" }}
-        />
-      )}
-      {showRight && (
-        <div
-          aria-hidden
-          className="pointer-events-none absolute right-0 top-0 h-full w-[20px]"
-          style={{ background: "linear-gradient(to left, var(--background), transparent)" }}
-        />
-      )}
     </div>
   );
 }

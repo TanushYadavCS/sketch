@@ -45,6 +45,15 @@ describe("HomePane", () => {
     expect(screen.getByText("Your conversations will appear here")).toBeInTheDocument();
   });
 
+  it("prefills the chat input when a suggested prompt chip is clicked", async () => {
+    const user = userEvent.setup();
+    render(<HomePane firstName="Karan" onSubmit={() => undefined} />);
+
+    await user.click(screen.getByRole("button", { name: "Triage inbox" }));
+
+    expect(screen.getByLabelText("Message Sketch")).toHaveValue("Triage my inbox from the last 24 hours");
+  });
+
   it("renders Recents with the same section and row copy as the provided design", () => {
     render(
       <HomePane

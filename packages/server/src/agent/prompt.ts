@@ -108,7 +108,9 @@ function renderInboxMessage(message: InboxMessageContext): string[] {
   return lines;
 }
 
-export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): string[] {
+export type ResponseSurface = "slack" | "whatsapp" | "web";
+
+export function buildPlatformFormattingLines(platform: ResponseSurface): string[] {
   if (platform === "slack") {
     return [
       "You are responding on Slack. Use Slack mrkdwn formatting:",
@@ -122,17 +124,44 @@ export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): st
     ];
   }
 
+  if (platform === "whatsapp") {
+    return [
+      "You are responding on WhatsApp. Use WhatsApp formatting:",
+      "",
+      "- *bold* for emphasis",
+      "- _italic_ for secondary emphasis",
+      "- ~strikethrough~ for corrections",
+      "- ```monospace``` for code",
+      "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
+      "- Do not use markdown links like [text](url) -- write URLs inline",
+      "- Keep responses concise -- WhatsApp is a mobile-first platform",
+    ];
+  }
+
   return [
-    "You are responding on WhatsApp. Use WhatsApp formatting:",
+    "You are responding in Sketch web chat. Use GitHub-flavored Markdown:",
     "",
-    "- *bold* for emphasis",
-    "- _italic_ for secondary emphasis",
-    "- ~strikethrough~ for corrections",
-    "- ```monospace``` for code",
-    "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
-    "- Do not use markdown links like [text](url) -- write URLs inline",
-    "- Keep responses concise -- WhatsApp is a mobile-first platform",
+    "- Use short paragraphs, headings only when they add structure, and bullet or numbered lists for scans",
+    "- Use **bold** for emphasis, _italic_ for secondary emphasis, and `code` for inline commands, filenames, and IDs",
+    "- Use fenced code blocks with a language when showing multi-line code or logs",
+    "- Use [descriptive link text](url) for links; avoid exposing raw long URLs unless the user asks for the literal URL",
+    "- Use Markdown tables only for small comparisons where rows and columns improve readability",
+    "- Keep responses concise and make lists easy to skim",
   ];
+}
+
+function platformHeading(params: { platform: ResponseSurface; deliveryPlatform?: "slack" | "whatsapp" }): string[] {
+  if (params.platform === "web" && params.deliveryPlatform) {
+    return [
+      "## Platform",
+      "",
+      ...buildPlatformFormattingLines("web"),
+      "",
+      `Background actions may still use ${params.deliveryPlatform} delivery context, but your visible reply is rendered in web chat and must use web Markdown formatting.`,
+    ];
+  }
+
+  return ["## Platform", "", ...buildPlatformFormattingLines(params.platform)];
 }
 
 /**
@@ -158,7 +187,8 @@ function sourceLabel(source: string): { label: string; noun: string } {
 }
 
 export function buildSystemContext(params: {
-  platform: "slack" | "whatsapp";
+  platform: ResponseSurface;
+  deliveryPlatform?: "slack" | "whatsapp";
   orgName?: string | null;
   botName?: string | null;
   indexedSources?: Array<{ source: string; fileCount: number }>;
@@ -296,13 +326,7 @@ export function buildSystemContext(params: {
     );
   }
 
-  if (params.platform === "slack") {
-    sections.push("", "## Platform", "", ...buildPlatformFormattingLines("slack"));
-  }
-
-  if (params.platform === "whatsapp") {
-    sections.push("", "## Platform", "", ...buildPlatformFormattingLines("whatsapp"));
-  }
+  sections.push("", ...platformHeading({ platform: params.platform, deliveryPlatform: params.deliveryPlatform }));
 
   const agentInstructions = params.agentInstructions?.trim();
   if (agentInstructions) {

@@ -1,5 +1,8 @@
 import { FileTextIcon } from "@phosphor-icons/react";
 import { cn } from "@sketch/ui/lib/utils";
+import { type ReactNode, isValidElement } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { SketchMessage, UserMessage } from "./chat-message";
 
 export interface ChatThreadFile {
@@ -24,6 +27,80 @@ export interface ChatThreadProps {
   error?: string | null;
   className?: string;
 }
+
+const markdownPlugins = [remarkGfm];
+
+function safeMarkdownHref(href: string | undefined): string | null {
+  const value = href?.trim();
+  if (!value) return null;
+  if (value.startsWith("/") || value.startsWith("#")) return value;
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isExternalHref(href: string): boolean {
+  return href.startsWith("http://") || href.startsWith("https://");
+}
+
+function textFromReactNode(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textFromReactNode).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return textFromReactNode(node.props.children);
+  return "";
+}
+
+function compactUrlLabel(href: string): string {
+  try {
+    const url = new URL(href);
+    const host = url.hostname.replace(/^www\./, "");
+    const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
+    const label = `${host}${path}`;
+    if (label.length <= 42) return label;
+    return `${label.slice(0, 39)}...`;
+  } catch {
+    return href.length <= 42 ? href : `${href.slice(0, 39)}...`;
+  }
+}
+
+function linkChildrenForHref(href: string, children: ReactNode): ReactNode {
+  const text = textFromReactNode(children).trim();
+  return text === href || text === `<${href}>` ? compactUrlLabel(href) : children;
+}
+
+function escapeMarkdownLinkLabel(label: string): string {
+  return label.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]");
+}
+
+function escapeMarkdownLinkHref(href: string): string {
+  return href.replaceAll(")", "%29").replaceAll(" ", "%20");
+}
+
+function normalizeChatMarkdown(text: string): string {
+  return text
+    .replace(/<((?:https?:\/\/|mailto:)[^>|]+)\|([^>]+)>/g, (_match, href: string, label: string) => {
+      return `[${escapeMarkdownLinkLabel(label)}](${escapeMarkdownLinkHref(href)})`;
+    })
+    .replace(/<((?:https?:\/\/|mailto:)[^>]+)>/g, (_match, href: string) => href);
+}
+
+const markdownComponents: Components = {
+  a({ href, children }) {
+    const safeHref = safeMarkdownHref(href);
+    if (!safeHref) return <span>{children}</span>;
+    const external = isExternalHref(safeHref);
+
+    return (
+      <a href={safeHref} target={external ? "_blank" : undefined} rel={external ? "noreferrer noopener" : undefined}>
+        {linkChildrenForHref(safeHref, children)}
+      </a>
+    );
+  },
+};
 
 export function ChatThread({ messages = [], busy = false, error, className }: ChatThreadProps) {
   if (messages.length === 0 && !busy && !error) return null;
@@ -112,12 +189,12 @@ function MessageTimestamp({ createdAt, align }: { createdAt?: string; align: "le
 
 function MessageContent({ message }: { message: ChatThreadMessage }) {
   if (!message.files?.length) {
-    return message.text ? <p className="whitespace-pre-wrap">{message.text}</p> : null;
+    return message.text ? <MarkdownMessage text={message.text} /> : null;
   }
 
   return (
     <div className="min-w-0 space-y-[10px]">
-      {message.text ? <p className="whitespace-pre-wrap">{message.text}</p> : null}
+      {message.text ? <MarkdownMessage text={message.text} /> : null}
       <div className="flex flex-wrap gap-[8px]">
         {message.files.map((file) => (
           <a
@@ -135,6 +212,16 @@ function MessageContent({ message }: { message: ChatThreadMessage }) {
           </a>
         ))}
       </div>
+    </div>
+  );
+}
+
+function MarkdownMessage({ text }: { text: string }) {
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown components={markdownComponents} remarkPlugins={markdownPlugins} skipHtml>
+        {normalizeChatMarkdown(text)}
+      </ReactMarkdown>
     </div>
   );
 }

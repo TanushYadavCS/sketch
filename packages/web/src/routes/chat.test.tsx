@@ -1,6 +1,12 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { ChatPage, buildChatThreadMessages, hasPendingAssistantProgress, validateChatSearch } from "./chat";
+import {
+  ChatPage,
+  buildChatThreadMessages,
+  hasPendingAssistantProgress,
+  titleFromChatMessages,
+  validateChatSearch,
+} from "./chat";
 
 const sendMessage = vi.fn();
 const setMessages = vi.fn();
@@ -125,6 +131,18 @@ describe("chat route", () => {
     ).toBe(false);
   });
 
+  it("uses the first user message as the chat title", () => {
+    expect(
+      titleFromChatMessages([
+        { id: "u1", role: "user", parts: [{ type: "text", text: "  Plan my day\nwith the team  " }] },
+        { id: "a1", role: "assistant", parts: [{ type: "text", text: "Done." }] },
+      ]),
+    ).toBe("Plan my day with the team");
+    expect(titleFromChatMessages([{ id: "a1", role: "assistant", parts: [{ type: "text", text: "Done." }] }])).toBe(
+      "New web chat",
+    );
+  });
+
   it("extracts generated file data parts as assistant attachments", () => {
     const messages = buildChatThreadMessages([
       {
@@ -176,6 +194,15 @@ describe("chat route", () => {
     await waitFor(() => expect(setMessages).toHaveBeenCalledWith(persisted));
   });
 
+  it("clears stale chat state when the selected conversation has no persisted messages", async () => {
+    setMessages.mockClear();
+    mocks.loadMessages.mockResolvedValueOnce({ messages: [] });
+
+    render(<ChatPage />);
+
+    await waitFor(() => expect(setMessages).toHaveBeenCalledWith([]));
+  });
+
   it("renders a dedicated chat screen and submits the initial search message after history loads", async () => {
     sendMessage.mockClear();
     mocks.navigate.mockClear();
@@ -183,10 +210,11 @@ describe("chat route", () => {
     const { container } = render(<ChatPage />);
 
     expect(container.firstElementChild).toHaveClass("mx-auto", "box-content", "max-w-4xl", "px-10");
-    expect(screen.getByRole("heading", { name: "New web chat" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Hi Sketch" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Thread options")).not.toBeInTheDocument();
-    expect(screen.getByText("Hi Sketch")).toBeInTheDocument();
-    expect(screen.getByText("Hi Karan")).toBeInTheDocument();
+    const thread = within(screen.getByLabelText("Chat thread"));
+    expect(thread.getByText("Hi Sketch")).toBeInTheDocument();
+    expect(thread.getByText("Hi Karan")).toBeInTheDocument();
     expect(useChatArgs).toHaveBeenCalledWith(expect.objectContaining({ id: "chat-alpha" }));
     await waitFor(() =>
       expect(sendMessage).toHaveBeenCalledWith({

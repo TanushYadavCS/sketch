@@ -784,6 +784,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           userPhone: currentUser.whatsapp_number,
           logger: deps.logger,
           platform: dmContext.platform,
+          responseSurface: "web",
           contextType: "dm",
           onProgressEvent: async (event) => {
             progressRenderer.renderEvent(event);

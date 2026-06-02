@@ -489,6 +489,7 @@ export type WebChatMessagePart =
 export interface WebChatStoredMessage {
   id: string;
   role: "user" | "assistant";
+  createdAt?: string;
   parts: WebChatMessagePart[];
 }
 

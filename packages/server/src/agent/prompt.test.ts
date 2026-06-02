@@ -248,6 +248,29 @@ describe("buildSystemContext", () => {
     });
   });
 
+  describe("web chat platform formatting", () => {
+    it("includes GitHub-flavored Markdown rules", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("Sketch web chat");
+      expect(result).toContain("GitHub-flavored Markdown");
+      expect(result).toContain("[descriptive link text](url)");
+      expect(result).toContain("fenced code blocks");
+    });
+
+    it("does not include Slack or WhatsApp link formatting", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).not.toContain("<url|text>");
+      expect(result).not.toContain("write URLs inline");
+    });
+
+    it("can mention delivery context without overriding web reply formatting", () => {
+      const result = buildSystemContext({ platform: "web", deliveryPlatform: "slack" });
+      expect(result).toContain("visible reply is rendered in web chat");
+      expect(result).toContain("must use web Markdown formatting");
+      expect(result).toContain("slack delivery context");
+    });
+  });
+
   describe("no per-user content", () => {
     it("does not contain user names or emails", () => {
       const result = buildSystemContext({

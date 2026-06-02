@@ -40,6 +40,14 @@ if (typeof globalThis.IntersectionObserver === "undefined") {
   } as unknown as typeof IntersectionObserver;
 }
 
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+
 // EventSource is not available in jsdom — provide a no-op stub so components
 // that use SSE (e.g. WhatsAppQR) don't crash when rendered in tests.
 if (typeof globalThis.EventSource === "undefined") {

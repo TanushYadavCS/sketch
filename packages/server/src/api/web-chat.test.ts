@@ -140,6 +140,7 @@ describe("web chat API", () => {
     expect(call.sessionMode).toBe("chat");
     expect(call.persistSession).toBe(true);
     expect(call.platform).toBe("slack");
+    expect(call.responseSurface).toBe("web");
     expect(call.contextType).toBe("dm");
     expect(call.userMessage).toContain("Karan Hudia");
     expect(call.userMessage).toContain("Can you summarize my workspace?");

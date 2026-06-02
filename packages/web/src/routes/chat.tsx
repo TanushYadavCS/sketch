@@ -103,6 +103,18 @@ export function hasPendingAssistantProgress(messages: WebChatMessage[]): boolean
   );
 }
 
+export function titleFromChatMessages(messages: WebChatMessage[]): string {
+  const title = messages
+    .find((message) => message.role === "user" && textFromMessage(message))
+    ?.parts.filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!title) return "New web chat";
+  return title.length > 80 ? `${title.slice(0, 77)}...` : title;
+}
+
 export const chatIndexRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: "/chat",
@@ -138,7 +150,8 @@ export function ChatPage() {
   const { conversationId } = useParams({ from: chatRoute.id });
   const search = useSearch({ from: chatRoute.id }) as ChatSearch;
   const sentInitialMessage = useRef<string | null>(null);
-  const [historyReady, setHistoryReady] = useState(false);
+  const threadScrollRef = useRef<HTMLDivElement | null>(null);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const transport = useMemo(
     () =>
       new DefaultChatTransport<WebChatMessage>({
@@ -150,20 +163,35 @@ export function ChatPage() {
     id: conversationId,
     transport,
   });
+  const historyReady = loadedConversationId === conversationId;
+  const chatTitle = titleFromChatMessages(chat.messages);
+  const latestMessage = chat.messages.at(-1);
+  const threadScrollKey = latestMessage
+    ? [
+        latestMessage.id,
+        latestMessage.role,
+        textFromMessage(latestMessage).length,
+        progressLinesFromMessage(latestMessage).join("\n").length,
+        filesFromMessage(latestMessage).length,
+        chat.status,
+      ].join(":")
+    : "";
   const hasBackgroundRun = hasPendingAssistantProgress(chat.messages);
   const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun;
 
   useEffect(() => {
     let cancelled = false;
+    setLoadedConversationId(null);
+    chat.setMessages([]);
     void api.webChat
       .messages(conversationId)
       .then(({ messages }) => {
-        if (!cancelled && messages.length > 0) {
+        if (!cancelled) {
           chat.setMessages(messages as WebChatMessage[]);
         }
       })
       .finally(() => {
-        if (!cancelled) setHistoryReady(true);
+        if (!cancelled) setLoadedConversationId(conversationId);
       });
     return () => {
       cancelled = true;
@@ -171,11 +199,25 @@ export function ChatPage() {
   }, [chat.setMessages, conversationId]);
 
   useEffect(() => {
+    if (!historyReady || !threadScrollKey) return;
+    const frameId = window.requestAnimationFrame(() => {
+      const el = threadScrollRef.current;
+      if (!el) return;
+      if (typeof el.scrollTo === "function") {
+        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      } else {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [historyReady, threadScrollKey]);
+
+  useEffect(() => {
     if (!historyReady || !hasBackgroundRun || chat.status !== "ready") return;
     let cancelled = false;
     const intervalId = window.setInterval(() => {
       void api.webChat.messages(conversationId).then(({ messages }) => {
-        if (!cancelled && messages.length > 0) {
+        if (!cancelled) {
           chat.setMessages(messages as WebChatMessage[]);
         }
       });
@@ -187,20 +229,21 @@ export function ChatPage() {
   }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
 
   useEffect(() => {
-    if (!historyReady || !search.message || sentInitialMessage.current === search.message) return;
-    sentInitialMessage.current = search.message;
+    const initialMessageKey = search.message ? `${conversationId}:${search.message}` : null;
+    if (!historyReady || !search.message || sentInitialMessage.current === initialMessageKey) return;
+    sentInitialMessage.current = initialMessageKey;
     void chat.sendMessage(outgoingTextMessage(search.message));
     void navigate({ to: "/chat/$conversationId", params: { conversationId }, search: {}, replace: true });
   }, [chat.sendMessage, conversationId, historyReady, navigate, search.message]);
 
   return (
     <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col px-10">
-      <ChatHeader title="New web chat" onBack={() => navigate({ to: "/home" })} />
+      <ChatHeader title={chatTitle} onBack={() => navigate({ to: "/home" })} />
 
       <div className="relative min-h-0 flex-1">
         <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[28px] bg-gradient-to-b from-background to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[28px] bg-gradient-to-t from-background to-transparent" />
-        <div className="absolute inset-0 overflow-y-auto">
+        <div ref={threadScrollRef} className="chat-scrollbar absolute inset-0 overflow-y-auto">
           <ChatThread
             className="pt-8 pb-12"
             messages={buildChatThreadMessages(chat.messages)}

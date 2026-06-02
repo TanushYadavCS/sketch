@@ -28,7 +28,7 @@ import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
 import { createCanUseTool } from "./permissions";
-import { buildSystemContext } from "./prompt";
+import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
 
@@ -109,6 +109,7 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
+  responseSurface?: ResponseSurface;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
@@ -221,7 +222,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   });
 
   const systemAppend = buildSystemContext({
-    platform: params.platform,
+    platform: params.responseSurface ?? params.platform,
+    deliveryPlatform: params.responseSurface === "web" ? params.platform : undefined,
     orgName: params.orgName,
     botName: params.botName,
     indexedSources,
