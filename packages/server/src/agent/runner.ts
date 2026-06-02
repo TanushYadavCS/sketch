@@ -246,7 +246,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const systemAppend = buildSystemContext({
     platform: params.responseSurface ?? params.platform,
-    deliveryPlatform: params.responseSurface === "web" ? params.platform : undefined,
+    deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
     orgName: params.orgName,
     orgDescription: params.orgDescription,
     botName: params.botName,

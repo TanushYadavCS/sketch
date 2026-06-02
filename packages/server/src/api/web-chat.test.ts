@@ -144,13 +144,7 @@ describe("web chat API", () => {
     expect(call.contextType).toBe("dm");
     expect(call.userMessage).toContain("Karan Hudia");
     expect(call.userMessage).toContain("Can you summarize my workspace?");
-    expect(call.taskContext).toEqual({
-      platform: "slack",
-      contextType: "dm",
-      deliveryTarget: admin.id,
-      createdBy: admin.id,
-      creatorTimezone: "Asia/Kolkata",
-    });
+    expect(call.taskContext).toBeUndefined();
   });
 
   it("honors the current user's technical tool-progress setting", async () => {
@@ -569,13 +563,19 @@ describe("web chat API", () => {
 
   it("preserves overlapping turns in the same conversation", async () => {
     const admin = await seedAdmin(db);
-    const bothRunsStarted = deferred<void>();
-    let startedRuns = 0;
+    const firstStarted = deferred<void>();
+    const secondStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const releaseSecond = deferred<void>();
     const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
-      startedRuns += 1;
-      if (startedRuns === 2) bothRunsStarted.resolve();
-      await bothRunsStarted.promise;
-      return makeAgentResult(`Reply to ${params.userMessage.includes("first") ? "first" : "second"}`);
+      if (params.userMessage.includes("first")) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        return makeAgentResult("Reply to first");
+      }
+      secondStarted.resolve();
+      await releaseSecond.promise;
+      return makeAgentResult("Reply to second");
     });
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
@@ -609,24 +609,23 @@ describe("web chat API", () => {
 
     const responses = await Promise.all([first, second]);
     expect(responses.map((res) => res.status)).toEqual([200, 200]);
-    await Promise.all(responses.map((res) => res.text()));
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+    releaseSecond.resolve();
+    await responses[1].text();
+    releaseFirst.resolve();
+    await responses[0].text();
 
     const transcript = JSON.parse(
       await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-overlap"), "utf-8"),
     ) as {
       messages: Array<{ id: string; role: string; parts: Array<{ type: string; text?: string }> }>;
     };
-    expect(transcript.messages.map((message) => message.id)).toEqual(
-      expect.arrayContaining(["user-msg-first", "user-msg-second"]),
-    );
-    expect(
-      transcript.messages.filter((message) => message.role === "assistant").map((message) => message.parts[0]),
-    ).toEqual(
-      expect.arrayContaining([
-        { type: "text", text: "Reply to first" },
-        { type: "text", text: "Reply to second" },
-      ]),
-    );
+    expect(transcript.messages.map((message) => ({ role: message.role, part: message.parts[0] }))).toEqual([
+      { role: "user", part: { type: "text", text: "first request" } },
+      { role: "assistant", part: { type: "text", text: "Reply to first" } },
+      { role: "user", part: { type: "text", text: "second request" } },
+      { role: "assistant", part: { type: "text", text: "Reply to second" } },
+    ]);
     expect(transcript.messages.some((message) => message.parts.some((part) => part.type === "data-progress"))).toBe(
       false,
     );

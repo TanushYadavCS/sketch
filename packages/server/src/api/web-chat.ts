@@ -519,13 +519,21 @@ async function completeWebChatProgressMessage(
 ): Promise<void> {
   await withWebChatTranscriptLock(userId, conversationId, async () => {
     const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-    const withoutProgress = existing.filter((message) => message.id !== progressMessageId);
-    await writeWebChatTranscript(
-      config,
-      userId,
-      conversationId,
-      assistantMessage ? [...withoutProgress, assistantMessage] : withoutProgress,
-    );
+    const progressIndex = existing.findIndex((message) => message.id === progressMessageId);
+    if (progressIndex === -1) {
+      await writeWebChatTranscript(
+        config,
+        userId,
+        conversationId,
+        assistantMessage ? [...existing, assistantMessage] : existing,
+      );
+      return;
+    }
+
+    const next = assistantMessage
+      ? existing.map((message, index) => (index === progressIndex ? assistantMessage : message))
+      : existing.filter((_, index) => index !== progressIndex);
+    await writeWebChatTranscript(config, userId, conversationId, next);
   });
 }
 
@@ -583,7 +591,7 @@ async function resolveWebChatDmContext(
   deps: WebChatRouteDeps,
   currentUser: Awaited<ReturnType<UserRepo["findById"]>>,
   settingsRow: Awaited<ReturnType<SettingsRepo["get"]>>,
-): Promise<{ platform: "slack" | "whatsapp"; deliveryTarget: string }> {
+): Promise<{ platform: "slack" | "whatsapp"; deliveryTarget: string } | null> {
   if (currentUser?.slack_user_id && deps.getSlack) {
     const slack = deps.getSlack();
     if (slack) {
@@ -605,7 +613,7 @@ async function resolveWebChatDmContext(
     return { platform: "whatsapp", deliveryTarget: whatsappJid(currentUser.whatsapp_number) };
   }
 
-  return { platform: "slack", deliveryTarget: currentUser?.id ?? "" };
+  return null;
 }
 
 export function webChatRoutes(deps: WebChatRouteDeps) {
@@ -741,6 +749,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
+    const deliveryPlatform = dmContext?.platform ?? "slack";
     const abortController = new AbortController();
     const progressRenderer = createProgressRenderer(resolveProgressDisplaySettings(currentUser));
     const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage);
@@ -783,7 +792,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           userEmail: currentUser.email,
           userPhone: currentUser.whatsapp_number,
           logger: deps.logger,
-          platform: dmContext.platform,
+          platform: deliveryPlatform,
           responseSurface: "web",
           contextType: "dm",
           onProgressEvent: async (event) => {
@@ -819,13 +828,17 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           userRepo: deps.users,
           currentUserId: currentUser.id,
           sendDm: deps.sendDm,
-          taskContext: {
-            platform: dmContext.platform,
-            contextType: "dm",
-            deliveryTarget: dmContext.deliveryTarget,
-            createdBy: currentUser.id,
-            creatorTimezone: currentUser.timezone,
-          },
+          ...(dmContext
+            ? {
+                taskContext: {
+                  platform: dmContext.platform,
+                  contextType: "dm" as const,
+                  deliveryTarget: dmContext.deliveryTarget,
+                  createdBy: currentUser.id,
+                  creatorTimezone: currentUser.timezone,
+                },
+              }
+            : {}),
         });
 
         const finalText = result.trace.finalText ?? "";
