@@ -1310,6 +1310,16 @@ export const api = {
         : "/api/oauth/google/authorize";
     },
   },
+  zohoOAuth: {
+    status() {
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; regions: string[] }>(
+        "/api/oauth/zoho/status",
+      );
+    },
+    authorizeUrl(region: string) {
+      return `/api/oauth/zoho/authorize?region=${encodeURIComponent(region)}`;
+    },
+  },
   identities: {
     listForUser(userId: string) {
       return request<{ identities: ProviderIdentity[] }>(`/api/identities/user/${userId}`);
