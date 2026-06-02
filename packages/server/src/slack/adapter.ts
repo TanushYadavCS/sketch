@@ -856,7 +856,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           afterMessageId: cursor?.last_seen_message_id,
           beforeMessageId: capture.captured.id,
           limit: INLINE_BACKLOG_LIMIT,
-          providerThreadId: threadTs,
+          providerThreadId: message.threadTs ? threadTs : undefined,
         });
         const conversationBacklog =
           backlog.messages.length > 0 || backlog.hasMore

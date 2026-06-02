@@ -848,7 +848,7 @@ describe("slack/adapter", () => {
       expect(deps.repos.channels.create).not.toHaveBeenCalled();
     });
 
-    it("loads current-thread backlog on mention", async () => {
+    it("loads channel-wide backlog on top-level mention", async () => {
       const deps = makeDeps();
       vi.mocked(deps.repos.conversations.getCursor).mockResolvedValueOnce({
         id: 1,
@@ -863,6 +863,33 @@ describe("slack/adapter", () => {
       const { mention } = getHandlers();
 
       await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: 1,
+          afterMessageId: 10,
+          beforeMessageId: 1,
+          providerThreadId: undefined,
+        }),
+      );
+    });
+
+    it("loads current-thread backlog on threaded mention", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.repos.conversations.getCursor).mockResolvedValueOnce({
+        id: 1,
+        conversation_id: 1,
+        scope_type: "slack_thread",
+        scope_key: "1",
+        last_seen_message_id: 10,
+        created_at: "2025-01-01",
+        updated_at: "2025-01-01",
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "2", threadTs: "1", type: "channel_mention" });
       await flush();
 
       expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
