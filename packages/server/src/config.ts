@@ -27,6 +27,12 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("false")
     .transform((v) => v === "true" || v === "1"),
+  VISION_ENABLED: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+  VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
@@ -35,6 +41,8 @@ export const configSchema = z.object({
   FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),
   FEATURE_ARCHIVE_AGE_DAYS: z.coerce.number().int().min(1).default(30),
   FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
+  GEMINI_MAX_RPM: z.coerce.number().int().min(1).default(60),
+  GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).default(4),
 
   // Sync reconciliation
   SYNC_ALLOW_LARGE_RECONCILE: z

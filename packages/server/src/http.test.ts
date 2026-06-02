@@ -1,5 +1,5 @@
 import { SignJWT } from "jose";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "./auth/jwt";
 import { hashPassword } from "./auth/password";
@@ -1996,6 +1996,57 @@ describe("Users API", () => {
       const getBody = await getRes.json();
       expect(getBody.users).toHaveLength(1);
       expect(getBody.users[0].email).toBe("admin@test.com");
+    });
+
+    it("removes user with dependent rows", async () => {
+      await sql`PRAGMA foreign_keys = ON`.execute(db);
+      const app = createApp(db, config);
+      const cookie = await setupAdmin(app);
+      const users = createUserRepository(db);
+      const admin = await users.findByEmail("admin@test.com");
+      if (!admin) throw new Error("Admin user missing");
+      const manager = await users.create({ name: "Manager", email: "manager@test.com" });
+      const report = await users.create({ name: "Report", email: "report@test.com", reportsTo: manager.id });
+
+      await db
+        .insertInto("user_provider_identities")
+        .values({
+          id: "identity-manager",
+          user_id: manager.id,
+          provider: "google_drive",
+          provider_user_id: "provider-manager",
+          provider_email: "manager@test.com",
+        })
+        .execute();
+      await db
+        .insertInto("inbox_messages")
+        .values({
+          id: "inbox-manager",
+          sender_user_id: admin.id,
+          recipient_user_id: manager.id,
+          message: "Please review this",
+          platform: "slack",
+        })
+        .execute();
+
+      const res = await app.request(`/api/users/${manager.id}`, {
+        method: "DELETE",
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(200);
+
+      await expect(users.findById(manager.id)).resolves.toBeUndefined();
+      await expect(users.findById(report.id)).resolves.toMatchObject({ reports_to: null });
+      await expect(
+        db.selectFrom("user_provider_identities").select("id").where("user_id", "=", manager.id).execute(),
+      ).resolves.toEqual([]);
+      await expect(
+        db
+          .selectFrom("inbox_messages")
+          .select("id")
+          .where((eb) => eb.or([eb("sender_user_id", "=", manager.id), eb("recipient_user_id", "=", manager.id)]))
+          .execute(),
+      ).resolves.toEqual([]);
     });
 
     it("returns 404 for unknown id", async () => {

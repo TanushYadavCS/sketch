@@ -236,13 +236,12 @@ function relationCompare(a: RelationListEntry, b: RelationListEntry): number {
   return a.id.localeCompare(b.id);
 }
 
-export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
+export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDeps) {
   const routes = new Hono();
   const repo = createEntityRepository(db);
   const relRepo = createEntityRelationshipsRepository(db);
   const timelineRepo = createEntityTimelineRepository(db);
   const sharesRepo = createEntitySharesRepository(db);
-  const { config } = deps;
 
   const RELATIONS_LIMIT = 200;
   const EVIDENCE_LIMIT = 100;
@@ -560,12 +559,9 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
   /**
    * GET /api/entities/:id/relations
    * Drawer Relationships section. Caps each side at 200; sets `truncated`
-   * when more rows exist. Gated by EXPERIMENTAL_FLAG (drawer UI is flagged).
+   * when more rows exist.
    */
   routes.get("/:id/relations", async (c) => {
-    if (!config.EXPERIMENTAL_FLAG) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
-    }
     const viewer = getFileViewer(c);
     const entity = await repo.getEntity(c.req.param("id"), viewer);
     if (!entity) {
@@ -588,9 +584,6 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
    * snippets are filtered out for hidden rows).
    */
   routes.get("/:id/relations/:rid/evidence", async (c) => {
-    if (!config.EXPERIMENTAL_FLAG) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
-    }
     const entityId = c.req.param("id");
     const relationshipId = c.req.param("rid");
     const viewer = getFileViewer(c);
@@ -612,9 +605,6 @@ export function createEntityProfileRoutes(db: Kysely<DB>, deps: EntityRoutesDeps
    * applied; capped at 100 visible rows.
    */
   routes.get("/:id/timeline", async (c) => {
-    if (!config.EXPERIMENTAL_FLAG) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Not found" } }, 404);
-    }
     const viewer = getFileViewer(c);
     const entity = await repo.getEntity(c.req.param("id"), viewer);
     if (!entity) {

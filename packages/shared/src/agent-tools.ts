@@ -80,6 +80,13 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__VisualAnalysis",
+    label: "Visual analysis",
+    description:
+      "Inspect visual attachments in the workspace for tasks such as OCR, screenshots, diagrams, or animations using the configured vision model.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__getProviderConfig",
     label: "Check integration provider",
     description: "Check whether an integration provider is configured.",

@@ -15,6 +15,7 @@ export interface UserRepository {
   findFirstAdmin(): Promise<UserRow | undefined>;
   findFirstLocalAdmin(): Promise<UserRow | undefined>;
   getAllEmailsForUser(id: string): Promise<string[]>;
+  getVerifiedEmailsForUser(id: string): Promise<string[]>;
   findByExactName(name: string, excludeUserId?: string): Promise<UserRow | undefined>;
   searchByNamePrefix(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
   searchByNameSubstring(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
@@ -125,6 +126,31 @@ export function createUserRepository(db: UserDb): UserRepository {
     async getAllEmailsForUser(userId: string): Promise<string[]> {
       const [user, identities] = await Promise.all([
         db.selectFrom("users").select("email").where("id", "=", userId).executeTakeFirst(),
+        db
+          .selectFrom("user_provider_identities")
+          .select("provider_email")
+          .where("user_id", "=", userId)
+          .where("provider_email", "is not", null)
+          .execute(),
+      ]);
+      const emails: string[] = [];
+      if (user?.email) emails.push(user.email);
+      for (const row of identities) {
+        if (row.provider_email && !emails.includes(row.provider_email)) {
+          emails.push(row.provider_email);
+        }
+      }
+      return emails;
+    },
+
+    async getVerifiedEmailsForUser(userId: string): Promise<string[]> {
+      const [user, identities] = await Promise.all([
+        db
+          .selectFrom("users")
+          .select("email")
+          .where("id", "=", userId)
+          .where("email_verified_at", "is not", null)
+          .executeTakeFirst(),
         db
           .selectFrom("user_provider_identities")
           .select("provider_email")
@@ -281,6 +307,27 @@ export function createUserRepository(db: UserDb): UserRepository {
     },
 
     async remove(id: string) {
+      await db
+        .deleteFrom("agent_environment_variable_shares")
+        .where("variable_id", "in", db.selectFrom("agent_environment_variables").select("id").where("user_id", "=", id))
+        .execute();
+      await db.deleteFrom("agent_environment_variable_shares").where("created_by", "=", id).execute();
+      await db.deleteFrom("agent_environment_variables").where("user_id", "=", id).execute();
+      await db.deleteFrom("user_provider_identities").where("user_id", "=", id).execute();
+      await db.deleteFrom("email_verification_tokens").where("user_id", "=", id).execute();
+      await db.deleteFrom("magic_link_tokens").where("user_id", "=", id).execute();
+      await db
+        .deleteFrom("inbox_messages")
+        .where((eb) => eb.or([eb("sender_user_id", "=", id), eb("recipient_user_id", "=", id)]))
+        .execute();
+      await db.updateTable("users").set({ reports_to: null }).where("reports_to", "=", id).execute();
+      await db.updateTable("channels").set({ agent_user_id: null }).where("agent_user_id", "=", id).execute();
+      await db.updateTable("whatsapp_groups").set({ agent_user_id: null }).where("agent_user_id", "=", id).execute();
+      await db
+        .updateTable("settings")
+        .set({ whatsapp_fallback_agent_id: null })
+        .where("whatsapp_fallback_agent_id", "=", id)
+        .execute();
       return db.deleteFrom("users").where("id", "=", id).execute();
     },
 

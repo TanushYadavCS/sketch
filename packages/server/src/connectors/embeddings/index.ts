@@ -12,7 +12,10 @@ export type { EmbeddingProvider, EmbeddingProviderConfig };
 export function createEmbeddingProvider(config: EmbeddingProviderConfig): EmbeddingProvider {
   switch (config.provider) {
     case "gemini":
-      return createGeminiEmbeddingProvider(config.apiKey);
+      return createGeminiEmbeddingProvider(config.apiKey, {
+        maxRpm: config.maxRpm,
+        maxRetries: config.maxRetries,
+      });
     default:
       throw new Error(`Unknown embedding provider: ${config.provider}`);
   }
@@ -21,7 +24,10 @@ export function createEmbeddingProvider(config: EmbeddingProviderConfig): Embedd
 export function createQueryEmbedder(config: EmbeddingProviderConfig): (query: string) => Promise<number[]> {
   switch (config.provider) {
     case "gemini":
-      return createGeminiQueryEmbedder(config.apiKey);
+      return createGeminiQueryEmbedder(config.apiKey, {
+        maxRpm: config.maxRpm,
+        maxRetries: config.maxRetries,
+      });
     default:
       throw new Error(`Unknown embedding provider: ${config.provider}`);
   }

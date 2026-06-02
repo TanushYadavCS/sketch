@@ -9,6 +9,7 @@ import type { Logger } from "../../logger";
 import type { TaskScheduler } from "../../scheduler/service";
 import type { TaskContext } from "../../scheduler/types";
 import type { TranscriptionSettings } from "../../transcription/service";
+import type { VisionConfig } from "../../vision/service";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -16,6 +17,7 @@ export interface SearchableUserRepo {
   list: () => Promise<SelectableUser[]>;
   findById: (id: string) => Promise<SelectableUser | undefined>;
   getAllEmailsForUser: (id: string) => Promise<string[]>;
+  getVerifiedEmailsForUser?: (id: string) => Promise<string[]>;
   findByEmail?: (email: string) => Promise<SelectableUser | undefined>;
   findBySlackId?: (slackUserId: string) => Promise<SelectableUser | undefined>;
   findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
@@ -49,6 +51,7 @@ export interface SketchMcpDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   toolConfig?: { BASE_URL?: string; PORT: number };
+  geminiConfig?: { maxRpm?: number; maxRetries?: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
@@ -60,10 +63,17 @@ export interface SketchMcpDeps {
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   transcriptionEnabled?: boolean;
+  visionConfig?: VisionConfig | null;
+  visionAnalysisEnabled?: boolean;
   logger?: Logger;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
+  };
+  publicMcp?: {
+    userEmails?: string[];
+    filterEntityMetadata?: boolean;
+    maxFileContentChars?: number;
   };
 }
 

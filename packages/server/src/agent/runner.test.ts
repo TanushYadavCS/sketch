@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { extractAssistantText, runAgent } from "./runner";
 
@@ -336,6 +339,81 @@ describe("runAgent", () => {
     };
     expect(callArgs.options.model).toBe("claude-test-model");
     expect(callArgs.options.maxTurns).toBe(50);
+  });
+
+  it("uses text attachment references for image prompts when the vision tool is configured", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const tmpDir = await mkdtemp(join(tmpdir(), "sketch-runner-vision-"));
+    const imagePath = join(tmpDir, "diagram.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    let capturedPrompt: unknown;
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      const callArgs = args as { prompt: unknown };
+      capturedPrompt = callArgs.prompt;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-vision-tool" };
+        yield { type: "result", session_id: "sess-vision-tool", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    try {
+      const result = await runAgent(
+        makeBaseParams({
+          workspaceDir: tmpDir,
+          attachments: [
+            {
+              originalName: "diagram.png",
+              mimeType: "image/png",
+              localPath: imagePath,
+              sizeBytes: 4,
+            },
+          ],
+          visionConfig: {
+            apiKey: "sk-or-vision",
+            model: "xiaomi/mimo-v2.5",
+            source: "env",
+            providerMode: "env",
+          },
+        }),
+      );
+
+      expect(typeof capturedPrompt).toBe("string");
+      expect(capturedPrompt).toContain("<attachments>");
+      expect(capturedPrompt).toContain(`path="${imagePath}"`);
+      expect(result.promptMode).toBe("text");
+      expect(result.imageCount).toBe(1);
+      expect(result.nonImageCount).toBe(0);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves visual analysis config from OpenRouter DB settings", async () => {
+    const { createSketchMcpServer } = await import("./sketch-tools");
+    vi.stubEnv("VISION_ENABLED", "true");
+    vi.stubEnv("VISION_MODEL", "xiaomi/mimo-v2.5");
+    vi.stubEnv("OPENROUTER_API_KEY", "sk-env");
+    vi.mocked(createSketchMcpServer).mockClear();
+
+    try {
+      await runAgent(
+        makeBaseParams({
+          loadTranscriptionSettings: vi.fn().mockResolvedValue({
+            llm_provider: "openrouter_bedrock",
+            anthropic_api_key: "sk-db",
+          }),
+        }),
+      );
+
+      expect(vi.mocked(createSketchMcpServer).mock.calls.at(-1)?.[0].visionConfig).toMatchObject({
+        apiKey: "sk-db",
+        model: "xiaomi/mimo-v2.5",
+        source: "db",
+        providerMode: "openrouter_bedrock",
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("returns enriched AgentResult with SDK telemetry fields", async () => {

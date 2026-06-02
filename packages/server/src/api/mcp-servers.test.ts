@@ -15,6 +15,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import { CanvasProviderRequestError } from "../integrations/canvas";
 import { createTestConfig, createTestDb } from "../test-utils";
 
 vi.mock("../integrations/factory", () => ({
@@ -647,6 +648,7 @@ describe("MCP Servers API", () => {
         "member@test.com",
         "slack",
         "https://sketch.example.com/callback",
+        "Test Member",
         "member",
       );
     });
@@ -689,6 +691,7 @@ describe("MCP Servers API", () => {
         "admin@test.com",
         "google-calendar-oauth",
         "",
+        "admin",
         "admin",
       );
     });
@@ -774,7 +777,64 @@ describe("MCP Servers API", () => {
       const body = await res.json();
       expect(body.connections).toHaveLength(1);
       expect(body.connections[0].appName).toBe("Slack");
-      expect(mockProvider.listConnections).toHaveBeenCalledWith("member@test.com");
+      expect(mockProvider.listConnections).toHaveBeenCalledWith("member@test.com", "Test Member");
+    });
+
+    it("fills shared connection owner names from Sketch users when Canvas omits them", async () => {
+      await seedAdmin(db);
+      const users = createUserRepository(db);
+      await users.create({
+        name: "Tanush Yadav",
+        email: "tanushyadav87@gmail.com",
+        emailVerified: true,
+      });
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "secrets:owner-1:aimfox:aimfox",
+            providerId: server.id,
+            source: "canvas_user_secrets",
+            appId: "aimfox",
+            appName: "Aimfox",
+            accountName: "tanushyadav87@gmail.com's Aimfox Connection",
+            status: "active",
+            accessLevel: "organization",
+            isOwnedByViewer: false,
+            canManageAccess: false,
+            canDelete: false,
+            createdAt: "2026-05-27T00:00:00Z",
+          },
+        ]),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections`, {
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.connections[0].ownerName).toBe("Tanush Yadav");
     });
 
     it("returns 404 for non-existent server", async () => {
@@ -807,7 +867,18 @@ describe("MCP Servers API", () => {
         type: "canvas",
         listApps: vi.fn(),
         initiateConnection: vi.fn(),
-        listConnections: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "conn-1",
+            providerId: server.id,
+            appId: "slack",
+            appName: "Slack",
+            status: "active",
+            canDelete: true,
+            isOwnedByViewer: true,
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
         removeConnection: vi.fn().mockResolvedValue(undefined),
         isBrokerCapable: () => false,
         getBrokerSpec: () => null,
@@ -827,7 +898,57 @@ describe("MCP Servers API", () => {
 
       const body = await res.json();
       expect(body.success).toBe(true);
-      expect(mockProvider.removeConnection).toHaveBeenCalledWith("member@test.com", "conn-1");
+      expect(mockProvider.removeConnection).toHaveBeenCalledWith("member@test.com", "conn-1", "Test Member");
+    });
+
+    it("rejects deleting non-owner shared Canvas connections", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "secrets:owner-1:github:github",
+            providerId: server.id,
+            source: "canvas_user_secrets",
+            appId: "github",
+            appName: "GitHub",
+            status: "active",
+            accessLevel: "organization",
+            isOwnedByViewer: false,
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ]),
+        removeConnection: vi.fn().mockResolvedValue(undefined),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/secrets%3Aowner-1%3Agithub%3Agithub`, {
+        method: "DELETE",
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(403);
+
+      const body = await res.json();
+      expect(body.error).toEqual({ code: "FORBIDDEN", message: "Only the owner can disconnect this app" });
+      expect(mockProvider.removeConnection).not.toHaveBeenCalled();
     });
 
     it("returns 404 for non-existent server", async () => {
@@ -859,6 +980,124 @@ describe("MCP Servers API", () => {
         headers: { Cookie: memberCookie },
       });
       expect(res.status).toBe(400);
+    });
+  });
+
+  // --- PATCH /api/mcp-servers/:id/connections/:connectionId/access ---
+
+  describe("PATCH /api/mcp-servers/:id/connections/:connectionId/access", () => {
+    it("is not mounted when experimental features are disabled", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: false }));
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/pd-1/access`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ accessLevel: "organization" }),
+      });
+
+      expect(res.status).toBe(404);
+    });
+
+    it("forwards the member email and requested access level to the provider", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        updateConnectionAccess: vi.fn().mockResolvedValue(null),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }));
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(
+        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Agithub%3Agithub/access`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: memberCookie },
+          body: JSON.stringify({ accessLevel: "organization" }),
+        },
+      );
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.success).toBe(true);
+      expect(mockProvider.updateConnectionAccess).toHaveBeenCalledWith(
+        "member@test.com",
+        "secrets:owner:github:github",
+        "organization",
+        "Test Member",
+      );
+    });
+
+    it("returns Canvas validation errors in the Sketch error shape", async () => {
+      await seedAdmin(db);
+      const repo = createMcpServerRepository(db);
+      const server = await repo.create({
+        type: "canvas",
+        displayName: "Canvas",
+        url: "https://canvas.example.com/mcp",
+        apiUrl: "https://canvas.example.com",
+        credentials: JSON.stringify({ apiKey: "sk-test" }),
+      });
+
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        updateConnectionAccess: vi
+          .fn()
+          .mockRejectedValue(
+            new CanvasProviderRequestError(400, "BAD_REQUEST", "Only Canvas-owned accounts can be shared"),
+          ),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }));
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/pd-1/access`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ accessLevel: "organization" }),
+      });
+      expect(res.status).toBe(400);
+
+      const body = await res.json();
+      expect(body.error).toEqual({ code: "BAD_REQUEST", message: "Only Canvas-owned accounts can be shared" });
     });
   });
 });

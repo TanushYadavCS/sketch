@@ -321,6 +321,36 @@ describe("getAllEmailsForUser()", () => {
   });
 });
 
+describe("getVerifiedEmailsForUser()", () => {
+  it("excludes unverified users.email", async () => {
+    const user = await users.create({ name: "Unverified", email: "unverified@example.com" });
+    const emails = await users.getVerifiedEmailsForUser(user.id);
+    expect(emails).toEqual([]);
+  });
+
+  it("includes verified users.email and provider emails", async () => {
+    const user = await users.create({
+      name: "Verified",
+      email: "verified@example.com",
+      emailVerified: true,
+    });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "verified-pi-1",
+        user_id: user.id,
+        provider: "google",
+        provider_user_id: "google-verified",
+        provider_email: "verified.google@example.com",
+      })
+      .execute();
+
+    const emails = await users.getVerifiedEmailsForUser(user.id);
+    expect(emails).toEqual(expect.arrayContaining(["verified@example.com", "verified.google@example.com"]));
+    expect(emails).toHaveLength(2);
+  });
+});
+
 describe("remove()", () => {
   it("deletes user", async () => {
     const created = await users.create({ name: "Jack", slackUserId: "U013" });

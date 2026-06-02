@@ -130,6 +130,10 @@ export interface IndexedFilesTable {
   mime_type: string | null;
   embedding_status: Generated<string>;
   summary_status: Generated<string>;
+  embedding_attempts: Generated<number>;
+  embedding_next_retry_at: string | null;
+  summary_attempts: Generated<number>;
+  summary_next_retry_at: string | null;
   share_with_everyone: Generated<number>;
 }
 
@@ -216,6 +220,28 @@ export interface MagicLinkTokensTable {
   expires_at: string;
   used_at: string | null;
   created_at: Generated<string>;
+}
+
+export interface ApiTokensTable {
+  id: string;
+  user_id: string;
+  name: string;
+  token_hash: string;
+  prefix: string;
+  created_at: Generated<string>;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface ExternalMcpToolCallsTable {
+  id: string;
+  token_id: string;
+  user_id: string;
+  tool_name: string;
+  success: number;
+  duration_ms: number;
+  called_at: Generated<string>;
 }
 
 export interface AgentEnvironmentVariablesTable {
@@ -567,6 +593,8 @@ export interface DB {
   file_share_emails: FileShareEmailsTable;
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
+  api_tokens: ApiTokensTable;
+  external_mcp_tool_calls: ExternalMcpToolCallsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
