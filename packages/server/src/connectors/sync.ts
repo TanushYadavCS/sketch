@@ -108,6 +108,7 @@ export async function runConnectorSync(
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
     >
   >,
 ): Promise<SyncResult> {
@@ -123,7 +124,7 @@ export async function runConnectorSync(
     };
   }
 
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, appConfig?.ENCRYPTION_KEY);
   const entityRepo = createEntityRepository(db);
   const factRepo = createIndexedFileFactRepository(db);
   const userRepo = createUserRepository(db);
@@ -232,6 +233,7 @@ export async function runConnectorSync(
           connectorType,
           item,
           existingHashes,
+          encryptionKey: appConfig?.ENCRYPTION_KEY,
         });
 
         if (itemResult.kind === "skipped_empty") {
@@ -290,6 +292,7 @@ export async function runConnectorSync(
         seenProviderFileIds,
         allowLargeReconcile: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
         maxReconcileRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
+        encryptionKey: appConfig?.ENCRYPTION_KEY,
         logger: syncLogger,
       });
       result.itemsArchived = reconcileResult.itemsArchived;
@@ -361,6 +364,7 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
     >
   >;
 }
@@ -395,12 +399,12 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     return;
   }
 
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, deps?.appConfig?.ENCRYPTION_KEY);
 
   // Auto-recover any connector stuck in `syncing` past the staleness threshold —
   // a row stuck mid-process is otherwise excluded from `findSyncableConfigs` and
   // would never retry until the server restarts.
-  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS);
+  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS, deps?.appConfig?.ENCRYPTION_KEY);
 
   // Same idea for enrichment: scheduled runs only claim `pending`/`failed` (so
   // an in-flight run can't be re-claimed mid-flight and race on chunk inserts),
@@ -502,8 +506,13 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
  * process. Recovered rows are flipped to "error" so `findSyncableConfigs` re-includes
  * them on the next eligibility pass.
  */
-async function recoverStaleSyncs(db: Kysely<DB>, logger: Logger, staleThresholdMs = 0): Promise<void> {
-  const repo = createConnectorRepository(db);
+async function recoverStaleSyncs(
+  db: Kysely<DB>,
+  logger: Logger,
+  staleThresholdMs = 0,
+  encryptionKey?: string,
+): Promise<void> {
+  const repo = createConnectorRepository(db, encryptionKey);
   const stale = await repo.findStaleSyncingConfigs(staleThresholdMs);
 
   if (stale.length === 0) return;
@@ -563,7 +572,7 @@ export function startSyncScheduler(
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   // Recover any connectors stuck in "syncing" from a previous crash
-  recoverStaleSyncs(db, logger).catch((err) => {
+  recoverStaleSyncs(db, logger, 0, deps?.appConfig?.ENCRYPTION_KEY).catch((err) => {
     logger.error({ err }, "Failed to recover stale syncs on startup");
   });
 

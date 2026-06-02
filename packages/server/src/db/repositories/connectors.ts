@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
 import type { DB } from "../schema";
 
@@ -78,21 +79,35 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
   )`;
 }
 
-export function createConnectorRepository(db: Kysely<DB>) {
+function decodeConnectorConfigRow<T extends { credentials: string }>(row: T, encryptionKey?: string): T {
+  return {
+    ...row,
+    credentials: decodeSecretField(row.credentials, encryptionKey, "connector_configs.credentials"),
+  };
+}
+
+export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string) {
   return {
     /** List all connector configs. */
     async listConfigs() {
-      return db.selectFrom("connector_configs").selectAll().orderBy("created_at", "desc").execute();
+      const rows = await db.selectFrom("connector_configs").selectAll().orderBy("created_at", "desc").execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /** Find a connector config by ID. */
     async findConfigById(id: string) {
-      return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirst();
+      const row = await db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirst();
+      return row ? decodeConnectorConfigRow(row, encryptionKey) : undefined;
     },
 
     /** Find connector configs by type. */
     async findConfigsByType(connectorType: ConnectorType) {
-      return db.selectFrom("connector_configs").selectAll().where("connector_type", "=", connectorType).execute();
+      const rows = await db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("connector_type", "=", connectorType)
+        .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /**
@@ -103,12 +118,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
     async findSyncableConfigs(opts?: { staleAfterMs?: number }) {
       const staleAfterMs = opts?.staleAfterMs ?? 15 * 60 * 1000;
       const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
-      return db
+      const rows = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("sync_status", "in", ["active", "pending", "error"])
         .where((eb) => eb.or([eb("last_synced_at", "is", null), eb("last_synced_at", "<", cutoff)]))
         .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /** Find connector configs stuck in `syncing` state past the staleness threshold. */
@@ -124,12 +140,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
     /** All connector configs owned by a user. */
     async listByOwner(createdBy: string) {
-      return db
+      const rows = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("created_by", "=", createdBy)
         .orderBy("created_at", "desc")
         .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /**
@@ -145,7 +162,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           .updateTable("connector_configs")
           .set({
             sync_status: "disabled",
-            credentials: scrubbed,
+            credentials: encodeSecretField(scrubbed, encryptionKey),
             credential_hint: null,
             error_message: "Owner removed from workspace",
             updated_at: new Date().toISOString(),
@@ -158,12 +175,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
     /** Find a connector config of a given type owned by the given user (used for per-user uniqueness). */
     async findByTypeAndOwner(connectorType: ConnectorType, createdBy: string) {
-      return db
+      const row = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("connector_type", "=", connectorType)
         .where("created_by", "=", createdBy)
         .executeTakeFirst();
+      return row ? decodeConnectorConfigRow(row, encryptionKey) : undefined;
     },
 
     /** Look up the connector config that owns a given indexed file (for file-scoped authz). */
@@ -192,14 +210,15 @@ export function createConnectorRepository(db: Kysely<DB>) {
           id,
           connector_type: data.connectorType,
           auth_type: data.authType,
-          credentials: data.credentials,
+          credentials: encodeSecretField(data.credentials, encryptionKey),
           scope_config: data.scopeConfig ?? "{}",
           created_by: data.createdBy,
           credential_hint: data.credentialHint ?? null,
         })
         .execute();
 
-      return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const row = await db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return decodeConnectorConfigRow(row, encryptionKey);
     },
 
     /** Update connector config fields. */
@@ -217,7 +236,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       }>,
     ) {
       const values: Record<string, unknown> = {};
-      if (data.credentials !== undefined) values.credentials = data.credentials;
+      if (data.credentials !== undefined) values.credentials = encodeSecretField(data.credentials, encryptionKey);
       if (data.scopeConfig !== undefined) values.scope_config = data.scopeConfig;
       if (data.syncStatus !== undefined) values.sync_status = data.syncStatus;
       if (data.syncCursor !== undefined) values.sync_cursor = data.syncCursor;
@@ -231,7 +250,8 @@ export function createConnectorRepository(db: Kysely<DB>) {
         await db.updateTable("connector_configs").set(values).where("id", "=", id).execute();
       }
 
-      return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const row = await db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return decodeConnectorConfigRow(row, encryptionKey);
     },
 
     /** Get all file IDs linked to a connector. */
@@ -680,12 +700,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
     /** List connector configs accessible by a set of connector IDs. */
     async listConfigsByIds(ids: string[]) {
       if (ids.length === 0) return [];
-      return db
+      const rows = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("id", "in", ids)
         .orderBy("created_at", "desc")
         .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /**

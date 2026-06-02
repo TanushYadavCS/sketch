@@ -659,7 +659,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     // other attendees still see previously-synced meetings via file_access.
     // Fail-noisy: if archival throws we let the 500 surface so the admin retries
     // rather than silently leaving credentials in DB after the user row is gone.
-    const result = await createConnectorRepository(deps.db).archiveConnectorsForOwner(id);
+    const result = await createConnectorRepository(deps.db, deps.config.ENCRYPTION_KEY).archiveConnectorsForOwner(id);
     if (result.archived > 0) {
       deps.logger.info({ userId: id, count: result.archived }, "Archived connectors after user removal");
     }

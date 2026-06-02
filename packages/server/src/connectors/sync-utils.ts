@@ -26,8 +26,8 @@ export function truncateErrorMessage(message: string): string {
   return collapsed.length > MAX_ERROR_MESSAGE_LENGTH ? `${collapsed.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : collapsed;
 }
 
-export function parseCredentials(encrypted: string): ConnectorCredentials {
-  return JSON.parse(encrypted) as ConnectorCredentials;
+export function parseCredentials(raw: string): ConnectorCredentials {
+  return JSON.parse(raw) as ConnectorCredentials;
 }
 
 export function serializeCredentials(credentials: ConnectorCredentials): string {

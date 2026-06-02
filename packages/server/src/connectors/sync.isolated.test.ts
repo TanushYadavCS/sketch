@@ -11,6 +11,7 @@
  */
 import type { Kysely } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { encrypt } from "../auth/encryption";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -19,6 +20,8 @@ import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData } from "./enrichment";
 import { recoverStaleEnrichments, runAllSyncs, runConnectorSync, startSyncScheduler } from "./sync";
 import type { NameResolver, SyncedItem } from "./types";
+
+const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 // Stub the heavy enrichment/sync work to keep tests fast
 vi.mock("./enrichment", () => ({
@@ -468,6 +471,34 @@ describe("runAllSyncs (Fix A + Fix C)", () => {
       .selectFrom("connector_configs")
       .select(["sync_status", "error_message"])
       .where("id", "=", "stuck")
+      .executeTakeFirstOrThrow();
+    expect(row.sync_status).toBe("error");
+    expect(row.error_message).toMatch(/auto-recovered/);
+  });
+
+  it("recovers stale-syncing rows with encrypted credentials", async () => {
+    db = await createTestDb();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "encrypted-stuck",
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: encrypt(JSON.stringify({ type: "api_key", api_key: "secret" }), TEST_KEY),
+        created_by: "user-encrypted-stuck",
+        sync_status: "syncing",
+        updated_at: twoHoursAgo,
+        last_synced_at: new Date().toISOString(),
+      })
+      .execute();
+
+    await expect(runAllSyncs(db, logger, { appConfig: { ENCRYPTION_KEY: TEST_KEY } })).resolves.toBeUndefined();
+
+    const row = await db
+      .selectFrom("connector_configs")
+      .select(["sync_status", "error_message"])
+      .where("id", "=", "encrypted-stuck")
       .executeTakeFirstOrThrow();
     expect(row.sync_status).toBe("error");
     expect(row.error_message).toMatch(/auto-recovered/);

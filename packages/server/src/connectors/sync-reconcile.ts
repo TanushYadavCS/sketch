@@ -18,6 +18,7 @@ export interface ReconcileConnectorSyncParams {
   seenProviderFileIds: Set<string>;
   allowLargeReconcile?: boolean;
   maxReconcileRatio?: number;
+  encryptionKey?: string;
   logger: Logger;
 }
 
@@ -36,9 +37,10 @@ export async function reconcileConnectorSync({
   seenProviderFileIds,
   allowLargeReconcile,
   maxReconcileRatio,
+  encryptionKey,
   logger,
 }: ReconcileConnectorSyncParams): Promise<{ itemsArchived: number; affectedIndexedFileIds: string[] }> {
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, encryptionKey);
   const entityRepo = createEntityRepository(db);
   const reconcileResult = await factRepo.reconcileStaleFacts(
     { kind: "connector", connectorConfigId, syncRunId },

@@ -13,6 +13,7 @@ import { type AgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import type { Config } from "./config";
 import { startSyncScheduler } from "./connectors/sync";
+import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
 import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
@@ -101,6 +102,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
+  await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);

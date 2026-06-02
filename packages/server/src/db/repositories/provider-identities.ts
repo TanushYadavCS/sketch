@@ -6,29 +6,49 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
+import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import type { ConnectorType } from "../../connectors/types";
 import type { DB } from "../schema";
 
-export function createProviderIdentityRepository(db: Kysely<DB>) {
+function decodeProviderIdentityRow<T extends { access_token: string | null; refresh_token: string | null }>(
+  row: T,
+  encryptionKey?: string,
+): T {
+  return {
+    ...row,
+    access_token:
+      row.access_token === null
+        ? null
+        : decodeSecretField(row.access_token, encryptionKey, "user_provider_identities.access_token"),
+    refresh_token:
+      row.refresh_token === null
+        ? null
+        : decodeSecretField(row.refresh_token, encryptionKey, "user_provider_identities.refresh_token"),
+  };
+}
+
+export function createProviderIdentityRepository(db: Kysely<DB>, encryptionKey?: string) {
   return {
     /** Find a user's identity for a specific provider. */
     async findByUserAndProvider(userId: string, provider: ConnectorType) {
-      return db
+      const row = await db
         .selectFrom("user_provider_identities")
         .selectAll()
         .where("user_id", "=", userId)
         .where("provider", "=", provider)
         .executeTakeFirst();
+      return row ? decodeProviderIdentityRow(row, encryptionKey) : undefined;
     },
 
     /** Get all provider identities for a user. */
     async findByUser(userId: string) {
-      return db
+      const rows = await db
         .selectFrom("user_provider_identities")
         .selectAll()
         .where("user_id", "=", userId)
         .orderBy("connected_at", "desc")
         .execute();
+      return rows.map((row) => decodeProviderIdentityRow(row, encryptionKey));
     },
 
     /** Get all connected provider user IDs for a user (across all providers). */
@@ -59,17 +79,23 @@ export function createProviderIdentityRepository(db: Kysely<DB>) {
           provider_user_id: data.providerUserId,
         };
         if (data.providerEmail !== undefined) values.provider_email = data.providerEmail;
-        if (data.accessToken !== undefined) values.access_token = data.accessToken;
-        if (data.refreshToken !== undefined) values.refresh_token = data.refreshToken;
+        if (data.accessToken !== undefined) {
+          values.access_token = data.accessToken === null ? null : encodeSecretField(data.accessToken, encryptionKey);
+        }
+        if (data.refreshToken !== undefined) {
+          values.refresh_token =
+            data.refreshToken === null ? null : encodeSecretField(data.refreshToken, encryptionKey);
+        }
         if (data.tokenExpiresAt !== undefined) values.token_expires_at = data.tokenExpiresAt;
 
         await db.updateTable("user_provider_identities").set(values).where("id", "=", existing.id).execute();
 
-        return db
+        const row = await db
           .selectFrom("user_provider_identities")
           .selectAll()
           .where("id", "=", existing.id)
           .executeTakeFirstOrThrow();
+        return decodeProviderIdentityRow(row, encryptionKey);
       }
 
       const id = randomUUID();
@@ -81,13 +107,24 @@ export function createProviderIdentityRepository(db: Kysely<DB>) {
           provider: data.provider,
           provider_user_id: data.providerUserId,
           provider_email: data.providerEmail ?? null,
-          access_token: data.accessToken ?? null,
-          refresh_token: data.refreshToken ?? null,
+          access_token:
+            data.accessToken === undefined || data.accessToken === null
+              ? null
+              : encodeSecretField(data.accessToken, encryptionKey),
+          refresh_token:
+            data.refreshToken === undefined || data.refreshToken === null
+              ? null
+              : encodeSecretField(data.refreshToken, encryptionKey),
           token_expires_at: data.tokenExpiresAt ?? null,
         })
         .execute();
 
-      return db.selectFrom("user_provider_identities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const row = await db
+        .selectFrom("user_provider_identities")
+        .selectAll()
+        .where("id", "=", id)
+        .executeTakeFirstOrThrow();
+      return decodeProviderIdentityRow(row, encryptionKey);
     },
 
     /** Remove a provider identity (disconnect). */
@@ -101,7 +138,12 @@ export function createProviderIdentityRepository(db: Kysely<DB>) {
 
     /** List all identities for a provider (admin view). */
     async findByProvider(provider: ConnectorType) {
-      return db.selectFrom("user_provider_identities").selectAll().where("provider", "=", provider).execute();
+      const rows = await db
+        .selectFrom("user_provider_identities")
+        .selectAll()
+        .where("provider", "=", provider)
+        .execute();
+      return rows.map((row) => decodeProviderIdentityRow(row, encryptionKey));
     },
   };
 }
