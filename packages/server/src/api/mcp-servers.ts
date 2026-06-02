@@ -10,10 +10,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { IntegrationConnection } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createUserRepository } from "../db/repositories/users";
+import { CanvasProviderRequestError } from "../integrations/canvas";
 import { createProvider } from "../integrations/factory";
 import { canvasCredentialsSchema } from "../integrations/types";
 
@@ -62,6 +64,10 @@ const connectionTestSchema = z.object({
 const createConnectionSchema = z.object({
   appId: z.string().min(1, "App ID is required"),
   callbackUrl: z.string().url().optional(),
+});
+
+const updateConnectionAccessSchema = z.object({
+  accessLevel: z.enum(["personal", "organization"]),
 });
 
 /**
@@ -143,13 +149,13 @@ async function resolveProvider(
 }
 
 /**
- * Resolves the authenticated user's email from the JWT subject.
- * Returns the email or a JSON error response if the user has none.
+ * Resolves the authenticated user's Canvas identity from the JWT subject.
+ * Returns the email/name or a JSON error response if the user has no email.
  */
-async function resolveUserEmail(
+async function resolveUserIdentity(
   c: import("hono").Context,
   users: UserRepo,
-): Promise<{ ok: true; email: string } | { ok: false; response: Response }> {
+): Promise<{ ok: true; email: string; name?: string } | { ok: false; response: Response }> {
   const userId = c.get("sub");
   const user = await users.findById(userId);
   if (!user?.email) {
@@ -158,7 +164,7 @@ async function resolveUserEmail(
       response: c.json({ error: { code: "BAD_REQUEST", message: "User has no email address" } }, 400),
     };
   }
-  return { ok: true, email: user.email };
+  return { ok: true, email: user.email, name: user.name ?? undefined };
 }
 
 function serializeServer(row: {
@@ -187,7 +193,104 @@ function serializeServer(row: {
   };
 }
 
-export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
+function hasDisplayOwnerName(connection: IntegrationConnection): boolean {
+  const ownerName = connection.ownerName?.trim();
+  return !!ownerName && !isEmail(ownerName);
+}
+
+function isEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function extractEmails(value?: string): string[] {
+  return value?.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? [];
+}
+
+function extractSecretOwnerId(connectionId: string): string | null {
+  const match = /^secrets:([^:]+):/.exec(connectionId);
+  return match?.[1] ?? null;
+}
+
+async function resolveUserName(
+  users: UserRepo,
+  values: Array<string | null | undefined>,
+  cache: Map<string, string | null>,
+): Promise<string | null> {
+  for (const raw of values) {
+    const value = raw?.trim();
+    if (!value) continue;
+    const cacheKey = `${isEmail(value) ? "email" : "id"}:${value.toLocaleLowerCase()}`;
+    if (cache.has(cacheKey)) {
+      const cached = cache.get(cacheKey);
+      if (cached) return cached;
+      continue;
+    }
+    const user = isEmail(value) ? await users.findByEmail(value) : await users.findById(value);
+    if (user?.name) {
+      cache.set(cacheKey, user.name);
+      return user.name;
+    }
+    if (!isEmail(value)) {
+      const emailUser = await users.findByEmail(value);
+      if (emailUser?.name) {
+        cache.set(cacheKey, emailUser.name);
+        return emailUser.name;
+      }
+    }
+    cache.set(cacheKey, null);
+  }
+  return null;
+}
+
+async function enrichConnectionOwnerNames(
+  connections: IntegrationConnection[],
+  users: UserRepo,
+): Promise<IntegrationConnection[]> {
+  const ownerNameCache = new Map<string, string | null>();
+  return Promise.all(
+    connections.map(async (connection) => {
+      if (
+        connection.accessLevel !== "organization" ||
+        connection.isOwnedByViewer !== false ||
+        hasDisplayOwnerName(connection)
+      ) {
+        return connection;
+      }
+
+      const ownerName = await resolveUserName(
+        users,
+        [
+          connection.ownerUserId,
+          extractSecretOwnerId(connection.id),
+          connection.ownerName,
+          ...extractEmails(connection.accountName),
+        ],
+        ownerNameCache,
+      );
+
+      return ownerName ? { ...connection, ownerName } : connection;
+    }),
+  );
+}
+
+function isAccessControlledConnection(connection: IntegrationConnection): boolean {
+  return (
+    connection.source === "canvas_user_secrets" ||
+    connection.accessLevel !== undefined ||
+    connection.isOwnedByViewer !== undefined ||
+    connection.canDelete !== undefined
+  );
+}
+
+function canDisconnectConnection(connection: IntegrationConnection): boolean {
+  return connection.canDelete !== false && connection.isOwnedByViewer !== false;
+}
+
+export function mcpServerRoutes(
+  mcpServers: McpServerRepo,
+  users: UserRepo,
+  options: { experimentalFlag?: boolean } = {},
+) {
   const routes = new Hono();
 
   // --- MCP Server CRUD (admin-only) ---
@@ -354,7 +457,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const userResult = await resolveUserEmail(c, users);
+    const userResult = await resolveUserIdentity(c, users);
     if (!userResult.ok) return userResult.response;
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
@@ -362,6 +465,8 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
       userResult.email,
       parsed.data.appId,
       parsed.data.callbackUrl ?? "",
+      userResult.name,
+      c.get("role"),
     );
     return c.json(result);
   });
@@ -371,12 +476,13 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     if (!resolved.ok) return resolved.response;
     const { row } = resolved;
 
-    const userResult = await resolveUserEmail(c, users);
+    const userResult = await resolveUserIdentity(c, users);
     if (!userResult.ok) return userResult.response;
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
-    const connections = await provider.listConnections(userResult.email);
-    return c.json({ connections });
+    const connections = await provider.listConnections(userResult.email, userResult.name);
+    const enrichedConnections = await enrichConnectionOwnerNames(connections, users);
+    return c.json({ connections: enrichedConnections });
   });
 
   routes.delete("/:id/connections/:connectionId", async (c) => {
@@ -384,14 +490,59 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     if (!resolved.ok) return resolved.response;
     const { row } = resolved;
 
-    const userResult = await resolveUserEmail(c, users);
+    const userResult = await resolveUserIdentity(c, users);
     if (!userResult.ok) return userResult.response;
 
     const connectionId = c.req.param("connectionId");
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
-    await provider.removeConnection(userResult.email, connectionId);
+    const connections = await provider.listConnections(userResult.email, userResult.name);
+    const connection = connections.find((item) => item.id === connectionId);
+    if (connection && isAccessControlledConnection(connection) && !canDisconnectConnection(connection)) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Only the owner can disconnect this app" } }, 403);
+    }
+
+    await provider.removeConnection(userResult.email, connectionId, userResult.name);
     return c.json({ success: true });
   });
+
+  if (options.experimentalFlag) {
+    routes.patch("/:id/connections/:connectionId/access", async (c) => {
+      const resolved = await resolveProvider(c, mcpServers);
+      if (!resolved.ok) return resolved.response;
+      const { row } = resolved;
+
+      const body = await c.req.json();
+      const parsed = updateConnectionAccessSchema.safeParse(body);
+      if (!parsed.success) {
+        const message = parsed.error.issues[0]?.message ?? "Invalid request";
+        return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+      }
+
+      const userResult = await resolveUserIdentity(c, users);
+      if (!userResult.ok) return userResult.response;
+
+      const connectionId = c.req.param("connectionId");
+      const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
+      if (!provider.updateConnectionAccess) {
+        return c.json({ error: { code: "BAD_REQUEST", message: "Provider does not support connection access" } }, 400);
+      }
+
+      try {
+        const connection = await provider.updateConnectionAccess(
+          userResult.email,
+          connectionId,
+          parsed.data.accessLevel,
+          userResult.name,
+        );
+        return c.json({ success: true, connection });
+      } catch (err) {
+        if (err instanceof CanvasProviderRequestError) {
+          return c.json({ error: { code: err.code, message: err.message } }, err.status as 400 | 401 | 403 | 404 | 500);
+        }
+        throw err;
+      }
+    });
+  }
 
   return routes;
 }

@@ -48,7 +48,14 @@ function syncInBackground(
   connectorId: string,
   logger: Logger,
   config?: Partial<
-    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+    Pick<
+      Config,
+      | "SYNC_ALLOW_LARGE_RECONCILE"
+      | "SYNC_MAX_RECONCILE_RATIO"
+      | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
+      | "GEMINI_MAX_RPM"
+      | "GEMINI_MAX_RETRIES"
+    >
   >,
 ) {
   runConnectorSync(db, connectorId, logger, config).catch((err) => {
@@ -107,7 +114,14 @@ export function connectorRoutes(
   logger: Logger,
   userRepo?: UserRepo,
   appConfig?: Partial<
-    Pick<Config, "SYNC_ALLOW_LARGE_RECONCILE" | "SYNC_MAX_RECONCILE_RATIO" | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD">
+    Pick<
+      Config,
+      | "SYNC_ALLOW_LARGE_RECONCILE"
+      | "SYNC_MAX_RECONCILE_RATIO"
+      | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
+      | "GEMINI_MAX_RPM"
+      | "GEMINI_MAX_RETRIES"
+    >
   >,
 ) {
   const routes = new Hono();
@@ -348,6 +362,8 @@ export function connectorRoutes(
       after: after ?? undefined,
       before: before ?? undefined,
       userEmails,
+      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
     });
     return c.json({ results });
   });
@@ -1326,7 +1342,12 @@ export function connectorRoutes(
       .where("id", "=", "default")
       .executeTakeFirst();
     const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({ provider: "gemini", apiKey: settings.gemini_api_key })
+      ? createEmbeddingProvider({
+          provider: "gemini",
+          apiKey: settings.gemini_api_key,
+          maxRpm: appConfig?.GEMINI_MAX_RPM,
+          maxRetries: appConfig?.GEMINI_MAX_RETRIES,
+        })
       : null;
 
     // Enrich only this specific file.
@@ -1340,6 +1361,8 @@ export function connectorRoutes(
       logger: logger.child({ component: "enrichment", fileId }),
       embeddingProvider,
       geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
       fileIds: [fileId],
       debugDumpDir,
     }).catch((err) => {

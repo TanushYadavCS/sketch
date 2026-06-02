@@ -232,6 +232,8 @@ export async function handleSearch(
     sortBy,
     userEmails,
     skipAutoEntityBoost,
+    geminiMaxRpm: deps.geminiConfig?.maxRpm,
+    geminiMaxRetries: deps.geminiConfig?.maxRetries,
   });
 
   const effectiveSortBy = sortBy ?? "relevance";

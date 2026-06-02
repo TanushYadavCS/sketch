@@ -1355,6 +1355,15 @@ export const api = {
         method: "DELETE",
       });
     },
+    updateConnectionAccess(providerId: string, connectionId: string, accessLevel: "personal" | "organization") {
+      return request<{ success: true; connection: IntegrationConnection | null }>(
+        `/api/mcp-servers/${providerId}/connections/${encodeURIComponent(connectionId)}/access`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ accessLevel }),
+        },
+      );
+    },
   },
   agentEnvironmentVariables: {
     async list() {

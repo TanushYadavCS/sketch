@@ -1573,13 +1573,13 @@ describe("Entity drawer routes", () => {
     expect(body.totalCount).toBe(2);
   });
 
-  it("GET /api/entities/:id/relations is gated by EXPERIMENTAL_FLAG", async () => {
+  it("GET /api/entities/:id/relations works without EXPERIMENTAL_FLAG (Files is GA)", async () => {
     const offConfig = createTestConfig({ EXPERIMENTAL_FLAG: false });
     const offApp = createApp(db, offConfig, { logger });
     await seedEntity("e1", "Sarah", "person");
     const offCookie = await login(offApp);
     const res = await offApp.request("/api/entities/e1/relations", { headers: { Cookie: offCookie } });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
   });
 
   it("GET /api/entities/:id/relations/:rid/evidence applies file RBAC (visibleCount < totalCount)", async () => {

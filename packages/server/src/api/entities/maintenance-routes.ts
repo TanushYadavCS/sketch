@@ -374,6 +374,8 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           lockAlreadyHeld,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+          geminiMaxRpm: config.GEMINI_MAX_RPM,
+          geminiMaxRetries: config.GEMINI_MAX_RETRIES,
           onPhase: (phase) => {
             job.phase = phase;
           },

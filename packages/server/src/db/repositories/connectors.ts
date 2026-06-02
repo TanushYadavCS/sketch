@@ -347,7 +347,14 @@ export function createConnectorRepository(db: Kysely<DB>) {
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
-        if (contentChanged) updates.embedding_status = "pending";
+        if (contentChanged) {
+          updates.embedding_status = "pending";
+          updates.summary_status = "pending";
+          updates.embedding_attempts = 0;
+          updates.embedding_next_retry_at = null;
+          updates.summary_attempts = 0;
+          updates.summary_next_retry_at = null;
+        }
 
         await db.updateTable("indexed_files").set(updates).where("id", "=", existing.id).execute();
 
@@ -374,6 +381,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           synced_at: now,
           mime_type: data.mimeType ?? null,
           embedding_status: "pending",
+          summary_status: "pending",
         })
         .execute();
 

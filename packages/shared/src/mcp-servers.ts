@@ -25,12 +25,24 @@ export interface IntegrationApp {
 export interface IntegrationConnection {
   id: string;
   providerId: string;
+  source?: "canvas_user_secrets" | "pipedream" | string;
   appId: string;
   appName: string;
+  app?: { name: string; nameSlug: string; imgSrc?: string };
   icon?: string;
   accountName?: string;
+  authType?: "oauth" | "api_key" | string;
+  healthy?: boolean;
   status: "active" | "error" | "expired";
+  accessLevel?: "personal" | "organization";
+  ownerUserId?: string;
+  ownerName?: string;
+  isOwnedByViewer?: boolean;
+  canUse?: boolean;
+  canManageAccess?: boolean;
+  canDelete?: boolean;
   createdAt: string;
+  connectedAt?: string;
 }
 
 /** Pagination info for cursor-based pagination. */
