@@ -524,6 +524,34 @@ describe("Connectors API — authorization", () => {
       expect(state).not.toContain("attacker");
     });
 
+    it("authorize is blocked with 409 when Zoho CRM is already connected", async () => {
+      const flaggedApp = createApp(
+        db,
+        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
+        { logger },
+      );
+
+      await createConnectorRepository(db).createConfig({
+        connectorType: "zoho_crm",
+        authType: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          access_token: "a",
+          refresh_token: "r",
+          client_id: "c",
+          client_secret: "s",
+        }),
+        createdBy: adminId,
+      });
+
+      const res = await flaggedApp.request("/api/oauth/zoho/authorize?region=in", {
+        headers: { Cookie: adminCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(409);
+    });
+
     it("callback exchanges tokens and stores a Zoho connector config", async () => {
       const flaggedApp = createApp(
         db,

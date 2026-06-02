@@ -362,6 +362,23 @@ export function oauthRoutes(
         return c.json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } }, 401);
       }
 
+      // Fail fast if Zoho CRM is already connected. The callback enforces this
+      // too, but blocking before the redirect prevents a re-consent at Zoho from
+      // rotating/invalidating the live connection's refresh token.
+      const existingZoho = await connectors.findConfigsByType("zoho_crm");
+      if (existingZoho.some((config) => config.sync_status !== "disabled")) {
+        return c.json(
+          {
+            error: {
+              code: "ALREADY_CONNECTED",
+              message: "Zoho CRM is already connected. Disconnect the existing connection before reconnecting.",
+              connector: "zoho_crm",
+            },
+          },
+          409,
+        );
+      }
+
       cleanupExpiredStates();
 
       const nonce = randomBytes(16).toString("hex");
