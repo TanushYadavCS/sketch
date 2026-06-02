@@ -19,6 +19,7 @@ import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { resolveConnectorCredentials } from "./credential-source";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { runEnrichment } from "./enrichment";
 import { runPostSyncGraphPipeline } from "./post-sync";
@@ -27,13 +28,7 @@ import { emitFactsForSyncedItem } from "./sync-facts";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
 import { reconcileConnectorSync } from "./sync-reconcile";
-import {
-  extractErrorMessage,
-  parseCredentials,
-  runWithConcurrency,
-  serializeCredentials,
-  truncateErrorMessage,
-} from "./sync-utils";
+import { extractErrorMessage, runWithConcurrency, serializeCredentials, truncateErrorMessage } from "./sync-utils";
 import type { ConnectorType, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
@@ -108,6 +103,10 @@ export async function runConnectorSync(
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
     >
   >,
 ): Promise<SyncResult> {
@@ -134,7 +133,6 @@ export async function runConnectorSync(
   }
 
   const connector = getConnector(config.connector_type as ConnectorType);
-  let credentials = parseCredentials(config.credentials);
   const scopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
   const owner = await userRepo.findById(config.created_by);
   const ownerEmail = owner?.email ?? null;
@@ -156,12 +154,21 @@ export async function runConnectorSync(
   activeSyncs.set(config.id, progress);
 
   try {
-    if (credentials.type === "oauth" && connector.refreshTokens) {
+    const resolvedCredentials = await resolveConnectorCredentials({
+      db,
+      config,
+      appConfig: appConfig ?? {},
+      ownerEmail,
+      logger: syncLogger,
+    });
+    let credentials = resolvedCredentials.credentials;
+
+    if (resolvedCredentials.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
       const refreshed = await connector.refreshTokens(credentials);
       if (refreshed) {
         credentials = refreshed;
         await repo.updateConfig(config.id, {
-          credentials: serializeCredentials(credentials),
+          credentials: serializeCredentials(credentials, appConfig?.ENCRYPTION_KEY),
         });
         syncLogger.debug("OAuth tokens refreshed");
       }
@@ -191,6 +198,7 @@ export async function runConnectorSync(
 
     for await (const item of connector.sync({
       credentials,
+      accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
       cursor: config.sync_cursor,
       logger: syncLogger,
@@ -306,6 +314,7 @@ export async function runConnectorSync(
 
     result.newCursor = await connector.getCursor({
       credentials,
+      accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
       currentCursor: config.sync_cursor,
       logger: syncLogger,
@@ -361,6 +370,10 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
     >
   >;
 }

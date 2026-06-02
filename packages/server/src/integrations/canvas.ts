@@ -9,6 +9,7 @@
  */
 import { join } from "node:path";
 import type { IntegrationApp, IntegrationConnection, PageInfo } from "@sketch/shared";
+import type { CredentialEnvelope } from "../connectors/credential-envelope";
 import type { BrokerSpec, IntegrationProvider, IntegrationUserOrgRole } from "./types";
 
 type CanvasAccountResponse = {
@@ -31,6 +32,16 @@ type CanvasAccountResponse = {
   created_at?: string;
   connectedAt?: string;
 };
+
+export type CanvasSketchConnectorType = "google_drive" | "fireflies" | "clickup" | "notion" | "linear";
+
+export interface CanvasConnectorCredentialResponse {
+  connectorType: CanvasSketchConnectorType;
+  provider: string;
+  credentialKind: "oauth_access_token" | "api_key";
+  expiresAt?: string;
+  envelope: CredentialEnvelope;
+}
 
 function hasCanvasAccessMetadata(account: CanvasAccountResponse): boolean {
   return (
@@ -292,5 +303,32 @@ export class CanvasProvider implements IntegrationProvider {
     }
 
     return null;
+  }
+
+  async mintConnectorCredential(params: {
+    userEmail: string;
+    connectorType: CanvasSketchConnectorType;
+    publicKeyId?: string;
+    userName?: string;
+    userOrgRole?: IntegrationUserOrgRole;
+  }): Promise<CanvasConnectorCredentialResponse> {
+    const res = await fetch(`${this.apiUrl}/api/sketch/credentials/mint`, {
+      method: "POST",
+      headers: this.headers(params.userEmail, true, params.userName, params.userOrgRole),
+      body: JSON.stringify({
+        connectorType: params.connectorType,
+        ...(params.publicKeyId ? { publicKeyId: params.publicKeyId } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      throw await this.parseError(res, `Canvas credential mint failed: ${res.status} ${res.statusText}`);
+    }
+
+    const raw = (await res.json()) as {
+      success: boolean;
+      data: CanvasConnectorCredentialResponse;
+    };
+    return raw.data;
   }
 }

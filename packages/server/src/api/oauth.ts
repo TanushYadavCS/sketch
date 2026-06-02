@@ -17,6 +17,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { verifyJwt } from "../auth/jwt";
 import { ensureValidToken } from "../connectors/google-drive";
+import { serializeCredentials } from "../connectors/sync-utils";
 import type { OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import type { createProviderIdentityRepository } from "../db/repositories/provider-identities";
@@ -59,6 +60,7 @@ export function oauthRoutes(
   db: Kysely<DB>,
   logger: Logger,
   baseUrl?: string,
+  encryptionKey?: string,
 ) {
   const routes = new Hono();
 
@@ -241,7 +243,8 @@ export function oauthRoutes(
       const connectorConfig = await connectors.createConfig({
         connectorType: "google_drive",
         authType: "oauth",
-        credentials: JSON.stringify(validCreds),
+        credentials: serializeCredentials(validCreds, encryptionKey),
+        credentialSource: "local",
         scopeConfig: JSON.stringify({}),
         createdBy: userId,
       });

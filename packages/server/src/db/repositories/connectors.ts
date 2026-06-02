@@ -181,7 +181,9 @@ export function createConnectorRepository(db: Kysely<DB>) {
       connectorType: ConnectorType;
       authType: string;
       credentials: string;
+      credentialSource?: "local" | "canvas";
       scopeConfig?: string;
+      syncStatus?: SyncStatus;
       createdBy: string;
       credentialHint?: string | null;
     }) {
@@ -193,7 +195,9 @@ export function createConnectorRepository(db: Kysely<DB>) {
           connector_type: data.connectorType,
           auth_type: data.authType,
           credentials: data.credentials,
+          credential_source: data.credentialSource ?? "local",
           scope_config: data.scopeConfig ?? "{}",
+          ...(data.syncStatus ? { sync_status: data.syncStatus } : {}),
           created_by: data.createdBy,
           credential_hint: data.credentialHint ?? null,
         })

@@ -97,8 +97,17 @@ export function ConnectIntegrationDialog({
   const [notionBrowseId, setNotionBrowseId] = useState<string | null>(null);
   const [notionPagesScanned, setNotionPagesScanned] = useState(0);
   const [notionScanDone, setNotionScanDone] = useState(false);
+  const [managedConnectorId, setManagedConnectorId] = useState<string | null>(null);
+  const [canvasPopupOpened, setCanvasPopupOpened] = useState(false);
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
+
+  const credentialSource = useQuery({
+    queryKey: ["connector-credential-source"],
+    queryFn: () => api.integrations.credentialSource(),
+    enabled: open,
+  });
+  const isCanvasMode = credentialSource.data?.mode === "canvas";
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -138,7 +147,7 @@ export function ConnectIntegrationDialog({
   const oauthStatus = useQuery({
     queryKey: ["google-oauth-status"],
     queryFn: () => api.googleOAuth.status(),
-    enabled: open && isOAuthRedirect,
+    enabled: open && isOAuthRedirect && !isCanvasMode,
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
@@ -174,6 +183,9 @@ export function ConnectIntegrationDialog({
   const validateMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
+      if (isCanvasMode && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, { rootPages: Array.from(selectedNotionPageIds) });
+      }
       const credentials = buildCredentials();
 
       // ClickUp: browse workspaces and spaces, show picker
@@ -222,6 +234,12 @@ export function ConnectIntegrationDialog({
   const connectWithNotionPagesMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
+      if (isCanvasMode && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, {
+          workspaces: Array.from(selectedWorkspaceIds),
+          spaces: Array.from(selectedSpaceIds),
+        });
+      }
       const credentials = buildCredentials();
       const scopeConfig = { rootPages: Array.from(selectedNotionPageIds) };
       return api.integrations.connect({
@@ -271,11 +289,14 @@ export function ConnectIntegrationDialog({
   const connectWithDrivesMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      const credentials = buildCredentials();
       const scopeConfig =
         sharedDrives.length > 0
           ? { sharedDrives: Array.from(selectedDriveIds) }
           : { folders: Array.from(selectedFolderIds) };
+      if (isCanvasMode && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, scopeConfig);
+      }
+      const credentials = buildCredentials();
       return api.integrations.connect({
         connectorType: integration.type,
         authType: integration.authType,
@@ -316,8 +337,73 @@ export function ConnectIntegrationDialog({
     setNotionBrowseId(null);
     setNotionPagesScanned(0);
     setNotionScanDone(false);
+    setManagedConnectorId(null);
+    setCanvasPopupOpened(false);
     onOpenChange(false);
   };
+
+  const canvasConnectMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration) throw new Error("No integration selected");
+      const result = await api.integrations.canvasConnect({
+        connectorType: integration.type,
+        callbackUrl: window.location.href,
+      });
+      window.open(result.redirectUrl, "canvas-connect", "width=640,height=760");
+      setCanvasPopupOpened(true);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to start Canvas connection.");
+    },
+  });
+
+  const canvasImportMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration) throw new Error("No integration selected");
+      return api.integrations.canvasImport({ connectorType: integration.type });
+    },
+    onSuccess: async ({ connector }) => {
+      if (!integration) return;
+      setManagedConnectorId(connector.id);
+
+      if (integration.type === "google_drive") {
+        const result = await api.integrations.browseGoogleDriveExisting(connector.id);
+        setSharedDrives(result.sharedDrives);
+        setRootFolders(result.rootFolders);
+        setSelectedDriveIds(new Set(result.sharedDrives.filter((d) => d.selected).map((d) => d.id)));
+        setSelectedFolderIds(new Set(result.rootFolders.filter((f) => f.selected).map((f) => f.id)));
+        setStep("drives");
+        return;
+      }
+
+      if (integration.type === "clickup") {
+        const result = await api.integrations.browseClickUpExisting(connector.id);
+        setClickUpWorkspaces(result.workspaces);
+        setSelectedWorkspaceIds(new Set(result.workspaces.filter((w) => w.selected).map((w) => w.id)));
+        setSelectedSpaceIds(
+          new Set(result.workspaces.flatMap((w) => w.spaces.filter((s) => s.selected).map((s) => s.id))),
+        );
+        setStep("clickup-workspaces");
+        return;
+      }
+
+      if (integration.type === "notion") {
+        const result = await api.integrations.browseNotionExisting(connector.id);
+        setNotionRootPages(result.rootPages.map((p) => ({ id: p.id, title: p.title, url: p.url })));
+        setSelectedNotionPageIds(new Set(result.rootPages.filter((p) => p.selected).map((p) => p.id)));
+        setNotionScanDone(true);
+        setStep("notion-pages");
+        return;
+      }
+
+      toast.success(`${integration.name} connected successfully.`);
+      resetAndClose();
+      onConnected();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to import Canvas credential.");
+    },
+  });
 
   const handleFieldChange = (key: string, value: string) => {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
@@ -361,6 +447,8 @@ export function ConnectIntegrationDialog({
     connectWithDrivesMutation.isPending ||
     connectWithNotionPagesMutation.isPending ||
     connectWithClickUpMutation.isPending ||
+    canvasConnectMutation.isPending ||
+    canvasImportMutation.isPending ||
     configureOAuthMutation.isPending;
 
   if (!integration) return null;
@@ -469,6 +557,49 @@ export function ConnectIntegrationDialog({
                 )}
               </Button>
             </DialogFooter>
+          </>
+        ) : step === "credentials" && isCanvasMode ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Connect {integration.name}
+              </DialogTitle>
+              <DialogDescription>Connect in Canvas, then continue here to choose sync scope.</DialogDescription>
+            </DialogHeader>
+
+            <div className="flex flex-col gap-3 py-4">
+              <Button
+                size="lg"
+                className="w-full"
+                onClick={() => canvasConnectMutation.mutate()}
+                disabled={isPending || credentialSource.data?.canvasConfigured === false}
+              >
+                {canvasConnectMutation.isPending ? (
+                  <>
+                    <SpinnerGapIcon size={14} className="animate-spin" />
+                    Opening Canvas...
+                  </>
+                ) : (
+                  "Connect in Canvas"
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => canvasImportMutation.mutate()}
+                disabled={isPending || !canvasPopupOpened}
+              >
+                {canvasImportMutation.isPending ? (
+                  <>
+                    <SpinnerGapIcon size={14} className="animate-spin" />
+                    Importing...
+                  </>
+                ) : (
+                  "Continue"
+                )}
+              </Button>
+            </div>
           </>
         ) : step === "credentials" && isOAuthRedirect ? (
           /* OAuth redirect: "Connect with Google" button */

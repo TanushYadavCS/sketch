@@ -1,3 +1,4 @@
+import { decrypt, encrypt } from "../auth/encryption";
 import type { ConnectorCredentials } from "./types";
 
 export const MAX_ERROR_MESSAGE_LENGTH = 500;
@@ -26,12 +27,19 @@ export function truncateErrorMessage(message: string): string {
   return collapsed.length > MAX_ERROR_MESSAGE_LENGTH ? `${collapsed.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : collapsed;
 }
 
-export function parseCredentials(encrypted: string): ConnectorCredentials {
-  return JSON.parse(encrypted) as ConnectorCredentials;
+export function parseCredentials(stored: string, encryptionKey?: string): ConnectorCredentials {
+  if (stored.startsWith("enc:")) {
+    if (!encryptionKey) {
+      throw new Error("Encrypted connector credentials found but ENCRYPTION_KEY is not set");
+    }
+    return JSON.parse(decrypt(stored, encryptionKey)) as ConnectorCredentials;
+  }
+  return JSON.parse(stored) as ConnectorCredentials;
 }
 
-export function serializeCredentials(credentials: ConnectorCredentials): string {
-  return JSON.stringify(credentials);
+export function serializeCredentials(credentials: ConnectorCredentials, encryptionKey?: string): string {
+  const plaintext = JSON.stringify(credentials);
+  return encryptionKey ? encrypt(plaintext, encryptionKey) : plaintext;
 }
 
 /**
