@@ -15,6 +15,7 @@ export interface SearchableUserRepo {
   list: () => Promise<SelectableUser[]>;
   findById: (id: string) => Promise<SelectableUser | undefined>;
   getAllEmailsForUser: (id: string) => Promise<string[]>;
+  getVerifiedEmailsForUser?: (id: string) => Promise<string[]>;
   findByEmail?: (email: string) => Promise<SelectableUser | undefined>;
   findBySlackId?: (slackUserId: string) => Promise<SelectableUser | undefined>;
   findByExactName?: (name: string, excludeUserId?: string) => Promise<SelectableUser | undefined>;
@@ -61,6 +62,11 @@ export interface SketchMcpDeps {
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   transcriptionEnabled?: boolean;
   logger?: Logger;
+  publicMcp?: {
+    userEmails?: string[];
+    filterEntityMetadata?: boolean;
+    maxFileContentChars?: number;
+  };
 }
 
 export type ToolResult = { content: { type: "text"; text: string }[] };
