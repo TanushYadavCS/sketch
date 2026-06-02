@@ -1,7 +1,73 @@
-import type { Connector, ConnectorCredentials, OAuthCredentials } from "./types";
+import { createHash } from "node:crypto";
+import type { Logger } from "pino";
+import type { Connector, ConnectorCredentials, OAuthCredentials, PersonEntitySeed, SyncedItem } from "./types";
 
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 1000;
+const PAGE_SIZE = 200;
+const CONTENT_LIMIT = 2000;
+
+const STANDARD_MODULES = [
+  "Accounts",
+  "Contacts",
+  "Deals",
+  "Leads",
+  "Tasks",
+  "Notes",
+  "Calls",
+  "Events",
+  "Meetings",
+] as const;
+
+type StandardModule = (typeof STANDARD_MODULES)[number];
+
+interface ZohoLookup {
+  id?: string;
+  name?: string;
+  email?: string;
+}
+
+interface ZohoModuleMetadata {
+  api_name?: string;
+  module_name?: string;
+  plural_label?: string;
+  generated_type?: string;
+  status?: string;
+  visible?: boolean;
+  viewable?: boolean;
+  api_supported?: boolean;
+}
+
+interface ZohoModulesResponse {
+  modules?: ZohoModuleMetadata[];
+}
+
+interface ZohoRecordsResponse {
+  data?: ZohoRecord[];
+  info?: { more_records?: boolean };
+}
+
+type ZohoRecord = Record<string, unknown> & {
+  id?: string;
+  Created_Time?: string;
+  Modified_Time?: string;
+  Owner?: ZohoLookup | null;
+};
+
+type ParentEntity = NonNullable<SyncedItem["parentEntities"]>[number];
+
+export interface DiscoveredZohoModule {
+  logicalName: StandardModule;
+  apiName: string;
+  label: string;
+}
+
+interface ZohoRequestOptions {
+  headers?: Record<string, string>;
+  attempt?: number;
+}
 
 function requireOAuthCredentials(credentials: ConnectorCredentials): OAuthCredentials {
   if (credentials.type !== "oauth") {
@@ -19,7 +85,118 @@ function zohoAuthHeader(accessToken: string): string {
   return `Zoho-oauthtoken ${accessToken}`;
 }
 
-async function zohoApiRequest<T>(credentials: OAuthCredentials, path: string): Promise<T> {
+function contentHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asLookup(value: unknown): ZohoLookup | null {
+  return isRecord(value) ? (value as ZohoLookup) : null;
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function lookupName(value: unknown): string | null {
+  const lookup = asLookup(value);
+  return lookup?.name?.trim() || lookup?.email?.trim() || null;
+}
+
+function lookupId(value: unknown): string | null {
+  const lookup = asLookup(value);
+  return lookup?.id?.trim() || null;
+}
+
+function fieldValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return asNonEmptyString(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const values = value.map(fieldValue).filter((item): item is string => Boolean(item));
+    return values.length > 0 ? values.join(", ") : null;
+  }
+  if (isRecord(value)) {
+    const named = lookupName(value);
+    if (named) return named;
+  }
+  return null;
+}
+
+function titleCase(input: string): string {
+  return input
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function normalizeModuleApiName(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+function isModuleUsable(module: ZohoModuleMetadata): boolean {
+  if (module.status && module.status.toLowerCase() !== "active") return false;
+  if (module.visible === false || module.viewable === false || module.api_supported === false) return false;
+  return Boolean(module.api_name);
+}
+
+export function makeProviderFileId(moduleApiName: string, recordId: string): string {
+  return `${moduleApiName}:${recordId}`;
+}
+
+export function moduleToFileType(moduleApiName: string): string {
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const known: Record<string, string> = {
+    accounts: "crm_account",
+    contacts: "crm_contact",
+    deals: "crm_deal",
+    leads: "crm_lead",
+    tasks: "crm_task",
+    notes: "crm_note",
+    calls: "crm_call",
+    events: "crm_event",
+    meetings: "crm_meeting",
+  };
+  return (
+    known[normalized] ??
+    `crm_${moduleApiName
+      .replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/\W+/g, "_")
+      .toLowerCase()}`
+  );
+}
+
+function logicalModuleFor(apiName: string): StandardModule | null {
+  const normalized = normalizeModuleApiName(apiName);
+  const byName: Record<string, StandardModule> = {
+    accounts: "Accounts",
+    contacts: "Contacts",
+    deals: "Deals",
+    leads: "Leads",
+    tasks: "Tasks",
+    notes: "Notes",
+    calls: "Calls",
+    events: "Events",
+    meetings: "Meetings",
+  };
+  return byName[normalized] ?? null;
+}
+
+async function zohoApiRequest<T>(
+  credentials: OAuthCredentials,
+  path: string,
+  logger?: Logger,
+  opts: ZohoRequestOptions = {},
+): Promise<T> {
   if (!credentials.api_domain) {
     throw new Error("Zoho CRM credentials are missing api_domain");
   }
@@ -27,13 +204,48 @@ async function zohoApiRequest<T>(credentials: OAuthCredentials, path: string): P
     throw new Error("Zoho CRM credentials are missing access_token");
   }
 
-  const response = await fetch(`${credentials.api_domain}/crm/v6${path}`, {
-    headers: { Authorization: zohoAuthHeader(credentials.access_token) },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  const attempt = opts.attempt ?? 1;
+  let response: Response;
+  try {
+    response = await fetch(`${credentials.api_domain}/crm/v6${path}`, {
+      headers: {
+        Authorization: zohoAuthHeader(credentials.access_token),
+        ...(opts.headers ?? {}),
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (attempt < MAX_RETRIES) {
+      const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+      logger?.warn({ err, attempt, waitMs }, "Zoho CRM network error, retrying");
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return zohoApiRequest(credentials, path, logger, { ...opts, attempt: attempt + 1 });
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Zoho CRM API network error after ${MAX_RETRIES} attempts: ${message}`);
+  }
 
+  if (response.status === 204) {
+    return {} as T;
+  }
   if (response.status === 401) {
     throw new Error("Zoho CRM token is invalid or revoked; reconnect required");
+  }
+  if (response.status === 429) {
+    if (attempt >= MAX_RETRIES) {
+      throw new Error(`Zoho CRM API rate limited after ${MAX_RETRIES} attempts`);
+    }
+    const retryAfter = Number.parseInt(response.headers.get("Retry-After") ?? "10", 10);
+    const waitMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : 10_000;
+    logger?.warn({ attempt, waitMs }, "Zoho CRM rate limited, retrying");
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return zohoApiRequest(credentials, path, logger, { ...opts, attempt: attempt + 1 });
+  }
+  if (response.status >= 500 && attempt < MAX_RETRIES) {
+    const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+    logger?.warn({ attempt, status: response.status, waitMs }, "Zoho CRM server error, retrying");
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return zohoApiRequest(credentials, path, logger, { ...opts, attempt: attempt + 1 });
   }
   if (!response.ok) {
     const body = await response.text();
@@ -46,6 +258,238 @@ async function zohoApiRequest<T>(credentials: OAuthCredentials, path: string): P
 export async function validateZohoCrmCredentials(credentials: ConnectorCredentials): Promise<void> {
   const oauth = requireOAuthCredentials(credentials);
   await zohoApiRequest<unknown>(oauth, "/users?type=CurrentUser");
+}
+
+export async function discoverStandardModules(
+  credentials: OAuthCredentials,
+  logger?: Logger,
+): Promise<DiscoveredZohoModule[]> {
+  const response = await zohoApiRequest<ZohoModulesResponse>(credentials, "/settings/modules", logger);
+  const discovered = new Map<StandardModule, DiscoveredZohoModule>();
+
+  for (const module of response.modules ?? []) {
+    if (!isModuleUsable(module)) continue;
+    const apiName = module.api_name as string;
+    const logicalName = logicalModuleFor(apiName);
+    if (!logicalName) continue;
+    if (discovered.has(logicalName)) continue;
+    discovered.set(logicalName, {
+      logicalName,
+      apiName,
+      label: module.plural_label ?? module.module_name ?? apiName,
+    });
+  }
+
+  return STANDARD_MODULES.flatMap((name) => {
+    const module = discovered.get(name);
+    return module ? [module] : [];
+  });
+}
+
+function getRecordName(moduleApiName: string, record: ZohoRecord): string {
+  const fullName = [record.First_Name, record.Last_Name].map(fieldValue).filter(Boolean).join(" ");
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const byModule: Record<string, unknown[]> = {
+    accounts: [record.Account_Name, record.Name],
+    contacts: [record.Full_Name, fullName, record.Email, record.Name],
+    leads: [record.Full_Name, fullName, record.Lead_Name, record.Company, record.Email, record.Name],
+    deals: [record.Deal_Name, record.Name, record.Account_Name],
+    tasks: [record.Subject, record.Name],
+    notes: [record.Note_Title, record.Subject, record.Name],
+    calls: [record.Subject, record.Name],
+    events: [record.Event_Title, record.Subject, record.Name],
+    meetings: [record.Event_Title, record.Subject, record.Name],
+  };
+  const candidates = [...(byModule[normalized] ?? [record.Name]), record.id];
+  return candidates.map(fieldValue).find((value): value is string => Boolean(value)) ?? `${moduleApiName} record`;
+}
+
+function sourcePath(orgName: string | undefined, moduleLabel: string): string {
+  return ["Zoho CRM", orgName, moduleLabel].filter(Boolean).join(" / ");
+}
+
+function importantFields(moduleApiName: string): string[] {
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const common = ["Owner", "Email", "Phone", "Mobile", "Created_Time", "Modified_Time"];
+  const byModule: Record<string, string[]> = {
+    accounts: ["Account_Name", "Website", "Industry", "Annual_Revenue", "Account_Type", ...common],
+    contacts: ["Full_Name", "First_Name", "Last_Name", "Email", "Title", "Account_Name", "Phone", "Mobile", "Owner"],
+    leads: ["Full_Name", "First_Name", "Last_Name", "Company", "Email", "Lead_Status", "Lead_Source", "Phone", "Owner"],
+    deals: [
+      "Deal_Name",
+      "Stage",
+      "Amount",
+      "Closing_Date",
+      "Probability",
+      "Expected_Revenue",
+      "Account_Name",
+      "Contact_Name",
+      "Owner",
+    ],
+    tasks: ["Subject", "Status", "Priority", "Due_Date", "What_Id", "Who_Id", "Owner"],
+    notes: ["Note_Title", "Parent_Id", "Owner", "Created_Time", "Modified_Time"],
+    calls: ["Subject", "Call_Type", "Call_Start_Time", "Call_Duration", "What_Id", "Who_Id", "Owner"],
+    events: ["Event_Title", "Subject", "Start_DateTime", "End_DateTime", "What_Id", "Who_Id", "Owner"],
+    meetings: ["Event_Title", "Subject", "Start_DateTime", "End_DateTime", "What_Id", "Who_Id", "Owner"],
+  };
+  return byModule[normalized] ?? common;
+}
+
+export function formatCrmRecordContent(moduleApiName: string, record: ZohoRecord): string {
+  const title = getRecordName(moduleApiName, record);
+  const lines = [`# ${title} (${titleCase(moduleApiName)})`];
+  const seen = new Set<string>();
+  const primary: string[] = [];
+
+  for (const key of importantFields(moduleApiName)) {
+    const value = fieldValue(record[key]);
+    if (!value) continue;
+    seen.add(key);
+    primary.push(`${titleCase(key)}: ${value}`);
+  }
+
+  if (primary.length > 0) {
+    lines.push("", primary.join(" | "));
+  }
+
+  const description = fieldValue(record.Description) ?? fieldValue(record.Note_Content);
+  if (description) {
+    seen.add("Description");
+    seen.add("Note_Content");
+    lines.push("", "## Description", description);
+  }
+
+  const customFields = Object.entries(record)
+    .filter(([key]) => !seen.has(key))
+    .filter(([key]) => key !== "id" && !key.startsWith("$") && !key.includes("__") && !key.endsWith("_Id"))
+    .map(([key, value]) => [titleCase(key), fieldValue(value)] as const)
+    .filter(([, value]) => Boolean(value))
+    .slice(0, 30);
+
+  if (customFields.length > 0) {
+    lines.push("", "## Additional Fields", customFields.map(([key, value]) => `${key}: ${value}`).join(" | "));
+  }
+
+  const content = lines.join("\n");
+  return content.length <= CONTENT_LIMIT ? content : `${content.slice(0, CONTENT_LIMIT - 12).trimEnd()}\n[truncated]`;
+}
+
+export function extractPeopleFromRecord(moduleApiName: string, record: ZohoRecord): PersonEntitySeed[] {
+  const seeds: PersonEntitySeed[] = [];
+  const owner = asLookup(record.Owner);
+  if (owner?.id && owner.name) {
+    seeds.push({
+      name: owner.name,
+      email: owner.email,
+      subtype: "internal",
+      source: "zoho_crm",
+      sourceId: `user:${owner.id}`,
+    });
+  }
+
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const recordName = getRecordName(moduleApiName, record);
+  const email = asNonEmptyString(record.Email);
+  if ((normalized === "contacts" || normalized === "leads") && record.id && recordName) {
+    seeds.push({
+      name: recordName,
+      email: email ?? undefined,
+      subtype: "external",
+      source: "zoho_crm",
+      sourceId: makeProviderFileId(moduleApiName, record.id),
+    });
+  }
+
+  const contact = asLookup(record.Contact_Name);
+  if (contact?.id && contact.name) {
+    seeds.push({
+      name: contact.name,
+      email: contact.email,
+      subtype: "external",
+      source: "zoho_crm",
+      sourceId: makeProviderFileId("Contacts", contact.id),
+    });
+  }
+
+  return seeds;
+}
+
+function parentFromLookup(moduleApiName: string, value: unknown, contextSnippet: string): ParentEntity[] {
+  const id = lookupId(value);
+  if (!id) return [];
+  return [{ source: "zoho_crm", sourceId: makeProviderFileId(moduleApiName, id), contextSnippet }];
+}
+
+export function extractParentEntities(moduleApiName: string, record: ZohoRecord): ParentEntity[] {
+  const normalized = normalizeModuleApiName(moduleApiName);
+  if (normalized === "deals") {
+    return parentFromLookup("Accounts", record.Account_Name, "Deal account");
+  }
+  if (normalized === "contacts") {
+    return parentFromLookup("Accounts", record.Account_Name, "Contact account");
+  }
+  if (["tasks", "notes", "calls", "events", "meetings"].includes(normalized)) {
+    return [
+      ...parentFromLookup("Deals", record.What_Id, "CRM activity parent"),
+      ...parentFromLookup("Contacts", record.Who_Id, "CRM activity participant"),
+      ...parentFromLookup("Contacts", record.Parent_Id, "CRM note parent"),
+    ];
+  }
+  return [];
+}
+
+function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, orgName?: string): SyncedItem | null {
+  if (!record.id) return null;
+  const content = formatCrmRecordContent(module.apiName, record);
+  return {
+    providerFileId: makeProviderFileId(module.apiName, record.id),
+    providerUrl: null,
+    fileName: getRecordName(module.apiName, record),
+    fileType: moduleToFileType(module.apiName),
+    contentCategory: "structured",
+    content,
+    sourcePath: sourcePath(orgName, module.label),
+    contentHash: contentHash(
+      JSON.stringify({
+        content,
+        modifiedTime: record.Modified_Time ?? null,
+        parents: extractParentEntities(module.apiName, record),
+      }),
+    ),
+    sourceCreatedAt: record.Created_Time ?? null,
+    sourceUpdatedAt: record.Modified_Time ?? null,
+    parentEntities: extractParentEntities(module.apiName, record),
+  };
+}
+
+async function* syncModule(
+  credentials: OAuthCredentials,
+  module: DiscoveredZohoModule,
+  cursor: string | null,
+  logger: Logger,
+  orgName?: string,
+): AsyncGenerator<{ item: SyncedItem; record: ZohoRecord }> {
+  let page = 1;
+  let moreRecords = true;
+  const headers = cursor ? { "If-Modified-Since": cursor } : undefined;
+
+  while (moreRecords) {
+    const params = new URLSearchParams({ page: String(page), per_page: String(PAGE_SIZE) });
+    const response = await zohoApiRequest<ZohoRecordsResponse>(
+      credentials,
+      `/${encodeURIComponent(module.apiName)}?${params.toString()}`,
+      logger,
+      { headers },
+    );
+
+    for (const record of response.data ?? []) {
+      const item = recordToSyncedItem(module, record, orgName);
+      if (item) yield { item, record };
+    }
+
+    moreRecords = response.info?.more_records === true;
+    page += 1;
+  }
 }
 
 export async function refreshZohoCrmTokens(credentials: OAuthCredentials): Promise<OAuthCredentials | null> {
@@ -107,17 +551,26 @@ export function createZohoCrmConnector(): Connector {
       await validateZohoCrmCredentials(credentials);
     },
 
-    sync() {
-      return (async function* (): AsyncGenerator<never> {
-        if (Date.now() >= 0) {
-          throw new Error("Zoho CRM sync is not implemented yet");
+    async *sync({ credentials, cursor, logger, onPersonSeed }) {
+      const oauth = requireOAuthCredentials(credentials);
+      const modules = await discoverStandardModules(oauth, logger);
+      const orgName = typeof oauth.region === "string" ? `Zoho ${oauth.region}` : undefined;
+
+      for (const module of modules) {
+        logger.info({ module: module.apiName }, "Syncing Zoho CRM module");
+        for await (const { item, record } of syncModule(oauth, module, cursor, logger, orgName)) {
+          if (onPersonSeed) {
+            for (const seed of extractPeopleFromRecord(module.apiName, record)) {
+              await onPersonSeed(seed);
+            }
+          }
+          yield item;
         }
-        yield undefined as never;
-      })();
+      }
     },
 
     async getCursor() {
-      return null;
+      return new Date().toISOString();
     },
 
     async refreshTokens(credentials) {
