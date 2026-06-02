@@ -40,6 +40,9 @@ export interface ConversationBacklogMessage {
   senderName: string;
   text: string;
   attachments: Attachment[];
+  providerThreadId?: string | null;
+  providerParentMessageId?: string | null;
+  isThreadReply?: boolean;
   providerTimestamp: string | null;
   receivedAt: string;
 }
@@ -98,7 +101,7 @@ function formatConversationBacklogMessages(messages: ConversationBacklogMessage[
 function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
   const lowerBound = params.afterMessageId ?? 0;
   const lines = [
-    `Missed WhatsApp messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
+    `Missed chat messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
   ];
   if (params.hasMore) {
     lines.push(

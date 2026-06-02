@@ -75,6 +75,7 @@ import * as m072 from "./migrations/072-enrichment-retry-backoff";
 import * as m073 from "./migrations/073-api-tokens";
 import * as m074 from "./migrations/074-external-mcp-tool-calls";
 import * as m075 from "./migrations/075-conversation-messages";
+import * as m076 from "./migrations/076-slack-conversation-thread-metadata";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>): Promise<void> {
@@ -154,6 +155,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "073-api-tokens": m073,
           "074-external-mcp-tool-calls": m074,
           "075-conversation-messages": m075,
+          "076-slack-conversation-thread-metadata": m076,
         };
       },
     },

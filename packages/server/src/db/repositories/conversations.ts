@@ -1,8 +1,9 @@
 import type { Insertable, Kysely, Selectable } from "kysely";
 import type { Attachment } from "../../files";
-import type { ConversationMessagesTable, ConversationsTable, DB } from "../schema";
+import type { ConversationCursorsTable, ConversationMessagesTable, ConversationsTable, DB } from "../schema";
 
 export type ConversationRow = Selectable<ConversationsTable>;
+export type ConversationCursorRow = Selectable<ConversationCursorsTable>;
 export type ConversationMessageRow = Selectable<ConversationMessagesTable>;
 
 export interface ConversationRef {
@@ -21,6 +22,9 @@ export interface ConversationMessageInsert {
   addressedToSketch?: boolean;
   text?: string;
   attachments?: Attachment[];
+  providerThreadId?: string | null;
+  providerParentMessageId?: string | null;
+  isThreadReply?: boolean;
   providerTimestamp?: string | null;
   receivedAt?: string;
 }
@@ -36,6 +40,9 @@ export interface StoredConversationMessage {
   addressedToSketch: boolean;
   text: string;
   attachments: Attachment[];
+  providerThreadId: string | null;
+  providerParentMessageId: string | null;
+  isThreadReply: boolean;
   providerTimestamp: string | null;
   receivedAt: string;
   createdAt: string;
@@ -47,6 +54,7 @@ export interface ListConversationMessagesOptions {
   limit?: number;
   order?: "asc" | "desc";
   includeBotMessages?: boolean;
+  providerThreadId?: string | null;
 }
 
 function parseAttachments(value: string | null): Attachment[] {
@@ -72,6 +80,9 @@ function toStored(row: ConversationMessageRow): StoredConversationMessage {
     addressedToSketch: row.addressed_to_sketch === 1,
     text: row.text,
     attachments: parseAttachments(row.attachments),
+    providerThreadId: row.provider_thread_id,
+    providerParentMessageId: row.provider_parent_message_id,
+    isThreadReply: row.is_thread_reply === 1,
     providerTimestamp: row.provider_timestamp,
     receivedAt: row.received_at,
     createdAt: row.created_at,
@@ -167,6 +178,9 @@ export function createConversationRepository(db: Kysely<DB>) {
         addressed_to_sketch: data.addressedToSketch ? 1 : 0,
         text: data.text ?? "",
         attachments: data.attachments && data.attachments.length > 0 ? JSON.stringify(data.attachments) : null,
+        provider_thread_id: data.providerThreadId ?? null,
+        provider_parent_message_id: data.providerParentMessageId ?? null,
+        is_thread_reply: data.isThreadReply ? 1 : 0,
         provider_timestamp: data.providerTimestamp ?? null,
         received_at: data.receivedAt ?? new Date().toISOString(),
       };
@@ -192,6 +206,13 @@ export function createConversationRepository(db: Kysely<DB>) {
       if (options.afterMessageId !== undefined) query = query.where("id", ">", options.afterMessageId);
       if (options.beforeMessageId !== undefined) query = query.where("id", "<", options.beforeMessageId);
       if (!options.includeBotMessages) query = query.where("is_bot", "=", 0);
+      if (options.providerThreadId !== undefined) {
+        if (options.providerThreadId === null) {
+          query = query.where("provider_thread_id", "is", null);
+        } else {
+          query = query.where("provider_thread_id", "=", options.providerThreadId);
+        }
+      }
 
       const order = options.order ?? "asc";
       const rows = await query
@@ -213,6 +234,7 @@ export function createConversationRepository(db: Kysely<DB>) {
       afterMessageId?: number | null;
       beforeMessageId: number;
       limit?: number;
+      providerThreadId?: string | null;
     }): Promise<{ messages: StoredConversationMessage[]; hasMore: boolean; nextCursor?: number }> {
       return this.listMessages(params.conversationId, {
         afterMessageId: params.afterMessageId ?? undefined,
@@ -220,15 +242,26 @@ export function createConversationRepository(db: Kysely<DB>) {
         limit: params.limit,
         order: "asc",
         includeBotMessages: false,
+        providerThreadId: params.providerThreadId,
       });
     },
 
-    async getMaxMessageId(conversationId: number): Promise<number | null> {
-      const row = await db
+    async getMaxMessageId(
+      conversationId: number,
+      options: { providerThreadId?: string | null } = {},
+    ): Promise<number | null> {
+      let query = db
         .selectFrom("conversation_messages")
         .select((eb) => eb.fn.max<number>("id").as("max_id"))
-        .where("conversation_id", "=", conversationId)
-        .executeTakeFirst();
+        .where("conversation_id", "=", conversationId);
+      if (options.providerThreadId !== undefined) {
+        if (options.providerThreadId === null) {
+          query = query.where("provider_thread_id", "is", null);
+        } else {
+          query = query.where("provider_thread_id", "=", options.providerThreadId);
+        }
+      }
+      const row = await query.executeTakeFirst();
       return row?.max_id ?? null;
     },
 
@@ -244,6 +277,73 @@ export function createConversationRepository(db: Kysely<DB>) {
     async advanceWatermarkToCurrentMax(conversationId: number): Promise<ConversationRow> {
       const maxId = await this.getMaxMessageId(conversationId);
       return this.updateWatermark(conversationId, maxId);
+    },
+
+    async getCursor(params: {
+      conversationId: number;
+      scopeType: string;
+      scopeKey: string;
+    }): Promise<ConversationCursorRow | undefined> {
+      return db
+        .selectFrom("conversation_cursors")
+        .selectAll()
+        .where("conversation_id", "=", params.conversationId)
+        .where("scope_type", "=", params.scopeType)
+        .where("scope_key", "=", params.scopeKey)
+        .executeTakeFirst();
+    },
+
+    async updateCursor(params: {
+      conversationId: number;
+      scopeType: string;
+      scopeKey: string;
+      messageId: number | null;
+    }): Promise<ConversationCursorRow> {
+      const existing = await this.getCursor(params);
+      if (existing) {
+        await db
+          .updateTable("conversation_cursors")
+          .set({ last_seen_message_id: params.messageId, updated_at: new Date().toISOString() })
+          .where("id", "=", existing.id)
+          .execute();
+      } else {
+        const values: Insertable<ConversationCursorsTable> = {
+          conversation_id: params.conversationId,
+          scope_type: params.scopeType,
+          scope_key: params.scopeKey,
+          last_seen_message_id: params.messageId,
+        };
+        try {
+          await db.insertInto("conversation_cursors").values(values).execute();
+        } catch {
+          const row = await this.getCursor(params);
+          if (!row) throw new Error("Failed to create conversation cursor");
+          await db
+            .updateTable("conversation_cursors")
+            .set({ last_seen_message_id: params.messageId, updated_at: new Date().toISOString() })
+            .where("id", "=", row.id)
+            .execute();
+        }
+      }
+      return db
+        .selectFrom("conversation_cursors")
+        .selectAll()
+        .where("conversation_id", "=", params.conversationId)
+        .where("scope_type", "=", params.scopeType)
+        .where("scope_key", "=", params.scopeKey)
+        .executeTakeFirstOrThrow();
+    },
+
+    async advanceCursorToCurrentMax(params: {
+      conversationId: number;
+      scopeType: string;
+      scopeKey: string;
+      providerThreadId?: string | null;
+    }): Promise<ConversationCursorRow> {
+      const maxId = await this.getMaxMessageId(params.conversationId, {
+        providerThreadId: params.providerThreadId,
+      });
+      return this.updateCursor({ ...params, messageId: maxId });
     },
   };
 }

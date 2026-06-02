@@ -169,6 +169,94 @@ function runRepositorySuite(label: string, createDb: () => Promise<Kysely<DB>>) 
 
       expect(updated.last_seen_message_id).toBe(message.row.id);
     });
+
+    it("filters backlog by Slack thread id and stores thread metadata", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+
+      const threadA = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "2",
+        senderJid: "S1",
+        senderName: "Alice",
+        text: "thread a",
+        providerThreadId: "1",
+        providerParentMessageId: "1",
+        isThreadReply: true,
+      });
+      await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "3",
+        senderJid: "S2",
+        senderName: "Bob",
+        text: "thread b",
+        providerThreadId: "9",
+        providerParentMessageId: "9",
+        isThreadReply: true,
+      });
+      const trigger = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "4",
+        senderJid: "S1",
+        senderName: "Alice",
+        text: "@Sketch help",
+        addressedToSketch: true,
+        providerThreadId: "1",
+        providerParentMessageId: "1",
+        isThreadReply: true,
+      });
+
+      const backlog = await repo.listBacklog({
+        conversationId: conversation.id,
+        beforeMessageId: trigger.row.id,
+        providerThreadId: "1",
+      });
+
+      expect(backlog.messages.map((m) => m.id)).toEqual([threadA.row.id]);
+      expect(backlog.messages[0].providerThreadId).toBe("1");
+      expect(backlog.messages[0].providerParentMessageId).toBe("1");
+      expect(backlog.messages[0].isThreadReply).toBe(true);
+    });
+
+    it("stores independent scoped cursors", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+
+      await repo.updateCursor({
+        conversationId: conversation.id,
+        scopeType: "slack_thread",
+        scopeKey: "1",
+        messageId: 10,
+      });
+      await repo.updateCursor({
+        conversationId: conversation.id,
+        scopeType: "slack_thread",
+        scopeKey: "2",
+        messageId: 20,
+      });
+
+      const threadA = await repo.getCursor({
+        conversationId: conversation.id,
+        scopeType: "slack_thread",
+        scopeKey: "1",
+      });
+      const threadB = await repo.getCursor({
+        conversationId: conversation.id,
+        scopeType: "slack_thread",
+        scopeKey: "2",
+      });
+
+      expect(threadA?.last_seen_message_id).toBe(10);
+      expect(threadB?.last_seen_message_id).toBe(20);
+    });
   });
 }
 
