@@ -12,8 +12,11 @@
 import type { Kysely } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createConnectorRepository } from "../db/repositories/connectors";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
+import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { createTestDb, createTestLogger } from "../test-utils";
+import { clearEnrichmentData } from "./enrichment";
 import { recoverStaleEnrichments, runAllSyncs, runConnectorSync, startSyncScheduler } from "./sync";
 import type { NameResolver, SyncedItem } from "./types";
 
@@ -32,11 +35,39 @@ const mockConnectorSync = vi.fn();
 vi.mock("./registry", () => ({
   getConnector: vi.fn(() => ({
     type: "google_drive",
+    promotableFileTypes: ["project"],
     sync: (...args: unknown[]) => mockConnectorSync(...args),
     getCursor: vi.fn().mockResolvedValue("cursor-v2"),
     validateCredentials: vi.fn().mockResolvedValue(undefined),
   })),
 }));
+
+interface StableFactTuple {
+  factType: string;
+  subjectName: string | null;
+  subjectEmail: string | null;
+  subjectSourceId: string | null;
+  raw: unknown;
+}
+
+async function loadStableFactTuples(db: Kysely<DB>, connectorConfigId: string): Promise<StableFactTuple[]> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["fact_type", "subject_name", "subject_email", "subject_source_id", "raw"])
+    .where("connector_config_id", "=", connectorConfigId)
+    .where("deleted_at", "is", null)
+    .execute();
+
+  return rows
+    .map((row) => ({
+      factType: row.fact_type,
+      subjectName: row.subject_name,
+      subjectEmail: row.subject_email,
+      subjectSourceId: row.subject_source_id,
+      raw: row.raw ? JSON.parse(row.raw) : null,
+    }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
 
 describe("startSyncScheduler", () => {
   let db: Kysely<DB> | null = null;
@@ -563,6 +594,141 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     expect(emails).toEqual(["alice@example.com", "bob@example.com"]);
   });
 
+  it("emits the same stable fact set for changed and unchanged item paths", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-fact-parity",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    const item = {
+      providerFileId: "provider-file-parity",
+      providerUrl: "https://example.test/parity",
+      fileName: "Parity Project",
+      fileType: "project",
+      contentCategory: "document" as const,
+      content: "stable parity content",
+      sourcePath: "/Parity Project",
+      contentHash: "hash-parity",
+      sourceCreatedAt: "2026-01-01T00:00:00.000Z",
+      sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+      parentEntities: [{ source: "google_drive", sourceId: "folder-1", contextSnippet: "Folder One" }],
+      attendees: [{ name: "Alice Attendee", email: "alice@example.com" }],
+      assignees: [{ name: "Bob Assignee", email: "bob@example.com" }],
+      authorName: "Carol Author",
+      authorEmail: "carol@example.com",
+      authorSourceId: "author-carol",
+    } satisfies SyncedItem;
+
+    async function* changedPathItems() {
+      yield item;
+    }
+    mockConnectorSync.mockReturnValueOnce(changedPathItems());
+
+    const changedResult = await runConnectorSync(db, "connector-fact-parity", logger);
+    expect(changedResult.itemsProcessed).toBe(1);
+    expect(changedResult.itemsCreated).toBe(1);
+
+    const changedTuples = await loadStableFactTuples(db, "connector-fact-parity");
+    expect(changedTuples.map((tuple) => tuple.factType).sort()).toEqual([
+      "assignee",
+      "attendee",
+      "author",
+      "parent_entity",
+      "structural_seed",
+    ]);
+
+    async function* unchangedPathItems() {
+      yield item;
+    }
+    mockConnectorSync.mockReturnValueOnce(unchangedPathItems());
+
+    const unchangedResult = await runConnectorSync(db, "connector-fact-parity", logger);
+    expect(unchangedResult.itemsProcessed).toBe(1);
+    expect(unchangedResult.itemsCreated).toBe(0);
+    expect(unchangedResult.itemsUpdated).toBe(0);
+
+    const unchangedTuples = await loadStableFactTuples(db, "connector-fact-parity");
+    expect(unchangedTuples).toEqual(changedTuples);
+  });
+
+  it("clears enrichment data when an existing file's content hash changes", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-clear-enrichment",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-clear-enrichment",
+        connector_config_id: "connector-clear-enrichment",
+        provider_file_id: "provider-clear-enrichment",
+        file_name: "changed.md",
+        file_type: "document",
+        content_category: "document",
+        source: "google_drive",
+        source_path: "/changed.md",
+        provider_url: null,
+        content: "old content",
+        summary: "old summary",
+        context_note: "old note",
+        access_scope_id: null,
+        content_hash: "old-hash",
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+        embedding_status: "done",
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "provider-clear-enrichment",
+        providerUrl: null,
+        fileName: "changed.md",
+        fileType: "document",
+        contentCategory: "document" as const,
+        content: "new content",
+        sourcePath: "/changed.md",
+        contentHash: "new-hash",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+    vi.mocked(clearEnrichmentData).mockClear();
+
+    const result = await runConnectorSync(db, "connector-clear-enrichment", logger);
+
+    expect(result.itemsProcessed).toBe(1);
+    expect(result.itemsUpdated).toBe(1);
+    expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
+    expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-clear-enrichment");
+  });
+
   it("re-seeds person entities for attendees even when content hash is unchanged", async () => {
     // Guards the skip-branch attendees-seed change: a cursor reset (or any
     // sync hitting the content-hash skip path) must now backfill attendee
@@ -640,6 +806,471 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
     const bob = persons.find((p) => p.name === "Bob Chen");
     expect(bob?.metadata && JSON.parse(bob.metadata).email).toBe("rchen@acme.com");
+
+    const facts = await db.selectFrom("indexed_file_facts").selectAll().execute();
+    expect(facts).toHaveLength(2);
+    expect(facts.every((fact) => fact.created_by_user_id === "admin")).toBe(true);
+    expect(facts.every((fact) => fact.connector_config_id === "connector-attendees-test")).toBe(true);
+    expect(facts.every((fact) => fact.materialized_at !== null)).toBe(true);
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .orderBy("source", "asc")
+      .execute();
+    expect(mentions).toEqual([
+      // ELP-02: Bob Chen's @acme.com domain promotes "Acme" as a company at
+      // threshold=1, and the promotion writes an INFERRED company mention
+      // on the evidence file so the entity drawer's mention timeline shows
+      // the file context.
+      { confidence: "INFERRED", source: "email_domain", relation: "mentioned" },
+      { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
+      { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
+    ]);
+  });
+
+  it("writes author facts and materializes authored mentions", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-author-test",
+        connector_type: "clickup",
+        auth_type: "api_key",
+        credentials: JSON.stringify({ type: "api_key", api_key: "test" }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "task-author-1",
+        providerUrl: null,
+        fileName: "Author task",
+        fileType: "task",
+        contentCategory: "document" as const,
+        content: "Task body",
+        sourcePath: null,
+        contentHash: "hash-author",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        authorEmail: "ada@example.com",
+        authorName: "Ada Lovelace",
+        authorSourceId: "user:ada",
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const result = await runConnectorSync(db, "connector-author-test", logger);
+    expect(result.itemsProcessed).toBe(1);
+
+    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    expect(fact.fact_type).toBe("author");
+    expect(fact.relation).toBe("authored");
+    expect(fact.subject_email).toBe("ada@example.com");
+    expect(fact.subject_source_id).toBe("user:ada");
+    expect(fact.materialized_at).not.toBeNull();
+
+    const mention = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .executeTakeFirstOrThrow();
+    expect(mention).toEqual({ confidence: "EXTRACTED", source: "clickup_author", relation: "authored" });
+  });
+
+  it("skips file archival and preserves the graph when a full resync loses most facts", async () => {
+    db = await createTestDb();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-safe-reconcile",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    const factRepo = createIndexedFileFactRepository(db);
+    for (let fileIndex = 0; fileIndex < 10; fileIndex++) {
+      const fileId = `safe-file-${fileIndex}`;
+      const providerFileId = `safe-provider-${fileIndex}`;
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: fileId,
+          connector_config_id: "connector-safe-reconcile",
+          provider_file_id: providerFileId,
+          file_name: `Safe ${fileIndex}`,
+          file_type: "document",
+          content_category: "document",
+          source: "google_drive",
+          content: `content ${fileIndex}`,
+          content_hash: `hash-${fileIndex}`,
+          synced_at: now,
+        })
+        .execute();
+
+      for (let attendeeIndex = 0; attendeeIndex < 10; attendeeIndex++) {
+        const attendee = {
+          name: `Safe Person ${fileIndex}-${attendeeIndex}`,
+          email: `safe-${fileIndex}-${attendeeIndex}@example.com`,
+        };
+        await factRepo.upsertFact({
+          indexedFileId: fileId,
+          connectorConfigId: "connector-safe-reconcile",
+          createdByUserId: "admin",
+          lastSeenSyncRunId: "previous-sync",
+          contentHash: `hash-${fileIndex}`,
+          source: "google_drive",
+          factType: "attendee",
+          relation: "attended",
+          subjectName: attendee.name,
+          subjectEmail: attendee.email,
+          subjectSource: "google_drive",
+          subjectSourceId: `${providerFileId}:${attendee.email}`,
+          contextSnippet: `Attended ${providerFileId}`,
+          raw: { providerFileId, attendee },
+        });
+      }
+    }
+
+    await materializeUnmaterializedFacts(db, logger);
+    const mentionsBefore = await db
+      .selectFrom("entity_mentions")
+      .select(db.fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow();
+    expect(Number(mentionsBefore.count)).toBe(100);
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "safe-provider-0",
+        providerUrl: null,
+        fileName: "Safe 0",
+        fileType: "document",
+        contentCategory: "document" as const,
+        content: "content 0 changed",
+        sourcePath: null,
+        contentHash: "hash-0-next",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Safe Person 0-0", email: "safe-0-0@example.com" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const warn = vi.fn();
+    let spyLogger = {} as typeof logger;
+    spyLogger = {
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      child: vi.fn(() => spyLogger),
+      warn,
+    } as unknown as typeof logger;
+
+    const result = await runConnectorSync(db, "connector-safe-reconcile", spyLogger);
+
+    expect(result.itemsArchived).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectorConfigId: "connector-safe-reconcile",
+        activeBefore: 100,
+        wouldTombstone: 99,
+        threshold: 0.5,
+        override: "SYNC_ALLOW_LARGE_RECONCILE=true",
+      }),
+      "Stale-fact reconcile skipped: delta exceeds threshold",
+    );
+
+    const archived = await db
+      .selectFrom("indexed_files")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("is_archived", "=", 1)
+      .executeTakeFirstOrThrow();
+    expect(Number(archived.count)).toBe(0);
+
+    const activeFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("deleted_at", "is", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(activeFacts.count)).toBe(100);
+
+    const mentionsAfter = await db
+      .selectFrom("entity_mentions")
+      .select(db.fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow();
+    expect(Number(mentionsAfter.count)).toBe(100);
+  });
+
+  it("force override processes the large reconcile and tombstones facts", async () => {
+    // Operator escape hatch: SYNC_ALLOW_LARGE_RECONCILE=true must bypass the
+    // ratio guard end-to-end so a legitimate large delete (workspace-wide
+    // cleanup) can complete via the same sync path.
+    db = await createTestDb();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-force-reconcile",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    const factRepo = createIndexedFileFactRepository(db);
+    for (let fileIndex = 0; fileIndex < 10; fileIndex++) {
+      const fileId = `force-file-${fileIndex}`;
+      const providerFileId = `force-provider-${fileIndex}`;
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: fileId,
+          connector_config_id: "connector-force-reconcile",
+          provider_file_id: providerFileId,
+          file_name: `Force ${fileIndex}`,
+          file_type: "document",
+          content_category: "document",
+          source: "google_drive",
+          content: `content ${fileIndex}`,
+          content_hash: `hash-${fileIndex}`,
+          synced_at: now,
+        })
+        .execute();
+      await db
+        .insertInto("connector_files")
+        .values({
+          connector_config_id: "connector-force-reconcile",
+          indexed_file_id: fileId,
+        })
+        .execute();
+      for (let attendeeIndex = 0; attendeeIndex < 10; attendeeIndex++) {
+        const attendee = {
+          name: `Force Person ${fileIndex}-${attendeeIndex}`,
+          email: `force-${fileIndex}-${attendeeIndex}@example.com`,
+        };
+        await factRepo.upsertFact({
+          indexedFileId: fileId,
+          connectorConfigId: "connector-force-reconcile",
+          createdByUserId: "admin",
+          lastSeenSyncRunId: "previous-sync",
+          contentHash: `hash-${fileIndex}`,
+          source: "google_drive",
+          factType: "attendee",
+          relation: "attended",
+          subjectName: attendee.name,
+          subjectEmail: attendee.email,
+          subjectSource: "google_drive",
+          subjectSourceId: `${providerFileId}:${attendee.email}`,
+          contextSnippet: `Attended ${providerFileId}`,
+          raw: { providerFileId, attendee },
+        });
+      }
+    }
+    await materializeUnmaterializedFacts(db, logger);
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "force-provider-0",
+        providerUrl: null,
+        fileName: "Force 0",
+        fileType: "document",
+        contentCategory: "document" as const,
+        content: "content 0 changed",
+        sourcePath: null,
+        contentHash: "hash-0-next",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ name: "Force Person 0-0", email: "force-0-0@example.com" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const warn = vi.fn();
+    let spyLogger = {} as typeof logger;
+    spyLogger = {
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      child: vi.fn(() => spyLogger),
+      warn,
+    } as unknown as typeof logger;
+
+    const result = await runConnectorSync(db, "connector-force-reconcile", spyLogger, {
+      SYNC_ALLOW_LARGE_RECONCILE: true,
+      SYNC_MAX_RECONCILE_RATIO: 0.5,
+    });
+
+    expect(result.itemsArchived).toBe(9);
+    expect(
+      warn.mock.calls.some(([, msg]) => typeof msg === "string" && msg.includes("Stale-fact reconcile skipped")),
+    ).toBe(false);
+
+    const activeFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("deleted_at", "is", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(activeFacts.count)).toBe(1);
+
+    const tombstonedFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("deleted_at", "is not", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(tombstonedFacts.count)).toBe(99);
+
+    const archivedFiles = await db
+      .selectFrom("indexed_files")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("is_archived", "=", 1)
+      .executeTakeFirstOrThrow();
+    expect(Number(archivedFiles.count)).toBe(9);
+  });
+
+  it("sub-threshold delete tombstones stale facts and updates the graph", async () => {
+    // Guard against an over-aggressive threshold: a legitimate 40% delta must
+    // still proceed. Failure mode: the helper accidentally blocks normal
+    // stale-fact cleanup, silently keeping a stale graph.
+    db = await createTestDb();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-undercut",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    const factRepo = createIndexedFileFactRepository(db);
+    for (let fileIndex = 0; fileIndex < 10; fileIndex++) {
+      const fileId = `undercut-file-${fileIndex}`;
+      const providerFileId = `undercut-provider-${fileIndex}`;
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: fileId,
+          connector_config_id: "connector-undercut",
+          provider_file_id: providerFileId,
+          file_name: `Undercut ${fileIndex}`,
+          file_type: "document",
+          content_category: "document",
+          source: "google_drive",
+          content: `content ${fileIndex}`,
+          content_hash: `hash-${fileIndex}`,
+          synced_at: now,
+        })
+        .execute();
+      await db
+        .insertInto("connector_files")
+        .values({
+          connector_config_id: "connector-undercut",
+          indexed_file_id: fileId,
+        })
+        .execute();
+      const attendee = {
+        name: `Undercut Person ${fileIndex}`,
+        email: `undercut-${fileIndex}@example.com`,
+      };
+      await factRepo.upsertFact({
+        indexedFileId: fileId,
+        connectorConfigId: "connector-undercut",
+        createdByUserId: "admin",
+        lastSeenSyncRunId: "previous-sync",
+        contentHash: `hash-${fileIndex}`,
+        source: "google_drive",
+        factType: "attendee",
+        relation: "attended",
+        subjectName: attendee.name,
+        subjectEmail: attendee.email,
+        subjectSource: "google_drive",
+        subjectSourceId: `${providerFileId}:${attendee.email}`,
+        contextSnippet: `Attended ${providerFileId}`,
+        raw: { providerFileId, attendee },
+      });
+    }
+    await materializeUnmaterializedFacts(db, logger);
+
+    async function* mockGen() {
+      for (let fileIndex = 0; fileIndex < 6; fileIndex++) {
+        const providerFileId = `undercut-provider-${fileIndex}`;
+        yield {
+          providerFileId,
+          providerUrl: null,
+          fileName: `Undercut ${fileIndex}`,
+          fileType: "document",
+          contentCategory: "document" as const,
+          content: `content ${fileIndex}`,
+          sourcePath: null,
+          contentHash: `hash-${fileIndex}`,
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+          attendees: [{ name: `Undercut Person ${fileIndex}`, email: `undercut-${fileIndex}@example.com` }],
+        } satisfies SyncedItem;
+      }
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const warn = vi.fn();
+    let spyLogger = {} as typeof logger;
+    spyLogger = {
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      child: vi.fn(() => spyLogger),
+      warn,
+    } as unknown as typeof logger;
+
+    const result = await runConnectorSync(db, "connector-undercut", spyLogger);
+
+    expect(result.itemsArchived).toBe(4);
+    expect(
+      warn.mock.calls.some(([, msg]) => typeof msg === "string" && msg.includes("Stale-fact reconcile skipped")),
+    ).toBe(false);
+
+    const activeFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("deleted_at", "is", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(activeFacts.count)).toBe(6);
+
+    const tombstonedFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("deleted_at", "is not", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(tombstonedFacts.count)).toBe(4);
+
+    const archivedFiles = await db
+      .selectFrom("indexed_files")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("is_archived", "=", 1)
+      .executeTakeFirstOrThrow();
+    expect(Number(archivedFiles.count)).toBe(4);
   });
 });
 

@@ -55,6 +55,7 @@ interface NavItem {
   href: string;
   disabled?: boolean;
   adminOnly?: boolean;
+  memberVisibleWhenExperimental?: boolean;
   /** Render only when `setupStatus.experimentalFlag === true`. */
   experimentalOnly?: boolean;
   /** Optional render-prop for a trailing element (e.g. a count badge). */
@@ -70,7 +71,13 @@ const allPrimaryNav: NavItem[] = [
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
   { label: "Integrations", icon: <LinkSimpleIcon size={18} />, href: "/integrations" },
   { label: "Usage", icon: <ChartBarIcon size={18} />, href: "/usage" },
-  { label: "Settings", icon: <GearIcon size={18} />, href: "/settings", adminOnly: true },
+  {
+    label: "Settings",
+    icon: <GearIcon size={18} />,
+    href: "/settings",
+    adminOnly: true,
+    memberVisibleWhenExperimental: true,
+  },
 ];
 
 function formatRole(role?: "admin" | "member"): string | null {
@@ -110,7 +117,8 @@ export function AppSidebar({
 
   const experimentalEnabled = setupStatus?.experimentalFlag === true;
   const primaryNav = allPrimaryNav.filter((item) => {
-    if (item.adminOnly && role !== "admin") return false;
+    if (item.adminOnly && role !== "admin" && !(item.memberVisibleWhenExperimental && experimentalEnabled))
+      return false;
     if (item.experimentalOnly && !experimentalEnabled) return false;
     return true;
   });

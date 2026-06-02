@@ -21,6 +21,15 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
+export interface ApiTokenRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
 export class ApiRequestError extends Error {
   status: number;
   code: string;
@@ -64,7 +73,7 @@ export interface ScheduledTaskListItem {
   scheduleType: "cron" | "interval" | "once" | "external";
   scheduleValue: string;
   timezone: string;
-  sessionMode: "fresh" | "persistent" | "chat";
+  sessionMode: "fresh";
   nextRunAt: string | null;
   lastRunAt: string | null;
   status: "active" | "paused" | "completed";
@@ -143,6 +152,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     const { code, message, ...rest } = body.error;
     throw new ApiRequestError(message, res.status, code, rest);
   }
+
+  // 204 No Content has no body to parse — callers that type the response as
+  // `void` rely on this fast-path.
+  if (res.status === 204) return undefined as T;
 
   return res.json() as Promise<T>;
 }
@@ -314,6 +327,225 @@ export interface EntityListItem {
   updatedAt: string;
 }
 
+export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
+
+export interface EntityProfileSummary {
+  identity: string;
+  activity: string;
+}
+
+export interface EntityProfile {
+  entityType: DrawerEntityType;
+  mentionCount: number;
+  sourceCounts: Record<string, number>;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+  summary: EntityProfileSummary;
+}
+
+export interface EntityManualShare {
+  email: string;
+  grantedAt: string;
+}
+
+export interface EntityDetail extends EntityListItem {
+  profile: EntityProfile;
+  shareWithEveryone: boolean;
+  manualShares: EntityManualShare[];
+}
+
+export interface EntitySharesResponse {
+  shares: EntityManualShare[];
+  shareWithEveryone: boolean;
+}
+
+export interface EntitySourceRef {
+  id: string;
+  source: string;
+  sourceId: string;
+  sourceUrl: string | null;
+  lastSeenAt: string;
+}
+
+export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+
+export interface EntityRelationView {
+  id: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  relationshipType: string;
+  confidence: string;
+  confidenceScore: number;
+  source: string;
+  validFrom: string | null;
+  validTo: string | null;
+  other: {
+    id: string;
+    name: string;
+    sourceType: string;
+    aliases: string[];
+  };
+  evidenceCount: number;
+  reviewId?: string;
+}
+
+export interface EntityRelationsResponse {
+  outgoing: EntityRelationView[];
+  incoming: EntityRelationView[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export interface EntityRelationEvidenceRow {
+  fileId: string;
+  fileName: string;
+  sourceType: string;
+  occurredAt: string;
+  chunkIndex: number | null;
+  contextSnippet: string | null;
+  sourceFactId: string | null;
+  note: string | null;
+}
+
+export interface EntityRelationEvidenceResponse {
+  rows: EntityRelationEvidenceRow[];
+  visibleCount: number;
+  totalCount: number;
+  truncated: boolean;
+}
+
+export interface EntityTimelineItem {
+  fileId: string;
+  fileName: string;
+  sourceType: string;
+  occurredAt: string;
+  mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+  mentionCount: number;
+  contextSnippet: string | null;
+  url: string | null;
+}
+
+export interface EntityTimelineGroup {
+  month: string;
+  items: EntityTimelineItem[];
+}
+
+export interface EntityTimelineResponse {
+  groups: EntityTimelineGroup[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
+
+export type ResetCategory = "manual" | "connectors" | "ai";
+
+export type ResetJobPhase = "idle" | "resetting" | "reset_done" | "replaying_facts" | "enriching" | "done" | "failed";
+
+export type ReenrichJobPhase = "idle" | "wiping" | "enriching" | "rebuilding" | "done" | "failed" | "cancelled";
+
+export type RebuildOnlyJobPhase = "idle" | "replaying_facts" | "enriching" | "done" | "failed";
+
+export type RebuildJobPhase = ResetJobPhase | ReenrichJobPhase | RebuildOnlyJobPhase;
+
+export interface RebuildJobProgress {
+  phase: string;
+  completed: number;
+  total: number;
+}
+
+export type RebuildJobKind = "reset" | "reenrich" | "rebuild";
+
+export interface RebuildJobRequest {
+  categories?: ResetCategory[];
+  scope?: ReenrichScope;
+  runAfter?: boolean;
+  wipeLlmFacts?: boolean;
+  pendingRebuildId?: string;
+}
+
+export interface RebuildJob {
+  id: string;
+  phase: RebuildJobPhase;
+  startedAt: string;
+  finishedAt: string | null;
+  request?: RebuildJobRequest;
+  progress?: RebuildJobProgress;
+  reset?: {
+    deleted: Record<string, number>;
+    factsMarkedUnmaterialized: number;
+  };
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
+  llmFactsWiped?: {
+    factsTombstoned: number;
+    relationshipEvidenceDeleted: number;
+    relationshipsDeleted: number;
+  };
+  replay?: {
+    factsRead: number;
+    entitiesCreated: number;
+    entitiesLinked: number;
+    mentionsWritten: number;
+    relationshipsWritten: number;
+    materialized: number;
+  };
+  recreate?: unknown;
+  summary?: {
+    scope?: { fileIds: string[]; missingFileIds: string[] };
+    wipe?: { files: number; mentions: number; factsTombstoned: number };
+    enrichment?: { filesProcessed: number; filesFailed: number };
+    recreate?: {
+      replay?: {
+        entitiesCreated: number;
+        entitiesLinked: number;
+        mentionsWritten: number;
+        relationshipsWritten: number;
+      };
+    };
+  };
+  error?: string;
+}
+
+export interface RebuildJobsResponse {
+  active: boolean;
+  currentJob: RebuildJob | null;
+  latestJob: RebuildJob | null;
+  blockedBy: { code: string; message: string } | null;
+}
+
+export interface ResetSubmitResponse {
+  message: string;
+  job?: { id: string; phase: string; startedAt: string; pendingRebuildId?: string; pendingRebuildExpiresAt?: string };
+  /** Present only when runAfter=false (two-step flow). */
+  pendingRebuildId?: string;
+  pendingRebuildExpiresAt?: string;
+  /** Present only on dry-run. */
+  dryRun?: boolean;
+  entitiesDeleted?: number;
+  candidatesCleared?: number;
+  reviewQueueCleared?: number;
+  reviewEvidenceCleared?: number;
+  rejectionsCleared?: number;
+  factsMarkedUnmaterialized?: number;
+}
+
+export interface RebuildSubmitResponse {
+  message: string;
+  job: { id: string; phase: string; startedAt: string };
+}
+
+export interface ReenrichSubmitResponse {
+  message?: string;
+  /** Present only on dry-run. */
+  dryRun?: boolean;
+  files?: number;
+  missingFileIds?: string[];
+  factsByType?: Record<string, number>;
+  job?: { id: string; phase: string; startedAt: string };
+}
+
 export interface BrowseFlatItem {
   id: string;
   name: string;
@@ -417,9 +649,21 @@ export interface SearchResult {
   score: number;
 }
 
+export interface FileManualShare {
+  email: string;
+  grantedAt: string;
+}
+
 export interface FileAccess {
   scope: "restricted" | "unrestricted";
   members: FileAccessMember[];
+  manualShares: FileManualShare[];
+  shareWithEveryone: boolean;
+}
+
+export interface FileSharesResponse {
+  shares: FileManualShare[];
+  shareWithEveryone: boolean;
 }
 
 export interface ProviderIdentity {
@@ -636,7 +880,18 @@ export const api = {
   },
   settings: {
     identity() {
-      return request<{ orgName: string | null; botName: string }>("/api/settings/identity");
+      return request<{
+        orgName: string | null;
+        botName: string;
+        orgContext: { description?: string; industry?: string } | null;
+      }>("/api/settings/identity");
+    },
+    updateIdentity(data: { orgName?: string; orgContext?: { description?: string; industry?: string } }) {
+      return request<{
+        orgName: string | null;
+        botName: string;
+        orgContext: { description?: string; industry?: string } | null;
+      }>("/api/settings/identity", { method: "PUT", body: JSON.stringify(data) });
     },
     apiKey() {
       return request<{ configured: boolean; apiKey: string | null }>("/api/settings/api-key");
@@ -646,6 +901,15 @@ export const api = {
     },
     revokeApiKey() {
       return request<{ success: true }>("/api/settings/api-key", { method: "DELETE" });
+    },
+    access() {
+      return request<{ adminCanReadAllFiles: boolean }>("/api/settings/access");
+    },
+    updateAccess(data: { adminCanReadAllFiles: boolean }) {
+      return request<{ adminCanReadAllFiles: boolean }>("/api/settings/access", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
     },
     searchConfig() {
       return request<{ geminiApiKeyConfigured: boolean; enrichmentEnabled: number; syncIntervalMinutes: number }>(
@@ -669,6 +933,20 @@ export const api = {
       return request<{ success: boolean; message: string }>("/api/settings/search/enrichments", {
         method: "POST",
       });
+    },
+  },
+  apiTokens: {
+    list() {
+      return request<{ tokens: ApiTokenRecord[]; mcpUrl: string | null }>("/api/api-tokens");
+    },
+    create(data: { name: string }) {
+      return request<{ token: ApiTokenRecord; plaintext: string; mcpUrl: string | null }>("/api/api-tokens", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    revoke(id: string) {
+      return request<{ success: true }>(`/api/api-tokens/${id}`, { method: "DELETE" });
     },
   },
   integrations: {
@@ -762,7 +1040,7 @@ export const api = {
       if (opts?.status) params.set("status", opts.status);
       if (opts?.access) params.set("access", opts.access);
       const qs = params.toString();
-      return request<{ files: UnifiedFile[]; total: number; hasMore: boolean }>(
+      return request<{ files: UnifiedFile[]; total: number; enrichedTotal: number; hasMore: boolean }>(
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
       );
     },
@@ -778,6 +1056,20 @@ export const api = {
       return request<{ file: FileContent; access: FileAccess; entities: LinkedEntity[] }>(
         `/api/connectors/files/${fileId}/content`,
       );
+    },
+    listFileShares(fileId: string) {
+      return request<FileSharesResponse>(`/api/connectors/files/${fileId}/shares`);
+    },
+    updateFileShares(fileId: string, data: { emails: string[]; shareWithEveryone?: boolean }) {
+      return request<FileSharesResponse>(`/api/connectors/files/${fileId}/shares`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
+    revokeFileShare(fileId: string, email: string) {
+      return request<{ success: boolean }>(`/api/connectors/files/${fileId}/shares/${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
     },
     enrich(id: string, data: { fileIds: string[]; instruction: string }) {
       return request<{ enrichment: { jobId: string; connectorId: string; fileCount: number } }>(
@@ -959,6 +1251,7 @@ export const api = {
         whatsappNumber?: string | null;
         description?: string | null;
         role?: string | null;
+        authRole?: "admin" | "member";
         reportsTo?: string | null;
         allowedTools?: string[] | null;
         slackChannelIds?: string[] | null;
@@ -1135,6 +1428,15 @@ export const api = {
         method: "DELETE",
       });
     },
+    updateConnectionAccess(providerId: string, connectionId: string, accessLevel: "personal" | "organization") {
+      return request<{ success: true; connection: IntegrationConnection | null }>(
+        `/api/mcp-servers/${providerId}/connections/${encodeURIComponent(connectionId)}/access`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ accessLevel }),
+        },
+      );
+    },
   },
   agentEnvironmentVariables: {
     async list() {
@@ -1180,15 +1482,32 @@ export const api = {
   entities: {
     get(id: string) {
       return request<{
-        entity: EntityListItem;
-        sourceRefs: Array<{
-          id: string;
-          source: string;
-          sourceId: string;
-          sourceUrl: string | null;
-          lastSeenAt: string;
-        }>;
+        entity: EntityDetail;
+        sourceRefs: EntitySourceRef[];
       }>(`/api/entities/${id}`);
+    },
+    relations(id: string) {
+      return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);
+    },
+    relationEvidence(id: string, relationId: string) {
+      return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);
+    },
+    timeline(id: string) {
+      return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    listShares(id: string) {
+      return request<EntitySharesResponse>(`/api/entities/${id}/shares`);
+    },
+    updateShares(id: string, data: { emails: string[]; shareWithEveryone?: boolean }) {
+      return request<EntitySharesResponse>(`/api/entities/${id}/shares`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    },
+    revokeShare(id: string, email: string) {
+      return request<{ success: boolean }>(`/api/entities/${id}/shares/${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
     },
     mentions(id: string, opts?: { source?: string; since?: string; limit?: number; offset?: number }) {
       const params = new URLSearchParams();
@@ -1212,17 +1531,68 @@ export const api = {
     deleteTentative() {
       return request<{ message: string; count: number }>("/api/entities/tentative", { method: "DELETE" });
     },
-    reset(categories: string[]) {
-      return request<{
-        message: string;
-        entitiesDeleted: number;
-        candidatesCleared: number;
-        reviewQueueCleared: number;
-        reviewEvidenceCleared: number;
-        rejectionsCleared: number;
-      }>("/api/entities/reset", {
+    reset(
+      categories: string[],
+      opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean; wipeLlmFacts?: boolean },
+    ) {
+      return request<ResetSubmitResponse>("/api/entities/resets", {
         method: "POST",
-        body: JSON.stringify({ categories }),
+        body: JSON.stringify({
+          categories,
+          runAfter: opts?.runAfter ?? false,
+          confirm: opts?.confirm,
+          dryRun: opts?.dryRun,
+          wipeLlmFacts: opts?.wipeLlmFacts,
+        }),
+      });
+    },
+    resetJob(id: string) {
+      return request<RebuildJob>(`/api/entities/resets/jobs/${id}`);
+    },
+    resetJobs() {
+      return request<RebuildJobsResponse>("/api/entities/resets/jobs");
+    },
+    reenrich(
+      scope: ReenrichScope,
+      opts?: { runAfter?: boolean; confirm?: string; dryRun?: boolean; pendingRebuildId?: string },
+    ) {
+      return request<ReenrichSubmitResponse>("/api/entities/reenrichments", {
+        method: "POST",
+        body: JSON.stringify({
+          scope,
+          runAfter: opts?.runAfter ?? true,
+          confirm: opts?.confirm,
+          dryRun: opts?.dryRun,
+          pendingRebuildId: opts?.pendingRebuildId,
+        }),
+      });
+    },
+    reenrichJob(id: string) {
+      return request<RebuildJob>(`/api/entities/reenrichments/jobs/${id}`);
+    },
+    reenrichJobs() {
+      return request<RebuildJobsResponse>("/api/entities/reenrichments/jobs");
+    },
+    stopReenrichJob(id: string) {
+      return request<{ message: string; job: RebuildJob }>(`/api/entities/reenrichments/jobs/${id}`, {
+        method: "DELETE",
+      });
+    },
+    rebuild(pendingRebuildId: string) {
+      return request<RebuildSubmitResponse>("/api/entities/rebuilds", {
+        method: "POST",
+        body: JSON.stringify({ pendingRebuildId }),
+      });
+    },
+    rebuildJob(id: string) {
+      return request<RebuildJob>(`/api/entities/rebuilds/jobs/${id}`);
+    },
+    rebuildJobs() {
+      return request<RebuildJobsResponse>("/api/entities/rebuilds/jobs");
+    },
+    cancelPendingRebuild(pendingRebuildId: string) {
+      return request<void>(`/api/entities/rebuilds/pending/${pendingRebuildId}`, {
+        method: "DELETE",
       });
     },
     update(id: string, data: { name?: string; sourceType?: string; status?: string; aliases?: string[] }) {
@@ -1234,7 +1604,15 @@ export const api = {
     remove(id: string) {
       return request<{ success: boolean }>(`/api/entities/${id}`, { method: "DELETE" });
     },
-    list(opts?: { type?: string; source?: string; search?: string; sort?: string; limit?: number; offset?: number }) {
+    list(opts?: {
+      type?: string;
+      source?: string;
+      search?: string;
+      sort?: string;
+      limit?: number;
+      offset?: number;
+      includeSystem?: boolean;
+    }) {
       const params = new URLSearchParams();
       if (opts?.type) params.set("type", opts.type);
       if (opts?.source) params.set("source", opts.source);
@@ -1242,6 +1620,7 @@ export const api = {
       if (opts?.sort) params.set("sort", opts.sort);
       if (opts?.limit) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
+      if (opts?.includeSystem) params.set("includeSystem", "true");
       const qs = params.toString();
       return request<{
         entities: EntityListItem[];
@@ -1250,11 +1629,13 @@ export const api = {
     },
   },
   entityReview: {
-    list(opts?: { limit?: number; offset?: number }) {
+    list(opts?: { limit?: number; offset?: number; search?: string }) {
       const params = new URLSearchParams();
       // `limit=0` is a meaningful value (count-only mode) — send it explicitly.
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
+      const search = opts?.search?.trim();
+      if (search) params.set("q", search);
       const qs = params.toString();
       return request<EntityReviewListResponse>(`/api/entity-review${qs ? `?${qs}` : ""}`);
     },

@@ -20,12 +20,14 @@ import { createAgentRunsRepo } from "./db/repositories/agent-runs";
 import { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createChannelRepository } from "./db/repositories/channels";
+import { createConversationRepository } from "./db/repositories/conversations";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import type { DB } from "./db/schema";
+import { configureMaterializeDefaults } from "./entities/materialize";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
 import type { IntegrationProvider, IntegrationStatus } from "./integrations/types";
@@ -37,13 +39,12 @@ import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
 import { createSlackStartupManager } from "./slack/startup";
-import { ThreadBuffer } from "./slack/thread-buffer";
 import { UserCache } from "./slack/user-cache";
 import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
 import { initTelemetry } from "./telemetry/setup";
+import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
-import { GroupBuffer } from "./whatsapp/group-buffer";
 
 export interface ServerHandle {
   config: Config;
@@ -69,6 +70,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const db = await createDatabase(config);
   await runMigrations(db);
   logger.info("Database ready");
+
+  configureMaterializeDefaults({ llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD });
 
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.
   // If no users exist yet, the row stays owned by 'admin' and never becomes editable
@@ -101,6 +104,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await runManagedSeed(config, settingsRepo, users);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
+  const conversationsRepo = createConversationRepository(db);
   const automationRunsRepo = createAutomationRunsRepository(db);
   const stepContentRepo = createAutomationStepContentRepository(db);
   const staleCount = await automationRunsRepo.markRunningAsFailed("Interrupted by server restart");
@@ -121,8 +125,22 @@ export async function createServer(config: Config, options?: CreateServerOptions
         allowOrgSharedEnv: params.claudeConfigDir !== undefined,
       }),
     );
+    const loadTranscriptionSettings = params.loadTranscriptionSettings ?? (() => settingsRepo.get());
+    const transcriptionSettings =
+      params.visionConfig === undefined || params.visionConfig === null
+        ? await loadTranscriptionSettings().catch((err) => {
+            logger.warn({ err }, "Failed to load settings for visual analysis config");
+            return null;
+          })
+        : null;
     const enrichedParams = {
       ...params,
+      loadTranscriptionSettings,
+      visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
+      geminiConfig: params.geminiConfig ?? {
+        maxRpm: config.GEMINI_MAX_RPM,
+        maxRetries: config.GEMINI_MAX_RETRIES,
+      },
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
@@ -171,13 +189,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const queueManager = new QueueManager();
 
   // 7. Slack infrastructure
-  const threadBuffer = new ThreadBuffer();
   const userCache = new UserCache();
   let slack: SlackBot | null = null;
 
   // 8. WhatsApp
   const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
-  const groupBuffer = new GroupBuffer();
 
   const sendDirectMessage = async ({
     userId,
@@ -285,15 +301,15 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000);
+  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
 
   const slackAdapterDeps = {
     db,
     config,
     logger,
-    repos: { users, channels, settings: settingsRepo },
+    repos: { users, channels, settings: settingsRepo, conversations: conversationsRepo },
     queue: queueManager,
-    slack: { threadBuffer, userCache },
+    slack: { userCache },
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
@@ -330,9 +346,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     config,
     logger,
-    repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo },
+    repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo, conversations: conversationsRepo },
     queue: queueManager,
-    groupBuffer,
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,

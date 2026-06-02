@@ -81,6 +81,23 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("knowledgeable, direct, and action-oriented");
     });
+
+    it("appends the org description when provided, and omits the line otherwise", () => {
+      const withDescription = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: "Canvas Labs",
+        orgDescription: "AI services company. Sketch is one of our products.",
+      });
+      expect(withDescription).toContain("About Canvas Labs: AI services company. Sketch is one of our products.");
+
+      const without = buildSystemContext({
+        platform: "slack",
+        botName: "Atlas",
+        orgName: "Canvas Labs",
+      });
+      expect(without).not.toContain("About Canvas Labs");
+    });
   });
 
   describe("memory section", () => {
@@ -156,6 +173,24 @@ describe("buildSystemContext", () => {
     it("mentions SendFileToChat tool", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("SendFileToChat");
+    });
+
+    it("keeps audio attachment guidance stable", () => {
+      expect(buildSystemContext({ platform: "slack" })).toContain(
+        "If no transcript is provided and a TranscribeAudio tool is available",
+      );
+    });
+
+    it("does not mention VisualAnalysis when vision analysis is unavailable", () => {
+      expect(buildSystemContext({ platform: "slack" })).not.toContain("VisualAnalysis");
+    });
+
+    it("mentions VisualAnalysis when vision analysis is available", () => {
+      const result = buildSystemContext({ platform: "slack", visionAnalysisEnabled: true });
+      expect(result).toContain("VisualAnalysis");
+      expect(result).toContain("visual tasks");
+      expect(result).toContain("OCR");
+      expect(result).not.toContain("Image and GIF files");
     });
   });
 
@@ -662,6 +697,74 @@ describe("buildSketchContext", () => {
       });
       expect(result).not.toContain("<thread>");
       expect(result).not.toContain("<channel_history>");
+    });
+
+    it("renders persisted conversation backlog inside the thread section", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "what did I miss?",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        conversationBacklog: {
+          afterMessageId: 10,
+          beforeMessageId: 13,
+          hasMore: false,
+          messages: [
+            {
+              id: 11,
+              senderName: "Bob",
+              text: "first missed message",
+              attachments: [],
+              providerTimestamp: "2026-01-01T00:00:00.000Z",
+              receivedAt: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              id: 12,
+              senderName: "Carol",
+              text: "",
+              attachments: [
+                {
+                  originalName: "note.txt",
+                  mimeType: "text/plain",
+                  localPath: "/ws/attachments/note.txt",
+                  sizeBytes: 12,
+                },
+              ],
+              providerTimestamp: null,
+              receivedAt: "2026-01-01T00:00:02.000Z",
+            },
+          ],
+        },
+      });
+
+      expect(result).toContain("Missed chat messages are shown below using durable row ids.");
+      expect(result).toContain("Bob [messageId=11]: first missed message");
+      expect(result).toContain("Carol [messageId=12]: See attached files.");
+      expect(result).toContain('path="/ws/attachments/note.txt"');
+    });
+
+    it("tells the agent how to continue when backlog is truncated", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "summarize",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        conversationBacklog: {
+          afterMessageId: null,
+          beforeMessageId: 50,
+          hasMore: true,
+          nextCursor: 25,
+          messages: [],
+        },
+      });
+
+      expect(result).toContain("<thread>");
+      expect(result).toContain("after messageId 0 and before the current messageId 50");
+      expect(result).toContain(
+        "Use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false to continue.",
+      );
     });
   });
 

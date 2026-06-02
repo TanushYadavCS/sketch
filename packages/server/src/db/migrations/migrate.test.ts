@@ -40,7 +40,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(54);
+    expect(rows.rows).toHaveLength(72);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -91,6 +91,24 @@ describe("runMigrations — full sequence", () => {
     expect(names[51]).toBe("056-scheduled-task-output-mode");
     expect(names[52]).toBe("057-entity-review-queue");
     expect(names[53]).toBe("058-entity-mentions-unique");
+    expect(names[54]).toBe("059-scheduled-tasks-fresh-session-only");
+    expect(names[55]).toBe("060-mention-provenance");
+    expect(names[56]).toBe("061-indexed-file-facts");
+    expect(names[57]).toBe("062-fact-materialization-state");
+    expect(names[58]).toBe("063-entity-domains");
+    expect(names[59]).toBe("064-entity-domains-seed");
+    expect(names[60]).toBe("065-entity-domains-reserved-seed");
+    expect(names[61]).toBe("066-entity-review-domain-candidates");
+    expect(names[62]).toBe("067-relation-evidence-fact-link");
+    expect(names[63]).toBe("068-entities-ai-brief");
+    expect(names[64]).toBe("069-admin-can-read-all-files");
+    expect(names[65]).toBe("070-file-shares");
+    expect(names[66]).toBe("071-entity-shares");
+    expect(names[67]).toBe("072-enrichment-retry-backoff");
+    expect(names[68]).toBe("073-api-tokens");
+    expect(names[69]).toBe("074-external-mcp-tool-calls");
+    expect(names[70]).toBe("075-conversation-messages");
+    expect(names[71]).toBe("076-slack-conversation-thread-metadata");
   });
 
   it("creates the users table", async () => {
@@ -101,6 +119,17 @@ describe("runMigrations — full sequence", () => {
     `.execute(db);
 
     expect(result.rows).toHaveLength(1);
+  });
+
+  it("creates conversation capture tables", async () => {
+    await runMigrations(db);
+
+    for (const table of ["conversations", "conversation_messages", "conversation_cursors"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
   });
 
   it("creates the settings table with enrichment_enabled column", async () => {
@@ -127,6 +156,22 @@ describe("runMigrations — full sequence", () => {
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
+  });
+
+  it("creates fact-aware relationship evidence columns and unique index", async () => {
+    await runMigrations(db);
+
+    const columns = await sql<{ name: string }>`
+      PRAGMA table_info(entity_relationship_evidence)
+    `.execute(db);
+    expect(columns.rows.map((row) => row.name)).toEqual(expect.arrayContaining(["source_fact_id", "evidence_key"]));
+
+    const indexes = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type='index' AND tbl_name='entity_relationship_evidence'
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toContain("idx_entity_relationship_evidence_key");
+    expect(indexes.rows.map((row) => row.name)).not.toContain("entity_relationship_evidence_unique");
   });
 
   it("creates user_provider_identities table", async () => {
@@ -196,7 +241,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(54);
+    expect(rows.rows).toHaveLength(72);
   });
 });
 
@@ -228,6 +273,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(54);
+    expect(rows.rows).toHaveLength(72);
   });
 });

@@ -105,7 +105,7 @@ New features that aren't ready for general availability are gated behind `config
 
 The flag flows: `config` → `bootstrap.ts` (injected in `trackedRunAgent`) → `RunAgentParams` → both `SketchMcpDeps` (tools) and `buildSystemContext` (prompt).
 
-Currently gated: Files UI, Connections UI, entity/connector/identity/OAuth APIs, agent search tools (Search, SearchEntities, GetEntityContext), and Information Discovery system prompt section.
+Currently gated: nothing. The Files/knowledge feature (connectors, entity explorer, entity drawer Timeline/Relationships, entity-review) is GA and no longer gated. The `EXPERIMENTAL_FLAG` mechanism remains available for future features — config flag, the `experimentalFlag` field on `/api/setup/status`, and the `experimentalOnly` nav-item field in `app-sidebar.tsx`.
 
 ## Related Repos
 

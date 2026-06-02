@@ -35,6 +35,26 @@ export interface InboxMessageContext {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface ConversationBacklogMessage {
+  id: number;
+  senderName: string;
+  text: string;
+  attachments: Attachment[];
+  providerThreadId?: string | null;
+  providerParentMessageId?: string | null;
+  isThreadReply?: boolean;
+  providerTimestamp: string | null;
+  receivedAt: string;
+}
+
+export interface ConversationBacklogContext {
+  messages: ConversationBacklogMessage[];
+  afterMessageId?: number | null;
+  beforeMessageId: number;
+  hasMore: boolean;
+  nextCursor?: number;
+}
+
 export interface SketchContextParams {
   messages: BufferedMessage[];
   currentUserName: string;
@@ -55,6 +75,48 @@ export interface SketchContextParams {
     groupName: string;
     groupDescription?: string;
   };
+  conversationBacklog?: ConversationBacklogContext;
+}
+
+function renderBufferedMessageLines(messages: BufferedMessage[]): string[] {
+  const lines: string[] = [];
+  for (const msg of messages) {
+    lines.push(`${msg.userName}: ${msg.text}`);
+    if (msg.attachments?.length) {
+      lines.push(formatAttachmentsForPrompt(msg.attachments));
+    }
+  }
+  return lines;
+}
+
+function formatConversationBacklogMessages(messages: ConversationBacklogMessage[]): BufferedMessage[] {
+  return messages.map((message) => ({
+    userName: `${message.senderName} [messageId=${message.id}]`,
+    text: message.text || (message.attachments.length > 0 ? "See attached files." : ""),
+    ts: message.providerTimestamp ?? message.receivedAt,
+    ...(message.attachments.length > 0 ? { attachments: message.attachments } : {}),
+  }));
+}
+
+function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
+  const lowerBound = params.afterMessageId ?? 0;
+  const lines = [
+    `Missed chat messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
+  ];
+  if (params.hasMore) {
+    lines.push(
+      `Only ${params.messages.length} missed messages are inlined. Use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false to continue.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderConversationBacklogLines(backlog: ConversationBacklogContext | undefined): string[] {
+  if (!backlog || (backlog.messages.length === 0 && !backlog.hasMore)) return [];
+
+  const lines = [buildConversationBacklogNotice(backlog)];
+  const messageLines = renderBufferedMessageLines(formatConversationBacklogMessages(backlog.messages));
+  return messageLines.length > 0 ? [...lines, "", ...messageLines] : lines;
 }
 
 function renderInboxMessage(message: InboxMessageContext): string[] {
@@ -190,9 +252,11 @@ export function buildSystemContext(params: {
   platform: ResponseSurface;
   deliveryPlatform?: "slack" | "whatsapp";
   orgName?: string | null;
+  orgDescription?: string | null;
   botName?: string | null;
   indexedSources?: Array<{ source: string; fileCount: number }>;
   agentInstructions?: string | null;
+  visionAnalysisEnabled?: boolean;
 }): string {
   const sections: string[] = [];
 
@@ -204,6 +268,10 @@ export function buildSystemContext(params: {
     sections.push(`You are ${params.botName}, an intelligent agent powered by Sketch, created by Canvas AI.`);
   } else {
     sections.push("You are Sketch, an intelligent agent created by Canvas AI.");
+  }
+
+  if (params.orgDescription && params.orgDescription.trim().length > 0) {
+    sections.push("", `About ${params.orgName ?? "the organization"}: ${params.orgDescription.trim()}`);
   }
 
   sections.push(
@@ -245,7 +313,10 @@ export function buildSystemContext(params: {
     "",
     "## File Attachments",
     "",
-    "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
+    params.visionAnalysisEnabled
+      ? "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the VisualAnalysis tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path."
+      : "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
+    "Audio files may be referenced as attachments. If a transcript is provided in the message context, treat it as the spoken content of that audio. If no transcript is provided and a TranscribeAudio tool is available, use it with the attachment path when the spoken content is relevant.",
   );
 
   sections.push(
@@ -428,16 +499,14 @@ export function buildSketchContext(params: SketchContextParams): string {
     sectionParts.push(`<user>\n${lines.join("\n")}\n</user>`);
   }
 
-  if (messages.length > 0) {
+  const backlogLines = renderConversationBacklogLines(params.conversationBacklog);
+  const messageLines = renderBufferedMessageLines(messages);
+  const separator = backlogLines.length > 0 && messageLines.length > 0 ? [""] : [];
+  const threadLines = [...backlogLines, ...separator, ...messageLines];
+
+  if (threadLines.length > 0) {
     const tag = params.threadTag ?? "thread";
-    const lines: string[] = [];
-    for (const msg of messages) {
-      lines.push(`${msg.userName}: ${msg.text}`);
-      if (msg.attachments?.length) {
-        lines.push(formatAttachmentsForPrompt(msg.attachments));
-      }
-    }
-    sectionParts.push(`<${tag}>\n${lines.join("\n")}\n</${tag}>`);
+    sectionParts.push(`<${tag}>\n${threadLines.join("\n")}\n</${tag}>`);
   }
 
   if (params.taskPrompt) {

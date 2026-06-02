@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
@@ -33,7 +34,7 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
       }
       return out;
     },
-    listByType: (t) => (t === "person" ? getList() : []),
+    listByType: (t) => getList().filter((e) => e.source_type === t),
   };
 }
 
@@ -616,7 +617,7 @@ describe("proposeEntity", () => {
     expect(refreshed.name).toBe("Bob Chen");
   });
 
-  it("12. ambiguous exact-name (two entities share the same canonical name) falls through to ranker", async () => {
+  it("12. ambiguous exact-name (two entities share the same canonical name) queues exact ambiguity", async () => {
     // upsertPersonEntity dedups by name, so we have to insert directly.
     // This shouldn't happen in healthy data but the fast-path must not
     // silently pick one of two same-name entities — that would be the
@@ -675,15 +676,12 @@ describe("proposeEntity", () => {
       triggeredByUserId: "user-1",
     });
 
-    // Two same-name entities → exact-name fast-path declines to link →
-    // ranker takes over. The ranker's token-superset/subset rule requires
-    // different token counts, so "Bob Chen" vs "Bob Chen" doesn't match
-    // there either, and the prefix rule also requires different lengths.
-    // Net result: no ranker candidate, falls through to "created".
-    //
-    // The acceptance criterion that matters: the fast-path did NOT silently
-    // link to one of the two duplicates.
-    expect(result.kind === "linked").toBe(false);
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].candidate_entity_id).toBeNull();
+    expect(queue[0].candidate_score).toBeNull();
+    expect(queue[0].candidate_reason).toBe("exact-ambiguous");
   });
 
   it("13. alias-match links — post-Confirm proposal hits the alias half of the fast-path", async () => {
@@ -771,5 +769,477 @@ describe("proposeEntity", () => {
     expect(result.kind).toBe("linked");
     if (result.kind !== "linked") throw new Error("unreachable");
     expect(result.entity.id).toBe(ss.id);
+  });
+
+  it("15. company fuzzy collision queues without calling person upsert", async () => {
+    const entityRepo = createEntityRepository(db);
+    const existing = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await insertTestFile(db, "file-15");
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Canvas",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:canvas",
+      evidence: [{ indexedFileId: "file-15" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.entity_type).toBe("company");
+    expect(queue.candidate_entity_id).toBe(existing.id);
+    expect(queue.candidate_reason).toBe("token-superset");
+    const companies = await db.selectFrom("entities").selectAll().where("source_type", "=", "company").execute();
+    expect(companies.map((c) => c.name)).toEqual(["Canvas Labs"]);
+  });
+
+  it("16. product version normalization links Claude 3 and Claude-3 but keeps Claude 3.5 separate", async () => {
+    const entityRepo = createEntityRepository(db);
+    const claude3 = await entityRepo.upsertEntity({
+      name: "Claude 3",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const before = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => before),
+      readEmail,
+    };
+
+    const linked = await proposeEntity(deps, {
+      name: "Claude-3",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:claude-3",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+    expect(linked.kind).toBe("linked");
+    if (linked.kind !== "linked") throw new Error("unreachable");
+    expect(linked.entity.id).toBe(claude3.id);
+
+    const fresh = await db.selectFrom("entities").selectAll().execute();
+    const created = await proposeEntity(
+      { ...deps, lookup: makeLookup(() => fresh) },
+      {
+        name: "Claude 3.5",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:claude-3-5",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+    expect(created.kind).toBe("created");
+    const products = await db.selectFrom("entities").selectAll().where("source_type", "=", "product").execute();
+    expect(products.map((p) => p.name).sort()).toEqual(["Claude 3", "Claude 3.5"]);
+  });
+
+  it("17. precomputed LLM candidates queue after exact-name fast-path is checked", async () => {
+    const entityRepo = createEntityRepository(db);
+    const exact = await entityRepo.upsertPersonEntity({
+      name: "Sarah Chen",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:sarah",
+    });
+    const fuzzy = await entityRepo.upsertPersonEntity({
+      name: "Sarah C",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:sarah-c",
+    });
+    const entities = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const linked = await proposeEntity(deps, {
+      name: "Sarah Chen",
+      entityType: "person",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "llm:sarah",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      precomputedCandidates: [{ entity: fuzzy, score: 12 }],
+    });
+
+    expect(linked.kind).toBe("linked");
+    if (linked.kind !== "linked") throw new Error("unreachable");
+    expect(linked.entity.id).toBe(exact.id);
+
+    await insertTestFile(db, "file-17");
+    const queued = await proposeEntity(deps, {
+      name: "Sarah Cheng",
+      entityType: "person",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "llm:sarah-cheng",
+      evidence: [{ indexedFileId: "file-17" }],
+      triggeredByUserId: "user-1",
+      precomputedCandidates: [{ entity: fuzzy, score: 12 }],
+    });
+
+    expect(queued.kind).toBe("queued");
+    const queue = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("normalized_name", "=", "sarah cheng")
+      .executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(fuzzy.id);
+    expect(queue.candidate_reason).toBe("llm-ambiguous");
+  });
+
+  it("18. evidenceDomain links a token-overlapping company before fuzzy queueing", async () => {
+    const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
+    const canvas = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await entityRepo.upsertEntity({
+      name: "Canvas Industries",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await domainsRepo.upsertDomain({
+      entityId: canvas.id,
+      domain: "canvas.example",
+      kind: "corporate",
+      source: "manual",
+    });
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        getCompanyIdsByDomain: (domain: string) => (domain === "canvas.example" ? [canvas.id] : []),
+      },
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Canvas",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:canvas-domain",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      evidenceDomain: "canvas.example",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(canvas.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("19. evidenceDomain disambiguates two confirmed companies via deterministic tie-break instead of queueing", async () => {
+    const entityRepo = createEntityRepository(db);
+    const first = await entityRepo.upsertEntity({
+      name: "Canvas Labs",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const second = await entityRepo.upsertEntity({
+      name: "Canvas Studios",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await db.updateTable("entities").set({ hotness: 10 }).where("id", "=", first.id).execute();
+    await db.updateTable("entities").set({ hotness: 1 }).where("id", "=", second.id).execute();
+    await insertTestFile(db, "file-19");
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        getCompanyIdsByDomain: (domain: string) => (domain === "canvas.example" ? [first.id, second.id] : []),
+      },
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Canvas",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:canvas-ambiguous-domain",
+      evidence: [{ indexedFileId: "file-19" }],
+      triggeredByUserId: "user-1",
+      evidenceDomain: "canvas.example",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(first.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("20. exact-name collision across confirmed companies picks the evidenceDomain-mapped winner (OW dedup)", async () => {
+    // Production shape: three OW entities accumulated across syncs
+    // ("Oliver Wyman", "OW", "Oliverwyman" — normalize to overlapping
+    // keys). When extraction emits `engaged_with` against the normalized
+    // form with evidenceDomain "oliverwyman.com", we must NOT queue —
+    // we land the edge on the domain-mapped canonical so the graph
+    // stays connected. Cleanup of the dupes is a separate problem.
+    const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
+    const canonical = await entityRepo.upsertEntity({
+      name: "Oliverwyman",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const ghost = await entityRepo.upsertEntity({
+      name: "Oliver Wyman",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await domainsRepo.upsertDomain({
+      entityId: canonical.id,
+      domain: "oliverwyman.com",
+      kind: "corporate",
+      source: "manual",
+    });
+    // Force both entities into the SAME normalized-name bucket so the
+    // exact-name fast-path collides them. normalizeName collapses
+    // whitespace, so "Oliver Wyman" and "Oliverwyman" already collide
+    // there; we additionally alias the ghost with the canonical form to
+    // exercise the alias-half of the bucket too.
+    await db
+      .updateTable("entities")
+      .set({ aliases: JSON.stringify(["Oliverwyman"]) })
+      .where("id", "=", ghost.id)
+      .execute();
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        getCompanyIdsByDomain: (domain: string) => (domain === "oliverwyman.com" ? [canonical.id] : []),
+      },
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Oliverwyman",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_relation",
+      sourceId: "rel:vedant->oliverwyman",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      evidenceDomain: "oliverwyman.com",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(canonical.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("21. exact-name collision with no evidenceDomain falls back to higher hotness", async () => {
+    // No domain signal available (e.g. extraction from a meeting that
+    // doesn't carry an explicit evidenceDomain, or proposing a non-company
+    // type). Tie-break by hotness — the more-mentioned entity wins. Still
+    // no queue: the cost of queueing is silent edge loss, the cost of a
+    // wrong link is a recoverable mis-attribution.
+    const entityRepo = createEntityRepository(db);
+    const hot = await entityRepo.upsertEntity({
+      name: "Aviation Edge",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const cold = await entityRepo.upsertEntity({
+      name: "Aviation Edge",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await db.updateTable("entities").set({ hotness: 17 }).where("id", "=", hot.id).execute();
+    await db.updateTable("entities").set({ hotness: 0 }).where("id", "=", cold.id).execute();
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Aviation Edge",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:aviation-edge",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe(hot.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("22. company exact-name collision with strong hotness disparity links without evidenceDomain", async () => {
+    const entityRepo = createEntityRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "acme-hot",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 100,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+        {
+          id: "acme-cold",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 1,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+      ])
+      .execute();
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Acme",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:acme-strong",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("linked");
+    if (result.kind === "linked") expect(result.entity.id).toBe("acme-hot");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("23. company exact-name collision with similar hotness queues without evidenceDomain", async () => {
+    const entityRepo = createEntityRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "acme-first",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 5,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+        {
+          id: "acme-second",
+          name: "Acme",
+          source_type: "company",
+          subtype: "external",
+          metadata: null,
+          aliases: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 4,
+          created_at: now,
+          updated_at: now,
+          ai_brief: null,
+        },
+      ])
+      .execute();
+    await insertTestFile(db, "file-23");
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => entities),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Acme",
+      entityType: "company",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "company:acme-similar",
+      evidence: [{ indexedFileId: "file-23" }],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(result.kind).toBe("queued");
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].candidate_reason).toBe("exact-ambiguous");
   });
 });

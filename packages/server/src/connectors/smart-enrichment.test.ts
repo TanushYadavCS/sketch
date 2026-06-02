@@ -14,7 +14,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
-import { handleCandidates } from "./smart-enrichment";
+import { extractEntities, handleCandidates, smartEnrichFile } from "./smart-enrichment";
 
 async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
   await db
@@ -173,5 +173,519 @@ describe("handleCandidates — stale seen_file_ids", () => {
     expect(storedIds).not.toContain(ghostFileId);
     expect(storedIds).toContain(liveFileId);
     expect(storedIds).toContain(secondLiveFileId);
+  });
+});
+
+describe("smartEnrichFile — LLM extraction facts", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("persists LLM facts on first sighting, defers materialization, and promotes once threshold reached", async () => {
+    const firstFileId = randomUUID();
+    const secondFileId = randomUUID();
+    await seedFile(db, firstFileId);
+    await seedFile(db, secondFileId);
+    const generator = {
+      generate: async () => "Jane Doe discussed the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return [{ mention: "Jane Doe", type: "person", variations: ["Jane"] }] as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    const fileBody = (id: string, hash: string) => ({
+      id,
+      fileName: `${id}.txt`,
+      content: "Jane Doe discussed the launch plan.",
+      contentCategory: "document",
+      source: "google_drive",
+      sourcePath: "/",
+      contentHash: hash,
+      connectorConfigId: "conn-smart",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      fileBody(firstFileId, "hash-1"),
+    );
+
+    const firstFact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", firstFileId)
+      .executeTakeFirstOrThrow();
+    expect(firstFact.fact_type).toBe("llm_extracted");
+    // Below threshold (1 file < 2): fact stays unmaterialized for retry.
+    expect(firstFact.materialized_at).toBeNull();
+    const noMentionsYet = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("indexed_file_id", "=", firstFileId)
+      .execute();
+    expect(noMentionsYet).toHaveLength(0);
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      fileBody(secondFileId, "hash-2"),
+    );
+
+    const factsAfter = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("fact_type", "=", "llm_extracted")
+      .execute();
+    expect(factsAfter.every((f) => f.materialized_at !== null)).toBe(true);
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["source", "confidence", "relation", "indexed_file_id"])
+      .execute();
+    expect(mentions.length).toBeGreaterThanOrEqual(2);
+    expect(mentions.every((m) => m.source === "llm_extraction" && m.confidence === "INFERRED")).toBe(true);
+  });
+
+  it("persists high-confidence relation facts and drops low-confidence relation outputs", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "Sarah Chen leads Project Atlas.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.94 },
+              { mention: "Project Atlas", type: "project", variations: ["Atlas"], confidence: 0.91 },
+              { mention: "Low Confidence Product", type: "product", variations: [], confidence: 0.9 },
+            ],
+            relations: [
+              {
+                type: "leads",
+                source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
+                target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },
+                confidence: 0.93,
+                context: "Sarah Chen leads Project Atlas.",
+              },
+              {
+                type: "builds",
+                source: { name: "Acme", type: "company", variations: [] },
+                target: { name: "Low Confidence Product", type: "product", variations: [] },
+                confidence: 0.72,
+                context: "Maybe Acme builds Low Confidence Product.",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "Sarah Chen leads Project Atlas.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-relations",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "relation", "subject_name", "materialized_at"])
+      .where("indexed_file_id", "=", fileId)
+      .orderBy("fact_type")
+      .execute();
+    expect(facts.filter((f) => f.fact_type === "llm_relation")).toHaveLength(1);
+    expect(facts.find((f) => f.fact_type === "llm_relation")).toMatchObject({
+      relation: "leads",
+      subject_name: "Sarah Chen",
+    });
+
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as source_name", "target.name as target_name"])
+      .executeTakeFirstOrThrow();
+    expect(relationship).toEqual({
+      relationship_type: "leads",
+      source_name: "Sarah Chen",
+      target_name: "Project Atlas",
+    });
+  });
+
+  it("preserves prior LLM facts when extractEntities throws", async () => {
+    // Regression guard: smartEnrichFile re-throws on Gemini failure, so the
+    // file-scope reconcile must never run with an empty mention set. If a
+    // future refactor swallows the error and falls through with mentions=[],
+    // every active llm_extracted fact for the file would be tombstoned.
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+
+    const priorMentions = [
+      { name: "Acme Corp", type: "company" },
+      { name: "Apollo", type: "project" },
+      { name: "Sarah Chen", type: "person" },
+    ];
+    for (const m of priorMentions) {
+      await db
+        .insertInto("indexed_file_facts")
+        .values({
+          id: randomUUID(),
+          indexed_file_id: fileId,
+          connector_config_id: "conn-smart",
+          created_by_user_id: "admin",
+          content_hash: "hash-prior",
+          source: "llm_extraction",
+          fact_type: "llm_extracted",
+          relation: "mentioned",
+          subject_name: m.name,
+          subject_source: "llm_extraction",
+          subject_source_id: `${fileId}:hash-prior:llm-extraction-v2:${m.name}`,
+          fact_key: `llm-prior-${m.name}`,
+          raw: JSON.stringify({
+            contentHash: "hash-prior",
+            promptVersion: "llm-extraction-v2",
+            model: "gemini",
+            mention: m.name,
+            type: m.type,
+            variations: [],
+          }),
+        })
+        .execute();
+    }
+
+    const throwingGenerator = {
+      generate: async () => {
+        throw new Error("unexpected summary call");
+      },
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          throw new Error("simulated Gemini timeout");
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await expect(
+      smartEnrichFile(
+        { db, logger: createTestLogger(), generator: throwingGenerator, embeddingProvider: null },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content: "some content that would have been analyzed",
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: "hash-new",
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("simulated Gemini timeout");
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    expect(facts).toHaveLength(3);
+    expect(facts.every((f) => f.deleted_at === null)).toBe(true);
+    expect(facts.map((f) => f.subject_name).sort()).toEqual(["Acme Corp", "Apollo", "Sarah Chen"]);
+  });
+
+  it("persists and materializes engaged_with (person -> company) via v3 prompt", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "Vedant Parikh", type: "person", variations: ["Vedant"], confidence: 0.95 },
+              { mention: "Oliver Wyman", type: "company", variations: ["OW"], confidence: 0.93 },
+            ],
+            relations: [
+              {
+                type: "engaged_with",
+                source: { name: "Vedant Parikh", type: "person", variations: ["Vedant"] },
+                target: { name: "Oliver Wyman", type: "company", variations: ["OW"] },
+                confidence: 0.92,
+                context: "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-engaged-with",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .select(["relation", "subject_name"])
+      .where("indexed_file_id", "=", fileId)
+      .where("fact_type", "=", "llm_relation")
+      .executeTakeFirstOrThrow();
+    expect(fact).toEqual({ relation: "engaged_with", subject_name: "Vedant Parikh" });
+
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as src", "target.name as tgt"])
+      .executeTakeFirstOrThrow();
+    expect(relationship).toEqual({
+      relationship_type: "engaged_with",
+      src: "Vedant Parikh",
+      tgt: "Oliver Wyman",
+    });
+  });
+});
+
+describe("extractEntities prompt — v6 entity type removal", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it("renders supported entity types without removed feature guidance", async () => {
+    let capturedPrompt = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        capturedPrompt = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(generator, {
+      id: "f-prompt",
+      fileName: "ow-canvas-standup.txt",
+      content: "transcript body",
+      contentCategory: "document",
+      source: "fireflies",
+      sourcePath: "/",
+      contentHash: null,
+      connectorConfigId: "conn-smart",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+
+    expect(capturedPrompt).toContain("Companies");
+    expect(capturedPrompt).toContain("Projects");
+    expect(capturedPrompt).toContain("Products");
+    expect(capturedPrompt).toContain("Teams");
+    expect(capturedPrompt).toContain("Prefer extracting from the top down");
+    expect(capturedPrompt).toContain('"engaged_with"');
+    expect(capturedPrompt).toContain("without being employed by it");
+    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product", "team"');
+    expect(capturedPrompt).not.toContain("Features");
+    expect(capturedPrompt).not.toContain('"feature"');
+    expect(capturedPrompt).not.toContain("feature -> project | product");
+  });
+
+  it("ignores feature mentions and feature endpoint relations emitted by the model", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId);
+    const generator = {
+      generate: async () => "OW Tourism Dashboard is the umbrella; Aviation Edge scraper is part of it.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              { mention: "OW Tourism Dashboard", type: "project", variations: ["OW Dashboard"], confidence: 0.95 },
+              { mention: "Aviation Edge scraper", type: "feature", variations: ["Aviation Edge"], confidence: 0.92 },
+            ],
+            relations: [
+              {
+                type: "part_of",
+                source: { name: "Aviation Edge scraper", type: "feature", variations: ["Aviation Edge"] },
+                target: { name: "OW Tourism Dashboard", type: "project", variations: ["OW Dashboard"] },
+                confidence: 0.9,
+                context: "Aviation Edge scraper is part of OW Tourism Dashboard",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "OW Tourism Dashboard is the umbrella; Aviation Edge scraper is part of it.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-feature-partof",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const llmFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "raw"])
+      .where("fact_type", "in", ["llm_extracted", "llm_relation"])
+      .execute();
+    const typedFeatureFacts = llmFacts.filter((fact) => {
+      const raw = JSON.parse(fact.raw ?? "{}") as {
+        type?: string;
+        source?: { type?: string };
+        target?: { type?: string };
+      };
+      return raw.type === "feature" || raw.source?.type === "feature" || raw.target?.type === "feature";
+    });
+    expect(typedFeatureFacts).toHaveLength(0);
+    const featureEntity = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("source_type", "=", "feature")
+      .executeTakeFirst();
+    expect(featureEntity).toBeUndefined();
+    const relationship = await db
+      .selectFrom("entity_relationships")
+      .selectAll()
+      .where("relationship_type", "=", "part_of")
+      .executeTakeFirst();
+    expect(relationship).toBeUndefined();
+  });
+});
+
+describe("extractEntities prompt — v7 quality rules", () => {
+  async function capturePrompt(): Promise<string> {
+    let captured = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        captured = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(generator, {
+      id: "f-v7",
+      fileName: "transcript.txt",
+      content: "body",
+      contentCategory: "document",
+      source: "fireflies",
+      sourcePath: "/",
+      contentHash: null,
+      connectorConfigId: "conn-v7",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+    return captured;
+  }
+
+  it("includes name-shape rules that reject degraded person forms", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Name shape rules");
+    expect(prompt).toContain("Title Case");
+    expect(prompt).toContain("Single first names with no surname");
+    expect(prompt).toContain("Initials-only");
+    expect(prompt).toContain("Email-handle style");
+    expect(prompt).toContain("ALL-CAPS");
+  });
+
+  it("includes the company-suffix → company rule", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Type disambiguation");
+    expect(prompt).toContain("Pvt Ltd");
+    expect(prompt).toContain("Private Limited");
+    expect(prompt).toContain('is type "company", never "person"');
+  });
+
+  it("excludes meeting titles and doc-title projects, and generic-feature products", async () => {
+    const prompt = await capturePrompt();
+    expect(prompt).toContain("Meeting titles or calendar event names");
+    expect(prompt).toContain("Standup");
+    expect(prompt).toContain("Document, note, or artifact titles as projects");
+    expect(prompt).toContain("Generic feature descriptions or internal component names as products");
+    expect(prompt).toContain("branded, proper-noun name");
+  });
+
+  it("renders the org description into the extraction prompt when provided", async () => {
+    let captured = "";
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(prompt: string) => {
+        captured = prompt;
+        return { mentions: [], relations: [] } as T;
+      },
+    } as GeminiGenerator;
+
+    await extractEntities(
+      generator,
+      {
+        id: "f-orgctx",
+        fileName: "transcript.txt",
+        content: "body",
+        contentCategory: "document",
+        source: "fireflies",
+        sourcePath: "/",
+        contentHash: null,
+        connectorConfigId: "conn-orgctx",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+      { orgName: "Canvas Labs", description: "AI services company. Sketch is one of our products." },
+    );
+
+    expect(captured).toContain("Organization: Canvas Labs");
+    expect(captured).toContain("AI services company. Sketch is one of our products.");
   });
 });

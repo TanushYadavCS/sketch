@@ -1,5 +1,5 @@
 import { SignJWT } from "jose";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "./auth/jwt";
 import { hashPassword } from "./auth/password";
@@ -1852,6 +1852,87 @@ describe("Users API", () => {
       expect(body.user.whatsapp_number).toBe("+14155550003");
     });
 
+    it("allows admins to promote another human user to admin", async () => {
+      const app = createApp(db, config);
+      const cookie = await setupAdmin(app);
+      const users = createUserRepository(db);
+      const target = await users.create({ name: "Target User", email: "target@test.com" });
+
+      const res = await app.request(`/api/users/${target.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ authRole: "admin" }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.user.auth_role).toBe("admin");
+      await expect(users.findById(target.id)).resolves.toMatchObject({ auth_role: "admin" });
+    });
+
+    it("allows admins to demote another admin to member", async () => {
+      const app = createApp(db, config);
+      const cookie = await setupAdmin(app);
+      const users = createUserRepository(db);
+      const target = await users.create({
+        name: "Second Admin",
+        email: "second-admin@test.com",
+        authRole: "admin",
+      });
+
+      const res = await app.request(`/api/users/${target.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ authRole: "member" }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.user.auth_role).toBe("member");
+      await expect(users.findById(target.id)).resolves.toMatchObject({ auth_role: "member" });
+    });
+
+    it("rejects auth role changes from members", async () => {
+      const app = createApp(db, config);
+      await setupAdmin(app);
+      const settings = createSettingsRepository(db);
+      const jwtSecret = (await settings.get())?.jwt_secret;
+      if (!jwtSecret) throw new Error("JWT secret missing");
+
+      const users = createUserRepository(db);
+      const caller = await users.create({ name: "Member Caller", email: "caller@test.com" });
+      const target = await users.create({ name: "Target User", email: "target-member@test.com" });
+      const memberCookie = `sketch_session=${await signJwt(caller.id, "member", jwtSecret)}`;
+
+      const res = await app.request(`/api/users/${target.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ authRole: "admin" }),
+      });
+      expect(res.status).toBe(403);
+
+      const body = await res.json();
+      expect(body.error.code).toBe("FORBIDDEN");
+      await expect(users.findById(target.id)).resolves.toMatchObject({ auth_role: "member" });
+    });
+
+    it("rejects changing your own auth role", async () => {
+      const app = createApp(db, config);
+      const cookie = await setupAdmin(app);
+      const users = createUserRepository(db);
+      const admin = await users.findByEmail("admin@test.com");
+      if (!admin) throw new Error("Admin user missing");
+
+      const res = await app.request(`/api/users/${admin.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ authRole: "member" }),
+      });
+      expect(res.status).toBe(403);
+
+      await expect(users.findById(admin.id)).resolves.toMatchObject({ auth_role: "admin" });
+    });
+
     it("returns 404 for unknown id", async () => {
       const app = createApp(db, config);
       const cookie = await setupAdmin(app);
@@ -1915,6 +1996,57 @@ describe("Users API", () => {
       const getBody = await getRes.json();
       expect(getBody.users).toHaveLength(1);
       expect(getBody.users[0].email).toBe("admin@test.com");
+    });
+
+    it("removes user with dependent rows", async () => {
+      await sql`PRAGMA foreign_keys = ON`.execute(db);
+      const app = createApp(db, config);
+      const cookie = await setupAdmin(app);
+      const users = createUserRepository(db);
+      const admin = await users.findByEmail("admin@test.com");
+      if (!admin) throw new Error("Admin user missing");
+      const manager = await users.create({ name: "Manager", email: "manager@test.com" });
+      const report = await users.create({ name: "Report", email: "report@test.com", reportsTo: manager.id });
+
+      await db
+        .insertInto("user_provider_identities")
+        .values({
+          id: "identity-manager",
+          user_id: manager.id,
+          provider: "google_drive",
+          provider_user_id: "provider-manager",
+          provider_email: "manager@test.com",
+        })
+        .execute();
+      await db
+        .insertInto("inbox_messages")
+        .values({
+          id: "inbox-manager",
+          sender_user_id: admin.id,
+          recipient_user_id: manager.id,
+          message: "Please review this",
+          platform: "slack",
+        })
+        .execute();
+
+      const res = await app.request(`/api/users/${manager.id}`, {
+        method: "DELETE",
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(200);
+
+      await expect(users.findById(manager.id)).resolves.toBeUndefined();
+      await expect(users.findById(report.id)).resolves.toMatchObject({ reports_to: null });
+      await expect(
+        db.selectFrom("user_provider_identities").select("id").where("user_id", "=", manager.id).execute(),
+      ).resolves.toEqual([]);
+      await expect(
+        db
+          .selectFrom("inbox_messages")
+          .select("id")
+          .where((eb) => eb.or([eb("sender_user_id", "=", manager.id), eb("recipient_user_id", "=", manager.id)]))
+          .execute(),
+      ).resolves.toEqual([]);
     });
 
     it("returns 404 for unknown id", async () => {

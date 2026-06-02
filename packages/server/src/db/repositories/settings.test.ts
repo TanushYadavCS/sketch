@@ -82,6 +82,18 @@ describe("Settings repository", () => {
     expect(row?.aws_region).toBe("us-east-1");
   });
 
+  it("update() round-trips admin_can_read_all_files and defaults to 0", async () => {
+    await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+    const initial = await settings.get();
+    expect(initial?.admin_can_read_all_files).toBe(0);
+
+    await settings.update({ adminCanReadAllFiles: true });
+    expect((await settings.get())?.admin_can_read_all_files).toBe(1);
+
+    await settings.update({ adminCanReadAllFiles: false });
+    expect((await settings.get())?.admin_can_read_all_files).toBe(0);
+  });
+
   it("update() allows clearing Slack and LLM credentials with null values", async () => {
     await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
     await settings.update({

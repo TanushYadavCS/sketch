@@ -5,7 +5,7 @@
  * - count-probe short-circuits when no pending rows exist (no list query)
  * - pending review rows render as "ghost rows" at the top of the entities
  *   table; a divider separates them from confirmed entities
- * - EXPERIMENTAL_FLAG=false hides everything (no probe issued, no ghost rows)
+ * - Files is GA: the count probe fires regardless of EXPERIMENTAL_FLAG
  * - clicking a ghost row opens the drawer in review mode (two-column
  *   reconcile view with the proposed entity + ReviewActions)
  * - "Confirm" inside the drawer resolves the row and shrinks the ghost set
@@ -100,7 +100,7 @@ function rowFactory(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe("EntityExplorer ECR-03B inline review", () => {
-  it("EXPERIMENTAL_FLAG=false: no ghost rows, no count probe issued", async () => {
+  it("Files GA: count probe fires regardless of EXPERIMENTAL_FLAG (no ghost rows when empty)", async () => {
     let probeCalls = 0;
     server.use(
       http.get("/api/setup/status", () => statusResponse(false)),
@@ -113,8 +113,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
 
     renderWithProviders(<EntityExplorer />);
     await waitFor(() => expect(screen.getByText("Simran S")).toBeInTheDocument());
-    await new Promise((r) => setTimeout(r, 50));
-    expect(probeCalls).toBe(0);
+    await waitFor(() => expect(probeCalls).toBeGreaterThan(0));
     expect(screen.queryByTestId("pending-reviews-badge")).not.toBeInTheDocument();
     expect(screen.queryByTestId(/^review-row-/)).not.toBeInTheDocument();
   });
@@ -388,5 +387,26 @@ describe("EntityExplorer ECR-03B inline review", () => {
     const candidate = await screen.findByTestId("reconcile-candidate");
     await waitFor(() => expect(candidate).toHaveTextContent("picked@example.com"));
     expect(candidate).not.toHaveTextContent("original@example.com");
+  });
+});
+
+describe("EntityExplorer rebuild dialog", () => {
+  function setupBaseHandlers() {
+    server.use(
+      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/entities", () => entityListResponse([])),
+    );
+  }
+
+  it("admin menu shows a single 'Rebuild entities…' item (no separate reset/recreate items)", async () => {
+    const user = userEvent.setup();
+    setupBaseHandlers();
+    renderWithProviders(<EntityExplorer />);
+
+    await user.click(await screen.findByTestId("entity-admin-menu"));
+
+    expect(await screen.findByTestId("rebuild-entities-menu-item")).toHaveTextContent("Rebuild entities");
+    expect(screen.queryByText(/Reset & recreate/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Reset entities/)).not.toBeInTheDocument();
   });
 });

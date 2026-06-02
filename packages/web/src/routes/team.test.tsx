@@ -6,7 +6,8 @@ import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TeamPage } from "./team";
 
-let mockAuth: { email: string; userId?: string } = {
+let mockAuth: { role: "admin" | "member"; email: string; userId?: string } = {
+  role: "admin",
   email: "admin@test.com",
 };
 
@@ -23,8 +24,24 @@ vi.mock("@tanstack/react-router", async () => {
 });
 
 afterEach(() => {
-  mockAuth = { email: "admin@test.com" };
+  mockAuth = { role: "admin", email: "admin@test.com" };
 });
+
+async function openEditForFirstMember(user: ReturnType<typeof userEvent.setup>) {
+  await waitFor(() => {
+    expect(screen.getByText("Alice Smith")).toBeInTheDocument();
+  });
+
+  const menuTriggers = screen.getAllByRole("button").filter((btn) => btn.querySelector("svg"));
+  await user.click(menuTriggers[1]);
+
+  await waitFor(() => {
+    expect(screen.getByText("Edit")).toBeInTheDocument();
+  });
+
+  await user.click(screen.getByText("Edit"));
+  return await screen.findByRole("dialog");
+}
 
 describe("TeamPage", () => {
   it("uses the shared dashboard page width", () => {
@@ -199,7 +216,7 @@ describe("TeamPage", () => {
       await waitFor(() => {
         expect(screen.getByText("This email or number is already linked to another member")).toBeInTheDocument();
       });
-    });
+    }, 15000);
 
     it("uses the same capped form viewport when the dialog opens", async () => {
       const user = userEvent.setup();
@@ -264,6 +281,62 @@ describe("TeamPage", () => {
     });
 
     expect(screen.queryByText("You")).not.toBeInTheDocument();
+  });
+
+  describe("Edit member dialog", () => {
+    it("lets admins update another user's auth role", async () => {
+      const updateFn = vi.fn();
+      server.use(
+        http.patch("/api/users/:id", async ({ request }) => {
+          const body = (await request.json()) as { authRole?: "admin" | "member" };
+          updateFn(body);
+          return HttpResponse.json({
+            user: {
+              id: "u1",
+              name: "Alice Smith",
+              email: null,
+              email_verified_at: null,
+              auth_role: body.authRole ?? "member",
+              slack_user_id: "U001",
+              whatsapp_number: null,
+              description: null,
+              type: "human",
+              role: null,
+              reports_to: null,
+              allowed_tools: null,
+              slack_channel_ids: [],
+              whatsapp_group_jids: [],
+              is_whatsapp_fallback: false,
+              created_at: "2026-01-01T00:00:00Z",
+            },
+          });
+        }),
+      );
+
+      const user = userEvent.setup();
+      renderWithProviders(<TeamPage />);
+
+      const dialog = await openEditForFirstMember(user);
+      await user.click(within(dialog).getByRole("combobox", { name: "Access" }));
+      await user.click(screen.getByRole("option", { name: "Admin" }));
+      await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() => {
+        expect(updateFn).toHaveBeenCalledWith(expect.objectContaining({ authRole: "admin" }));
+      });
+    });
+
+    it("does not show auth role controls to members", async () => {
+      setMockAuth({ role: "member", email: "member@test.com", userId: "u2" });
+
+      const user = userEvent.setup();
+      renderWithProviders(<TeamPage />);
+
+      const dialog = await openEditForFirstMember(user);
+
+      expect(within(dialog).queryByText("Access")).not.toBeInTheDocument();
+      expect(within(dialog).queryByRole("combobox", { name: "Access" })).not.toBeInTheDocument();
+    }, 15000);
   });
 
   describe("Remove member dialog", () => {

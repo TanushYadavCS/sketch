@@ -14,6 +14,7 @@ import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
@@ -27,6 +28,10 @@ import {
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
+import type { TranscriptionSettings } from "../transcription/service";
+import { resolveTranscriptionConfig } from "../transcription/service";
+import type { VisionConfig } from "../vision/service";
+import { resolveVisionConfig } from "../vision/service";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
@@ -117,6 +122,7 @@ export interface RunAgentParams {
   resumeSessionId?: string;
   abortController?: AbortController;
   orgName?: string | null;
+  orgDescription?: string | null;
   botName?: string | null;
   integrationMcpServers?: Record<string, McpServerConfig>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -137,6 +143,7 @@ export interface RunAgentParams {
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
   toolConfig?: { BASE_URL?: string; PORT: number };
+  geminiConfig?: { maxRpm?: number; maxRetries?: number };
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
@@ -158,6 +165,8 @@ export interface RunAgentParams {
   };
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   agentEnv?: Record<string, string>;
+  loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
+  visionConfig?: VisionConfig | null;
   /**
    * Free-form instruction set for an agent persona, appended to the system
    * prompt. Set when the run is associated with a /team agent (channel-bound,
@@ -171,6 +180,11 @@ export interface RunAgentParams {
    * Null/undefined preserves the runner's default toolset.
    */
   agentAllowedTools?: string[] | null;
+  conversationRepo?: ReturnType<typeof createConversationRepository>;
+  conversationContext?: {
+    conversationId: number;
+    providerThreadId?: string | null;
+  };
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
@@ -221,13 +235,24 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     return [];
   });
 
+  const transcriptionSettings = params.loadTranscriptionSettings
+    ? await params.loadTranscriptionSettings().catch((err) => {
+        logger.warn({ err }, "Failed to load transcription settings");
+        return null;
+      })
+    : null;
+  const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
+  const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
+
   const systemAppend = buildSystemContext({
     platform: params.responseSurface ?? params.platform,
     deliveryPlatform: params.responseSurface === "web" ? params.platform : undefined,
     orgName: params.orgName,
+    orgDescription: params.orgDescription,
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,
+    visionAnalysisEnabled: Boolean(visionConfig),
   });
 
   const sdkBuiltInTools = params.agentAllowedTools
@@ -255,6 +280,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
 
   const attachments = params.attachments ?? [];
   const hasImages = attachments.some((a) => isImageAttachment(a));
+  const useVisionToolForImages = hasImages && Boolean(visionConfig);
   let usedExistingSession = existingSessionId !== undefined;
 
   let prompt: string | AsyncIterable<SDKUserMessage>;
@@ -268,12 +294,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       imageCount: images.length,
       nonImageCount: nonImages.length,
       images: images.map((a) => ({ name: a.originalName, mime: a.mimeType })),
-      promptMode: hasImages ? "multimodal" : "text",
+      promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
     },
     "Prompt mode selected",
   );
 
-  if (hasImages) {
+  if (hasImages && !useVisionToolForImages) {
     const content = await buildMultimodalContent(userMessage, attachments);
     prompt = (async function* () {
       yield {
@@ -300,11 +326,19 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     queueManager: params.queueManager,
     activeQueueKey: params.activeQueueKey,
     toolConfig: params.toolConfig,
+    geminiConfig: params.geminiConfig,
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
+    loadTranscriptionSettings: params.loadTranscriptionSettings,
+    transcriptionEnabled: Boolean(transcriptionConfig),
+    visionConfig,
+    visionAnalysisEnabled: Boolean(visionConfig),
+    logger,
+    conversationRepo: params.conversationRepo,
+    conversationContext: params.conversationContext,
   });
 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);
@@ -564,7 +598,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     nonImageCount: nonImages.length,
     mimeTypes: attachments.map((a) => a.mimeType),
     fileSizes: attachments.map((a) => a.sizeBytes),
-    promptMode: hasImages ? "multimodal" : "text",
+    promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
     toolCalls,
     trace: {
       progressEvents,

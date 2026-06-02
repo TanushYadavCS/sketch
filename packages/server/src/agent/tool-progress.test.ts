@@ -149,6 +149,13 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(['⚙️ Using list_files: "root"']);
   });
 
+  it("renders chat history reads with a dedicated label", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__ReadChatHistory", input: {} },
+    ]);
+    expect(lines).toEqual(["💬 Reading Chat History"]);
+  });
+
   it("does not include unsafe fallback input fields", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "UnknownTool", input: { apiKey: "secret", message: "hello" } },

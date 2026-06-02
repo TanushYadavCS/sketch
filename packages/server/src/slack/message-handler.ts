@@ -8,19 +8,26 @@ import type { SlackBot } from "./bot";
 
 const SLACK_TEXT_LIMIT = 39_000;
 
+export interface SentSlackMessage {
+  messageRef: string;
+  text: string;
+}
+
 export function createSlackMessageHandler(
   slackBot: SlackBot,
   channelId: string,
   threadTs?: string,
-): (text: string) => Promise<void> {
+): (text: string) => Promise<SentSlackMessage[]> {
   return async (text: string) => {
     const chunks = chunkText(text, SLACK_TEXT_LIMIT);
+    const sent: SentSlackMessage[] = [];
     for (const chunk of chunks) {
       if (threadTs) {
-        await slackBot.postThreadReply(channelId, threadTs, chunk);
+        sent.push({ messageRef: await slackBot.postThreadReply(channelId, threadTs, chunk), text: chunk });
       } else {
-        await slackBot.postMessage(channelId, chunk);
+        sent.push({ messageRef: await slackBot.postMessage(channelId, chunk), text: chunk });
       }
     }
+    return sent;
   };
 }

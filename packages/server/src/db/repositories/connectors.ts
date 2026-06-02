@@ -27,28 +27,54 @@ export interface FileViewer {
 /**
  * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
  *
- *   unrestricted  = no scope AND no per-file shares
- *   scoped        = caller is in access_scope_members for the file's scope
- *   per-file      = caller has a row in file_access for the file
+ *   unrestricted      = no scope AND no per-file shares
+ *   scoped            = caller is in access_scope_members for the file's scope
+ *   per-file          = caller has a row in file_access for the file
+ *   manual share      = caller's email is in file_share_emails for the file
+ *   org-wide          = indexed_files.share_with_everyone = 1
+ *   entity-share prop = caller has access to an entity mentioned in the file
+ *                       (via entity_share_emails OR entities.share_with_everyone).
+ *                       Read-time only — no rows are written to file_access.
  *
  * v1 matches the caller's primary email only; multi-email users (Slack login email
  * differs from connector-side email) under-see — the safe failure direction. v2 will
  * swap `= :email` for `IN (:emails[])` once we wire `getAllEmailsForUser` through.
  *
- * Callers must qualify the file table as `indexed_files` (or alias to it) — the
- * predicate references columns by that name.
+ * `alias` is the SQL identifier for `indexed_files` at the call site; pass a
+ * different name when the file table is aliased (entity visibility predicate
+ * inlines this with the alias of the outer query's join).
+ *
+ * Acyclic: this references the entity-share tables directly. It MUST NOT call
+ * entityVisibilityPredicate, which depends on file visibility — otherwise the
+ * planner sees mutually-recursive EXISTS chains.
  */
-export function fileVisibilityPredicate(viewer: FileViewer) {
+export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_files") {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(alias)) {
+    throw new Error(`fileVisibilityPredicate: invalid table alias "${alias}"`);
+  }
+  const t = sql.raw(alias);
   const email = viewer.email ?? "";
   return sql<boolean>`(
-    (indexed_files.access_scope_id IS NULL
-      AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = indexed_files.id))
+    (${t}.access_scope_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = ${t}.id))
     OR EXISTS (SELECT 1 FROM access_scope_members asm
-               WHERE asm.access_scope_id = indexed_files.access_scope_id
+               WHERE asm.access_scope_id = ${t}.access_scope_id
                  AND asm.email = ${email})
     OR EXISTS (SELECT 1 FROM file_access fa
-               WHERE fa.indexed_file_id = indexed_files.id
+               WHERE fa.indexed_file_id = ${t}.id
                  AND fa.email = ${email})
+    OR EXISTS (SELECT 1 FROM file_share_emails fse
+               WHERE fse.indexed_file_id = ${t}.id
+                 AND fse.email = ${email})
+    OR ${t}.share_with_everyone = 1
+    OR EXISTS (
+      SELECT 1 FROM entity_mentions em_shared
+      INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
+      LEFT JOIN entity_share_emails ese
+        ON ese.entity_id = ent_shared.id AND ese.email = ${email}
+      WHERE em_shared.indexed_file_id = ${t}.id
+        AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
+    )
   )`;
 }
 
@@ -321,7 +347,14 @@ export function createConnectorRepository(db: Kysely<DB>) {
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
-        if (contentChanged) updates.embedding_status = "pending";
+        if (contentChanged) {
+          updates.embedding_status = "pending";
+          updates.summary_status = "pending";
+          updates.embedding_attempts = 0;
+          updates.embedding_next_retry_at = null;
+          updates.summary_attempts = 0;
+          updates.summary_next_retry_at = null;
+        }
 
         await db.updateTable("indexed_files").set(updates).where("id", "=", existing.id).execute();
 
@@ -348,6 +381,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           synced_at: now,
           mime_type: data.mimeType ?? null,
           embedding_status: "pending",
+          summary_status: "pending",
         })
         .execute();
 
@@ -725,6 +759,60 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .limit(opts.limit)
         .offset(opts.offset)
         .execute();
+    },
+
+    /**
+     * Count non-archived files that have a summary, across the same filter
+     * set as `listAllFiles`/`countAllFiles`. Drives the "X enriched" badge
+     * in the Files header — must be filtered globally, not over the page
+     * slice (the prior page-local count silently misreported the global
+     * total whenever the user paged past the first 50 rows).
+     */
+    async countEnrichedFiles(opts: {
+      viewer: FileViewer;
+      connectorType?: string;
+      category?: string;
+      status?: string;
+      access?: string;
+    }) {
+      let query = db
+        .selectFrom("indexed_files")
+        .select(sql`count(*)`.as("count"))
+        .where("indexed_files.is_archived", "=", 0);
+
+      if (opts.connectorType) {
+        query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.category) {
+        query = query.where("indexed_files.content_category", "=", opts.category);
+      }
+      if (opts.status === "raw") {
+        query = query
+          .where("indexed_files.summary", "is", null)
+          .where("indexed_files.embedding_status", "not in", ["pending", "failed"])
+          .where("indexed_files.summary_status", "not in", ["pending", "failed"]);
+      } else {
+        query = query.where("indexed_files.summary", "is not", null);
+      }
+      if (opts.status === "pending") {
+        query = query.where((eb) =>
+          eb.or([
+            eb("indexed_files.embedding_status", "in", ["pending", "failed"]),
+            eb("indexed_files.summary_status", "in", ["pending", "failed"]),
+          ]),
+        );
+      }
+      if (opts.access === "restricted") {
+        query = query.where("indexed_files.access_scope_id", "is not", null);
+      } else if (opts.access === "unrestricted") {
+        query = query.where("indexed_files.access_scope_id", "is", null);
+      }
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
+      }
+
+      const result = await query.executeTakeFirstOrThrow();
+      return Number(result.count);
     },
 
     /** Count non-archived files with optional filters. RBAC-gated for non-admins. */
