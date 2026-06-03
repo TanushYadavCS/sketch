@@ -15,18 +15,13 @@ const baseConnection = {
   createdAt: "2026-01-01T00:00:00Z",
 } satisfies Partial<IntegrationConnection>;
 
-function renderSection(
-  connections: IntegrationConnection[],
-  onDisconnect = vi.fn(),
-  options: { accessSettingsEnabled?: boolean } = {},
-) {
+function renderSection(connections: IntegrationConnection[], onDisconnect = vi.fn()) {
   return renderWithProviders(
     <IntegrationsSection
       connections={connections}
       isLoadingConnections={false}
       providerId="provider-1"
       orgName="Acme"
-      accessSettingsEnabled={options.accessSettingsEnabled ?? true}
       onAdd={vi.fn()}
       onDisconnect={onDisconnect}
     />,
@@ -173,77 +168,6 @@ describe("IntegrationsSection", () => {
     expect(screen.queryByText(/gmail\.com/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Aimfox Connection/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect Aimfox" })).toBeDisabled();
-  });
-
-  it("keeps settings available for non-Pipedream apps when access settings are disabled", async () => {
-    const user = userEvent.setup();
-
-    renderSection(
-      [
-        {
-          ...baseConnection,
-          id: "secrets:viewer-1:github:github",
-          source: "canvas_user_secrets",
-          accessLevel: "personal",
-          isOwnedByViewer: true,
-          canManageAccess: true,
-          canDelete: true,
-        },
-      ],
-      vi.fn(),
-      { accessSettingsEnabled: false },
-    );
-
-    expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).queryByRole("switch", { name: "Share with organization" })).not.toBeInTheDocument();
-    expect(within(dialog).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(within(dialog).getAllByRole("button", { name: "Close" }).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("button", { name: "Settings unavailable for GitHub" })).not.toBeInTheDocument();
-  });
-
-  it("hides access-control state when access settings are disabled", async () => {
-    const user = userEvent.setup();
-
-    renderSection(
-      [
-        {
-          ...baseConnection,
-          id: "secrets:owner-1:github:github",
-          source: "canvas_user_secrets",
-          accountName: "Engineering GitHub",
-          accessLevel: "organization",
-          ownerName: "Tara",
-          isOwnedByViewer: false,
-          canManageAccess: false,
-          canDelete: false,
-        },
-      ],
-      vi.fn(),
-      { accessSettingsEnabled: false },
-    );
-
-    expect(screen.queryByText("Org shared")).not.toBeInTheDocument();
-    expect(screen.queryByText("Owned by Tara")).not.toBeInTheDocument();
-    expect(screen.getByText("Engineering GitHub")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open settings for GitHub" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeEnabled();
-
-    await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Engineering GitHub")).toBeInTheDocument();
-    expect(within(dialog).queryByText(/Owned by:/)).not.toBeInTheDocument();
-    expect(within(dialog).queryByRole("switch", { name: "Share with organization" })).not.toBeInTheDocument();
-    expect(within(dialog).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(
-      within(dialog).queryByText(
-        "Tara shared this connection with the organization. You can use it, but only the owner can manage access or credentials.",
-      ),
-    ).not.toBeInTheDocument();
   });
 
   it("keeps shared accounts non-destructive when Canvas omits canDelete", () => {

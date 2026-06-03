@@ -22,7 +22,6 @@ export function IntegrationsSection({
   isLoadingConnections,
   providerId,
   orgName,
-  accessSettingsEnabled = true,
   onAdd,
   onDisconnect,
 }: {
@@ -30,7 +29,6 @@ export function IntegrationsSection({
   isLoadingConnections: boolean;
   providerId: string;
   orgName?: string;
-  accessSettingsEnabled?: boolean;
   onAdd: () => void;
   onDisconnect: () => void;
 }) {
@@ -87,7 +85,6 @@ export function IntegrationsSection({
               isDisconnecting={disconnectingId === connection.id}
               onDisconnect={() => handleDisconnect(connection.id)}
               onOpenSettings={() => setSettingsConnection(connection)}
-              accessSettingsEnabled={accessSettingsEnabled}
             />
           ))}
         </div>
@@ -96,7 +93,6 @@ export function IntegrationsSection({
         connection={settingsConnection}
         providerId={providerId}
         orgName={orgName}
-        accessSettingsEnabled={accessSettingsEnabled}
         onOpenChange={(open) => !open && setSettingsConnection(null)}
         onSaved={onDisconnect}
       />
@@ -110,14 +106,12 @@ function ConnectionRow({
   isDisconnecting,
   onDisconnect,
   onOpenSettings,
-  accessSettingsEnabled,
 }: {
   connection: IntegrationConnection;
   isLast: boolean;
   isDisconnecting: boolean;
   onDisconnect: () => void;
   onOpenSettings: () => void;
-  accessSettingsEnabled: boolean;
 }) {
   const isActive = connection.status === "active";
   const abbrev = getAbbreviation(connection.appName);
@@ -125,11 +119,9 @@ function ConnectionRow({
   const accountLabel = getAccountDisplayName(connection);
   const ownerDisplayName = getOwnerDisplayName(connection);
   const connectedAt = connection.connectedAt ?? connection.createdAt;
-  const isOrgShared = accessSettingsEnabled && connection.accessLevel === "organization";
+  const isOrgShared = connection.accessLevel === "organization";
   const isSharedByAnotherUser = isOrgShared && connection.isOwnedByViewer === false;
-  const canDelete = accessSettingsEnabled
-    ? connection.canDelete !== false && connection.isOwnedByViewer !== false
-    : true;
+  const canDelete = connection.canDelete !== false && connection.isOwnedByViewer !== false;
   const metadata = [
     isSharedByAnotherUser ? `Owned by ${ownerDisplayName}` : accountLabel,
     `Connected ${formatDate(connectedAt)}`,
@@ -239,14 +231,12 @@ function AccessSettingsDialog({
   connection,
   providerId,
   orgName,
-  accessSettingsEnabled,
   onOpenChange,
   onSaved,
 }: {
   connection: IntegrationConnection | null;
   providerId: string;
   orgName?: string;
-  accessSettingsEnabled: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
 }) {
@@ -261,18 +251,17 @@ function AccessSettingsDialog({
     return <Dialog open={false} onOpenChange={onOpenChange} />;
   }
 
-  const showAccessSettings = accessSettingsEnabled;
-  const canManageAccess = showAccessSettings && connection.canManageAccess === true;
+  const canManageAccess = connection.canManageAccess === true;
   const desiredAccess = shareWithOrg ? "organization" : "personal";
   const hasChanged = desiredAccess !== (connection.accessLevel ?? "personal");
   const ownerDisplayName = getOwnerDisplayName(connection);
-  const isOrgShared = showAccessSettings && connection.accessLevel === "organization";
+  const isOrgShared = connection.accessLevel === "organization";
   const isSharedByAnotherUser = isOrgShared && connection.isOwnedByViewer === false;
   const accountLabel = isSharedByAnotherUser ? null : getAccountDisplayName(connection);
   const accessCopy =
-    showAccessSettings && connection.isOwnedByViewer === false
+    connection.isOwnedByViewer === false
       ? `${ownerDisplayName} shared this connection with the organization. You can use it, but only the owner can manage access or credentials.`
-      : showAccessSettings && shareWithOrg
+      : shareWithOrg
         ? `Everyone in ${orgName ?? "the organization"} can select and run this connection.`
         : "Only you can use this connection.";
 
@@ -314,33 +303,29 @@ function AccessSettingsDialog({
           </div>
         </DialogHeader>
 
-        {showAccessSettings && (
-          <div className="rounded-lg border border-border p-4">
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-sm font-medium">Share with organization</p>
-                <p className="mt-1 text-sm text-muted-foreground">{accessCopy}</p>
-              </div>
-              <Switch
-                aria-label="Share with organization"
-                checked={shareWithOrg}
-                onCheckedChange={setShareWithOrg}
-                disabled={!canManageAccess || saving}
-              />
+        <div className="rounded-lg border border-border p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Share with organization</p>
+              <p className="mt-1 text-sm text-muted-foreground">{accessCopy}</p>
             </div>
+            <Switch
+              aria-label="Share with organization"
+              checked={shareWithOrg}
+              onCheckedChange={setShareWithOrg}
+              disabled={!canManageAccess || saving}
+            />
           </div>
-        )}
+        </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            {showAccessSettings ? "Cancel" : "Close"}
+            Cancel
           </Button>
-          {showAccessSettings && (
-            <Button onClick={save} disabled={!canManageAccess || !hasChanged || saving}>
-              {saving ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
-              Save
-            </Button>
-          )}
+          <Button onClick={save} disabled={!canManageAccess || !hasChanged || saving}>
+            {saving ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+            Save
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
