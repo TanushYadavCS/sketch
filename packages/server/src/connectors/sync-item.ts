@@ -21,6 +21,7 @@ export interface ProcessSyncedItemParams {
   connectorType: ConnectorType;
   item: SyncedItem;
   existingHashes: ExistingContentHashMap;
+  encryptionKey?: string;
 }
 
 export async function loadExistingContentHashes(
@@ -53,6 +54,7 @@ export async function processSyncedItem({
   connectorType,
   item,
   existingHashes,
+  encryptionKey,
 }: ProcessSyncedItemParams): Promise<ProcessSyncedItemResult> {
   if (!item.fileName && !item.content) {
     return { kind: "skipped_empty" };
@@ -82,7 +84,7 @@ export async function processSyncedItem({
   }
 
   const itemResult = await db.transaction().execute(async (trx) => {
-    const txRepo = createConnectorRepository(trx);
+    const txRepo = createConnectorRepository(trx, encryptionKey);
     const upsertResult = await txRepo.upsertFile({
       connectorConfigId,
       source: connectorType,

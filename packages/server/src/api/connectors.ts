@@ -55,6 +55,7 @@ function syncInBackground(
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
     >
   >,
 ) {

@@ -97,7 +97,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
-  const connectors = createConnectorRepository(db);
+  const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
@@ -333,7 +333,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
   }
 
-  const identities = createProviderIdentityRepository(db);
+  const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
   app.route("/api/identities", providerIdentityRoutes(identities, users));
 
   if (deps?.logger) {
