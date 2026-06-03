@@ -87,14 +87,25 @@ function decodeConnectorConfigRow<T extends { credentials: string }>(row: T, enc
   };
 }
 
+/** CRM activity file types whose bodyless ("empty reminder") rows are hidden from the list. */
+const CRM_ACTIVITY_FILE_TYPES_SQL = sql.join(
+  ["crm_task", "crm_call", "crm_event", "crm_meeting", "crm_note"].map((t) => sql`${t}`),
+);
+
 /**
- * Keeps rollup *anchors* and ungrouped rows, dropping CRM activity members.
- * A member is a row whose `rollup_group_id` points at a different parent record;
- * anchors have `rollup_group_id = provider_file_id`, and non-CRM rows have it NULL.
+ * The Files-list (browse) visibility rule, Gmail-style:
+ *  - drop rollup *members* (activities shown under their parent object instead), and
+ *  - drop bodyless CRM activities ("empty reminders") entirely — they're only
+ *    counted under their object, never listed.
+ * Keeps rollup anchors (rollup_group_id = provider_file_id), ungrouped non-CRM
+ * rows (NULL), and CRM activities that carry real content (content_category = 'document').
  */
-const rollupAnchorPredicate = sql<boolean>`(
-  indexed_files.rollup_group_id IS NULL
-  OR indexed_files.rollup_group_id = indexed_files.provider_file_id
+const browseVisibilityPredicate = sql<boolean>`(
+  (indexed_files.rollup_group_id IS NULL OR indexed_files.rollup_group_id = indexed_files.provider_file_id)
+  AND NOT (
+    indexed_files.content_category = 'structured'
+    AND indexed_files.file_type IN (${CRM_ACTIVITY_FILE_TYPES_SQL})
+  )
 )`;
 
 export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string) {
@@ -791,7 +802,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .where("indexed_files.is_archived", "=", 0);
 
       if (opts.collapseRollups) {
-        query = query.where(rollupAnchorPredicate);
+        query = query.where(browseVisibilityPredicate);
       }
 
       if (opts.connectorType) {
@@ -944,7 +955,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .where("indexed_files.is_archived", "=", 0)
         .where("indexed_files.connector_config_id", "=", opts.connectorConfigId)
         .where("indexed_files.rollup_group_id", "=", opts.groupId)
-        .where("indexed_files.provider_file_id", "!=", opts.groupId);
+        .where("indexed_files.provider_file_id", "!=", opts.groupId)
+        // Only list activities that carry real content; bodyless reminders are counted, not listed.
+        .where("indexed_files.content_category", "=", "document");
       if (!opts.viewer.isAdmin) {
         query = query.where(fileVisibilityPredicate(opts.viewer));
       }
@@ -1026,7 +1039,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .where("indexed_files.is_archived", "=", 0);
 
       if (opts.collapseRollups) {
-        query = query.where(rollupAnchorPredicate);
+        query = query.where(browseVisibilityPredicate);
       }
 
       if (opts.connectorType) {
@@ -1078,7 +1091,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .selectFrom("indexed_files")
         .select(["indexed_files.source", sql<number>`count(*)`.as("count")])
         .where("indexed_files.is_archived", "=", 0)
-        .where(rollupAnchorPredicate)
+        .where(browseVisibilityPredicate)
         .groupBy("indexed_files.source");
       if (!viewer.isAdmin) {
         query = query.where(fileVisibilityPredicate(viewer));

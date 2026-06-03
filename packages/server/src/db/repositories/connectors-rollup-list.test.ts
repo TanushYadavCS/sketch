@@ -34,6 +34,7 @@ describe("connectors repo — CRM rollup collapse", () => {
     providerFileId: string,
     fileType: string,
     rollupGroupId: string | null,
+    contentCategory: "document" | "structured" = "structured",
   ): Promise<{ id: string }> {
     return repo.upsertFile({
       source: "zoho_crm",
@@ -41,7 +42,7 @@ describe("connectors repo — CRM rollup collapse", () => {
       providerUrl: null,
       fileName: providerFileId,
       fileType,
-      contentCategory: "structured",
+      contentCategory,
       content: null,
       sourcePath: null,
       contentHash: providerFileId,
@@ -54,8 +55,8 @@ describe("connectors repo — CRM rollup collapse", () => {
 
   it("collapses activity members under their anchor and annotates the anchor", async () => {
     const anchor = await seedFile("Accounts:a1", "crm_account", "Accounts:a1");
-    await seedFile("Tasks:t1", "crm_task", "Accounts:a1");
-    await seedFile("Calls:c1", "crm_call", "Accounts:a1");
+    await seedFile("Tasks:t1", "crm_task", "Accounts:a1", "document"); // bodied → listed on expand
+    await seedFile("Calls:c1", "crm_call", "Accounts:a1"); // bodyless reminder → counted, not listed
     await seedFile("Deals:d1", "crm_deal", "Deals:d1"); // self-anchor, no members
     await db
       .insertInto("crm_object_summaries")
@@ -113,6 +114,7 @@ describe("connectors repo — CRM rollup collapse", () => {
       limit: 50,
       offset: 0,
     });
-    expect(members.map((m) => m.provider_file_id).sort()).toEqual(["Calls:c1", "Tasks:t1"]);
+    // Only the bodied activity is listed; the bodyless call is counted (count=2) but not listed.
+    expect(members.map((m) => m.provider_file_id)).toEqual(["Tasks:t1"]);
   });
 });

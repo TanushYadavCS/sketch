@@ -401,18 +401,23 @@ function CrmObjectGroup({ file, onView }: { file: UnifiedFile; onView: (fileId: 
           </div>
         ) : members.length === 0 ? (
           <div className="border-b border-border bg-muted/10 px-3 py-2 pl-8 text-xs text-muted-foreground">
-            No activities
+            No activities with notes — {file.activityCount ?? 0} logged touch
+            {(file.activityCount ?? 0) === 1 ? "" : "es"} (calls/tasks without notes).
           </div>
         ) : (
           <>
             {members.map((member) => (
               <UnifiedFileRow key={member.id} file={member} onView={() => onView(member.id)} nested />
             ))}
-            {data?.hasMore && (
-              <div className="border-b border-border bg-muted/10 px-3 py-2 pl-8 text-[11px] text-muted-foreground">
-                Showing first {members.length} of {file.activityCount ?? members.length} activities.
-              </div>
-            )}
+            {(() => {
+              const remaining = (file.activityCount ?? members.length) - members.length;
+              return remaining > 0 ? (
+                <div className="border-b border-border bg-muted/10 px-3 py-2 pl-8 text-[11px] text-muted-foreground">
+                  + {remaining} more touch{remaining === 1 ? "" : "es"} without notes
+                  {data?.hasMore ? " (and more with notes)" : ""}.
+                </div>
+              ) : null;
+            })()}
           </>
         ))}
     </>
