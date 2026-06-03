@@ -84,7 +84,7 @@ interface IndexedFileRowForResponse {
 function mapIndexedFileRow(
   f: IndexedFileRowForResponse,
   accessInfo: { count: number } | undefined,
-  rollup?: { activityCount: number; summary: string },
+  rollup?: { activityCount: number; summary?: string },
 ) {
   return {
     id: f.id,
@@ -103,7 +103,11 @@ function mapIndexedFileRow(
     accessScope: accessInfo ? ("restricted" as const) : ("unrestricted" as const),
     accessCount: accessInfo?.count ?? null,
     ...(rollup
-      ? { resultKind: "crm_object" as const, activityCount: rollup.activityCount, rollupSummary: rollup.summary }
+      ? {
+          resultKind: "crm_object" as const,
+          activityCount: rollup.activityCount,
+          ...(rollup.summary ? { rollupSummary: rollup.summary } : {}),
+        }
       : {}),
   };
 }
@@ -389,18 +393,22 @@ export function connectorRoutes(
         ? await connectorRepo.getFileAccessMap(fileIds)
         : new Map<string, { type: string; count: number }>();
 
-    // Annotate rollup anchors (parent objects with activities) with their count + summary.
+    // Annotate rollup anchors (parent objects with activities) with their live
+    // activity count + (optional) generated summary. Count drives the badge/expand
+    // so it works before summaries exist (they are async and capped).
     const anchors = files
       .filter((f) => f.rollup_group_id && f.rollup_group_id === f.provider_file_id)
       .map((f) => ({ connectorConfigId: f.connector_config_id, groupId: f.provider_file_id }));
-    const rollupMap = await connectorRepo.getRollupSummaries(anchors);
+    const [countMap, summaryMap] = await Promise.all([
+      connectorRepo.getActivityCounts(anchors),
+      connectorRepo.getRollupSummaries(anchors),
+    ]);
 
     return c.json({
       files: files.map((f) => {
-        const rollup =
-          f.rollup_group_id === f.provider_file_id
-            ? rollupMap.get(`${f.connector_config_id}::${f.provider_file_id}`)
-            : undefined;
+        const key = `${f.connector_config_id}::${f.provider_file_id}`;
+        const count = f.rollup_group_id === f.provider_file_id ? (countMap.get(key) ?? 0) : 0;
+        const rollup = count > 0 ? { activityCount: count, summary: summaryMap.get(key)?.summary } : undefined;
         return mapIndexedFileRow(f, accessMap.get(f.id), rollup);
       }),
       total,

@@ -860,6 +860,39 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       return map;
     },
 
+    /**
+     * Live count of activity members rolled up under each anchor object.
+     * Drives the "N activities" badge + expand affordance independently of
+     * whether a summary has been generated yet (summaries are capped/async).
+     */
+    async getActivityCounts(
+      anchors: Array<{ connectorConfigId: string; groupId: string }>,
+    ): Promise<Map<string, number>> {
+      const map = new Map<string, number>();
+      if (anchors.length === 0) return map;
+      const configIds = [...new Set(anchors.map((a) => a.connectorConfigId))];
+      const groupIds = [...new Set(anchors.map((a) => a.groupId))];
+      const rows = await db
+        .selectFrom("indexed_files")
+        .select([
+          "indexed_files.connector_config_id",
+          "indexed_files.rollup_group_id",
+          sql<number>`count(*)`.as("count"),
+        ])
+        .where("indexed_files.is_archived", "=", 0)
+        .where("indexed_files.connector_config_id", "in", configIds)
+        .where("indexed_files.rollup_group_id", "in", groupIds)
+        .whereRef("indexed_files.provider_file_id", "!=", "indexed_files.rollup_group_id")
+        .groupBy(["indexed_files.connector_config_id", "indexed_files.rollup_group_id"])
+        .execute();
+      for (const r of rows) {
+        if (r.rollup_group_id) {
+          map.set(`${r.connector_config_id}::${r.rollup_group_id}`, Number(r.count));
+        }
+      }
+      return map;
+    },
+
     /** Resolve a file's group identity (for the rollup-members endpoint), viewer-scoped. */
     async getRollupAnchorRef(fileId: string, viewer: FileViewer) {
       let query = db

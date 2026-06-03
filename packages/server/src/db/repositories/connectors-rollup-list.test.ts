@@ -83,12 +83,25 @@ describe("connectors repo — CRM rollup collapse", () => {
     const bySource = await repo.countFilesBySource(ADMIN);
     expect(bySource.find((r) => r.source === "zoho_crm")?.count).toBe(2);
 
-    // Anchor annotation.
-    const summaries = await repo.getRollupSummaries([{ connectorConfigId: "cfg", groupId: "Accounts:a1" }]);
+    // Activity counts drive the badge/expand even without a generated summary.
+    await seedFile("Notes:n1", "crm_note", "Deals:d1"); // member under Deals:d1, which has NO summary
+    const counts = await repo.getActivityCounts([
+      { connectorConfigId: "cfg", groupId: "Accounts:a1" },
+      { connectorConfigId: "cfg", groupId: "Deals:d1" },
+    ]);
+    expect(counts.get("cfg::Accounts:a1")).toBe(2);
+    expect(counts.get("cfg::Deals:d1")).toBe(1);
+
+    // Summary lookup is optional — present for Accounts:a1, absent for Deals:d1.
+    const summaries = await repo.getRollupSummaries([
+      { connectorConfigId: "cfg", groupId: "Accounts:a1" },
+      { connectorConfigId: "cfg", groupId: "Deals:d1" },
+    ]);
     expect(summaries.get("cfg::Accounts:a1")).toEqual({
       activityCount: 2,
       summary: "Acme: 2 activities, latest call.",
     });
+    expect(summaries.get("cfg::Deals:d1")).toBeUndefined();
 
     // Members endpoint returns the activities, not the anchor.
     const ref = await repo.getRollupAnchorRef(anchor.id, ADMIN);
