@@ -114,7 +114,7 @@ describe("connectors repo — CRM rollup collapse", () => {
       limit: 50,
       offset: 0,
     });
-    // Only the bodied activity is listed; the bodyless call is counted (count=2) but not listed.
-    expect(members.map((m) => m.provider_file_id)).toEqual(["Tasks:t1"]);
+    // All touches are listed (bodied + bodyless) so the object's full timeline is visible.
+    expect(members.map((m) => m.provider_file_id).sort()).toEqual(["Calls:c1", "Tasks:t1"]);
   });
 });

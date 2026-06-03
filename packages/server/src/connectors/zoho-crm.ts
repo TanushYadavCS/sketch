@@ -744,8 +744,32 @@ async function resolveModuleFields(
   if (names.length === 0) names = importantFields(moduleApiName);
   // System fields are valid on every CRM module and are required downstream
   // (cursor, change detection, owner seeding), so force them to the front.
-  const ordered = [...new Set(["Created_Time", "Modified_Time", "Owner", ...names])];
+  // Parent-relation lookups (What_Id/Who_Id/Parent_Id) drive activity rollup but
+  // Zoho's field-discovery omits them, so force them in too — otherwise activities
+  // never resolve a rollup_group_id and orphan from their parent object.
+  const ordered = [
+    ...new Set(["Created_Time", "Modified_Time", "Owner", ...rollupRelationFields(moduleApiName), ...names]),
+  ];
   return ordered.slice(0, ZOHO_MAX_FIELDS).join(",");
+}
+
+/**
+ * Parent-relation lookup fields per activity module. These resolve the rollup
+ * group (parent Account/Contact/Deal) and are NOT reliably returned by Zoho's
+ * `/settings/fields` discovery, so {@link resolveModuleFields} force-requests them.
+ */
+function rollupRelationFields(moduleApiName: string): string[] {
+  switch (normalizeModuleApiName(moduleApiName)) {
+    case "tasks":
+    case "calls":
+    case "events":
+    case "meetings":
+      return ["What_Id", "Who_Id"];
+    case "notes":
+      return ["Parent_Id"];
+    default:
+      return [];
+  }
 }
 
 async function* syncModule(

@@ -430,4 +430,111 @@ describe("Zoho CRM connector sync integration", () => {
     expect(config.sync_cursor).toEqual(expect.any(String));
     expect(config.last_synced_at).toEqual(expect.any(String));
   });
+
+  it("force-requests parent-relation fields even when Zoho field discovery omits them", async () => {
+    db = await createTestDb();
+
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "zoho-crm-rel",
+        connector_type: "zoho_crm",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          access_token: "access-token",
+          refresh_token: "refresh-token",
+          client_id: "client-id",
+          client_secret: "client-secret",
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          accounts_server: "https://accounts.zoho.in",
+          api_domain: "https://www.zohoapis.in",
+          region: "in",
+        }),
+        created_by: "admin-user",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    const fieldsByModule: Record<string, string> = {};
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = new URL(String(input));
+      const path = url.pathname;
+      if (path.endsWith("/settings/modules")) {
+        return Promise.resolve(
+          jsonResponse({
+            modules: [
+              { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true },
+              { api_name: "Calls", plural_label: "Calls", status: "visible", api_supported: true },
+              { api_name: "Notes", plural_label: "Notes", status: "visible", api_supported: true },
+            ],
+          }),
+        );
+      }
+      if (path.includes("/settings/fields")) {
+        // Real Zoho discovery for Calls/Notes does NOT surface What_Id/Who_Id/Parent_Id.
+        return Promise.resolve(
+          jsonResponse({ fields: [{ api_name: "Subject" }, { api_name: "Note_Title" }, { api_name: "Description" }] }),
+        );
+      }
+      const moduleMatch = path.match(/\/crm\/v\d+\/(\w+)$/);
+      if (moduleMatch) {
+        const moduleName = moduleMatch[1];
+        fieldsByModule[moduleName] = url.searchParams.get("fields") ?? "";
+        const data: Record<string, unknown>[] =
+          moduleName === "Contacts"
+            ? [
+                {
+                  id: "c1",
+                  Full_Name: "Jane Buyer",
+                  Created_Time: "2026-01-01T00:00:00+05:30",
+                  Modified_Time: "2026-01-02T00:00:00+05:30",
+                },
+              ]
+            : moduleName === "Calls"
+              ? [
+                  {
+                    id: "call1",
+                    Subject: "Intro call",
+                    Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+                    Created_Time: "2026-01-03T00:00:00+05:30",
+                    Modified_Time: "2026-01-03T00:00:00+05:30",
+                  },
+                ]
+              : [
+                  {
+                    id: "note1",
+                    Note_Title: "Met at conference",
+                    Description: "Discussed renewal timing and budget.",
+                    Parent_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+                    Created_Time: "2026-01-04T00:00:00+05:30",
+                    Modified_Time: "2026-01-04T00:00:00+05:30",
+                  },
+                ];
+        return Promise.resolve(jsonResponse({ data, info: { more_records: false } }));
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+
+    await runConnectorSync(db, "zoho-crm-rel", logger);
+
+    // The fix: relation lookups are force-requested despite discovery omitting them.
+    expect(fieldsByModule.Calls).toContain("What_Id");
+    expect(fieldsByModule.Calls).toContain("Who_Id");
+    expect(fieldsByModule.Notes).toContain("Parent_Id");
+
+    // And so the activities resolve a rollup group pointing at their parent contact.
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select(["provider_file_id", "rollup_group_id"])
+      .where("source", "=", "zoho_crm")
+      .where("provider_file_id", "in", ["Calls:call1", "Notes:note1"])
+      .orderBy("provider_file_id")
+      .execute();
+    expect(rows).toEqual([
+      { provider_file_id: "Calls:call1", rollup_group_id: "Contacts:c1" },
+      { provider_file_id: "Notes:note1", rollup_group_id: "Contacts:c1" },
+    ]);
+  });
 });

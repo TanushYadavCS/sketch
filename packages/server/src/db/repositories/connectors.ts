@@ -955,9 +955,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .where("indexed_files.is_archived", "=", 0)
         .where("indexed_files.connector_config_id", "=", opts.connectorConfigId)
         .where("indexed_files.rollup_group_id", "=", opts.groupId)
-        .where("indexed_files.provider_file_id", "!=", opts.groupId)
-        // Only list activities that carry real content; bodyless reminders are counted, not listed.
-        .where("indexed_files.content_category", "=", "document");
+        .where("indexed_files.provider_file_id", "!=", opts.groupId);
       if (!opts.viewer.isAdmin) {
         query = query.where(fileVisibilityPredicate(opts.viewer));
       }
