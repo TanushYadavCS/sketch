@@ -175,7 +175,9 @@ describe("IntegrationsSection", () => {
     expect(screen.getByRole("button", { name: "Disconnect Aimfox" })).toBeDisabled();
   });
 
-  it("hides access settings controls when access settings are disabled", () => {
+  it("keeps settings available for non-Pipedream apps when access settings are disabled", async () => {
+    const user = userEvent.setup();
+
     renderSection(
       [
         {
@@ -192,9 +194,14 @@ describe("IntegrationsSection", () => {
       { accessSettingsEnabled: false },
     );
 
-    expect(screen.queryByRole("button", { name: "Open settings for GitHub" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Settings unavailable for GitHub" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("switch", { name: "Share with organization" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Settings unavailable for GitHub" })).not.toBeInTheDocument();
   });
 
   it("hides access-control state when access settings are disabled", () => {
@@ -219,7 +226,7 @@ describe("IntegrationsSection", () => {
     expect(screen.queryByText("Org shared")).not.toBeInTheDocument();
     expect(screen.queryByText("Owned by Tara")).not.toBeInTheDocument();
     expect(screen.getByText("Engineering GitHub")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Open settings for GitHub" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open settings for GitHub" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeEnabled();
   });
 

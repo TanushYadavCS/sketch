@@ -92,15 +92,14 @@ export function IntegrationsSection({
           ))}
         </div>
       )}
-      {accessSettingsEnabled && (
-        <AccessSettingsDialog
-          connection={settingsConnection}
-          providerId={providerId}
-          orgName={orgName}
-          onOpenChange={(open) => !open && setSettingsConnection(null)}
-          onSaved={onDisconnect}
-        />
-      )}
+      <AccessSettingsDialog
+        connection={settingsConnection}
+        providerId={providerId}
+        orgName={orgName}
+        accessSettingsEnabled={accessSettingsEnabled}
+        onOpenChange={(open) => !open && setSettingsConnection(null)}
+        onSaved={onDisconnect}
+      />
     </div>
   );
 }
@@ -122,7 +121,7 @@ function ConnectionRow({
 }) {
   const isActive = connection.status === "active";
   const abbrev = getAbbreviation(connection.appName);
-  const isCanvasOwned = connection.source === "canvas_user_secrets";
+  const canOpenSettings = connection.source !== "pipedream";
   const accountLabel = getAccountDisplayName(connection);
   const ownerDisplayName = getOwnerDisplayName(connection);
   const connectedAt = connection.connectedAt ?? connection.createdAt;
@@ -194,31 +193,27 @@ function ConnectionRow({
           )}
         </div>
 
-        {accessSettingsEnabled ? (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={
-              isCanvasOwned
-                ? "size-7 text-muted-foreground"
-                : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
-            }
-            aria-label={
-              isCanvasOwned
-                ? `Open settings for ${connection.appName}`
-                : `Settings unavailable for ${connection.appName}`
-            }
-            title={
-              isCanvasOwned ? `Open settings for ${connection.appName}` : "Settings are only available for Canvas apps"
-            }
-            onClick={isCanvasOwned ? onOpenSettings : undefined}
-            disabled={!isCanvasOwned}
-          >
-            <GearSixIcon size={14} />
-          </Button>
-        ) : (
-          <span aria-hidden="true" className="size-7" />
-        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className={
+            canOpenSettings
+              ? "size-7 text-muted-foreground"
+              : "size-7 cursor-not-allowed text-muted-foreground/40 hover:bg-transparent hover:text-muted-foreground/40"
+          }
+          aria-label={
+            canOpenSettings
+              ? `Open settings for ${connection.appName}`
+              : `Settings unavailable for ${connection.appName}`
+          }
+          title={
+            canOpenSettings ? `Open settings for ${connection.appName}` : "Settings are unavailable for Pipedream apps"
+          }
+          onClick={canOpenSettings ? onOpenSettings : undefined}
+          disabled={!canOpenSettings}
+        >
+          <GearSixIcon size={14} />
+        </Button>
 
         <Button
           variant="ghost"
@@ -244,12 +239,14 @@ function AccessSettingsDialog({
   connection,
   providerId,
   orgName,
+  accessSettingsEnabled,
   onOpenChange,
   onSaved,
 }: {
   connection: IntegrationConnection | null;
   providerId: string;
   orgName?: string;
+  accessSettingsEnabled: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
 }) {
@@ -264,7 +261,7 @@ function AccessSettingsDialog({
     return <Dialog open={false} onOpenChange={onOpenChange} />;
   }
 
-  const canManageAccess = connection.canManageAccess === true;
+  const canManageAccess = accessSettingsEnabled && connection.canManageAccess === true;
   const desiredAccess = shareWithOrg ? "organization" : "personal";
   const hasChanged = desiredAccess !== (connection.accessLevel ?? "personal");
   const ownerDisplayName = getOwnerDisplayName(connection);
