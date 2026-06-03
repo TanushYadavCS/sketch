@@ -1323,6 +1323,56 @@ describe("Entity drawer routes", () => {
       .execute();
   }
 
+  async function seedCrmActivityFile({
+    id,
+    fileName,
+    fileType = "crm_task",
+    contentCategory = "structured",
+    rollupGroupId = "Deals:d1",
+    sourceUpdatedAt = "2026-05-22T00:00:00.000Z",
+    accessScopeId = null,
+  }: {
+    id: string;
+    fileName: string;
+    fileType?: string;
+    contentCategory?: "document" | "structured";
+    rollupGroupId?: string | null;
+    sourceUpdatedAt?: string;
+    accessScopeId?: string | null;
+  }) {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "cfg-zoho-timeline",
+        connector_type: "zoho_crm",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id,
+        connector_config_id: "cfg-zoho-timeline",
+        provider_file_id: `Tasks:${id}`,
+        file_name: fileName,
+        file_type: fileType,
+        content_category: contentCategory,
+        source: "zoho_crm",
+        content_hash: `hash-${id}`,
+        is_archived: 0,
+        synced_at: now,
+        access_scope_id: accessScopeId,
+        source_created_at: sourceUpdatedAt,
+        source_updated_at: sourceUpdatedAt,
+        rollup_group_id: rollupGroupId,
+      })
+      .execute();
+  }
+
   async function seedEvidence(id: string, relationshipId: string, fileId: string, chunkIndex = -1) {
     await db
       .insertInto("entity_relationship_evidence")
@@ -1802,5 +1852,143 @@ describe("Entity drawer routes", () => {
     expect(mayItems[0].mentionCount).toBe(2);
     expect(mayItems[0].mentionConfidence).toBe("EXTRACTED");
     expect(body.totalCount).toBe(2);
+  });
+
+  it("GET /api/entities/:id/timeline returns CRM activity metadata from entity mentions", async () => {
+    await seedEntity("deal-1", "Acme renewal", "deal");
+    await seedEntity("contact-1", "Jane Buyer", "person");
+    await seedCrmActivityFile({
+      id: "crm-task-1",
+      fileName: "Follow up on renewal - Jane Buyer",
+      contentCategory: "structured",
+      rollupGroupId: "Deals:d1",
+    });
+
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "crm-m-deal",
+          entity_id: "deal-1",
+          indexed_file_id: "crm-task-1",
+          chunk_index: -1,
+          context_snippet: "CRM activity parent",
+          confidence: "EXTRACTED",
+          source: "zoho_crm",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "crm-m-contact",
+          entity_id: "contact-1",
+          indexed_file_id: "crm-task-1",
+          chunk_index: -1,
+          context_snippet: "CRM activity participant",
+          confidence: "EXTRACTED",
+          source: "zoho_crm",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+
+    const dealRes = await app.request("/api/entities/deal-1/timeline", { headers: { Cookie: adminCookie } });
+    const contactRes = await app.request("/api/entities/contact-1/timeline", { headers: { Cookie: adminCookie } });
+    expect(dealRes.status).toBe(200);
+    expect(contactRes.status).toBe(200);
+
+    const dealBody = (await dealRes.json()) as {
+      groups: Array<{
+        items: Array<{
+          fileId: string;
+          fileType: string | null;
+          contentCategory: string;
+          rollupGroupId: string | null;
+          crmActivity: { activityType: string; hasBody: boolean } | null;
+        }>;
+      }>;
+    };
+    const contactBody = (await contactRes.json()) as typeof dealBody;
+    const dealItem = dealBody.groups.flatMap((g) => g.items).find((item) => item.fileId === "crm-task-1");
+    const contactItem = contactBody.groups.flatMap((g) => g.items).find((item) => item.fileId === "crm-task-1");
+
+    expect(dealItem).toMatchObject({
+      fileType: "crm_task",
+      contentCategory: "structured",
+      rollupGroupId: "Deals:d1",
+      crmActivity: { activityType: "task", hasBody: false },
+    });
+    expect(contactItem).toMatchObject({
+      fileType: "crm_task",
+      crmActivity: { activityType: "task", hasBody: false },
+    });
+  });
+
+  it("GET /api/entities/:id/timeline applies file RBAC to CRM activity rows", async () => {
+    await seedEntity("crm-rbac-entity", "Acme renewal", "deal");
+    await seedCrmActivityFile({
+      id: "crm-task-public",
+      fileName: "Public follow up - Jane Buyer",
+      rollupGroupId: "Deals:d1",
+      sourceUpdatedAt: "2026-05-23T00:00:00.000Z",
+    });
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-crm-timeline",
+        connector_config_id: "cfg-zoho-timeline",
+        scope_type: "crm_private_view",
+        provider_scope_id: "private",
+        label: "Private CRM",
+      })
+      .execute();
+    await seedCrmActivityFile({
+      id: "crm-task-restricted",
+      fileName: "Restricted follow up - Jane Buyer",
+      rollupGroupId: "Deals:d1",
+      sourceUpdatedAt: "2026-05-24T00:00:00.000Z",
+      accessScopeId: "scope-crm-timeline",
+    });
+
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "crm-rbac-public",
+          entity_id: "crm-rbac-entity",
+          indexed_file_id: "crm-task-public",
+          chunk_index: -1,
+          context_snippet: "Visible CRM activity",
+          confidence: "EXTRACTED",
+          source: "zoho_crm",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "crm-rbac-restricted",
+          entity_id: "crm-rbac-entity",
+          indexed_file_id: "crm-task-restricted",
+          chunk_index: -1,
+          context_snippet: "Restricted CRM activity",
+          confidence: "EXTRACTED",
+          source: "zoho_crm",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+
+    const res = await app.request("/api/entities/crm-rbac-entity/timeline", { headers: { Cookie: memberCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      groups: Array<{ items: Array<{ fileId: string; crmActivity: { activityType: string } | null }> }>;
+      totalCount: number;
+    };
+    const items = body.groups.flatMap((g) => g.items);
+    expect(items.map((item) => item.fileId)).toEqual(["crm-task-public"]);
+    expect(items[0].crmActivity).toEqual({ activityType: "task", hasBody: false });
+    expect(body.totalCount).toBe(1);
   });
 });

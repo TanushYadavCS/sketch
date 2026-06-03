@@ -438,12 +438,19 @@ export interface EntityRelationEvidenceResponse {
 export interface EntityTimelineItem {
   fileId: string;
   fileName: string;
+  fileType: string | null;
+  contentCategory: string;
   sourceType: string;
   occurredAt: string;
   mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
   mentionCount: number;
   contextSnippet: string | null;
   url: string | null;
+  rollupGroupId: string | null;
+  crmActivity: {
+    activityType: "task" | "call" | "event" | "meeting" | "note";
+    hasBody: boolean;
+  } | null;
 }
 
 export interface EntityTimelineGroup {

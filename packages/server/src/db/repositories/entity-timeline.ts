@@ -11,12 +11,16 @@ import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 export interface TimelineItem {
   fileId: string;
   fileName: string;
+  fileType: string | null;
+  contentCategory: string;
   sourceType: string;
   occurredAt: string;
   mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
   mentionCount: number;
   contextSnippet: string | null;
   url: string | null;
+  rollupGroupId: string | null;
+  crmActivity: CrmTimelineActivity | null;
 }
 
 export interface TimelineGroup {
@@ -24,7 +28,19 @@ export interface TimelineGroup {
   items: TimelineItem[];
 }
 
+export interface CrmTimelineActivity {
+  activityType: "task" | "call" | "event" | "meeting" | "note";
+  hasBody: boolean;
+}
+
 const CONFIDENCE_ORDER: Record<string, number> = { EXTRACTED: 0, INFERRED: 1, AMBIGUOUS: 2 };
+const CRM_ACTIVITY_TYPES: Record<string, CrmTimelineActivity["activityType"]> = {
+  crm_task: "task",
+  crm_call: "call",
+  crm_event: "event",
+  crm_meeting: "meeting",
+  crm_note: "note",
+};
 
 function normalizeConfidence(value: string): TimelineItem["mentionConfidence"] {
   return value === "EXTRACTED" || value === "INFERRED" || value === "AMBIGUOUS" ? value : "AMBIGUOUS";
@@ -38,6 +54,13 @@ function monthKey(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "unknown";
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function crmActivityFor(fileType: string | null, contentCategory: string): CrmTimelineActivity | null {
+  if (!fileType) return null;
+  const activityType = CRM_ACTIVITY_TYPES[fileType];
+  if (!activityType) return null;
+  return { activityType, hasBody: contentCategory === "document" };
 }
 
 export function createEntityTimelineRepository(db: Kysely<DB>) {
@@ -59,10 +82,13 @@ export function createEntityTimelineRepository(db: Kysely<DB>) {
         .select([
           "indexed_files.id as file_id",
           "indexed_files.file_name",
+          "indexed_files.file_type",
+          "indexed_files.content_category",
           "indexed_files.source as file_source",
           "indexed_files.source_updated_at",
           "indexed_files.source_created_at",
           "indexed_files.provider_url",
+          "indexed_files.rollup_group_id",
           "entity_mentions.confidence",
           "entity_mentions.context_snippet",
           "entity_mentions.mentioned_at",
@@ -94,12 +120,16 @@ export function createEntityTimelineRepository(db: Kysely<DB>) {
         byFile.set(row.file_id, {
           fileId: row.file_id,
           fileName: row.file_name,
+          fileType: row.file_type,
+          contentCategory: row.content_category,
           sourceType: row.file_source,
           occurredAt,
           mentionConfidence: normalizeConfidence(row.confidence),
           mentionCount: 1,
           contextSnippet: row.context_snippet ?? null,
           url: row.provider_url ?? null,
+          rollupGroupId: row.rollup_group_id ?? null,
+          crmActivity: crmActivityFor(row.file_type, row.content_category),
         });
       }
 
