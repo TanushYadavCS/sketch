@@ -388,7 +388,13 @@ describe("replaySourceFacts", () => {
   it("runs a follow-up materialization pass for concurrent callers", async () => {
     await db.deleteFrom("indexed_file_facts").execute();
     const repo = createIndexedFileFactRepository(db);
-    for (let i = 0; i < 1000; i++) {
+    /**
+     * The first pass only needs a non-empty batch to materialize; the assertion
+     * is that a late fact inserted afterward gets picked up by a follow-up pass.
+     * A small batch keeps this CPU-bound test well under the unit tier's default
+     * 5s timeout, which a 1000-fact batch tipped over under full-suite contention.
+     */
+    for (let i = 0; i < 25; i++) {
       await repo.upsertFact({
         source: "manual",
         factType: "person_seed",
