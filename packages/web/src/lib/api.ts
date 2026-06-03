@@ -361,6 +361,7 @@ export interface EntityProfile {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+  crmActivityBrief: { summary: string; activityCount: number; updatedAt: string } | null;
   summary: EntityProfileSummary;
 }
 

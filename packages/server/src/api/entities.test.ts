@@ -1373,6 +1373,55 @@ describe("Entity drawer routes", () => {
       .execute();
   }
 
+  async function seedZohoConnectorConfig(id = "cfg-zoho-profile") {
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id,
+        connector_type: "zoho_crm",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: adminId,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+  }
+
+  async function seedZohoSourceRef(entityId: string, sourceId: string) {
+    await db
+      .insertInto("entity_source_refs")
+      .values({
+        id: `ref-${entityId}-${sourceId.replace(/[^a-zA-Z0-9]/g, "-")}`,
+        entity_id: entityId,
+        source: "zoho_crm",
+        source_id: sourceId,
+        source_url: null,
+        last_seen_at: "2026-05-20T00:00:00.000Z",
+      })
+      .execute();
+  }
+
+  async function seedCrmObjectSummary(
+    connectorConfigId: string,
+    groupId: string,
+    summary: string,
+    activityCount: number,
+  ) {
+    await db
+      .insertInto("crm_object_summaries")
+      .values({
+        connector_config_id: connectorConfigId,
+        group_id: groupId,
+        summary,
+        activity_count: activityCount,
+        basis_first_at: "2026-05-01T00:00:00.000Z",
+        basis_last_at: "2026-05-22T00:00:00.000Z",
+        basis_hash: `basis-${groupId}`,
+        updated_at: "2026-05-22T00:00:00.000Z",
+      })
+      .execute();
+  }
+
   async function seedEvidence(id: string, relationshipId: string, fileId: string, chunkIndex = -1) {
     await db
       .insertInto("entity_relationship_evidence")
@@ -1430,6 +1479,67 @@ describe("Entity drawer routes", () => {
     expect(body.entity.profile.summary.identity).toContain("Acme");
     expect(body.entity.profile.summary.activity).toContain("1 file");
     expect(body.entity.profile.summary.activity).toContain("1 mention");
+  });
+
+  it("GET /api/entities/:id surfaces CRM activity brief for Zoho Account and Deal source refs", async () => {
+    await seedZohoConnectorConfig();
+    await seedEntity("account-entity", "Acme Corp", "company");
+    await seedEntity("deal-entity", "Acme Renewal", "deal");
+    await seedEntity("contact-entity", "Jane Buyer", "person");
+    await seedZohoSourceRef("account-entity", "Accounts:a1");
+    await seedZohoSourceRef("deal-entity", "Deals:d1");
+    await seedZohoSourceRef("contact-entity", "Contacts:c1");
+    await seedCrmObjectSummary(
+      "cfg-zoho-profile",
+      "Accounts:a1",
+      "Account activity is focused on renewal planning.",
+      47,
+    );
+    await seedCrmObjectSummary(
+      "cfg-zoho-profile",
+      "Deals:d1",
+      "Deal activity is focused on commercial close steps.",
+      12,
+    );
+
+    const accountRes = await app.request("/api/entities/account-entity", { headers: { Cookie: adminCookie } });
+    const dealRes = await app.request("/api/entities/deal-entity", { headers: { Cookie: adminCookie } });
+    const contactRes = await app.request("/api/entities/contact-entity", { headers: { Cookie: adminCookie } });
+    expect(accountRes.status).toBe(200);
+    expect(dealRes.status).toBe(200);
+    expect(contactRes.status).toBe(200);
+
+    const accountBody = (await accountRes.json()) as {
+      entity: { profile: { crmActivityBrief: { summary: string; activityCount: number; updatedAt: string } | null } };
+    };
+    const dealBody = (await dealRes.json()) as typeof accountBody;
+    const contactBody = (await contactRes.json()) as typeof accountBody;
+
+    expect(accountBody.entity.profile.crmActivityBrief).toEqual({
+      summary: "Account activity is focused on renewal planning.",
+      activityCount: 47,
+      updatedAt: "2026-05-22T00:00:00.000Z",
+    });
+    expect(dealBody.entity.profile.crmActivityBrief).toMatchObject({
+      summary: "Deal activity is focused on commercial close steps.",
+      activityCount: 12,
+    });
+    expect(contactBody.entity.profile.crmActivityBrief).toBeNull();
+  });
+
+  it("GET /api/entities/:id omits CRM activity brief when multiple Zoho configs make source refs ambiguous", async () => {
+    await seedZohoConnectorConfig("cfg-zoho-profile-a");
+    await seedZohoConnectorConfig("cfg-zoho-profile-b");
+    await seedEntity("ambiguous-account", "Acme Corp", "company");
+    await seedZohoSourceRef("ambiguous-account", "Accounts:a1");
+    await seedCrmObjectSummary("cfg-zoho-profile-a", "Accounts:a1", "Account activity from first config.", 10);
+
+    const res = await app.request("/api/entities/ambiguous-account", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entity: { profile: { crmActivityBrief: { summary: string; activityCount: number; updatedAt: string } | null } };
+    };
+    expect(body.entity.profile.crmActivityBrief).toBeNull();
   });
 
   it("GET /api/entities/:id filters summary activity and collaborators by visible files", async () => {
