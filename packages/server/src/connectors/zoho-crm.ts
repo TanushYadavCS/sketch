@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
+import { normalizeEmailDomain, normalizeWebsiteDomain } from "../db/repositories/entity-domains";
 import type {
   Connector,
   ConnectorCredentials,
@@ -589,6 +590,19 @@ function rollupGroupIdForRecord(moduleApiName: string, record: ZohoRecord): stri
   return null;
 }
 
+function addDomain(domains: Set<string>, domain: string | null): void {
+  if (domain) domains.add(domain);
+}
+
+export function extractAccountDomainsFromRecord(record: ZohoRecord): string[] {
+  const domains = new Set<string>();
+  addDomain(domains, normalizeWebsiteDomain(asNonEmptyString(record.Website)));
+  addDomain(domains, normalizeWebsiteDomain(asNonEmptyString(record.Website_URL)));
+  addDomain(domains, normalizeWebsiteDomain(asNonEmptyString(record.Domain)));
+  addDomain(domains, normalizeEmailDomain(asNonEmptyString(record.Email)));
+  return [...domains];
+}
+
 function entitySeedsForRecord(moduleApiName: string, record: ZohoRecord): EntitySeed[] {
   if (!record.id) return [];
   const normalized = normalizeModuleApiName(moduleApiName);
@@ -599,13 +613,14 @@ function entitySeedsForRecord(moduleApiName: string, record: ZohoRecord): Entity
     fileType: moduleToFileType(moduleApiName),
   };
   if (normalized === "accounts") {
+    const domains = extractAccountDomainsFromRecord(record);
     return [
       {
         name,
         sourceType: "company",
         source: "zoho_crm",
         sourceId: makeProviderFileId(moduleApiName, record.id),
-        metadata,
+        metadata: domains.length > 0 ? { ...metadata, crmAccountDomains: domains } : metadata,
       },
     ];
   }

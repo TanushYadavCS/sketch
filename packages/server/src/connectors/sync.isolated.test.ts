@@ -463,7 +463,7 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
       connectorConfigId: "gmail-a",
     });
 
-    expect(second).toEqual({ id: first.id, created: false, contentChanged: true });
+    expect(second).toEqual({ id: first.id, created: false, contentChanged: true, categoryChanged: false });
 
     const rows = await db
       .selectFrom("indexed_files")

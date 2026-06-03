@@ -83,7 +83,8 @@ describe("Zoho CRM connector sync integration", () => {
               {
                 id: "a1",
                 Account_Name: "Acme Corp",
-                Website: "https://acme.test",
+                Website: "https://www.acme.test/path",
+                Email: "billing@finance.acme.test",
                 Industry: "Manufacturing",
                 Created_Time: "2026-01-01T00:00:00+05:30",
                 Modified_Time: "2026-01-02T00:00:00+05:30",
@@ -100,7 +101,7 @@ describe("Zoho CRM connector sync integration", () => {
               {
                 id: "c1",
                 Full_Name: "Jane Buyer",
-                Email: "jane@acme.test",
+                Email: "jane@gmail.com",
                 Account_Name: { id: "a1", name: "Acme Corp" },
                 Owner: { id: "u1", name: "Owner One" },
                 Created_Time: "2026-01-01T00:00:00+05:30",
@@ -404,6 +405,31 @@ describe("Zoho CRM connector sync integration", () => {
       { source_name: "Acme renewal", target_name: "Acme Corp", relationship_type: "deal_for" },
       { source_name: "Acme renewal", target_name: "Jane Buyer", relationship_type: "primary_contact" },
       { source_name: "Jane Buyer", target_name: "Acme Corp", relationship_type: "works_at" },
+    ]);
+
+    const domains = await db
+      .selectFrom("entity_domains")
+      .leftJoin("entities", "entities.id", "entity_domains.entity_id")
+      .select([
+        "entity_domains.domain",
+        "entity_domains.kind",
+        "entity_domains.source",
+        "entity_domains.is_primary",
+        "entities.name as entity_name",
+      ])
+      .where("entity_domains.domain", "in", ["acme.test", "finance.acme.test", "gmail.com"])
+      .orderBy("entity_domains.domain")
+      .execute();
+    expect(domains).toEqual([
+      { domain: "acme.test", kind: "corporate", source: "zoho_crm", is_primary: 1, entity_name: "Acme Corp" },
+      {
+        domain: "finance.acme.test",
+        kind: "corporate",
+        source: "zoho_crm",
+        is_primary: 0,
+        entity_name: "Acme Corp",
+      },
+      { domain: "gmail.com", kind: "personal", source: "manual", is_primary: 0, entity_name: null },
     ]);
 
     const taskMentions = await db

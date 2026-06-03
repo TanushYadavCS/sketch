@@ -4,6 +4,7 @@ import type { OAuthCredentials } from "./types";
 import {
   createZohoCrmConnector,
   discoverStandardModules,
+  extractAccountDomainsFromRecord,
   extractParentEntities,
   extractPeopleFromRecord,
   formatCrmRecordContent,
@@ -174,6 +175,24 @@ describe("Zoho CRM connector", () => {
       { source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM activity parent" },
       { source: "zoho_crm", sourceId: "Contacts:c1", contextSnippet: "CRM activity participant" },
     ]);
+  });
+
+  it("extracts Account domains from websites and Account email fields", () => {
+    expect(
+      extractAccountDomainsFromRecord({
+        id: "a1",
+        Account_Name: "Acme Corp",
+        Website: "https://www.acme.com/path",
+        Email: "billing@finance.acme.com",
+      }),
+    ).toEqual(["acme.com", "finance.acme.com"]);
+    expect(
+      extractAccountDomainsFromRecord({
+        id: "a2",
+        Account_Name: "Personal Account",
+        Website: "gmail.com/about",
+      }),
+    ).toEqual(["gmail.com"]);
   });
 
   it("extracts owner, contact, and lead people without wiring them into PR3 sync", () => {

@@ -1,5 +1,5 @@
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
@@ -327,6 +327,56 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
     const entities = await db.selectFrom("entities").selectAll().where("source_type", "=", "company").execute();
     expect(entities).toHaveLength(1);
+  });
+
+  it("logs conflicting Zoho CRM Account domain claims without reassigning the domain", async () => {
+    await seedFiles(db, 1);
+    const entityRepo = createEntityRepository(db);
+    const domainsRepo = createEntityDomainsRepository(db);
+    const globex = await entityRepo.upsertEntity({ name: "Globex", sourceType: "company" });
+    await domainsRepo.upsertDomain({
+      entityId: globex.id,
+      domain: "globex.test",
+      kind: "corporate",
+      source: "manual",
+      confidence: 1,
+      isPrimary: true,
+    });
+
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: "file-1",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: ADMIN_ID,
+      source: "zoho_crm",
+      factType: "structural_seed",
+      relation: "seeded",
+      subjectName: "Acme Corp",
+      subjectSource: "zoho_crm",
+      subjectSourceId: "Accounts:a1",
+      raw: {
+        sourceType: "company",
+        metadata: { crmAccountDomains: ["globex.test"] },
+      },
+    });
+    const logger = { info: vi.fn(), warn: vi.fn() } as unknown as ReturnType<typeof createTestLogger>;
+
+    await materializeUnmaterializedFacts(db, logger);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityName: "Acme Corp",
+        domain: "globex.test",
+        result: "skipped_manual_conflict",
+      }),
+      "Skipped conflicting Zoho CRM Account domain claim",
+    );
+    const domain = await db
+      .selectFrom("entity_domains")
+      .select(["domain", "entity_id", "source"])
+      .where("domain", "=", "globex.test")
+      .executeTakeFirstOrThrow();
+    expect(domain).toEqual({ domain: "globex.test", entity_id: globex.id, source: "manual" });
   });
 
   it("holds non-person LLM collisions in review without materializing mentions", async () => {
