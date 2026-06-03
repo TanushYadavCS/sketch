@@ -176,6 +176,13 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(["💬 Reading Chat History"]);
   });
 
+  it("renders local Mac commands without echoing the command", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__local_run_command", input: { command: "cat ~/.ssh/id_rsa" } },
+    ]);
+    expect(lines).toEqual(["💻 Running local Mac command"]);
+  });
+
   it("does not include unsafe fallback input fields", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "UnknownTool", input: { apiKey: "secret", message: "hello" } },

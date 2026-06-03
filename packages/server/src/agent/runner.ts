@@ -25,6 +25,7 @@ import {
   cleanupIntegrationAccess,
   startIntegrationAccess,
 } from "../integrations/wrapper";
+import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
@@ -154,6 +155,7 @@ export interface RunAgentParams {
   };
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
+  localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -333,6 +335,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
+    localDeviceInvoker: params.localDeviceInvoker,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,

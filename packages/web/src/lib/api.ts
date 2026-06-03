@@ -30,6 +30,17 @@ export interface ApiTokenRecord {
   revokedAt: string | null;
 }
 
+export interface LocalDeviceRecord {
+  id: string;
+  name: string;
+  platform: string;
+  prefix: string;
+  status: "online" | "offline" | "revoked";
+  lastSeenAt: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
 export class ApiRequestError extends Error {
   status: number;
   code: string;
@@ -956,6 +967,23 @@ export const api = {
     },
     revoke(id: string) {
       return request<{ success: true }>(`/api/api-tokens/${id}`, { method: "DELETE" });
+    },
+  },
+  localDevices: {
+    list() {
+      return request<{ devices: LocalDeviceRecord[]; baseUrl: string; websocketUrl: string }>("/api/local-devices");
+    },
+    create(data: { name: string; platform?: string }) {
+      return request<{ device: LocalDeviceRecord; plaintext: string; baseUrl: string; websocketUrl: string }>(
+        "/api/local-devices",
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      );
+    },
+    revoke(id: string) {
+      return request<{ success: true }>(`/api/local-devices/${id}`, { method: "DELETE" });
     },
   },
   integrations: {

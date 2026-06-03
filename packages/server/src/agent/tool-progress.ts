@@ -34,6 +34,7 @@ const TOOL_EMOJI: Record<string, string> = {
   SearchEntities: "🔍",
   GetEntityContext: "📊",
   ReadChatHistory: "💬",
+  local_run_command: "💻",
 };
 
 const FALLBACK_EMOJI = "⚙️";
@@ -88,6 +89,7 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
 const FRIENDLY_STATIC_LINES: Record<string, string> = {
   GetEntityContext: "Getting entity context",
   ReadChatHistory: "Reading Chat History",
+  local_run_command: "Running local Mac command",
 };
 
 const CANVAS_FRIENDLY_TARGET_PREFIX: Record<string, string> = {

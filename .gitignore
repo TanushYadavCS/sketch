@@ -9,3 +9,5 @@ data/
 /skills/
 /skills-lock.json
 .worktrees/
+apps/macos/.build/
+apps/macos/.dist/

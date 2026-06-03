@@ -19,6 +19,7 @@ import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
+import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
 import { providerIdentityRoutes } from "./api/provider-identities";
@@ -59,6 +60,7 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
 import type { IntegrationProvider } from "./integrations/types";
+import type { LocalDeviceGateway } from "./local-devices/gateway";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
@@ -85,6 +87,7 @@ interface AppDeps {
     channelId: string;
     messageRef: string;
   }>;
+  localDeviceGateway?: LocalDeviceGateway;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -307,6 +310,12 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
 
   app.route("/api/usage", usageRoutes(db));
+  if (deps?.localDeviceGateway) {
+    app.route(
+      "/api/local-devices",
+      localDeviceRoutes(db, { baseUrl: config.BASE_URL, port: config.PORT, gateway: deps.localDeviceGateway }),
+    );
+  }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/entity-review", entityReviewRoutes(db));
   if (config.EXPERIMENTAL_FLAG) {
