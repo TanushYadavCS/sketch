@@ -16,8 +16,10 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { verifyJwt } from "../auth/jwt";
+import type { Config } from "../config";
 import { ensureValidToken } from "../connectors/google-drive";
-import type { OAuthCredentials } from "../connectors/types";
+import { runConnectorSync } from "../connectors/sync";
+import type { ConnectorType, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import type { createProviderIdentityRepository } from "../db/repositories/provider-identities";
 import type { createSettingsRepository } from "../db/repositories/settings";
@@ -39,16 +41,42 @@ const googleConfigSchema = z.object({
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
+const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "gmail"]);
 
 /** In-memory nonce store. Entries expire after 10 minutes. */
-const pendingStates = new Map<string, { userId: string; expiresAt: number }>();
+const pendingStates = new Map<string, { userId: string; connectorType: ConnectorType; expiresAt: number }>();
 
 function cleanupExpiredStates() {
   const now = Date.now();
   for (const [key, val] of pendingStates) {
     if (val.expiresAt < now) pendingStates.delete(key);
   }
+}
+
+function googleConnectorFromQuery(value: string | undefined): ConnectorType {
+  return value === "gmail" ? "gmail" : "google_drive";
+}
+
+function googleScopesFor(connectorType: ConnectorType): string {
+  const providerScope = connectorType === "gmail" ? GMAIL_SCOPE : DRIVE_SCOPE;
+  return `${providerScope} ${USERINFO_SCOPE}`;
+}
+
+function googleConnectorName(connectorType: ConnectorType): string {
+  return connectorType === "gmail" ? "Gmail" : "Google Drive";
+}
+
+function parseGoogleState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
+  const parts = state.split(":");
+  if (parts.length === 2) {
+    return { userId: parts[0], connectorType: "google_drive", nonce: parts[1] };
+  }
+  if (parts.length !== 3) return null;
+  const connectorType = parts[1] as ConnectorType;
+  if (!GOOGLE_OAUTH_CONNECTORS.has(connectorType)) return null;
+  return { userId: parts[0], connectorType, nonce: parts[2] };
 }
 
 export function oauthRoutes(
@@ -59,6 +87,7 @@ export function oauthRoutes(
   db: Kysely<DB>,
   logger: Logger,
   baseUrl?: string,
+  appConfig?: Config,
 ) {
   const routes = new Hono();
 
@@ -82,14 +111,15 @@ export function oauthRoutes(
       return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
     }
     const userId = user.id;
+    const connectorType = googleConnectorFromQuery(c.req.query("connector"));
 
     if (!config?.google_oauth_client_id || !config?.google_oauth_client_secret) {
       return c.json(
         {
           error: {
             code: "OAUTH_CLIENT_NOT_CONFIGURED",
-            message: "Ask your admin to configure Google Drive first",
-            connector: "google_drive",
+            message: `Ask your admin to configure ${googleConnectorName(connectorType)} first`,
+            connector: connectorType,
           },
         },
         412,
@@ -99,8 +129,8 @@ export function oauthRoutes(
     cleanupExpiredStates();
 
     const nonce = randomBytes(16).toString("hex");
-    const state = `${userId}:${nonce}`;
-    pendingStates.set(nonce, { userId, expiresAt: Date.now() + 10 * 60 * 1000 });
+    const state = `${userId}:${connectorType}:${nonce}`;
+    pendingStates.set(nonce, { userId, connectorType, expiresAt: Date.now() + 10 * 60 * 1000 });
 
     // Build the callback URL from BASE_URL or the request's origin
     const origin = baseUrl ?? new URL(c.req.url).origin;
@@ -110,7 +140,7 @@ export function oauthRoutes(
       client_id: config.google_oauth_client_id,
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: `${DRIVE_SCOPE} ${USERINFO_SCOPE}`,
+      scope: googleScopesFor(connectorType),
       access_type: "offline",
       prompt: "consent",
       state,
@@ -138,17 +168,16 @@ export function oauthRoutes(
     }
 
     // Parse and verify state
-    const colonIdx = state.indexOf(":");
-    if (colonIdx === -1) {
+    const parsedState = parseGoogleState(state);
+    if (!parsedState) {
       return c.redirect("/files?oauth=error&reason=invalid_state");
     }
 
-    const userId = state.substring(0, colonIdx);
-    const nonce = state.substring(colonIdx + 1);
+    const { userId, connectorType, nonce } = parsedState;
 
     cleanupExpiredStates();
     const pending = pendingStates.get(nonce);
-    if (!pending || pending.userId !== userId) {
+    if (!pending || pending.userId !== userId || pending.connectorType !== connectorType) {
       return c.redirect("/files?oauth=error&reason=invalid_state");
     }
     pendingStates.delete(nonce);
@@ -158,12 +187,12 @@ export function oauthRoutes(
       return c.redirect("/files?oauth=error&reason=not_configured");
     }
 
-    // Per-user uniqueness: one Google Drive connection per user. If one exists,
+    // Per-user uniqueness: one Google connection per user and connector. If one exists,
     // bounce the user back with a "rotate via the manage UI" affordance instead
     // of stacking orphan rows.
-    const existingDrive = await connectors.findByTypeAndOwner("google_drive", userId);
-    if (existingDrive) {
-      return c.redirect(`/files?oauth=error&reason=already_connected&connectorId=${existingDrive.id}`);
+    const existingConnector = await connectors.findByTypeAndOwner(connectorType, userId);
+    if (existingConnector) {
+      return c.redirect(`/files?oauth=error&reason=already_connected&connectorId=${existingConnector.id}`);
     }
 
     // Build redirect URI from BASE_URL or request origin (must match authorize step)
@@ -218,7 +247,7 @@ export function oauthRoutes(
       // Save to user_provider_identities
       await identities.upsert({
         userId,
-        provider: "google_drive",
+        provider: connectorType,
         providerUserId,
         providerEmail,
         accessToken: tokenData.access_token,
@@ -239,7 +268,7 @@ export function oauthRoutes(
       const validCreds = await ensureValidToken(oauthCreds);
 
       const connectorConfig = await connectors.createConfig({
-        connectorType: "google_drive",
+        connectorType,
         authType: "oauth",
         credentials: JSON.stringify(validCreds),
         scopeConfig: JSON.stringify({}),
@@ -247,9 +276,18 @@ export function oauthRoutes(
       });
 
       logger.info(
-        { userId, connectorId: connectorConfig.id, providerEmail },
-        "Google Drive OAuth tokens saved — awaiting drive selection",
+        { userId, connectorId: connectorConfig.id, connectorType, providerEmail },
+        "Google OAuth tokens saved",
       );
+
+      // Gmail has no post-connect scope-picker step to kick off the first sync
+      // (unlike Drive's folder picker), so connecting would otherwise leave the
+      // user on an empty Files list. Start a background sync with default scope.
+      if (connectorType === "gmail") {
+        runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
+          logger.error({ err, connectorId: connectorConfig.id }, "Gmail first sync failed");
+        });
+      }
 
       return c.redirect(`/files?oauth=success&connectorId=${connectorConfig.id}`);
     } catch (err) {

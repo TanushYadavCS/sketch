@@ -337,7 +337,10 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/identities", providerIdentityRoutes(identities, users));
 
   if (deps?.logger) {
-    app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
+    app.route(
+      "/api/oauth",
+      oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL, config),
+    );
   }
 
   if (config.SYSTEM_SECRET) {
