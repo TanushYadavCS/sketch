@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
+import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { InboxMessageContext } from "../agent/prompt";
 import { buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
@@ -56,6 +57,7 @@ type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
 const INLINE_BACKLOG_LIMIT = 25;
+const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -539,7 +541,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
           await updateReaction(reactionJid, message.rawMessage as WAMessage, null);
           if (whatsapp.isConnected) {
-            await whatsapp.sendText(deliveryJid, "Something went wrong, try again.");
+            await whatsapp.sendText(deliveryJid, agentFailureMessage(err, WHATSAPP_AGENT_ERROR_MESSAGE));
           }
         } finally {
           whatsapp.stopComposing(deliveryJid);
@@ -819,7 +821,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
         await updateReaction(groupJid, message.rawMessage as WAMessage, null);
         if (whatsapp.isConnected) {
-          await whatsapp.sendText(groupJid, "Something went wrong, try again.");
+          await whatsapp.sendText(
+            groupJid,
+            agentFailureMessage(err, WHATSAPP_AGENT_ERROR_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE),
+          );
         }
       } finally {
         whatsapp.stopComposing(groupJid);

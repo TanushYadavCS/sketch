@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { downloadSlackFile } from "../files";
 import { QueueManager } from "../queue";
@@ -406,6 +407,20 @@ describe("slack/adapter", () => {
 
       expect(mockBotInstance.setAssistantStatus).toHaveBeenLastCalledWith("D1", "1", "");
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", "_Something went wrong, try again_");
+    });
+
+    it("tells DM users to start a new session when the prompt is too long", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("Claude Code returned an error result: Prompt is too long")),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "crash", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(mockBotInstance.setAssistantStatus).toHaveBeenLastCalledWith("D1", "1", "");
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", PROMPT_TOO_LONG_RECOVERY_MESSAGE);
     });
 
     it("clears the shimmer when pre-runAgent setup throws (e.g. buildMcpServers)", async () => {
@@ -1107,6 +1122,21 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.setAssistantStatus).toHaveBeenCalledWith("C1", "1", "💭 Thinking…");
       expect(mockBotInstance.setAssistantStatus).toHaveBeenLastCalledWith("C1", "1", "");
     });
+
+    it("tells channel users to mention the bot with /new when the prompt is too long", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("Claude Code returned an error result: Prompt is too long")),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(mockBotInstance.setAssistantStatus).toHaveBeenLastCalledWith("C1", "1", "");
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE);
+    });
+
     it("applies bound agent overlay when channel.agent_user_id is set", async () => {
       const baseDeps = makeDeps();
       const agentUser = makeUser({

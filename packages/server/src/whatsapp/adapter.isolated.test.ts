@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { downloadWhatsAppMedia } from "../files";
 import { QueueManager } from "../queue";
@@ -403,6 +404,28 @@ describe("whatsapp/adapter", () => {
       await flush();
 
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
+    });
+
+    it("tells DM users to start a new session when the prompt is too long", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("Claude Code returned an error result: Prompt is too long")),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "crash",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", PROMPT_TOO_LONG_RECOVERY_MESSAGE);
     });
 
     it("flushes buffered progress before sending the DM error reply", async () => {
@@ -1269,6 +1292,30 @@ describe("whatsapp/adapter", () => {
       expect(mock.addReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key, "👀");
       expect(mock.removeReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key);
       expect(mock.addReaction).not.toHaveBeenCalledWith("group@g.us", rawMessage.key, "✅");
+    });
+
+    it("tells group users to mention the bot with /new when the prompt is too long", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockRejectedValue(new Error("Claude Code returned an error result: Prompt is too long")),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE);
     });
 
     it("resets the current group session on /new", async () => {

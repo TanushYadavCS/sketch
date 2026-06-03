@@ -6,6 +6,7 @@
 import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import { type BufferedMessage, type InboxMessageContext, buildSketchContext } from "../agent/prompt";
 import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
@@ -61,6 +62,7 @@ type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
 const INLINE_BACKLOG_LIMIT = 25;
 const SLACK_THREAD_CURSOR_SCOPE = "slack_thread";
+const SLACK_AGENT_ERROR_MESSAGE = "_Something went wrong, try again_";
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -694,7 +696,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       } catch (err) {
         logger.error({ err, userId: user.id }, "Agent run failed");
         await clearAssistantStatus?.();
-        await replyToUser("_Something went wrong, try again_");
+        await replyToUser(agentFailureMessage(err, SLACK_AGENT_ERROR_MESSAGE));
       }
     });
   });
@@ -1034,7 +1036,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
         logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
         await clearAssistantStatus?.();
-        await slackBot.postThreadReply(message.channelId, threadTs, "_Something went wrong, try again_");
+        await slackBot.postThreadReply(
+          message.channelId,
+          threadTs,
+          agentFailureMessage(err, SLACK_AGENT_ERROR_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE),
+        );
       }
     });
   });
