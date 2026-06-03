@@ -12,7 +12,7 @@
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { type WASocket, downloadMediaMessage, getContentType, type proto } from "@whiskeysockets/baileys";
+import type { WASocket, proto } from "@whiskeysockets/baileys";
 import type { Logger } from "./logger";
 import { shouldTreatAsAudioAttachment } from "./transcription/audio-types";
 
@@ -247,6 +247,7 @@ export async function downloadWhatsAppMedia(
 ): Promise<Attachment> {
   await mkdir(destDir, { recursive: true });
 
+  const { downloadMediaMessage, getContentType } = await import("@whiskeysockets/baileys");
   const buffer = await downloadMediaMessage(
     msg as Parameters<typeof downloadMediaMessage>[0],
     "buffer",

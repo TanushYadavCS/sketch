@@ -1,8 +1,11 @@
 /**
  * Integration tests for the full migration sequence on Postgres (PGlite).
  *
- * PGlite runs Postgres 17 compiled to WASM in-process. Each describe block
- * creates a fresh in-memory Postgres instance so tests are fully isolated.
+ * PGlite runs Postgres 17 compiled to WASM in-process. The ~1s WASM cold-boot
+ * dominates pg test cost, so the read-only schema-assertion tests share a single
+ * process-wide instance (getSharedPgDb) that is already fully migrated — exactly
+ * the state these tests assert. Tests that re-run migrations or mutate schema use
+ * a fresh createTestPgDb() so they do not pollute the shared instance.
  *
  * Migrations 014, 019, and 023 contain SQLite-specific DDL (table-copy-rename,
  * FTS5 virtual table, SQLite triggers). Those migrations will need dialect guards
@@ -10,22 +13,16 @@
  * are in place: the base tables must exist, SQLite-only objects are not created.
  */
 import { type Kysely, sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestPgDb } from "../../test-utils";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
 
-  beforeEach(async () => {
-    db = await createTestPgDb();
-  }, 30000);
-
-  afterEach(async () => {
-    if (db) {
-      await db.destroy();
-    }
+  beforeAll(async () => {
+    db = await getSharedPgDb();
   }, 30000);
 
   it("runs all migrations on a fresh Postgres database without error", async () => {
@@ -110,12 +107,22 @@ describe("runMigrations on Postgres — full sequence", () => {
   });
 
   it("running migrations twice is idempotent", async () => {
-    await runMigrations(db);
+    /**
+     * Re-runs migrations (DDL mutation via Kysely's Migrator, which also takes
+     * its own lock). Uses a fresh instance so it cannot pollute the shared
+     * schema that the read-only tests depend on.
+     */
+    const freshDb = await createTestPgDb();
+    try {
+      await runMigrations(freshDb, { quiet: true });
 
-    const rows = await sql<{ name: string }>`
-      SELECT name FROM kysely_migration ORDER BY name ASC
-    `.execute(db);
-    expect(rows.rows).toHaveLength(73);
+      const rows = await sql<{ name: string }>`
+        SELECT name FROM kysely_migration ORDER BY name ASC
+      `.execute(freshDb);
+      expect(rows.rows).toHaveLength(73);
+    } finally {
+      await freshDb.destroy();
+    }
   });
 
   it("creates the users table", async () => {
@@ -223,14 +230,8 @@ describe("runMigrations on Postgres — full sequence", () => {
 describe("runMigrations on Postgres — search schema", () => {
   let db!: Kysely<DB>;
 
-  beforeEach(async () => {
-    db = await createTestPgDb();
-  }, 30000);
-
-  afterEach(async () => {
-    if (db) {
-      await db.destroy();
-    }
+  beforeAll(async () => {
+    db = await getSharedPgDb();
   }, 30000);
 
   it("indexed_files has a search_vector column of type tsvector", async () => {
@@ -324,15 +325,23 @@ describe("runMigrations on Postgres — search schema", () => {
 describe("runMigrations on Postgres — chat_sessions schema", () => {
   let db!: Kysely<DB>;
 
-  beforeEach(async () => {
-    db = await createTestPgDb();
+  beforeAll(async () => {
+    db = await getSharedPgDb();
   }, 30000);
 
+  /**
+   * This block includes a data-insert test, so every test runs inside a
+   * transaction that is rolled back afterward. The schema-read tests are
+   * unaffected by the wrapping transaction; the insert never leaks into the
+   * shared instance.
+   */
+  beforeEach(async () => {
+    await sql`BEGIN`.execute(db);
+  });
+
   afterEach(async () => {
-    if (db) {
-      await db.destroy();
-    }
-  }, 30000);
+    await sql`ROLLBACK`.execute(db);
+  });
 
   it("chat_sessions has thread_key NOT NULL with default empty string", async () => {
     const result = await sql<{ column_name: string; is_nullable: string; column_default: string }>`

@@ -79,7 +79,7 @@ import * as m076 from "./migrations/076-slack-conversation-thread-metadata";
 import * as m077 from "./migrations/077-scheduled-task-output-thread";
 import type { DB } from "./schema";
 
-export async function runMigrations(db: Kysely<DB>): Promise<void> {
+export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
   const migrator = new Migrator({
     db,
     provider: {
@@ -167,7 +167,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
 
   for (const result of results ?? []) {
     if (result.status === "Success") {
-      console.log(`Migration applied: ${result.migrationName}`);
+      if (!options?.quiet) console.log(`Migration applied: ${result.migrationName}`);
     } else if (result.status === "Error") {
       console.error(`Migration failed: ${result.migrationName}`);
     }

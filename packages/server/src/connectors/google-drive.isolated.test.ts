@@ -55,12 +55,23 @@ describe("listFolderContents — folderId injection guard", () => {
     //
     // We reset the spy to track the call, then confirm fetch was actually
     // attempted (meaning validation passed).
+    //
+    // driveRequest retries network failures with exponential backoff (1s + 2s).
+    // Fake timers drive those retries to completion instantly instead of waiting
+    // ~3s of real time, while still executing every retry/backoff branch.
     fetchSpy.mockReset();
     fetchSpy.mockRejectedValue(new Error("network mock"));
 
-    await expect(listFolderContents("access-token", "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs")).rejects.toThrow(
-      "network mock",
-    );
+    vi.useFakeTimers();
+    try {
+      const assertion = expect(listFolderContents("access-token", "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs")).rejects.toThrow(
+        "network mock",
+      );
+      await vi.runAllTimersAsync();
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
     // fetch was called — validation did not block the well-formed ID
     expect(fetchSpy).toHaveBeenCalled();
   });

@@ -402,7 +402,8 @@ describe("replaySourceFacts", () => {
     }
 
     const first = materializeUnmaterializedFacts(db, createTestLogger());
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await first;
+
     await repo.upsertFact({
       source: "manual",
       factType: "person_seed",
@@ -415,7 +416,6 @@ describe("replaySourceFacts", () => {
     });
     const second = materializeUnmaterializedFacts(db, createTestLogger());
 
-    await first;
     const followUp = await second;
 
     expect(followUp.factsRead).toBeGreaterThanOrEqual(1);

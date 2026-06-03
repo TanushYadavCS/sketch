@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -112,15 +112,16 @@ async function seedConnectorFile(db: Kysely<DB>, ownerId: string) {
 }
 
 async function waitForJobDone(app: ReturnType<typeof createApp>, cookie: string, jobId: string): Promise<string> {
-  for (let i = 0; i < 100; i++) {
-    const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: cookie } });
-    if (res.status === 200) {
+  return await vi.waitFor(
+    async () => {
+      const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: cookie } });
+      if (res.status !== 200) throw new Error(`job status ${res.status}`);
       const body = (await res.json()) as { phase: string };
-      if (body.phase === "done" || body.phase === "failed") return body.phase;
-    }
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  throw new Error("job did not finish");
+      if (body.phase !== "done" && body.phase !== "failed") throw new Error(`job phase ${body.phase}`);
+      return body.phase;
+    },
+    { timeout: 10_000, interval: 20 },
+  );
 }
 
 async function runResetAndWait(
@@ -933,15 +934,16 @@ describe("two-step rebuild flow", () => {
   }
 
   async function waitForResetDone(jobId: string): Promise<string> {
-    for (let i = 0; i < 100; i++) {
-      const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: adminCookie } });
-      if (res.status === 200) {
+    return await vi.waitFor(
+      async () => {
+        const res = await app.request(`/api/entities/resets/jobs/${jobId}`, { headers: { Cookie: adminCookie } });
+        if (res.status !== 200) throw new Error(`reset status ${res.status}`);
         const body = (await res.json()) as { phase: string };
-        if (body.phase === "done" || body.phase === "failed") return body.phase;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    throw new Error("reset job did not finish");
+        if (body.phase !== "done" && body.phase !== "failed") throw new Error(`reset phase ${body.phase}`);
+        return body.phase;
+      },
+      { timeout: 10_000, interval: 20 },
+    );
   }
 
   /**
@@ -993,17 +995,16 @@ describe("two-step rebuild flow", () => {
     });
     expect(promote.status).toBe(202);
     const body = (await promote.json()) as { job: { id: string } };
-    for (let i = 0; i < 100; i++) {
-      const r = await app.request(`/api/entities/rebuilds/jobs/${body.job.id}`, { headers: { Cookie: adminCookie } });
-      if (r.status === 200) {
+    await vi.waitFor(
+      async () => {
+        const r = await app.request(`/api/entities/rebuilds/jobs/${body.job.id}`, { headers: { Cookie: adminCookie } });
+        if (r.status !== 200) throw new Error(`rebuild status ${r.status}`);
         const j = (await r.json()) as { phase: string };
-        if (j.phase === "done" || j.phase === "failed") {
-          expect(j.phase).toBe("done");
-          break;
-        }
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
+        if (j.phase !== "done" && j.phase !== "failed") throw new Error(`rebuild phase ${j.phase}`);
+        expect(j.phase).toBe("done");
+      },
+      { timeout: 10_000, interval: 20 },
+    );
 
     // After promotion + completion, the same id can't be reused.
     const replay = await app.request("/api/entities/rebuilds", {

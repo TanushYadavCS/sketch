@@ -7,9 +7,6 @@
  * Integration-specific sub-resources (apps, connections) delegate to the
  * provider adapter from integrations/factory.ts, scoped to the member's email.
  */
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { IntegrationConnection } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -102,6 +99,11 @@ async function testMcpConnection(
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
+  const [{ Client }, { StreamableHTTPClientTransport }, { SSEClientTransport }] = await Promise.all([
+    import("@modelcontextprotocol/sdk/client/index.js"),
+    import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+    import("@modelcontextprotocol/sdk/client/sse.js"),
+  ]);
   const client = new Client({ name: "sketch", version: "1.0.0" });
 
   try {

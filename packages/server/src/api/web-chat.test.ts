@@ -182,16 +182,18 @@ describe("web chat API", () => {
     });
     const cookie = await login(app);
 
-    await app.request("/api/web-chat?conversationId=chat-alpha", {
+    const resAlpha = await app.request("/api/web-chat?conversationId=chat-alpha", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ message: "Alpha" }),
     });
-    await app.request("/api/web-chat?conversationId=chat-beta", {
+    await resAlpha.text();
+    const resBeta = await app.request("/api/web-chat?conversationId=chat-beta", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ message: "Beta" }),
     });
+    await resBeta.text();
 
     expect(runAgent).toHaveBeenNthCalledWith(
       1,
@@ -875,11 +877,12 @@ describe("web chat API", () => {
     });
     const cookie = await login(app);
 
-    await app.request("/api/web-chat", {
+    const res = await app.request("/api/web-chat", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ message: "Schedule a reminder" }),
     });
+    await res.text();
 
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
     expect(openDmChannel).toHaveBeenCalledWith("U_SLACK", undefined);
@@ -905,11 +908,12 @@ describe("web chat API", () => {
     });
     const cookie = await login(app);
 
-    await app.request("/api/web-chat", {
+    const res = await app.request("/api/web-chat", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ message: "Schedule a reminder" }),
     });
+    await res.text();
 
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
     expect(call.platform).toBe("whatsapp");

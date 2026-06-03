@@ -6,12 +6,11 @@
  * Also validates clearEnrichmentData() does not throw on Postgres.
  */
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
-import { sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type Kysely, sql } from "kysely";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import type { DB } from "../db/schema";
-import { createTestPgDb } from "../test-utils";
+import { getSharedPgDb } from "../test-utils";
 import { clearEnrichmentData } from "./enrichment";
 
 /**
@@ -63,14 +62,18 @@ async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
 }
 
 describe("chunk_embeddings on Postgres", () => {
-  let db: Kysely<DB>;
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await getSharedPgDb();
+  }, 30000);
 
   beforeEach(async () => {
-    db = await createTestPgDb();
+    await sql`BEGIN`.execute(db);
   });
 
   afterEach(async () => {
-    await db.destroy();
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("inserts a row into chunk_embeddings with a vector(3072) embedding", async () => {
@@ -148,14 +151,18 @@ describe("chunk_embeddings on Postgres", () => {
 });
 
 describe("file_embeddings on Postgres", () => {
-  let db: Kysely<DB>;
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await getSharedPgDb();
+  }, 30000);
 
   beforeEach(async () => {
-    db = await createTestPgDb();
+    await sql`BEGIN`.execute(db);
   });
 
   afterEach(async () => {
-    await db.destroy();
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("inserts a row into file_embeddings with a vector(3072) embedding", async () => {
@@ -214,14 +221,18 @@ describe("file_embeddings on Postgres", () => {
 });
 
 describe("clearEnrichmentData on Postgres", () => {
-  let db: Kysely<DB>;
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await getSharedPgDb();
+  }, 30000);
 
   beforeEach(async () => {
-    db = await createTestPgDb();
+    await sql`BEGIN`.execute(db);
   });
 
   afterEach(async () => {
-    await db.destroy();
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("does not throw on Postgres (no 'no such table' error for embedding tables)", async () => {

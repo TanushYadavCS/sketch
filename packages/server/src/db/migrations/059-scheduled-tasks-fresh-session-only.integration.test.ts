@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import SQLite from "better-sqlite3";
-import { Kysely, SqliteDialect } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Kysely, SqliteDialect, sql } from "kysely";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGliteDialect } from "../../test-pglite-dialect";
 import { up } from "./059-scheduled-tasks-fresh-session-only";
 
@@ -30,7 +30,13 @@ describe.each([
 ])("059-scheduled-tasks-fresh-session-only migration on $name", ({ createDb }) => {
   let db: Kysely<TestDB>;
 
-  beforeEach(async () => {
+  /**
+   * Boot the database and create the schema once per dialect. For Postgres this
+   * pays PGlite's ~1s WASM cold-boot a single time instead of once per test.
+   * Per-test row mutations are isolated with BEGIN/ROLLBACK, leaving the
+   * committed table intact between tests.
+   */
+  beforeAll(async () => {
     db = createDb();
     await db.schema
       .createTable("scheduled_tasks")
@@ -39,8 +45,16 @@ describe.each([
       .execute();
   });
 
-  afterEach(async () => {
+  afterAll(async () => {
     await db.destroy();
+  });
+
+  beforeEach(async () => {
+    await sql`BEGIN`.execute(db);
+  });
+
+  afterEach(async () => {
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("normalizes every non-fresh task mode to fresh", async () => {

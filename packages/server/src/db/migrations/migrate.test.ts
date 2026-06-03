@@ -8,7 +8,7 @@
  */
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
@@ -30,11 +30,28 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("runs all migrations on a fresh database without error", async () => {
-    await expect(runMigrations(db)).resolves.not.toThrow();
+    await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
+  });
+
+  it("logs each applied migration by default and stays silent when quiet is set", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await runMigrations(db);
+      expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
+      expect(logSpy).toHaveBeenCalledTimes(73);
+
+      const quietDb = createBlankDb();
+      logSpy.mockClear();
+      await runMigrations(quietDb, { quiet: true });
+      expect(logSpy).not.toHaveBeenCalled();
+      await quietDb.destroy();
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it("records all migration entries in the kysely_migration table", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
@@ -44,7 +61,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("records migrations with the correct names in order", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
@@ -113,7 +130,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates the users table", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const result = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type='table' AND name='users'
@@ -123,7 +140,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates conversation capture tables", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     for (const table of ["conversations", "conversation_messages", "conversation_cursors"]) {
       const result = await sql<{ name: string }>`
@@ -134,7 +151,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates the settings table with enrichment_enabled column", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const result = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type='table' AND name='settings'
@@ -149,7 +166,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates connector_configs and indexed_files tables", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     for (const table of ["connector_configs", "indexed_files"]) {
       const result = await sql<{ name: string }>`
@@ -160,7 +177,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates fact-aware relationship evidence columns and unique index", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const columns = await sql<{ name: string }>`
       PRAGMA table_info(entity_relationship_evidence)
@@ -176,7 +193,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates user_provider_identities table", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const result = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type='table' AND name='user_provider_identities'
@@ -186,7 +203,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates access_scopes, access_scope_members, connector_files, and file_access tables", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     for (const table of ["access_scopes", "access_scope_members", "connector_files", "file_access"]) {
       const result = await sql<{ name: string }>`
@@ -197,7 +214,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates document_chunks and document_timeframes tables", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     for (const table of ["document_chunks", "document_timeframes"]) {
       const result = await sql<{ name: string }>`
@@ -208,7 +225,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("creates FTS5 virtual table indexed_files_fts", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const result = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type='table' AND name='indexed_files_fts'
@@ -218,7 +235,7 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("settings table has smtp_secure, google_oauth_client_id, google_oauth_client_secret, gemini_api_key columns", async () => {
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     await db.insertInto("settings").values({ id: "default" }).execute();
 
@@ -235,8 +252,8 @@ describe("runMigrations — full sequence", () => {
   });
 
   it("running migrations twice is idempotent (only applies each migration once)", async () => {
-    await runMigrations(db);
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
+    await runMigrations(db, { quiet: true });
 
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
@@ -260,12 +277,12 @@ describe("runMigrations — incremental upgrade", () => {
   it("applies only pending migrations when 001-018 are already present", async () => {
     // Simulate a DB that already has 001-018 applied by running the full migration
     // sequence once, then seeding a user row to represent existing data.
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     await db.insertInto("users").values({ id: "existing-user", name: "Alice" }).execute();
 
     // Running again should be a no-op.
-    await runMigrations(db);
+    await runMigrations(db, { quiet: true });
 
     const users = await db.selectFrom("users").selectAll().execute();
     expect(users).toHaveLength(1);

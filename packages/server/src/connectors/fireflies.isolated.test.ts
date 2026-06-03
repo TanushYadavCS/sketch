@@ -36,6 +36,7 @@ async function runFirefliesOnce(
   fixture: FirefliesFixture,
   ownerEmail: string | null = null,
   resolveNameToEmail?: NameResolver,
+  minRequestIntervalMs = 0,
 ): Promise<SyncedItem | null> {
   const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
     const body = JSON.parse((init as RequestInit).body as string) as {
@@ -100,7 +101,7 @@ async function runFirefliesOnce(
   });
 
   try {
-    const connector = createFirefliesConnector();
+    const connector = createFirefliesConnector({ minRequestIntervalMs });
     for await (const item of connector.sync({
       credentials: { type: "api_key", api_key: "test" },
       scopeConfig: {},
@@ -122,7 +123,7 @@ describe("Fireflies getCursor lag", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-27T12:00:00.000Z"));
 
-    const connector = createFirefliesConnector();
+    const connector = createFirefliesConnector({ minRequestIntervalMs: 0 });
 
     try {
       const cursor = await connector.getCursor({
@@ -215,7 +216,7 @@ describe("Fireflies sync includes late-arriving transcripts", () => {
       });
     });
 
-    const connector = createFirefliesConnector();
+    const connector = createFirefliesConnector({ minRequestIntervalMs: 0 });
     const items: Array<{ providerFileId: string }> = [];
     for await (const item of connector.sync({
       credentials: { type: "api_key", api_key: "test" },
@@ -429,4 +430,25 @@ describe("Fireflies speaker resolution via Sketch-side resolver", () => {
     );
     expect(item?.accessEmails).toEqual(expect.arrayContaining(["alice@x.com", "meetingbot@x.com", "recovered@x.com"]));
   }, 15000);
+});
+
+describe("Fireflies request rate limiting", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("spaces sequential API requests by the configured minimum interval", async () => {
+    const item = await runFirefliesOnce(
+      {
+        id: "t-rate-limit",
+        participants: ["a@example.com"],
+        speakers: [{ id: 1, name: "Alice" }],
+        contacts: [{ email: "a@example.com", name: "Alice" }],
+      },
+      null,
+      undefined,
+      10,
+    );
+    expect(item?.providerFileId).toBe("t-rate-limit");
+  });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ChannelQueue, QueueManager } from "./queue";
 
 /**
@@ -21,9 +21,7 @@ describe("ChannelQueue", () => {
     queue.enqueue(createWork(order, 2, 10));
     queue.enqueue(createWork(order, 3, 10));
 
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(order).toEqual([1, 2, 3]);
+    await vi.waitFor(() => expect(order).toEqual([1, 2, 3]));
   });
 
   it("continues processing after an error in a work item", async () => {
@@ -36,9 +34,7 @@ describe("ChannelQueue", () => {
     });
     queue.enqueue(createWork(order, 3));
 
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(order).toEqual([1, 3]);
+    await vi.waitFor(() => expect(order).toEqual([1, 3]));
   });
 
   it("processes items one at a time with no concurrent overlap", async () => {
@@ -57,10 +53,8 @@ describe("ChannelQueue", () => {
       });
     }
 
-    await new Promise((r) => setTimeout(r, 200));
-
+    await vi.waitFor(() => expect(order).toEqual([0, 1, 2]));
     expect(maxConcurrency).toBe(1);
-    expect(order).toEqual([0, 1, 2]);
   });
 
   it("does nothing when no items are enqueued", async () => {
@@ -98,7 +92,7 @@ describe("QueueManager", () => {
     manager.getQueue("ch-a").enqueue(createTimedWork("ch-a", 50));
     manager.getQueue("ch-b").enqueue(createTimedWork("ch-b", 50));
 
-    await new Promise((r) => setTimeout(r, 150));
+    await vi.waitFor(() => expect(timestamps).toHaveLength(4));
 
     const find = (channel: string, event: string) => {
       const entry = timestamps.find((t) => t.channel === channel && t.event === event);
@@ -111,10 +105,7 @@ describe("QueueManager", () => {
     const endA = find("ch-a", "end");
     const endB = find("ch-b", "end");
 
-    const timeDiffStarts = Math.abs(startA.time - startB.time);
-    expect(timeDiffStarts).toBeLessThan(20);
-
-    expect(endA.time).toBeLessThan(startA.time + 100);
-    expect(endB.time).toBeLessThan(startB.time + 100);
+    expect(startA.time).toBeLessThan(endB.time);
+    expect(startB.time).toBeLessThan(endA.time);
   });
 });

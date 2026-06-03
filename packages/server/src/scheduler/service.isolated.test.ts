@@ -457,7 +457,7 @@ describe("executeTask() invokes automation runtime", () => {
 
     const row = await repo.add({ ...baseTaskFields, platform: "slack", context_type: "dm", created_by: "U_DM_USER" });
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     expect(executeAutomation).toHaveBeenCalledWith(
       expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
@@ -470,7 +470,7 @@ describe("executeTask() invokes automation runtime", () => {
 
     const row = await repo.add({ ...baseTaskFields, platform: "slack", context_type: "dm", created_by: "U_DM_USER" });
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     expect(lastExecuteAutomationParams).toEqual(
       expect.objectContaining({
@@ -495,7 +495,7 @@ describe("executeTask() invokes automation runtime", () => {
       delivery_target: "C_CHANNEL1",
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     expect(executeAutomation).toHaveBeenCalledWith(
       expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
@@ -514,7 +514,7 @@ describe("executeTask() invokes automation runtime", () => {
       delivery_target: "1234567890@g.us",
     });
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     expect(executeAutomation).toHaveBeenCalledWith(
       expect.objectContaining({ task: expect.objectContaining({ id: row.id }) }),
@@ -523,6 +523,10 @@ describe("executeTask() invokes automation runtime", () => {
 });
 
 describe("executeTask() bot availability checks", () => {
+  afterEach(() => {
+    lastExecuteAutomationParams = null;
+  });
+
   it("skips execution when Slack bot is unavailable", async () => {
     const deps = buildDeps(db, { slack: null });
     const scheduler = new TaskScheduler(deps as never);
@@ -546,7 +550,7 @@ describe("executeTask() bot availability checks", () => {
     const row = await repo.add({ ...baseTaskFields, platform: "slack", output_mode: "silent" });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     expect(lastExecuteAutomationParams?.sendMessage).toBeUndefined();
   });
@@ -593,7 +597,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     expect(lastExecuteAutomationParams?.sendMessage).toBeDefined();
     await lastExecuteAutomationParams?.sendMessage?.("Hello from task");
@@ -617,7 +621,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await lastExecuteAutomationParams?.sendMessage?.("Hello from task");
 
@@ -644,7 +648,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await expect(lastExecuteAutomationParams?.sendMessage?.("Hello from task")).rejects.toThrow(
       "Failed to open Slack DM channel",
@@ -665,7 +669,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await lastExecuteAutomationParams?.sendMessage?.("Channel update");
 
@@ -690,7 +694,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await lastExecuteAutomationParams?.sendMessage?.("Thread reply");
 
@@ -716,7 +720,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await lastExecuteAutomationParams?.sendMessage?.("Thread reply");
 
@@ -742,7 +746,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await lastExecuteAutomationParams?.sendMessage?.("Output channel update");
 
@@ -765,7 +769,7 @@ describe("executeTask() delivery routing", () => {
     });
 
     await scheduler.executeTask(row as ScheduledTaskRow);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
 
     await lastExecuteAutomationParams?.sendMessage?.("WhatsApp message");
 
@@ -1080,8 +1084,11 @@ describe("executeTask() run timestamps", () => {
     await scheduler.scheduleTask(row as ScheduledTaskRow);
     await scheduler.executeTask(row as ScheduledTaskRow);
 
-    const updated = await repo.getById(row.id);
-    expect(updated?.last_run_at).toBeDefined();
+    const updated = await vi.waitFor(async () => {
+      const task = await repo.getById(row.id);
+      expect(task?.last_run_at).toBeDefined();
+      return task;
+    });
     expect(Number.isNaN(new Date(updated?.last_run_at as string).getTime())).toBe(false);
 
     vi.restoreAllMocks();

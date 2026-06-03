@@ -6,12 +6,11 @@
  * Phase 2 production code will implement.
  */
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
-import { sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type Kysely, sql } from "kysely";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import type { DB } from "../db/schema";
-import { createTestPgDb } from "../test-utils";
+import { getSharedPgDb } from "../test-utils";
 import { hybridSearch, searchFiles } from "./search";
 
 /**
@@ -72,14 +71,18 @@ async function insertFile(
 }
 
 describe("searchFiles on Postgres — tsvector/ts_rank", () => {
-  let db: Kysely<DB>;
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await getSharedPgDb();
+  }, 30000);
 
   beforeEach(async () => {
-    db = await createTestPgDb();
+    await sql`BEGIN`.execute(db);
   });
 
   afterEach(async () => {
-    await db.destroy();
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("returns results matching by file_name", async () => {
@@ -146,14 +149,18 @@ describe("searchFiles on Postgres — tsvector/ts_rank", () => {
 });
 
 describe("hybridSearch on Postgres — vector + FTS", () => {
-  let db: Kysely<DB>;
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await getSharedPgDb();
+  }, 30000);
 
   beforeEach(async () => {
-    db = await createTestPgDb();
+    await sql`BEGIN`.execute(db);
   });
 
   afterEach(async () => {
-    await db.destroy();
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("hybridSearch with queryEmbedding returns results ranked by cosine similarity", async () => {

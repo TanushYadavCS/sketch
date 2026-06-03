@@ -172,6 +172,7 @@ describe("WorkspacePage", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   // ── Rendering ─────────────────────────────────────────────────────────────

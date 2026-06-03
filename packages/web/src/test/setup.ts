@@ -1,7 +1,19 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { server } from "./msw";
+
+/**
+ * Default every `userEvent.setup()` to no inter-keystroke delay. No test asserts
+ * on typing cadence, and userEvent's default schedules a real timer between
+ * keystrokes — which dominated the suite's "tests" phase. Patched globally so the
+ * ~80 existing `userEvent.setup()` call sites don't each need editing; a call site
+ * can still opt back in by passing an explicit `delay`.
+ */
+const baseUserEventSetup = userEvent.setup.bind(userEvent);
+(userEvent as { setup: typeof userEvent.setup }).setup = ((options = {}) =>
+  baseUserEventSetup({ delay: null, ...options })) as typeof userEvent.setup;
 
 /**
  * Stub heavy icon libraries. Their barrel exports pull in thousands of files
@@ -105,7 +117,7 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
+beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => {
   cleanup();
   server.resetHandlers();

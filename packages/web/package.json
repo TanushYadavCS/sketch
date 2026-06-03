@@ -8,7 +8,11 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:unit": "vitest run --project unit --project unit-isolated --passWithNoTests",
+    "test:integration": "vitest run --project integration --passWithNoTests",
+    "test:changed": "vitest run --changed --project unit --project unit-isolated --passWithNoTests",
+    "test:watch": "vitest --project unit --project unit-isolated"
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.193",
@@ -42,6 +46,8 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
+    "@vitest/coverage-v8": "4.0.18",
+    "happy-dom": "^20.9.0",
     "jsdom": "^28.1.0",
     "msw": "^2.12.10",
     "shadcn": "^3.8.5",

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Tests for the entity explorer's ECR-03B inline review surface.
  *

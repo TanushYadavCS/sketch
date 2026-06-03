@@ -6,24 +6,26 @@
  * target (workspace_key, thread_key) works correctly on Postgres, which requires
  * a plain column-based unique constraint (not an expression index).
  */
-import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type Kysely, sql } from "kysely";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
-import { createTestPgDb } from "../test-utils";
+import { getSharedPgDb } from "../test-utils";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 
 describe("session persistence on Postgres", () => {
   let db!: Kysely<DB>;
 
-  beforeEach(async () => {
-    db = await createTestPgDb();
+  beforeAll(async () => {
+    db = await getSharedPgDb();
   }, 30000);
 
+  beforeEach(async () => {
+    await sql`BEGIN`.execute(db);
+  });
+
   afterEach(async () => {
-    if (db) {
-      await db.destroy();
-    }
-  }, 30000);
+    await sql`ROLLBACK`.execute(db);
+  });
 
   describe("workspace-level sessions (empty string thread_key sentinel)", () => {
     it("saveSessionId inserts a new session", async () => {

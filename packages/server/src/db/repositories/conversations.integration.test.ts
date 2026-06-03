@@ -1,19 +1,40 @@
-import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestDb, createTestPgDb } from "../../test-utils";
+import { type Kysely, sql } from "kysely";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, getSharedPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createConversationRepository } from "./conversations";
 
-function runRepositorySuite(label: string, createDb: () => Promise<Kysely<DB>>) {
+/**
+ * The Postgres arm runs against the worker-shared PGlite instance with per-test
+ * BEGIN/ROLLBACK isolation (`shared: true`) instead of booting a fresh ~1.3 GB
+ * PGlite per test. The repository is data-only (no nested `.transaction()`), so
+ * it satisfies getSharedPgDb's contract. The SQLite arm keeps the cheap
+ * per-test template clone.
+ */
+function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { shared?: boolean } = {}) {
   describe(label, () => {
     let db!: Kysely<DB>;
 
+    if (opts.shared) {
+      beforeAll(async () => {
+        db = await getDb();
+      }, 30000);
+    }
+
     beforeEach(async () => {
-      db = await createDb();
+      if (opts.shared) {
+        await sql`BEGIN`.execute(db);
+      } else {
+        db = await getDb();
+      }
     }, 30000);
 
     afterEach(async () => {
-      await db.destroy();
+      if (opts.shared) {
+        await sql`ROLLBACK`.execute(db);
+      } else {
+        await db.destroy();
+      }
     });
 
     it("deduplicates provider messages by conversation, provider id, sender, and bot side", async () => {
@@ -261,4 +282,4 @@ function runRepositorySuite(label: string, createDb: () => Promise<Kysely<DB>>) 
 }
 
 runRepositorySuite("createConversationRepository sqlite", createTestDb);
-runRepositorySuite("createConversationRepository postgres", createTestPgDb);
+runRepositorySuite("createConversationRepository postgres", getSharedPgDb, { shared: true });

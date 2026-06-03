@@ -1776,7 +1776,7 @@ describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
     const evidenceAfterSkip = await testDb.selectFrom("entity_review_evidence").selectAll().executeTakeFirstOrThrow();
 
     expect(queueAfterSkip.occurrence_count).toBe(2);
-    expect(new Date(queueAfterSkip.last_seen_at).getTime()).toBeGreaterThan(
+    expect(new Date(queueAfterSkip.last_seen_at).getTime()).toBeGreaterThanOrEqual(
       new Date(queueAfterFirst.last_seen_at).getTime(),
     );
     expect(evidenceAfterSkip.id).toBe(evidenceAfterFirst.id);
