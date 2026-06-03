@@ -23,6 +23,18 @@ type ActivityRow = {
   synced_at: string;
 };
 
+type BasisActivityRow = Pick<
+  ActivityRow,
+  "provider_file_id" | "content_hash" | "source_created_at" | "source_updated_at" | "synced_at"
+>;
+
+type RollupCandidate = {
+  groupId: string;
+  activityCount: number;
+  isDirty: boolean;
+  isBacklog: boolean;
+};
+
 export interface RefreshCrmActivityRollupsParams {
   db: Kysely<DB>;
   connectorConfigId: string;
@@ -55,21 +67,21 @@ export async function refreshCrmActivityRollups(
     errors: [],
   };
 
-  const groupIds = await collectDirtyGroupIds(params);
-  result.groupsConsidered = groupIds.length;
-  if (groupIds.length === 0) return result;
+  const candidates = await collectRollupCandidates(params);
+  result.groupsConsidered = candidates.length;
+  if (candidates.length === 0) return result;
 
   const maxGroups = params.maxGroupsPerRun ?? DEFAULT_MAX_GROUPS_PER_RUN;
-  const cappedGroupIds = groupIds.slice(0, maxGroups);
-  result.groupsCapped = Math.max(0, groupIds.length - cappedGroupIds.length);
+  const cappedCandidates = candidates.slice(0, maxGroups);
+  result.groupsCapped = Math.max(0, candidates.length - cappedCandidates.length);
   if (result.groupsCapped > 0) {
     params.logger?.warn(
       { connectorConfigId: params.connectorConfigId, skippedGroups: result.groupsCapped, maxGroups },
-      "CRM rollup refresh capped dirty groups",
+      "CRM rollup refresh capped groups; backlog will drain on later syncs",
     );
   }
 
-  for (const groupId of cappedGroupIds) {
+  for (const { groupId } of cappedCandidates) {
     try {
       const outcome = await refreshOneGroup(params, groupId);
       if (outcome === "refreshed") result.groupsRefreshed++;
@@ -83,6 +95,29 @@ export async function refreshCrmActivityRollups(
   }
 
   return result;
+}
+
+async function collectRollupCandidates(params: RefreshCrmActivityRollupsParams): Promise<RollupCandidate[]> {
+  const dirtyGroupIds = await collectDirtyGroupIds(params);
+  const backlogCandidates = await collectBacklogCandidates(params);
+  const candidates = new Map<string, RollupCandidate>();
+
+  for (const candidate of backlogCandidates) candidates.set(candidate.groupId, candidate);
+
+  for (const groupId of dirtyGroupIds) {
+    const existing = candidates.get(groupId);
+    candidates.set(groupId, {
+      groupId,
+      activityCount: existing?.activityCount ?? 0,
+      isDirty: true,
+      isBacklog: existing?.isBacklog ?? false,
+    });
+  }
+
+  return [...candidates.values()].sort((a, b) => {
+    if (a.isDirty !== b.isDirty) return a.isDirty ? -1 : 1;
+    return b.activityCount - a.activityCount || a.groupId.localeCompare(b.groupId);
+  });
 }
 
 async function collectDirtyGroupIds(params: RefreshCrmActivityRollupsParams): Promise<string[]> {
@@ -101,6 +136,50 @@ async function collectDirtyGroupIds(params: RefreshCrmActivityRollupsParams): Pr
     }
   }
   return [...ids].sort();
+}
+
+async function collectBacklogCandidates(params: RefreshCrmActivityRollupsParams): Promise<RollupCandidate[]> {
+  const summaries = await params.db
+    .selectFrom("crm_object_summaries")
+    .select(["group_id", "basis_hash"])
+    .where("connector_config_id", "=", params.connectorConfigId)
+    .execute();
+  const summaryHashes = new Map(summaries.map((summary) => [summary.group_id, summary.basis_hash]));
+
+  const rows = await params.db
+    .selectFrom("indexed_files")
+    .select([
+      "rollup_group_id",
+      "provider_file_id",
+      "content_hash",
+      "source_created_at",
+      "source_updated_at",
+      "synced_at",
+    ])
+    .where("connector_config_id", "=", params.connectorConfigId)
+    .where("source", "=", "zoho_crm")
+    .where("is_archived", "=", 0)
+    .where("rollup_group_id", "is not", null)
+    .whereRef("provider_file_id", "!=", "rollup_group_id")
+    .where("file_type", "in", CRM_ACTIVITY_FILE_TYPES)
+    .execute();
+
+  const grouped = new Map<string, BasisActivityRow[]>();
+  for (const row of rows) {
+    if (!row.rollup_group_id) continue;
+    const group = grouped.get(row.rollup_group_id) ?? [];
+    group.push(row);
+    grouped.set(row.rollup_group_id, group);
+  }
+
+  const candidates: RollupCandidate[] = [];
+  for (const [groupId, activities] of grouped) {
+    const basis = buildBasis(activities);
+    if (summaryHashes.get(groupId) === basis.hash) continue;
+    candidates.push({ groupId, activityCount: activities.length, isDirty: false, isBacklog: true });
+  }
+
+  return candidates.sort((a, b) => b.activityCount - a.activityCount || a.groupId.localeCompare(b.groupId));
 }
 
 async function refreshOneGroup(
@@ -201,7 +280,7 @@ async function loadAnchorName(db: Kysely<DB>, connectorConfigId: string, groupId
   return anchor?.file_name ?? groupId;
 }
 
-function buildBasis(activities: ActivityRow[]): { firstAt: string | null; lastAt: string | null; hash: string } {
+function buildBasis(activities: BasisActivityRow[]): { firstAt: string | null; lastAt: string | null; hash: string } {
   const times = activities.map(activityTime).filter(Boolean);
   const payload = activities.map((activity) => ({
     providerFileId: activity.provider_file_id,
@@ -215,7 +294,7 @@ function buildBasis(activities: ActivityRow[]): { firstAt: string | null; lastAt
   };
 }
 
-function activityTime(activity: ActivityRow): string {
+function activityTime(activity: BasisActivityRow): string {
   return activity.source_updated_at ?? activity.source_created_at ?? activity.synced_at;
 }
 

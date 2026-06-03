@@ -134,6 +134,94 @@ describe("CRM activity rollups", () => {
     expect(result).toMatchObject({ groupsConsidered: 1, groupsDeleted: 1, errors: [] });
     expect(await db.selectFrom("crm_object_summaries").selectAll().execute()).toHaveLength(0);
   });
+
+  it("drains unsummarized backlog groups across capped runs by activity count", async () => {
+    db = await createTestDb();
+    await seedConnector(db);
+    await seedGroup(db, "Deals:low", 1);
+    await seedGroup(db, "Deals:high", 3);
+    await seedGroup(db, "Deals:mid", 2);
+
+    const first = await refreshCrmActivityRollups({
+      db,
+      connectorConfigId: "zoho-crm",
+      maxGroupsPerRun: 2,
+      logger,
+    });
+
+    expect(first).toMatchObject({
+      groupsConsidered: 3,
+      groupsRefreshed: 2,
+      groupsCapped: 1,
+      errors: [],
+    });
+    expect(await summaryGroupIds(db)).toEqual(["Deals:high", "Deals:mid"]);
+
+    const second = await refreshCrmActivityRollups({
+      db,
+      connectorConfigId: "zoho-crm",
+      maxGroupsPerRun: 2,
+      logger,
+    });
+
+    expect(second).toMatchObject({
+      groupsConsidered: 1,
+      groupsRefreshed: 1,
+      groupsCapped: 0,
+      errors: [],
+    });
+    expect(await summaryGroupIds(db)).toEqual(["Deals:high", "Deals:low", "Deals:mid"]);
+  });
+
+  it("refreshes new and deletes old groups when an activity is re-parented", async () => {
+    db = await createTestDb();
+    await seedConnector(db);
+    await seedCrmFile(db, {
+      id: "old-deal-file",
+      providerFileId: "Deals:old",
+      fileName: "Old deal",
+      fileType: "crm_deal",
+      rollupGroupId: "Deals:old",
+      contentHash: "old-deal-hash",
+      sourceUpdatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "new-deal-file",
+      providerFileId: "Deals:new",
+      fileName: "New deal",
+      fileType: "crm_deal",
+      rollupGroupId: "Deals:new",
+      contentHash: "new-deal-hash",
+      sourceUpdatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "task-file",
+      providerFileId: "Tasks:t1",
+      fileName: "Follow up",
+      fileType: "crm_task",
+      rollupGroupId: "Deals:old",
+      contentHash: "task-hash",
+      sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+    });
+    await refreshCrmActivityRollups({ db, connectorConfigId: "zoho-crm", dirtyGroupIds: ["Deals:old"], logger });
+    expect(await summaryGroupIds(db)).toEqual(["Deals:old"]);
+
+    await db
+      .updateTable("indexed_files")
+      .set({ rollup_group_id: "Deals:new", content_hash: "task-hash-reparented" })
+      .where("id", "=", "task-file")
+      .execute();
+
+    const result = await refreshCrmActivityRollups({
+      db,
+      connectorConfigId: "zoho-crm",
+      dirtyGroupIds: ["Deals:old", "Deals:new"],
+      logger,
+    });
+
+    expect(result).toMatchObject({ groupsRefreshed: 1, groupsDeleted: 1, errors: [] });
+    expect(await summaryGroupIds(db)).toEqual(["Deals:new"]);
+  });
 });
 
 async function seedConnector(db: Kysely<DB>): Promise<void> {
@@ -182,4 +270,33 @@ async function seedCrmFile(
       synced_at: file.sourceUpdatedAt,
     })
     .execute();
+}
+
+async function seedGroup(db: Kysely<DB>, groupId: string, activityCount: number): Promise<void> {
+  await seedCrmFile(db, {
+    id: `${groupId}:anchor`,
+    providerFileId: groupId,
+    fileName: groupId,
+    fileType: "crm_deal",
+    rollupGroupId: groupId,
+    contentHash: `${groupId}:anchor-hash`,
+    sourceUpdatedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  for (let index = 1; index <= activityCount; index++) {
+    await seedCrmFile(db, {
+      id: `${groupId}:task:${index}`,
+      providerFileId: `Tasks:${groupId}:${index}`,
+      fileName: `${groupId} task ${index}`,
+      fileType: "crm_task",
+      rollupGroupId: groupId,
+      contentHash: `${groupId}:task-hash:${index}`,
+      sourceUpdatedAt: `2026-01-0${index + 1}T00:00:00.000Z`,
+    });
+  }
+}
+
+async function summaryGroupIds(db: Kysely<DB>): Promise<string[]> {
+  const summaries = await db.selectFrom("crm_object_summaries").select("group_id").orderBy("group_id").execute();
+  return summaries.map((summary) => summary.group_id);
 }
