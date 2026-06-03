@@ -19,7 +19,7 @@ import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
-import { refreshCrmActivityRollups } from "./crm-rollup";
+import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { runEnrichment } from "./enrichment";
@@ -399,10 +399,12 @@ async function refreshCrmRollupsForSync(params: {
             maxRetries: params.appConfig?.GEMINI_MAX_RETRIES,
           })
         : null;
+    const reconcile = await reconcileDanglingCrmRollups(params.db, params.connectorConfigId, params.syncLogger);
+    const dirtyGroupIds = [...new Set([...params.dirtyGroupIds, ...reconcile.affectedGroupIds])];
     const result = await refreshCrmActivityRollups({
       db: params.db,
       connectorConfigId: params.connectorConfigId,
-      dirtyGroupIds: params.dirtyGroupIds,
+      dirtyGroupIds,
       affectedIndexedFileIds: params.affectedIndexedFileIds,
       generator,
       logger: params.syncLogger,

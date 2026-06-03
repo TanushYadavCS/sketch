@@ -543,6 +543,21 @@ function parentFromLookup(moduleApiName: string, value: unknown, contextSnippet:
   return [{ source: "zoho_crm", sourceId: makeProviderFileId(moduleApiName, id), contextSnippet }];
 }
 
+/**
+ * Resolve the module a polymorphic activity lookup (Task/Call/Event `What_Id`,
+ * Note `Parent_Id`) actually points at. Zoho returns this discriminator as the
+ * TOP-LEVEL `$se_module` system field on the record — it is NOT nested inside the
+ * lookup object — so prefer that. Fall back to any module embedded in the lookup
+ * value, then to `fallback`. Getting this wrong points the rollup at a
+ * non-existent anchor (e.g. `Deals:<accountId>`), which silently hides the
+ * activity, so the record-level field is authoritative.
+ */
+function relatedModuleForLookup(record: ZohoRecord, lookupValue: unknown, fallback: StandardModule): StandardModule {
+  const se = asNonEmptyString((record as Record<string, unknown>).$se_module);
+  const fromRecord = se ? logicalModuleFor(se) : null;
+  return fromRecord ?? lookupModuleApiName(lookupValue, fallback);
+}
+
 export function extractParentEntities(moduleApiName: string, record: ZohoRecord): ParentEntity[] {
   const normalized = normalizeModuleApiName(moduleApiName);
   if (normalized === "deals") {
@@ -552,9 +567,9 @@ export function extractParentEntities(moduleApiName: string, record: ZohoRecord)
     return parentFromLookup("Accounts", record.Account_Name, "Contact account");
   }
   if (["tasks", "notes", "calls", "events", "meetings"].includes(normalized)) {
-    const whatModule = lookupModuleApiName(record.What_Id, "Deals");
+    const whatModule = relatedModuleForLookup(record, record.What_Id, "Accounts");
     const whoModule = lookupModuleApiName(record.Who_Id, "Contacts");
-    const parentModule = lookupModuleApiName(record.Parent_Id, "Contacts");
+    const parentModule = relatedModuleForLookup(record, record.Parent_Id, "Contacts");
     return [
       ...parentFromLookup(whatModule, record.What_Id, "CRM activity parent"),
       ...parentFromLookup(whoModule, record.Who_Id, "CRM activity participant"),
@@ -579,13 +594,13 @@ function rollupGroupIdForRecord(moduleApiName: string, record: ZohoRecord): stri
   }
   if (["tasks", "calls", "events", "meetings"].includes(normalized)) {
     const whatId = lookupId(record.What_Id);
-    if (whatId) return makeProviderFileId(lookupModuleApiName(record.What_Id, "Deals"), whatId);
+    if (whatId) return makeProviderFileId(relatedModuleForLookup(record, record.What_Id, "Accounts"), whatId);
     const whoId = lookupId(record.Who_Id);
     if (whoId) return makeProviderFileId(lookupModuleApiName(record.Who_Id, "Contacts"), whoId);
   }
   if (normalized === "notes") {
     const parentId = lookupId(record.Parent_Id);
-    if (parentId) return makeProviderFileId(lookupModuleApiName(record.Parent_Id, "Contacts"), parentId);
+    if (parentId) return makeProviderFileId(relatedModuleForLookup(record, record.Parent_Id, "Contacts"), parentId);
   }
   return null;
 }

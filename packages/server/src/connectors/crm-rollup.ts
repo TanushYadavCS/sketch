@@ -368,3 +368,89 @@ function chunk<T>(items: T[], size: number): T[][] {
   for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
   return chunks;
 }
+
+export interface ReconcileDanglingRollupsResult {
+  scanned: number;
+  repointed: number;
+  orphaned: number;
+  affectedGroupIds: string[];
+}
+
+function rawIdOf(providerFileId: string): string | null {
+  const idx = providerFileId.indexOf(":");
+  return idx >= 0 ? providerFileId.slice(idx + 1) : null;
+}
+
+/**
+ * Repoint CRM activities whose `rollup_group_id` references a non-existent anchor.
+ *
+ * The composite id ("Module:id") can carry the wrong module half when Zoho omits
+ * the `$se_module` discriminator (e.g. "Deals:<accountId>" when the parent is an
+ * Account). Zoho record ids are globally unique across modules, so we re-resolve
+ * by the raw id against the real anchor rows (those that are their own rollup
+ * group). For each dangling member:
+ *   - raw id matches an anchor → rewrite the module prefix to the anchor's id
+ *   - raw id matches no anchor → NULL the link (fail-open: the activity becomes
+ *     visible on its own again instead of vanishing under a phantom parent)
+ *
+ * Runs after every sync (cheap when there are no danglers) and self-heals data
+ * written by older code or by records that arrive without `$se_module`.
+ */
+export async function reconcileDanglingCrmRollups(
+  db: Kysely<DB>,
+  connectorConfigId: string,
+  logger?: Logger,
+): Promise<ReconcileDanglingRollupsResult> {
+  const anchors = await db
+    .selectFrom("indexed_files")
+    .select(["provider_file_id"])
+    .where("connector_config_id", "=", connectorConfigId)
+    .whereRef("rollup_group_id", "=", "provider_file_id")
+    .execute();
+  const anchorPfids = new Set(anchors.map((a) => a.provider_file_id));
+  const anchorByRawId = new Map<string, string>();
+  for (const a of anchors) {
+    const raw = rawIdOf(a.provider_file_id);
+    if (raw && !anchorByRawId.has(raw)) anchorByRawId.set(raw, a.provider_file_id);
+  }
+
+  const members = await db
+    .selectFrom("indexed_files")
+    .select(["id", "rollup_group_id"])
+    .where("connector_config_id", "=", connectorConfigId)
+    .where("rollup_group_id", "is not", null)
+    .whereRef("rollup_group_id", "!=", "provider_file_id")
+    .execute();
+
+  const updates = new Map<string | null, string[]>();
+  const affected = new Set<string>();
+  let scanned = 0;
+  for (const m of members) {
+    scanned++;
+    const current = m.rollup_group_id as string;
+    if (anchorPfids.has(current)) continue;
+    const raw = rawIdOf(current);
+    const target = raw ? (anchorByRawId.get(raw) ?? null) : null;
+    if (target === current) continue;
+    affected.add(current);
+    if (target) affected.add(target);
+    const list = updates.get(target) ?? [];
+    list.push(m.id);
+    updates.set(target, list);
+  }
+
+  let repointed = 0;
+  let orphaned = 0;
+  for (const [target, ids] of updates) {
+    for (const idChunk of chunk(ids, 500)) {
+      await db.updateTable("indexed_files").set({ rollup_group_id: target }).where("id", "in", idChunk).execute();
+    }
+    if (target === null) orphaned += ids.length;
+    else repointed += ids.length;
+  }
+
+  if (repointed > 0 || orphaned > 0) {
+    logger?.info({ connectorConfigId, scanned, repointed, orphaned }, "Reconciled dangling CRM rollups");
+  }
+  return { scanned, repointed, orphaned, affectedGroupIds: [...affected] };
+}

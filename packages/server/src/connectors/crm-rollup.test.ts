@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { refreshCrmActivityRollups } from "./crm-rollup";
+import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 
 const logger = createTestLogger();
 
@@ -221,6 +221,67 @@ describe("CRM activity rollups", () => {
 
     expect(result).toMatchObject({ groupsRefreshed: 1, groupsDeleted: 1, errors: [] });
     expect(await summaryGroupIds(db)).toEqual(["Deals:new"]);
+  });
+
+  it("reconciles dangling rollups: repoints wrong-module prefixes and NULLs true orphans", async () => {
+    db = await createTestDb();
+    await seedConnector(db);
+    await seedCrmFile(db, {
+      id: "acc",
+      providerFileId: "Accounts:a1",
+      fileName: "Acme Corp",
+      fileType: "crm_account",
+      rollupGroupId: "Accounts:a1",
+      contentHash: "acc-hash",
+      sourceUpdatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "task",
+      providerFileId: "Tasks:t1",
+      fileName: "Call Acme",
+      fileType: "crm_task",
+      rollupGroupId: "Deals:a1",
+      contentHash: "task-hash",
+      sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "call",
+      providerFileId: "Calls:c1",
+      fileName: "Intro call",
+      fileType: "crm_call",
+      rollupGroupId: "Accounts:a1",
+      contentHash: "call-hash",
+      sourceUpdatedAt: "2026-01-03T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "note",
+      providerFileId: "Notes:n1",
+      fileName: "Orphan note",
+      fileType: "crm_note",
+      rollupGroupId: "Contacts:zzz",
+      contentHash: "note-hash",
+      sourceUpdatedAt: "2026-01-04T00:00:00.000Z",
+    });
+
+    const result = await reconcileDanglingCrmRollups(db, "zoho-crm", logger);
+
+    expect(result).toMatchObject({ scanned: 3, repointed: 1, orphaned: 1 });
+    expect(result.affectedGroupIds.sort()).toEqual(["Accounts:a1", "Contacts:zzz", "Deals:a1"]);
+
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select(["provider_file_id", "rollup_group_id"])
+      .where("connector_config_id", "=", "zoho-crm")
+      .orderBy("provider_file_id")
+      .execute();
+    const byPfid = Object.fromEntries(rows.map((r) => [r.provider_file_id, r.rollup_group_id]));
+    expect(byPfid["Tasks:t1"]).toBe("Accounts:a1");
+    expect(byPfid["Calls:c1"]).toBe("Accounts:a1");
+    expect(byPfid["Notes:n1"]).toBeNull();
+    expect(byPfid["Accounts:a1"]).toBe("Accounts:a1");
+
+    const second = await reconcileDanglingCrmRollups(db, "zoho-crm", logger);
+    expect(second).toMatchObject({ repointed: 0, orphaned: 0 });
   });
 });
 

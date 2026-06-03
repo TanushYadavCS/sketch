@@ -177,6 +177,28 @@ describe("Zoho CRM connector", () => {
     ]);
   });
 
+  it("resolves the What_Id module from the record-level $se_module (Account parent, not the Deals fallback)", () => {
+    expect(
+      extractParentEntities("Tasks", {
+        id: "t1",
+        $se_module: "Accounts",
+        What_Id: { id: "a1", name: "Acme Corp" },
+        Who_Id: { id: "c1", name: "Jane Buyer" },
+      }),
+    ).toEqual([
+      { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "CRM activity parent" },
+      { source: "zoho_crm", sourceId: "Contacts:c1", contextSnippet: "CRM activity participant" },
+    ]);
+
+    expect(
+      extractParentEntities("Notes", {
+        id: "n1",
+        $se_module: "Accounts",
+        Parent_Id: { id: "a1", name: "Acme Corp" },
+      }),
+    ).toEqual([{ source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "CRM note parent" }]);
+  });
+
   it("extracts Account domains from websites and Account email fields", () => {
     expect(
       extractAccountDomainsFromRecord({
