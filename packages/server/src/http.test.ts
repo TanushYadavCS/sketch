@@ -757,10 +757,10 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
     });
 
-    it("uses auth_role for managed platform cookie sessions", async () => {
+    it("uses the trusted platform role for managed platform cookie sessions", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
-      const user = await users.create({ name: "Platform Admin", email: "platform-admin@test.com", authRole: "admin" });
+      const user = await users.create({ name: "Platform Admin", email: "platform-admin@test.com", authRole: "member" });
 
       const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
@@ -775,6 +775,26 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
       expect(body.userId).toBe(user.id);
       expect(body.email).toBe("platform-admin@test.com");
+    });
+
+    it("falls back to auth_role when a managed platform token has no admin/member role claim", async () => {
+      await seedAdmin(db);
+      const users = createUserRepository(db);
+      const user = await users.create({ name: "Legacy Admin", email: "legacy-admin@test.com", authRole: "admin" });
+
+      const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
+      const app = createApp(db, managedConfig);
+      const token = await makePlatformToken("legacy-admin@test.com", "customer");
+
+      const res = await app.request("/api/auth/session", {
+        headers: { Cookie: `sketch_platform_session=${token}` },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.authenticated).toBe(true);
+      expect(body.role).toBe("admin");
+      expect(body.userId).toBe(user.id);
+      expect(body.email).toBe("legacy-admin@test.com");
     });
 
     it("returns authenticated with member details for member users", async () => {

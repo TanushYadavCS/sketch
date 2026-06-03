@@ -9,7 +9,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { verifyEmailToken } from "../auth/email-verify";
-import { signJwt, verifyJwt } from "../auth/jwt";
+import { signJwt, verifyJwt, verifyJwtWithRoleClaim } from "../auth/jwt";
 import {
   type VerifiedUser,
   createRateLimitedMagicLinkToken,
@@ -38,6 +38,10 @@ type AuthRole = "admin" | "member";
 
 function toAuthRole(value: string | null | undefined): AuthRole {
   return value === "admin" ? "admin" : "member";
+}
+
+function resolveManagedAuthRole(payload: { roleClaim?: AuthRole }, user: { auth_role?: string | null }): AuthRole {
+  return payload.roleClaim ?? toAuthRole(user.auth_role);
 }
 
 function isSecure(c: Context): boolean {
@@ -159,11 +163,11 @@ export function authRoutes(
     if (deps.config.MANAGED_AUTH_SECRET) {
       const platformToken = getCookie(c, PLATFORM_COOKIE);
       if (platformToken) {
-        const payload = await verifyJwt(platformToken, deps.config.MANAGED_AUTH_SECRET);
+        const payload = await verifyJwtWithRoleClaim(platformToken, deps.config.MANAGED_AUTH_SECRET);
         if (payload?.email) {
           const user = await db.selectFrom("users").selectAll().where("email", "=", payload.email).executeTakeFirst();
           if (user) {
-            const role = toAuthRole(user.auth_role);
+            const role = resolveManagedAuthRole(payload, user);
             return c.json({
               authenticated: true,
               role,

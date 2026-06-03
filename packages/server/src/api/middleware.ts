@@ -12,7 +12,7 @@
  */
 import type { Context, Next } from "hono";
 import { getCookie } from "hono/cookie";
-import { verifyJwt } from "../auth/jwt";
+import { verifyJwt, verifyJwtWithRoleClaim } from "../auth/jwt";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import { SESSION_COOKIE } from "./auth";
 
@@ -56,6 +56,13 @@ export interface AuthMiddlewareOpts {
 
 function toAuthRole(value: string | null | undefined): "admin" | "member" {
   return value === "admin" ? "admin" : "member";
+}
+
+function resolveManagedAuthRole(
+  payload: { roleClaim?: "admin" | "member" },
+  user: { authRole?: string | null },
+): "admin" | "member" {
+  return payload.roleClaim ?? toAuthRole(user.authRole);
 }
 
 function canUseSketchApiKey(path: string, method: string): boolean {
@@ -157,7 +164,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     if (opts?.managedAuthSecret) {
       const platformToken = getCookie(c, PLATFORM_COOKIE);
       if (platformToken) {
-        const payload = await verifyJwt(platformToken, opts.managedAuthSecret);
+        const payload = await verifyJwtWithRoleClaim(platformToken, opts.managedAuthSecret);
         if (!payload || !payload.email) {
           const loginUrl = opts.managedUrl ? `${opts.managedUrl}/login` : "/login";
           return c.redirect(loginUrl);
@@ -168,7 +175,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
           return c.json({ error: { code: "FORBIDDEN", message: "User not found in this tenant" } }, 403);
         }
 
-        c.set("role", toAuthRole(user.authRole));
+        c.set("role", resolveManagedAuthRole(payload, user));
         c.set("sub", user.id);
         c.set("email", user.email ?? payload.email ?? null);
         c.set("adminCanReadAllFiles", adminCanReadAllFiles);

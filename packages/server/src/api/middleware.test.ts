@@ -100,11 +100,13 @@ describe("auth middleware - existing local auth", () => {
 });
 
 describe("auth middleware - managed SSO", () => {
-  const findUserByEmail = vi.fn(async (email: string) => {
-    if (email === "admin@test.com") return { id: "user-1" };
-    if (email === "member@test.com") return { id: "user-2" };
-    return null;
-  });
+  const findUserByEmail = vi.fn(
+    async (email: string): Promise<{ id: string; authRole?: string | null; email?: string | null } | null> => {
+      if (email === "admin@test.com") return { id: "user-1" };
+      if (email === "member@test.com") return { id: "user-2" };
+      return null;
+    },
+  );
 
   /**
    * Creates a platform-style JWT with UUID in `sub` and email in `email` claim,
@@ -143,7 +145,7 @@ describe("auth middleware - managed SSO", () => {
     expect(body.sub).toBe("admin@test.com");
   });
 
-  it("valid platform cookie is accepted and user is looked up by email", async () => {
+  it("valid platform cookie is accepted and uses the trusted platform role", async () => {
     const app = createTestApp(mockSettings, {
       managedAuthSecret: MANAGED_AUTH_SECRET,
       managedUrl: MANAGED_URL,
@@ -155,9 +157,35 @@ describe("auth middleware - managed SSO", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.role).toBe("member");
+    expect(body.role).toBe("admin");
     expect(body.sub).toBe("user-1");
     expect(findUserByEmail).toHaveBeenCalledWith("admin@test.com");
+  });
+
+  it("falls back to the local role when a platform token has no managed role claim", async () => {
+    findUserByEmail.mockResolvedValueOnce({ id: "user-3", authRole: "admin", email: "legacy@test.com" });
+    const app = createTestApp(mockSettings, {
+      managedAuthSecret: MANAGED_AUTH_SECRET,
+      managedUrl: MANAGED_URL,
+      findUserByEmail,
+    });
+    const token = await new SignJWT({
+      sub: "550e8400-e29b-41d4-a716-446655440000",
+      email: "legacy@test.com",
+      role: "customer",
+    })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuedAt()
+      .setExpirationTime("7d")
+      .sign(new TextEncoder().encode(MANAGED_AUTH_SECRET));
+    const res = await app.request("/api/test", {
+      headers: { Cookie: `sketch_platform_session=${token}` },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.role).toBe("admin");
+    expect(body.sub).toBe("user-3");
   });
 
   it("when email claim is present, middleware calls findUserByEmail(payload.email) not payload.sub", async () => {
