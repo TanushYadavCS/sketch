@@ -11,6 +11,7 @@ import { ConnectionsBanner } from "@/components/connections-banner";
 import { AddIntegrationDialog } from "@/components/connections/add-integration-dialog";
 import { AddMcpDialog } from "@/components/connections/add-mcp-dialog";
 import { AddProviderDialog, ProviderSelectorDialog } from "@/components/connections/add-provider-dialog";
+import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
 import { EditMcpDialog } from "@/components/connections/edit-mcp-dialog";
 import { EditProviderDialog } from "@/components/connections/edit-provider-dialog";
 import {
@@ -73,12 +74,7 @@ type IntegrationsTab = "applications" | "mcps" | "environment";
 export function getPersonallyConnectedAppIds(connections: IntegrationConnection[]): Set<string> {
   return new Set(
     connections
-      .filter(
-        (connection) =>
-          connection.source !== "canvas_user_secrets" ||
-          connection.accessLevel !== "organization" ||
-          connection.isOwnedByViewer !== false,
-      )
+      .filter((connection) => isOwnedOrPersonalAppConnection(connection))
       .map((connection) => connection.appId),
   );
 }
