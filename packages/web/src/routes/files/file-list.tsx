@@ -103,7 +103,7 @@ export function FileList({
           <span className="w-20 text-center">Similarity</span>
         </div>
         {searchResults.map((result) => (
-          <SearchResultRow key={result.id} result={result} onView={() => onView(result.id)} />
+          <SearchResultRow key={result.id} result={result} onView={() => onView(result.hitFileId ?? result.id)} />
         ))}
       </>
     );
@@ -174,7 +174,12 @@ function SearchResultRow({ result, onView }: { result: SearchResult; onView: () 
       <button type="button" onClick={onView} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <Icon size={16} className="shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{result.fileName}</p>
+          <p className="truncate text-sm font-medium">
+            {result.fileName}
+            {result.resultKind === "email_thread" && result.messageCount ? (
+              <span className="ml-2 text-[11px] font-normal text-muted-foreground">{result.messageCount} messages</span>
+            ) : null}
+          </p>
           {result.snippet ? (
             <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{result.snippet}</p>
           ) : result.sourcePath ? (

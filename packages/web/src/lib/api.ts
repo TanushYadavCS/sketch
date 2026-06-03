@@ -633,6 +633,33 @@ export interface FileContent {
   sourcePath: string | null;
   providerUrl: string | null;
   enrichmentStatus: string;
+  /** Present for email_message files — lets the detail sheet load the full thread. */
+  emailThread?: { connectorId: string; threadKey: string };
+}
+
+export interface EmailAddr {
+  name?: string | null;
+  email: string;
+}
+
+export interface EmailThreadSummary {
+  threadKey: string;
+  latestIndexedFileId: string;
+  latestSubject: string | null;
+  messageCount: number;
+  lastActivity: string | null;
+  participants: string[];
+}
+
+export interface EmailThreadMessage {
+  indexedFileId: string;
+  subject: string | null;
+  sentAt: string | null;
+  from: EmailAddr;
+  to: EmailAddr[];
+  cc: EmailAddr[];
+  providerUrl: string | null;
+  content: string | null;
 }
 
 export interface FileAccessMember {
@@ -655,7 +682,9 @@ export type UnifiedFile = ConnectorFile;
 
 /** A result from hybrid search (FTS5 + vector). */
 export interface SearchResult {
+  resultKind?: "file" | "email_thread";
   id: string;
+  hitFileId?: string;
   fileName: string;
   source: string;
   contentCategory: string;
@@ -667,6 +696,11 @@ export interface SearchResult {
   snippet: string | null;
   similarity: number | null;
   score: number;
+  threadKey?: string;
+  messageCount?: number;
+  latestSubject?: string;
+  lastActivity?: string | null;
+  participants?: string[];
 }
 
 export interface FileManualShare {
@@ -1010,6 +1044,38 @@ export const api = {
     entityCount(id: string) {
       return request<{ count: number }>(`/api/connectors/${id}/entity-count`);
     },
+    suppressedEmails(id: string, opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{
+        countsByReason: Record<string, number>;
+        recent: Array<{
+          providerFileId: string;
+          providerMessageId: string | null;
+          threadId: string | null;
+          reason: string;
+          observedAt: string;
+        }>;
+        total: number;
+        hasMore: boolean;
+      }>(`/api/connectors/${id}/suppressed-emails${qs ? `?${qs}` : ""}`);
+    },
+    emailThreads(id: string, opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{ threads: EmailThreadSummary[]; total: number; hasMore: boolean }>(
+        `/api/connectors/${id}/email-threads${qs ? `?${qs}` : ""}`,
+      );
+    },
+    emailThread(id: string, threadKey: string) {
+      return request<{ messages: EmailThreadMessage[] }>(
+        `/api/connectors/${id}/email-threads/${encodeURIComponent(threadKey)}`,
+      );
+    },
     sync(id: string) {
       return request<{ sync: { connectorId: string; status: string } }>(`/api/connectors/${id}/syncs`, {
         method: "POST",
@@ -1238,8 +1304,10 @@ export const api = {
         body: JSON.stringify({ clientId, clientSecret }),
       });
     },
-    authorizeUrl() {
-      return "/api/oauth/google/authorize";
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/google/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/google/authorize";
     },
   },
   identities: {

@@ -8,7 +8,7 @@
  * Today: 4 connectors. Tomorrow: 50+. This registry scales to both.
  */
 
-export type IntegrationType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
+export type IntegrationType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -131,6 +131,43 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     connectSteps: [
       "Create an OAuth 2.0 Client in Google Cloud Console",
       "Enable the Google Drive API for your project",
+      "Add the redirect URI shown below to your OAuth client",
+      "Paste the Client ID and Client Secret, then connect with Google",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
+  },
+  {
+    type: "gmail",
+    name: "Gmail",
+    description: "Email messages and threads",
+    category: "Communication",
+    color: "#EA4335",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [
+      {
+        key: "client_id",
+        label: "Client ID",
+        type: "text",
+        placeholder: "123456789.apps.googleusercontent.com",
+        helpText: "OAuth 2.0 Client ID from Google Cloud Console",
+      },
+      {
+        key: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        placeholder: "GOCSPX-...",
+        helpText: "OAuth 2.0 Client Secret",
+      },
+    ],
+    scopeLabel: "mailbox",
+    scopeType: "none",
+    itemNoun: "emails",
+    credentialUrl: "https://console.cloud.google.com/apis/credentials",
+    connectSteps: [
+      "Create an OAuth 2.0 Client in Google Cloud Console",
+      "Enable the Gmail API for your project",
       "Add the redirect URI shown below to your OAuth client",
       "Paste the Client ID and Client Secret, then connect with Google",
     ],
