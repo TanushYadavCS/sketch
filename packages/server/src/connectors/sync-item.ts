@@ -7,7 +7,7 @@ import type { ConnectorType, SyncedItem } from "./types";
 
 type ConnectorRepository = ReturnType<typeof createConnectorRepository>;
 
-export type ExistingContentHashMap = Map<string, { id: string; contentHash: string | null }>;
+export type ExistingContentHashMap = Map<string, { id: string; contentHash: string | null; contentCategory: string }>;
 
 export type ProcessSyncedItemResult =
   | { kind: "skipped_empty" }
@@ -33,7 +33,14 @@ export async function loadExistingContentHashes(
   const existingHashes: ExistingContentHashMap = new Map();
   const existingFiles = await db
     .selectFrom("indexed_files")
-    .select(["id", "connector_config_id", "provider_file_id", "provider_message_id", "content_hash"])
+    .select([
+      "id",
+      "connector_config_id",
+      "provider_file_id",
+      "provider_message_id",
+      "content_hash",
+      "content_category",
+    ])
     .where("source", "=", connectorType)
     .where("is_archived", "=", 0)
     .execute();
@@ -45,7 +52,11 @@ export async function loadExistingContentHashes(
       providerMessageId: f.provider_message_id,
     });
     if (identity.kind === "provider_file_id" || identity.connectorConfigId === connectorConfigId) {
-      existingHashes.set(syncIdentityKey(identity), { id: f.id, contentHash: f.content_hash });
+      existingHashes.set(syncIdentityKey(identity), {
+        id: f.id,
+        contentHash: f.content_hash,
+        contentCategory: f.content_category,
+      });
     }
   }
   return existingHashes;
@@ -71,7 +82,7 @@ export async function processSyncedItem({
   }
 
   const existing = existingHashes.get(syncIdentityKey(getSyncIdentityForItem(item, connectorConfigId, connectorType)));
-  if (existing && existing.contentHash === item.contentHash) {
+  if (existing && existing.contentHash === item.contentHash && existing.contentCategory === item.contentCategory) {
     await db
       .updateTable("indexed_files")
       .set({
@@ -116,7 +127,7 @@ export async function processSyncedItem({
       mimeType: item.mimeType,
     });
 
-    if (upsertResult.contentChanged) {
+    if (upsertResult.contentChanged || upsertResult.categoryChanged) {
       await clearEnrichmentData(trx, upsertResult.id);
     }
 

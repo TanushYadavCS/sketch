@@ -15,6 +15,7 @@ const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
 const PAGE_SIZE = 200;
 const CONTENT_LIMIT = 2000;
+const RENDERER_VERSION = "zoho-crm-activity-v2";
 // Zoho v6 GET records requires an explicit `fields` list, capped at 50 names.
 const ZOHO_MAX_FIELDS = 50;
 
@@ -71,6 +72,8 @@ type ZohoRecord = Record<string, unknown> & {
 
 type ParentEntity = NonNullable<SyncedItem["parentEntities"]>[number];
 type RelationshipEndpoint = NonNullable<SyncedItem["relationships"]>[number]["source"];
+
+const ACTIVITY_MODULES = new Set(["tasks", "notes", "calls", "events", "meetings"]);
 
 export interface DiscoveredZohoModule {
   logicalName: StandardModule;
@@ -166,6 +169,10 @@ function normalizeModuleApiName(input: string): string {
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, "");
+}
+
+function isActivityModule(moduleApiName: string): boolean {
+  return ACTIVITY_MODULES.has(normalizeModuleApiName(moduleApiName));
 }
 
 function isModuleUsable(module: ZohoModuleMetadata): boolean {
@@ -320,6 +327,16 @@ export async function discoverStandardModules(
   });
 }
 
+function getActivityRelatedName(record: ZohoRecord): string | null {
+  return lookupName(record.Who_Id) ?? lookupName(record.What_Id) ?? lookupName(record.Parent_Id);
+}
+
+function appendRelatedName(baseName: string, relatedName: string | null): string {
+  if (!relatedName) return baseName;
+  if (baseName.toLowerCase().includes(relatedName.toLowerCase())) return baseName;
+  return `${baseName} - ${relatedName}`;
+}
+
 function getRecordName(moduleApiName: string, record: ZohoRecord): string {
   const fullName = [record.First_Name, record.Last_Name].map(fieldValue).filter(Boolean).join(" ");
   const normalized = normalizeModuleApiName(moduleApiName);
@@ -335,7 +352,8 @@ function getRecordName(moduleApiName: string, record: ZohoRecord): string {
     meetings: [record.Event_Title, record.Subject, record.Name],
   };
   const candidates = [...(byModule[normalized] ?? [record.Name]), record.id];
-  return candidates.map(fieldValue).find((value): value is string => Boolean(value)) ?? `${moduleApiName} record`;
+  const name = candidates.map(fieldValue).find((value): value is string => Boolean(value)) ?? `${moduleApiName} record`;
+  return ACTIVITY_MODULES.has(normalized) ? appendRelatedName(name, getActivityRelatedName(record)) : name;
 }
 
 function sourcePath(orgName: string | undefined, moduleLabel: string): string {
@@ -370,6 +388,10 @@ function importantFields(moduleApiName: string): string[] {
 }
 
 export function formatCrmRecordContent(moduleApiName: string, record: ZohoRecord): string {
+  if (isActivityModule(moduleApiName)) {
+    return formatCrmActivityContent(moduleApiName, record);
+  }
+
   const title = getRecordName(moduleApiName, record);
   const lines = [`# ${title} (${titleCase(moduleApiName)})`];
   const seen = new Set<string>();
@@ -406,6 +428,60 @@ export function formatCrmRecordContent(moduleApiName: string, record: ZohoRecord
 
   const content = lines.join("\n");
   return content.length <= CONTENT_LIMIT ? content : `${content.slice(0, CONTENT_LIMIT - 12).trimEnd()}\n[truncated]`;
+}
+
+function formatCrmActivityContent(moduleApiName: string, record: ZohoRecord): string {
+  const title = getRecordName(moduleApiName, record);
+  const normalized = normalizeModuleApiName(moduleApiName);
+  const lines = [`# ${title} (${titleCase(moduleApiName)})`];
+  const metadata = activityMetadata(normalized, record);
+
+  if (metadata.length > 0) {
+    lines.push("", metadata.join(" | "));
+  }
+
+  const body = activityBody(record);
+  if (body) {
+    lines.push("", "## Description", body);
+  }
+
+  const content = lines.join("\n");
+  return content.length <= CONTENT_LIMIT ? content : `${content.slice(0, CONTENT_LIMIT - 12).trimEnd()}\n[truncated]`;
+}
+
+function activityBody(record: ZohoRecord): string | null {
+  return fieldValue(record.Description) ?? fieldValue(record.Note_Content);
+}
+
+function metadataPart(label: string, value: unknown): string | null {
+  const rendered = fieldValue(value);
+  return rendered ? `${label}: ${rendered}` : null;
+}
+
+function activityMetadata(normalizedModuleApiName: string, record: ZohoRecord): string[] {
+  const common = [
+    metadataPart("Owner", record.Owner),
+    metadataPart("Related", record.What_Id ?? record.Parent_Id),
+    metadataPart("Contact", record.Who_Id),
+  ];
+  const byModule: Record<string, Array<string | null>> = {
+    tasks: [
+      metadataPart("Status", record.Status),
+      metadataPart("Priority", record.Priority),
+      metadataPart("Due", record.Due_Date),
+      ...common,
+    ],
+    notes: [metadataPart("Parent", record.Parent_Id), metadataPart("Owner", record.Owner)],
+    calls: [
+      metadataPart("Type", record.Call_Type),
+      metadataPart("Start", record.Call_Start_Time),
+      metadataPart("Duration", record.Call_Duration),
+      ...common,
+    ],
+    events: [metadataPart("Start", record.Start_DateTime), metadataPart("End", record.End_DateTime), ...common],
+    meetings: [metadataPart("Start", record.Start_DateTime), metadataPart("End", record.End_DateTime), ...common],
+  };
+  return (byModule[normalizedModuleApiName] ?? common).filter((part): part is string => Boolean(part));
 }
 
 export function extractPeopleFromRecord(moduleApiName: string, record: ZohoRecord): PersonEntitySeed[] {
@@ -586,6 +662,7 @@ function relationshipsForRecord(moduleApiName: string, record: ZohoRecord): NonN
 function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, orgName?: string): SyncedItem | null {
   if (!record.id) return null;
   const content = formatCrmRecordContent(module.apiName, record);
+  const contentCategory = isActivityModule(module.apiName) && activityBody(record) ? "document" : "structured";
   const entitySeeds = entitySeedsForRecord(module.apiName, record);
   const personSeeds = extractPeopleFromRecord(module.apiName, record);
   const parentEntities = extractParentEntities(module.apiName, record);
@@ -596,12 +673,14 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
     providerUrl: null,
     fileName: getRecordName(module.apiName, record),
     fileType: moduleToFileType(module.apiName),
-    contentCategory: "structured",
+    contentCategory,
     content,
     sourcePath: sourcePath(orgName, module.label),
     contentHash: contentHash(
       JSON.stringify({
+        rendererVersion: RENDERER_VERSION,
         content,
+        contentCategory,
         modifiedTime: record.Modified_Time ?? null,
         entitySeeds,
         personSeeds,

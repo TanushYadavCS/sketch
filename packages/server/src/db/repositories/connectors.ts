@@ -362,8 +362,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .executeTakeFirst();
 
       if (existing) {
-        // If content changed, mark for re-embedding
         const contentChanged = data.contentHash !== existing.content_hash;
+        const categoryChanged = data.contentCategory !== existing.content_category;
         const updates: Record<string, unknown> = {
           provider_file_id: data.providerFileId,
           provider_message_id: data.providerMessageId ?? null,
@@ -381,7 +381,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
-        if (contentChanged) {
+        if (contentChanged || categoryChanged) {
           updates.embedding_status = "pending";
           updates.summary_status = "pending";
           updates.embedding_attempts = 0;
@@ -392,7 +392,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
         await db.updateTable("indexed_files").set(updates).where("id", "=", existing.id).execute();
 
-        return { id: existing.id, created: false, contentChanged };
+        return { id: existing.id, created: false, contentChanged, categoryChanged };
       }
 
       const id = randomUUID();
@@ -421,7 +421,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         })
         .execute();
 
-      return { id, created: true, contentChanged: false };
+      return { id, created: true, contentChanged: false, categoryChanged: false };
     },
 
     /** Link a connector to a file (many-to-many). Idempotent. */

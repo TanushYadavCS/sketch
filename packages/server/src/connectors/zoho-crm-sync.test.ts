@@ -68,6 +68,7 @@ describe("Zoho CRM connector sync integration", () => {
               { api_name: "Deal_Name" },
               { api_name: "Full_Name" },
               { api_name: "Subject" },
+              { api_name: "Description" },
               { api_name: "What_Id" },
               { api_name: "Who_Id" },
             ],
@@ -137,6 +138,7 @@ describe("Zoho CRM connector sync integration", () => {
                 id: "t1",
                 Subject: "Follow up on renewal",
                 Status: "Not Started",
+                Description: "Confirm renewal paperwork and next meeting date.",
                 What_Id: { id: "d1", name: "Acme renewal", $se_module: "Deals" },
                 Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
                 Owner: { id: "u1", name: "Owner One" },
@@ -217,9 +219,9 @@ describe("Zoho CRM connector sync integration", () => {
       },
       {
         providerFileId: "Tasks:t1",
-        fileName: "Follow up on renewal",
+        fileName: "Follow up on renewal - Jane Buyer",
         fileType: "crm_task",
-        contentCategory: "structured",
+        contentCategory: "document",
         sourcePath: "Zoho CRM / Zoho in / Tasks",
         providerUrl: null,
       },
@@ -229,8 +231,10 @@ describe("Zoho CRM connector sync integration", () => {
     expect(files[2].content).toContain("Stage: Negotiation");
     expect(files[2].source_created_at).toBe("2026-01-01T00:00:00+05:30");
     expect(files[2].source_updated_at).toBe("2026-01-02T00:00:00+05:30");
-    expect(files[3].content).toContain("# Follow up on renewal (Tasks)");
+    expect(files[3].content).toContain("# Follow up on renewal - Jane Buyer (Tasks)");
     expect(files[3].content).toContain("Status: Not Started");
+    expect(files[3].content).toContain("Confirm renewal paperwork and next meeting date.");
+    expect(files[3].content).not.toContain("Additional Fields");
 
     const connectorFiles = await db
       .selectFrom("connector_files")

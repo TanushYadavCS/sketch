@@ -123,6 +123,40 @@ describe("Zoho CRM connector", () => {
     expect(content).not.toContain("{");
   });
 
+  it("formats CRM activities with curated metadata and relation-aware names", () => {
+    const task = formatCrmRecordContent("Tasks", {
+      id: "t1",
+      Subject: "Need to call",
+      Status: "Completed",
+      Priority: "High",
+      Due_Date: "2026-01-10",
+      What_Id: { id: "d1", name: "Acme renewal", $se_module: "Deals" },
+      Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+      Owner: { id: "u1", name: "Owner One" },
+      Description: "Discuss renewal timeline.",
+      Send_Notification_Email: true,
+      Modified_By: { id: "u2", name: "System User" },
+      Last_Activity_Time: "2026-01-11T00:00:00+05:30",
+    });
+
+    expect(task).toContain("# Need to call - Jane Buyer (Tasks)");
+    expect(task).toContain("Status: Completed | Priority: High | Due: 2026-01-10");
+    expect(task).toContain("Related: Acme renewal | Contact: Jane Buyer");
+    expect(task).toContain("Discuss renewal timeline.");
+    expect(task).not.toContain("Additional Fields");
+    expect(task).not.toContain("Send Notification Email");
+    expect(task).not.toContain("Modified By");
+    expect(task).not.toContain("Last Activity Time");
+
+    const call = formatCrmRecordContent("Calls", {
+      id: "call1",
+      Subject: "Outgoing call to Jane Buyer",
+      Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+    });
+    expect(call).toContain("# Outgoing call to Jane Buyer (Calls)");
+    expect(call).not.toContain("Outgoing call to Jane Buyer - Jane Buyer");
+  });
+
   it("extracts parent entities for deals, contacts, and CRM activities", () => {
     expect(extractParentEntities("Deals", { id: "d1", Account_Name: { id: "a1", name: "Acme" } })).toEqual([
       { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "Deal account" },
@@ -188,6 +222,7 @@ describe("Zoho CRM connector", () => {
               { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true },
               { api_name: "Deals", plural_label: "Deals", status: "visible", api_supported: true },
               { api_name: "Tasks", plural_label: "Tasks", status: "visible", api_supported: true },
+              { api_name: "Notes", plural_label: "Notes", status: "visible", api_supported: true },
             ],
           }),
         );
@@ -200,6 +235,9 @@ describe("Zoho CRM connector", () => {
               { api_name: "Deal_Name" },
               { api_name: "Full_Name" },
               { api_name: "Subject" },
+              { api_name: "Description" },
+              { api_name: "Note_Content" },
+              { api_name: "Parent_Id" },
               { api_name: "What_Id" },
               { api_name: "Who_Id" },
             ],
@@ -254,6 +292,7 @@ describe("Zoho CRM connector", () => {
                 Account_Name: { id: "a1", name: "Acme Corp" },
                 Contact_Name: { id: "c1", name: "Jane Buyer" },
                 Stage: "Negotiation",
+                Description: "Structured deal description stays structured.",
                 Modified_Time: "2026-01-02T00:00:00+05:30",
               },
             ],
@@ -278,6 +317,22 @@ describe("Zoho CRM connector", () => {
           }),
         );
       }
+      if (url.includes("/Notes?")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: [
+              {
+                id: "n1",
+                Note_Title: "Renewal context",
+                Note_Content: "Jane prefers annual billing with quarterly reviews.",
+                Parent_Id: { id: "d1", name: "Acme renewal", $se_module: "Deals" },
+                Modified_Time: "2026-01-02T00:00:00+05:30",
+              },
+            ],
+            info: { more_records: false },
+          }),
+        );
+      }
       return Promise.resolve(new Response("not found", { status: 404 }));
     });
 
@@ -293,12 +348,19 @@ describe("Zoho CRM connector", () => {
       items.push(item);
     }
 
-    expect(items.map((item) => item.providerFileId)).toEqual(["Accounts:a1", "Contacts:c1", "Deals:d1", "Tasks:t1"]);
+    expect(items.map((item) => item.providerFileId)).toEqual([
+      "Accounts:a1",
+      "Contacts:c1",
+      "Deals:d1",
+      "Tasks:t1",
+      "Notes:n1",
+    ]);
     expect(items[0]).toMatchObject({
       fileType: "crm_account",
       contentCategory: "structured",
       sourcePath: "Zoho CRM / Zoho in / Accounts",
     });
+    expect(items[2]).toMatchObject({ fileType: "crm_deal", contentCategory: "structured" });
     expect(items[1].parentEntities).toEqual([
       { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "Contact account" },
     ]);
@@ -308,12 +370,21 @@ describe("Zoho CRM connector", () => {
     ]);
     expect(items[3]).toMatchObject({
       fileType: "crm_task",
+      fileName: "Follow up on renewal - Jane Buyer",
+      contentCategory: "structured",
       parentEntities: [
         { source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM activity parent" },
         { source: "zoho_crm", sourceId: "Contacts:c1", contextSnippet: "CRM activity participant" },
       ],
       assignees: [{ name: "Owner One", email: "owner@sketch.test", source: "zoho_crm", sourceId: "user:u1" }],
     });
+    expect(items[4]).toMatchObject({
+      fileType: "crm_note",
+      fileName: "Renewal context - Acme renewal",
+      contentCategory: "document",
+      parentEntities: [{ source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM note parent" }],
+    });
+    expect(items[4].content).toContain("Jane prefers annual billing with quarterly reviews.");
     expect(fetchSpy).toHaveBeenCalled();
   });
 
