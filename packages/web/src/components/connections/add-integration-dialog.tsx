@@ -18,6 +18,7 @@ import { Input } from "@sketch/ui/components/input";
 import { getAbbreviation } from "@sketch/ui/lib/utils";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { isOwnedOrPersonalAppConnection } from "./connection-status";
 
 type AddIntegrationStep =
   | { kind: "search" }
@@ -156,7 +157,7 @@ export function AddIntegrationDialog({
       const verifyConnection = async () => {
         try {
           const connections = await api.mcpServers.listConnections(providerId);
-          const connected = connections.some((c) => c.appId === app.id);
+          const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
           if (cancelledRef.current) return;
           if (connected) {
             toast.success("App connected successfully!");

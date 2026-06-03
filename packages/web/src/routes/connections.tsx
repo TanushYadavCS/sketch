@@ -11,6 +11,7 @@ import { ConnectionsBanner } from "@/components/connections-banner";
 import { AddIntegrationDialog } from "@/components/connections/add-integration-dialog";
 import { AddMcpDialog } from "@/components/connections/add-mcp-dialog";
 import { AddProviderDialog, ProviderSelectorDialog } from "@/components/connections/add-provider-dialog";
+import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
 import { EditMcpDialog } from "@/components/connections/edit-mcp-dialog";
 import { EditProviderDialog } from "@/components/connections/edit-provider-dialog";
 import {
@@ -70,19 +71,10 @@ function ConnectionsCallback() {
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
 
-export function getPersonallyConnectedAppIds(
-  connections: IntegrationConnection[],
-  accessSettingsEnabled = true,
-): Set<string> {
+export function getPersonallyConnectedAppIds(connections: IntegrationConnection[]): Set<string> {
   return new Set(
     connections
-      .filter(
-        (connection) =>
-          !accessSettingsEnabled ||
-          connection.source !== "canvas_user_secrets" ||
-          connection.accessLevel !== "organization" ||
-          connection.isOwnedByViewer !== false,
-      )
+      .filter((connection) => isOwnedOrPersonalAppConnection(connection))
       .map((connection) => connection.appId),
   );
 }
@@ -121,7 +113,6 @@ function ConnectionsPage() {
   });
 
   const connections = connectionsQuery.data ?? [];
-  const accessSettingsEnabled = setupStatusQuery.data?.experimentalFlag === true;
 
   const envVarsQuery = useQuery({
     queryKey: ["agent-environment-variables"],
@@ -221,7 +212,6 @@ function ConnectionsPage() {
                   onAdd={() => setShowAddIntegrationDialog(true)}
                   providerId={provider.id}
                   orgName={setupStatusQuery.data?.orgName ?? undefined}
-                  accessSettingsEnabled={accessSettingsEnabled}
                   onDisconnect={invalidateAll}
                 />
               </>
@@ -331,7 +321,7 @@ function ConnectionsPage() {
           open={showAddIntegrationDialog}
           onOpenChange={setShowAddIntegrationDialog}
           providerId={provider.id}
-          connectedAppIds={getPersonallyConnectedAppIds(connections, accessSettingsEnabled)}
+          connectedAppIds={getPersonallyConnectedAppIds(connections)}
           onSuccess={invalidateAll}
         />
       )}

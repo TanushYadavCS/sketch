@@ -986,7 +986,7 @@ describe("MCP Servers API", () => {
   // --- PATCH /api/mcp-servers/:id/connections/:connectionId/access ---
 
   describe("PATCH /api/mcp-servers/:id/connections/:connectionId/access", () => {
-    it("is not mounted when experimental features are disabled", async () => {
+    it("is mounted when experimental features are disabled", async () => {
       await seedAdmin(db);
       const repo = createMcpServerRepository(db);
       const server = await repo.create({
@@ -997,16 +997,39 @@ describe("MCP Servers API", () => {
         credentials: JSON.stringify({ apiKey: "sk-test" }),
       });
 
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn(),
+        initiateConnection: vi.fn(),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        updateConnectionAccess: vi.fn().mockResolvedValue(null),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
       const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: false }));
       const memberCookie = await getMemberCookie(db);
 
-      const res = await app.request(`/api/mcp-servers/${server.id}/connections/pd-1/access`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ accessLevel: "organization" }),
-      });
+      const res = await app.request(
+        `/api/mcp-servers/${server.id}/connections/secrets%3Aowner%3Agithub%3Agithub/access`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: memberCookie },
+          body: JSON.stringify({ accessLevel: "organization" }),
+        },
+      );
 
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(200);
+      expect(mockProvider.updateConnectionAccess).toHaveBeenCalledWith(
+        "member@test.com",
+        "secrets:owner:github:github",
+        "organization",
+        "Test Member",
+      );
     });
 
     it("forwards the member email and requested access level to the provider", async () => {
