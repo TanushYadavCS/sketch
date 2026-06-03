@@ -37,7 +37,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(74);
+    expect(rows.rows).toHaveLength(75);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -105,6 +105,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[71]).toBe("076-slack-conversation-thread-metadata");
     expect(names[72]).toBe("077-scheduled-task-output-thread");
     expect(names[73]).toBe("078-local-devices");
+    expect(names[74]).toBe("079-conversation-message-search");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -120,7 +121,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       const rows = await sql<{ name: string }>`
         SELECT name FROM kysely_migration ORDER BY name ASC
       `.execute(freshDb);
-      expect(rows.rows).toHaveLength(74);
+      expect(rows.rows).toHaveLength(75);
     } finally {
       await freshDb.destroy();
     }
@@ -258,6 +259,19 @@ describe("runMigrations on Postgres — search schema", () => {
     expect(result.rows[0].data_type).toBe("tsvector");
   });
 
+  it("conversation_messages has a search_vector column of type tsvector", async () => {
+    const result = await sql<{ column_name: string; data_type: string; udt_name: string }>`
+      SELECT column_name, data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'conversation_messages'
+        AND column_name = 'search_vector'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].data_type).toBe("tsvector");
+  });
+
   it("a GIN index exists on the search_vector column of indexed_files", async () => {
     const result = await sql<{ indexname: string; indexdef: string }>`
       SELECT indexname, indexdef
@@ -269,6 +283,19 @@ describe("runMigrations on Postgres — search schema", () => {
     expect(result.rows.length).toBeGreaterThanOrEqual(1);
     const hasSearchVectorIndex = result.rows.some((r) => r.indexdef.includes("search_vector"));
     expect(hasSearchVectorIndex).toBe(true);
+  });
+
+  it("a GIN index exists on the search_vector column of conversation_messages", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE tablename = 'conversation_messages'
+        AND indexname = 'conversation_messages_search_vector_idx'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].indexdef).toContain("USING gin");
+    expect(result.rows[0].indexdef).toContain("search_vector");
   });
 
   it("chunk_embeddings table exists with chunk_id (text PK) and embedding (vector type) columns", async () => {

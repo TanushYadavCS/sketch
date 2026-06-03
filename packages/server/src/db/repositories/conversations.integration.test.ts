@@ -171,6 +171,184 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(withBot.nextCursor).toBe(bot.row.id);
     });
 
+    it("searches messages by text and sender name within the current conversation", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "group@g.us",
+      });
+      const otherConversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "other@g.us",
+      });
+
+      const match = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "u1",
+        senderJid: "111@s.whatsapp.net",
+        senderName: "Alice",
+        text: "We decided the launch budget is approved",
+      });
+      await repo.insertMessage({
+        conversationId: otherConversation.id,
+        providerMessageId: "u2",
+        senderJid: "222@s.whatsapp.net",
+        senderName: "Bob",
+        text: "launch budget in a different group",
+      });
+      await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "u3",
+        senderJid: "333@s.whatsapp.net",
+        senderName: "Carol",
+        text: "unrelated notes",
+      });
+
+      const byText = await repo.searchMessages(conversation.id, { query: "launch budget" });
+      const bySender = await repo.searchMessages(conversation.id, { query: "Alice" });
+
+      expect(byText.messages.map((m) => m.id)).toContain(match.row.id);
+      expect(byText.messages.every((m) => m.conversationId === conversation.id)).toBe(true);
+      expect(bySender.messages.map((m) => m.id)).toContain(match.row.id);
+      expect(byText.hasMore).toBe(false);
+      expect(typeof byText.messages[0].rank).toBe("number");
+    });
+
+    it("searches with bot exclusion by default and optional bot inclusion", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+
+      await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "u1",
+        senderJid: "U1",
+        senderName: "Alice",
+        text: "deployment notes",
+      });
+      const bot = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "b1",
+        senderJid: "bot",
+        senderName: "Sketch",
+        text: "deployment answer from Sketch",
+        isBot: true,
+      });
+
+      const withoutBot = await repo.searchMessages(conversation.id, { query: "Sketch deployment" });
+      const withBot = await repo.searchMessages(conversation.id, {
+        query: "Sketch deployment",
+        includeBotMessages: true,
+      });
+
+      expect(withoutBot.messages.map((m) => m.id)).not.toContain(bot.row.id);
+      expect(withBot.messages.map((m) => m.id)).toContain(bot.row.id);
+    });
+
+    it("searches with row-id bounds and Slack current-thread filtering", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+
+      const older = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1",
+        senderJid: "U1",
+        senderName: "Alice",
+        text: "demo plan older",
+        providerThreadId: "thread-a",
+      });
+      const currentThread = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "2",
+        senderJid: "U2",
+        senderName: "Bob",
+        text: "demo plan current thread",
+        providerThreadId: "thread-a",
+        providerParentMessageId: "thread-a",
+        isThreadReply: true,
+      });
+      await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "3",
+        senderJid: "U3",
+        senderName: "Carol",
+        text: "demo plan other thread",
+        providerThreadId: "thread-b",
+      });
+
+      const result = await repo.searchMessages(conversation.id, {
+        query: "demo plan",
+        afterMessageId: older.row.id,
+        providerThreadId: "thread-a",
+      });
+
+      expect(result.messages.map((m) => m.id)).toEqual([currentThread.row.id]);
+      expect(result.messages[0].providerThreadId).toBe("thread-a");
+    });
+
+    it("searches ambient top-level Slack channel messages with conversation scope", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+
+      const topLevel = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1",
+        senderJid: "U1",
+        senderName: "Alice",
+        text: "passive top-level roadmap note",
+        providerThreadId: "1",
+      });
+
+      const result = await repo.searchMessages(conversation.id, { query: "roadmap" });
+
+      expect(result.messages.map((m) => m.id)).toContain(topLevel.row.id);
+      expect(result.messages[0].providerThreadId).toBe("1");
+    });
+
+    it("returns empty results for no matches and handles special query characters safely", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "111@s.whatsapp.net",
+      });
+      await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "u1",
+        senderJid: "111@s.whatsapp.net",
+        senderName: "Alice",
+        text: "planning notes café mañana 北京",
+      });
+
+      const noMatch = await repo.searchMessages(conversation.id, { query: "xyzzyquux" });
+      const special = await repo.searchMessages(conversation.id, { query: "planning & notes (planning) -- notes:" });
+      const safeQueries = ["planning OR", "planning AND", "NOT planning", "planning OR notes"];
+      const unicodeQueries = ["café", "mañana", "北京"];
+
+      expect(noMatch.messages).toHaveLength(0);
+      expect(special.messages.length).toBeGreaterThan(0);
+      for (const query of safeQueries) {
+        await expect(repo.searchMessages(conversation.id, { query })).resolves.toBeDefined();
+      }
+      for (const query of unicodeQueries) {
+        const result = await repo.searchMessages(conversation.id, { query });
+        expect(result.messages.length).toBeGreaterThan(0);
+      }
+    });
+
     it("advances the watermark to the current max message id", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({

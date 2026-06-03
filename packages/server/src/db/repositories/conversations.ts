@@ -1,5 +1,6 @@
-import type { Insertable, Kysely, Selectable } from "kysely";
+import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
 import type { Attachment } from "../../files";
+import { isPg } from "../dialect";
 import type { ConversationCursorsTable, ConversationMessagesTable, ConversationsTable, DB } from "../schema";
 
 export type ConversationRow = Selectable<ConversationsTable>;
@@ -57,6 +58,23 @@ export interface ListConversationMessagesOptions {
   providerThreadId?: string | null;
 }
 
+export interface SearchConversationMessagesOptions {
+  query: string;
+  afterMessageId?: number;
+  beforeMessageId?: number;
+  limit?: number;
+  includeBotMessages?: boolean;
+  providerThreadId?: string | null;
+}
+
+export interface SearchConversationMessageResult extends StoredConversationMessage {
+  rank: number;
+}
+
+interface RankedConversationMessageRow extends ConversationMessageRow {
+  rank: number;
+}
+
 function parseAttachments(value: string | null): Attachment[] {
   if (!value) return [];
 
@@ -97,6 +115,19 @@ function messageUniqueWhere(db: Kysely<DB>, data: ConversationMessageInsert) {
     .where("provider_message_id", "=", data.providerMessageId)
     .where("sender_jid", "=", data.senderJid ?? "")
     .where("is_bot", "=", data.isBot ? 1 : 0);
+}
+
+function sanitizePostgresWebsearchQuery(input: string): string {
+  return input.split("\0").join(" ").replace(/\s+/g, " ").trim();
+}
+
+function sanitizeSqliteFtsQuery(input: string): string {
+  const words = input.match(/[\p{L}\p{N}_]+/gu)?.filter((word) => !/^(OR|AND|NOT|NEAR)$/i.test(word)) ?? [];
+  return words.join(" OR ");
+}
+
+function rankedToStored(row: RankedConversationMessageRow): SearchConversationMessageResult {
+  return { ...toStored(row), rank: Number(row.rank) };
 }
 
 export function createConversationRepository(db: Kysely<DB>) {
@@ -226,6 +257,106 @@ export function createConversationRepository(db: Kysely<DB>) {
         messages,
         hasMore,
         nextCursor: hasMore ? visibleRows[visibleRows.length - 1]?.id : undefined,
+      };
+    },
+
+    async searchMessages(
+      conversationId: number,
+      options: SearchConversationMessagesOptions,
+    ): Promise<{ messages: SearchConversationMessageResult[]; hasMore: boolean }> {
+      const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+      const threadFilter =
+        options.providerThreadId === undefined
+          ? sql``
+          : options.providerThreadId === null
+            ? sql`AND m.provider_thread_id IS NULL`
+            : sql`AND m.provider_thread_id = ${options.providerThreadId}`;
+      const afterFilter = options.afterMessageId === undefined ? sql`` : sql`AND m.id > ${options.afterMessageId}`;
+      const beforeFilter = options.beforeMessageId === undefined ? sql`` : sql`AND m.id < ${options.beforeMessageId}`;
+      const botFilter = options.includeBotMessages ? sql`` : sql`AND m.is_bot = 0`;
+
+      if (isPg(db)) {
+        const pgQuery = sanitizePostgresWebsearchQuery(options.query);
+        if (!pgQuery) return { messages: [], hasMore: false };
+
+        const rows = await sql<RankedConversationMessageRow>`
+          WITH q AS (
+            SELECT websearch_to_tsquery('simple', ${pgQuery}) AS query
+          )
+          SELECT
+            m.id,
+            m.conversation_id,
+            m.provider_message_id,
+            m.sender_jid,
+            m.sender_name,
+            m.sender_user_id,
+            m.is_bot,
+            m.addressed_to_sketch,
+            m.text,
+            m.attachments,
+            m.provider_thread_id,
+            m.provider_parent_message_id,
+            m.is_thread_reply,
+            m.provider_timestamp,
+            m.received_at,
+            m.created_at,
+            ts_rank(m.search_vector, q.query) AS rank
+          FROM conversation_messages m, q
+          WHERE m.conversation_id = ${conversationId}
+            ${botFilter}
+            ${afterFilter}
+            ${beforeFilter}
+            ${threadFilter}
+            AND m.search_vector @@ q.query
+          ORDER BY rank DESC, m.id DESC
+          LIMIT ${limit + 1}
+        `.execute(db);
+
+        const visibleRows = rows.rows.slice(0, limit);
+        return {
+          messages: visibleRows.map(rankedToStored),
+          hasMore: rows.rows.length > limit,
+        };
+      }
+
+      const ftsQuery = sanitizeSqliteFtsQuery(options.query);
+      if (!ftsQuery) return { messages: [], hasMore: false };
+
+      const rows = await sql<RankedConversationMessageRow>`
+        SELECT
+          m.id,
+          m.conversation_id,
+          m.provider_message_id,
+          m.sender_jid,
+          m.sender_name,
+          m.sender_user_id,
+          m.is_bot,
+          m.addressed_to_sketch,
+          m.text,
+          m.attachments,
+          m.provider_thread_id,
+          m.provider_parent_message_id,
+          m.is_thread_reply,
+          m.provider_timestamp,
+          m.received_at,
+          m.created_at,
+          bm25(conversation_messages_fts, 5.0, 1.0) AS rank
+        FROM conversation_messages_fts
+        INNER JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
+        WHERE conversation_messages_fts MATCH ${ftsQuery}
+          AND m.conversation_id = ${conversationId}
+          ${botFilter}
+          ${afterFilter}
+          ${beforeFilter}
+          ${threadFilter}
+        ORDER BY rank, m.id DESC
+        LIMIT ${limit + 1}
+      `.execute(db);
+
+      const visibleRows = rows.rows.slice(0, limit);
+      return {
+        messages: visibleRows.map(rankedToStored),
+        hasMore: rows.rows.length > limit,
       };
     },
 

@@ -60,7 +60,7 @@ type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
-const INLINE_BACKLOG_LIMIT = 25;
+const INLINE_BACKLOG_LIMIT = 10;
 const SLACK_THREAD_CURSOR_SCOPE = "slack_thread";
 const SLACK_AGENT_ERROR_MESSAGE = "_Something went wrong, try again_";
 
@@ -661,7 +661,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           currentUserId: user.id,
           sendDm,
           conversationRepo: repos.conversations,
-          conversationContext: { conversationId: capture.conversation.id },
+          conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
         });
 
         if (result.trace.finalText) {
@@ -980,6 +980,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           conversationRepo: repos.conversations,
           conversationContext: {
             conversationId: capture.conversation.id,
+            currentMessageId: capture.captured.id,
             providerThreadId: message.threadTs ? threadTs : undefined,
           },
         });

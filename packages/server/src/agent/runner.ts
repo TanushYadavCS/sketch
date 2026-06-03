@@ -187,6 +187,7 @@ export interface RunAgentParams {
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
+    currentMessageId?: number;
     providerThreadId?: string | null;
   };
 }

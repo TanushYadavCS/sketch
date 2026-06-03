@@ -56,7 +56,7 @@ type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
-const INLINE_BACKLOG_LIMIT = 25;
+const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
@@ -502,7 +502,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             agentInstructions,
             agentAllowedTools,
             conversationRepo: repos.conversations,
-            conversationContext: { conversationId: capture.conversation.id },
+            conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
@@ -786,7 +786,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           agentInstructions,
           agentAllowedTools,
           conversationRepo: repos.conversations,
-          conversationContext: { conversationId: capture.conversation.id },
+          conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });

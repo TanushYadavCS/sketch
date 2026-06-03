@@ -176,6 +176,13 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(["💬 Reading Chat History"]);
   });
 
+  it("renders chat history searches with the query", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__SearchChatHistory", input: { query: "launch budget" } },
+    ]);
+    expect(lines).toEqual(['🔎 Searching chat history for "launch budget"']);
+  });
+
   it("renders local Mac commands without echoing the command", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "mcp__sketch__local_run_command", input: { command: "cat ~/.ssh/id_rsa" } },

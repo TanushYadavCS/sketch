@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(74);
+      expect(logSpy).toHaveBeenCalledTimes(75);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(74);
+    expect(rows.rows).toHaveLength(75);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -128,6 +128,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[71]).toBe("076-slack-conversation-thread-metadata");
     expect(names[72]).toBe("077-scheduled-task-output-thread");
     expect(names[73]).toBe("078-local-devices");
+    expect(names[74]).toBe("079-conversation-message-search");
   });
 
   it("creates the users table", async () => {
@@ -143,7 +144,12 @@ describe("runMigrations — full sequence", () => {
   it("creates conversation capture tables", async () => {
     await runMigrations(db, { quiet: true });
 
-    for (const table of ["conversations", "conversation_messages", "conversation_cursors"]) {
+    for (const table of [
+      "conversations",
+      "conversation_messages",
+      "conversation_cursors",
+      "conversation_messages_fts",
+    ]) {
       const result = await sql<{ name: string }>`
         SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
       `.execute(db);
@@ -271,7 +277,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(74);
+    expect(rows.rows).toHaveLength(75);
   });
 });
 
@@ -303,6 +309,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(74);
+    expect(rows.rows).toHaveLength(75);
   });
 });

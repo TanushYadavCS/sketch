@@ -80,6 +80,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__SearchChatHistory",
+    label: "Search chat history",
+    description: "Search persisted messages in the current chat conversation.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__TranscribeAudio",
     label: "Transcribe audio",
     description: "Convert an audio attachment in the workspace into text.",

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { createReadChatHistoryTool } from "./tools/chat-history";
+import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
 import { createLocalRunCommandTool } from "./tools/local-command";
@@ -26,6 +26,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
   const tools = [
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps),
+    createSearchChatHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),

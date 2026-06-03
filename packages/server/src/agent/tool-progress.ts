@@ -34,6 +34,7 @@ const TOOL_EMOJI: Record<string, string> = {
   SearchEntities: "🔍",
   GetEntityContext: "📊",
   ReadChatHistory: "💬",
+  SearchChatHistory: "🔎",
   local_run_command: "💻",
 };
 
@@ -54,6 +55,7 @@ const PRIMARY_ARG: Record<string, string> = {
   ManageScheduledTasks: "action",
   SearchDeliveryTargets: "query",
   SearchEntities: "queries",
+  SearchChatHistory: "query",
 };
 
 const EXTRA_FALLBACK_ARG_KEYS = ["path", "folder"];
@@ -84,6 +86,11 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
     fallback: "Listing delivery targets",
   },
   SearchEntities: { prefix: "Searching entities for", keys: ["queries"], fallback: "Searching entities" },
+  SearchChatHistory: {
+    prefix: "Searching chat history for",
+    keys: ["query"],
+    fallback: "Searching chat history",
+  },
 };
 
 const FRIENDLY_STATIC_LINES: Record<string, string> = {

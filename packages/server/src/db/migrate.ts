@@ -78,6 +78,7 @@ import * as m075 from "./migrations/075-conversation-messages";
 import * as m076 from "./migrations/076-slack-conversation-thread-metadata";
 import * as m077 from "./migrations/077-scheduled-task-output-thread";
 import * as m078 from "./migrations/078-local-devices";
+import * as m079 from "./migrations/079-conversation-message-search";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -160,6 +161,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "076-slack-conversation-thread-metadata": m076,
           "077-scheduled-task-output-thread": m077,
           "078-local-devices": m078,
+          "079-conversation-message-search": m079,
         };
       },
     },

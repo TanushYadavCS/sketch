@@ -100,6 +100,76 @@ describe("createSketchMcpServer", () => {
     expect(server.instance).toBeDefined();
   });
 
+  it("exposes chat history read and search tools", () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });
+    const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+    expect(tools.ReadChatHistory).toBeDefined();
+    expect(tools.SearchChatHistory).toBeDefined();
+  });
+
+  it("SearchChatHistory searches the scoped conversation", async () => {
+    const collector = new UploadCollector();
+    const searchMessages = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          id: 7,
+          conversationId: 1,
+          providerMessageId: "m1",
+          senderJid: "U1",
+          senderName: "Alice",
+          senderUserId: "user-1",
+          isBot: false,
+          addressedToSketch: false,
+          text: "launch budget approved",
+          attachments: [],
+          providerThreadId: "thread-1",
+          providerParentMessageId: null,
+          isThreadReply: false,
+          providerTimestamp: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+          createdAt: "2026-01-01T00:00:01.000Z",
+          rank: 0.5,
+        },
+      ],
+      hasMore: false,
+    });
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      conversationRepo: { searchMessages } as never,
+      conversationContext: { conversationId: 1, currentMessageId: 12, providerThreadId: "thread-1" },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (input: {
+              query: string;
+              scope?: "conversation" | "current_thread";
+            }) => Promise<{ content: { text: string }[] }>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.SearchChatHistory.handler({ query: "launch", scope: "current_thread" });
+
+    expect(searchMessages).toHaveBeenCalledWith(1, {
+      query: "launch",
+      afterMessageId: undefined,
+      beforeMessageId: 12,
+      limit: undefined,
+      includeBotMessages: undefined,
+      providerThreadId: "thread-1",
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      messages: [{ id: 7, rank: 0.5, text: "launch budget approved", providerThreadId: "thread-1" }],
+      hasMore: false,
+    });
+  });
+
   it("does not expose TranscribeAudio when transcription is disabled", () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });

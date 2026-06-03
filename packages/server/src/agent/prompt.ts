@@ -105,7 +105,7 @@ function buildConversationBacklogNotice(params: ConversationBacklogContext): str
   ];
   if (params.hasMore) {
     lines.push(
-      `Only ${params.messages.length} missed messages are inlined. Use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false to continue.`,
+      `Only ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For chronological continuation, use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false.`,
     );
   }
   return lines.join("\n");
@@ -346,6 +346,19 @@ export function buildSystemContext(params: {
     "## Shared Contexts",
     "",
     "In shared channels and groups, multiple people may see your response. Use the current sender and recent history to understand who is asking and what context they already have. Keep replies concise and avoid revealing private context that is not present in the shared conversation.",
+  );
+
+  sections.push(
+    "",
+    "## Chat History",
+    "",
+    "Use SearchChatHistory to find relevant stored chat messages by keyword, topic, decision, person, project, or older/wider chat reference in the current conversation.",
+    "When a user asks about a named topic, decision, person, project, phrase, or older chat reference that is not already visible, you must call SearchChatHistory first. Do not page through chat history with ReadChatHistory as the first step for targeted lookup.",
+    "Use ReadChatHistory for chronological paging, missed-message continuation, or reading around a known chat message row id.",
+    'For Slack thread-local questions, use SearchChatHistory with scope: "current_thread" when active thread metadata is available.',
+    'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
+    "SearchChatHistory is scoped to the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
+    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id.",
   );
 
   sections.push(

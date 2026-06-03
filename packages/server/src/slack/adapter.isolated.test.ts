@@ -885,12 +885,13 @@ describe("slack/adapter", () => {
           conversationId: 1,
           afterMessageId: 10,
           beforeMessageId: 1,
+          limit: 10,
           providerThreadId: undefined,
         }),
       );
       expect(deps.runAgent).toHaveBeenCalledWith(
         expect.objectContaining({
-          conversationContext: { conversationId: 1, providerThreadId: undefined },
+          conversationContext: { conversationId: 1, currentMessageId: 1, providerThreadId: undefined },
         }),
       );
     });
@@ -917,12 +918,13 @@ describe("slack/adapter", () => {
           conversationId: 1,
           afterMessageId: 10,
           beforeMessageId: 1,
+          limit: 10,
           providerThreadId: "1",
         }),
       );
       expect(deps.runAgent).toHaveBeenCalledWith(
         expect.objectContaining({
-          conversationContext: { conversationId: 1, providerThreadId: "1" },
+          conversationContext: { conversationId: 1, currentMessageId: 1, providerThreadId: "1" },
         }),
       );
     });

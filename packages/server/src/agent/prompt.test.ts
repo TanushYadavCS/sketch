@@ -141,6 +141,21 @@ describe("buildSystemContext", () => {
     });
   });
 
+  describe("chat history section", () => {
+    it("distinguishes chronological reads from chat-history search", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("## Chat History");
+      expect(result).toContain("Use ReadChatHistory for chronological paging");
+      expect(result).toContain("Use SearchChatHistory to find relevant stored chat messages");
+      expect(result).toContain("must call SearchChatHistory first");
+      expect(result).toContain('scope: "current_thread"');
+      expect(result).toContain('scope: "conversation"');
+      expect(result).toContain("does not replace the existing Search tool");
+      expect(result).toContain("call ReadChatHistory around that row id");
+    });
+  });
+
   describe("scheduled tasks section", () => {
     it("includes scheduled tasks section", () => {
       const result = buildSystemContext({ platform: "slack" });
@@ -763,7 +778,10 @@ describe("buildSketchContext", () => {
       expect(result).toContain("<thread>");
       expect(result).toContain("after messageId 0 and before the current messageId 50");
       expect(result).toContain(
-        "Use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false to continue.",
+        "If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially.",
+      );
+      expect(result).toContain(
+        "For chronological continuation, use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false.",
       );
     });
   });

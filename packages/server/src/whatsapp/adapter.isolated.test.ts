@@ -1039,7 +1039,7 @@ describe("whatsapp/adapter", () => {
       await flush();
 
       expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
-        expect.objectContaining({ conversationId: 1, beforeMessageId: expect.any(Number) }),
+        expect.objectContaining({ conversationId: 1, beforeMessageId: expect.any(Number), limit: 10 }),
       );
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("Bob");
