@@ -88,7 +88,7 @@ export interface SyncedItem {
    * Structured assignee data for deterministic entity linking.
    * Each assignee is matched to a person entity and linked via entity_mentions.
    */
-  assignees?: Array<{ name: string; email?: string }>;
+  assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present; entries
@@ -154,7 +154,11 @@ export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>
 export type IndexedFileFactRaw =
   | { providerFileId: string; attendee: { name?: string; email?: string } }
   | { providerFileId: string; correspondent: { name?: string; email?: string; sourceId?: string } }
-  | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
+  | {
+      providerFileId: string;
+      assignee: { name: string; email?: string; source?: string; sourceId?: string };
+      sourceRefKey: string;
+    }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }

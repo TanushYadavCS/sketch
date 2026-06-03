@@ -55,6 +55,7 @@ describe("Zoho CRM connector sync integration", () => {
               { api_name: "Accounts", plural_label: "Accounts", status: "visible", api_supported: true },
               { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true },
               { api_name: "Deals", plural_label: "Deals", status: "visible", api_supported: true },
+              { api_name: "Tasks", plural_label: "Tasks", status: "visible", api_supported: true },
             ],
           }),
         );
@@ -62,7 +63,14 @@ describe("Zoho CRM connector sync integration", () => {
       if (url.includes("/settings/fields")) {
         return Promise.resolve(
           jsonResponse({
-            fields: [{ api_name: "Account_Name" }, { api_name: "Deal_Name" }, { api_name: "Full_Name" }],
+            fields: [
+              { api_name: "Account_Name" },
+              { api_name: "Deal_Name" },
+              { api_name: "Full_Name" },
+              { api_name: "Subject" },
+              { api_name: "What_Id" },
+              { api_name: "Who_Id" },
+            ],
           }),
         );
       }
@@ -121,14 +129,33 @@ describe("Zoho CRM connector sync integration", () => {
           }),
         );
       }
+      if (url.includes("/Tasks?")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: [
+              {
+                id: "t1",
+                Subject: "Follow up on renewal",
+                Status: "Not Started",
+                What_Id: { id: "d1", name: "Acme renewal", $se_module: "Deals" },
+                Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+                Owner: { id: "u1", name: "Owner One" },
+                Created_Time: "2026-01-01T00:00:00+05:30",
+                Modified_Time: "2026-01-02T00:00:00+05:30",
+              },
+            ],
+            info: { more_records: false },
+          }),
+        );
+      }
       return Promise.resolve(new Response("not found", { status: 404 }));
     });
 
     const result = await runConnectorSync(db, "zoho-crm-pr4", logger);
 
     expect(result).toMatchObject({
-      itemsProcessed: 3,
-      itemsCreated: 3,
+      itemsProcessed: 4,
+      itemsCreated: 4,
       itemsUpdated: 0,
       itemsArchived: 0,
       errors: [],
@@ -153,7 +180,7 @@ describe("Zoho CRM connector sync integration", () => {
       .orderBy("provider_file_id")
       .execute();
 
-    expect(files).toHaveLength(3);
+    expect(files).toHaveLength(4);
     expect(
       files.map((file) => ({
         providerFileId: file.provider_file_id,
@@ -188,19 +215,29 @@ describe("Zoho CRM connector sync integration", () => {
         sourcePath: "Zoho CRM / Zoho in / Deals",
         providerUrl: null,
       },
+      {
+        providerFileId: "Tasks:t1",
+        fileName: "Follow up on renewal",
+        fileType: "crm_task",
+        contentCategory: "structured",
+        sourcePath: "Zoho CRM / Zoho in / Tasks",
+        providerUrl: null,
+      },
     ]);
 
     expect(files[2].content).toContain("# Acme renewal (Deals)");
     expect(files[2].content).toContain("Stage: Negotiation");
     expect(files[2].source_created_at).toBe("2026-01-01T00:00:00+05:30");
     expect(files[2].source_updated_at).toBe("2026-01-02T00:00:00+05:30");
+    expect(files[3].content).toContain("# Follow up on renewal (Tasks)");
+    expect(files[3].content).toContain("Status: Not Started");
 
     const connectorFiles = await db
       .selectFrom("connector_files")
       .select(["connector_config_id", "indexed_file_id"])
       .where("connector_config_id", "=", "zoho-crm-pr4")
       .execute();
-    expect(connectorFiles).toHaveLength(3);
+    expect(connectorFiles).toHaveLength(4);
 
     const facts = await db
       .selectFrom("indexed_file_facts")
@@ -209,8 +246,16 @@ describe("Zoho CRM connector sync integration", () => {
       .orderBy("fact_type")
       .orderBy("relation")
       .orderBy("subject_source_id")
+      .orderBy("context_snippet")
       .execute();
     expect(facts).toEqual([
+      {
+        fact_type: "assignee",
+        relation: "assigned",
+        subject_source: "zoho_crm",
+        subject_source_id: "user:u1",
+        context_snippet: "Assigned to Owner One",
+      },
       {
         fact_type: "crm_relation",
         relation: "deal_for",
@@ -233,6 +278,34 @@ describe("Zoho CRM connector sync integration", () => {
         context_snippet: "Contact account",
       },
       {
+        fact_type: "parent_entity",
+        relation: "mentioned",
+        subject_source: "zoho_crm",
+        subject_source_id: "Accounts:a1",
+        context_snippet: "Contact account",
+      },
+      {
+        fact_type: "parent_entity",
+        relation: "mentioned",
+        subject_source: "zoho_crm",
+        subject_source_id: "Accounts:a1",
+        context_snippet: "Deal account",
+      },
+      {
+        fact_type: "parent_entity",
+        relation: "mentioned",
+        subject_source: "zoho_crm",
+        subject_source_id: "Contacts:c1",
+        context_snippet: "CRM activity participant",
+      },
+      {
+        fact_type: "parent_entity",
+        relation: "mentioned",
+        subject_source: "zoho_crm",
+        subject_source_id: "Deals:d1",
+        context_snippet: "CRM activity parent",
+      },
+      {
         fact_type: "person_seed",
         relation: "seeded",
         subject_source: "zoho_crm",
@@ -250,8 +323,22 @@ describe("Zoho CRM connector sync integration", () => {
         fact_type: "person_seed",
         relation: "seeded",
         subject_source: "zoho_crm",
+        subject_source_id: "Contacts:c1",
+        context_snippet: "Zoho CRM / Zoho in / Tasks",
+      },
+      {
+        fact_type: "person_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
         subject_source_id: "user:u1",
         context_snippet: "Zoho CRM / Zoho in / Contacts",
+      },
+      {
+        fact_type: "person_seed",
+        relation: "seeded",
+        subject_source: "zoho_crm",
+        subject_source_id: "user:u1",
+        context_snippet: "Zoho CRM / Zoho in / Tasks",
       },
       {
         fact_type: "structural_seed",
@@ -293,6 +380,21 @@ describe("Zoho CRM connector sync integration", () => {
       { source_name: "Acme renewal", target_name: "Acme Corp", relationship_type: "deal_for" },
       { source_name: "Acme renewal", target_name: "Jane Buyer", relationship_type: "primary_contact" },
       { source_name: "Jane Buyer", target_name: "Acme Corp", relationship_type: "works_at" },
+    ]);
+
+    const taskMentions = await db
+      .selectFrom("entity_mentions")
+      .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .select(["indexed_files.provider_file_id", "entities.name", "entity_mentions.relation", "entity_mentions.source"])
+      .where("indexed_files.provider_file_id", "=", "Tasks:t1")
+      .orderBy("entity_mentions.relation")
+      .orderBy("entities.name")
+      .execute();
+    expect(taskMentions).toEqual([
+      { provider_file_id: "Tasks:t1", name: "Owner One", relation: "assigned", source: "zoho_crm_assignee" },
+      { provider_file_id: "Tasks:t1", name: "Acme renewal", relation: "mentioned", source: "zoho_crm_parent_entity" },
+      { provider_file_id: "Tasks:t1", name: "Jane Buyer", relation: "mentioned", source: "zoho_crm_parent_entity" },
     ]);
 
     const config = await db

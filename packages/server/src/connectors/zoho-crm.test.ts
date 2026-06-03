@@ -123,12 +123,22 @@ describe("Zoho CRM connector", () => {
     expect(content).not.toContain("{");
   });
 
-  it("extracts parent entities for deals and contacts", () => {
+  it("extracts parent entities for deals, contacts, and CRM activities", () => {
     expect(extractParentEntities("Deals", { id: "d1", Account_Name: { id: "a1", name: "Acme" } })).toEqual([
       { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "Deal account" },
     ]);
     expect(extractParentEntities("Contacts", { id: "c1", Account_Name: { id: "a1", name: "Acme" } })).toEqual([
       { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "Contact account" },
+    ]);
+    expect(
+      extractParentEntities("Tasks", {
+        id: "t1",
+        What_Id: { id: "d1", name: "Acme renewal", $se_module: "Deals" },
+        Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+      }),
+    ).toEqual([
+      { source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM activity parent" },
+      { source: "zoho_crm", sourceId: "Contacts:c1", contextSnippet: "CRM activity participant" },
     ]);
   });
 
@@ -167,7 +177,7 @@ describe("Zoho CRM connector", () => {
     ]);
   });
 
-  it("syncs paginated standard modules with If-Modified-Since and no entity graph", async () => {
+  it("syncs paginated standard modules with If-Modified-Since and CRM graph hints", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url.endsWith("/settings/modules")) {
@@ -177,6 +187,7 @@ describe("Zoho CRM connector", () => {
               { api_name: "Accounts", plural_label: "Accounts", status: "visible", api_supported: true },
               { api_name: "Contacts", plural_label: "Contacts", status: "visible", api_supported: true },
               { api_name: "Deals", plural_label: "Deals", status: "visible", api_supported: true },
+              { api_name: "Tasks", plural_label: "Tasks", status: "visible", api_supported: true },
             ],
           }),
         );
@@ -184,7 +195,14 @@ describe("Zoho CRM connector", () => {
       if (url.includes("/settings/fields")) {
         return Promise.resolve(
           jsonResponse({
-            fields: [{ api_name: "Account_Name" }, { api_name: "Deal_Name" }, { api_name: "Full_Name" }],
+            fields: [
+              { api_name: "Account_Name" },
+              { api_name: "Deal_Name" },
+              { api_name: "Full_Name" },
+              { api_name: "Subject" },
+              { api_name: "What_Id" },
+              { api_name: "Who_Id" },
+            ],
           }),
         );
       }
@@ -243,6 +261,23 @@ describe("Zoho CRM connector", () => {
           }),
         );
       }
+      if (url.includes("/Tasks?")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: [
+              {
+                id: "t1",
+                Subject: "Follow up on renewal",
+                What_Id: { id: "d1", name: "Acme renewal", $se_module: "Deals" },
+                Who_Id: { id: "c1", name: "Jane Buyer", $se_module: "Contacts" },
+                Owner: { id: "u1", name: "Owner One", email: "owner@sketch.test" },
+                Modified_Time: "2026-01-02T00:00:00+05:30",
+              },
+            ],
+            info: { more_records: false },
+          }),
+        );
+      }
       return Promise.resolve(new Response("not found", { status: 404 }));
     });
 
@@ -258,14 +293,27 @@ describe("Zoho CRM connector", () => {
       items.push(item);
     }
 
-    expect(items.map((item) => item.providerFileId)).toEqual(["Accounts:a1", "Contacts:c1", "Deals:d1"]);
+    expect(items.map((item) => item.providerFileId)).toEqual(["Accounts:a1", "Contacts:c1", "Deals:d1", "Tasks:t1"]);
     expect(items[0]).toMatchObject({
       fileType: "crm_account",
       contentCategory: "structured",
       sourcePath: "Zoho CRM / Zoho in / Accounts",
     });
-    // This phase ingests CRM records as plain files; no entity graph is emitted.
-    expect(items.every((item) => item.parentEntities === undefined)).toBe(true);
+    expect(items[1].parentEntities).toEqual([
+      { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "Contact account" },
+    ]);
+    expect(items[2].relationships?.map((relationship) => relationship.relationType)).toEqual([
+      "deal_for",
+      "primary_contact",
+    ]);
+    expect(items[3]).toMatchObject({
+      fileType: "crm_task",
+      parentEntities: [
+        { source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM activity parent" },
+        { source: "zoho_crm", sourceId: "Contacts:c1", contextSnippet: "CRM activity participant" },
+      ],
+      assignees: [{ name: "Owner One", email: "owner@sketch.test", source: "zoho_crm", sourceId: "user:u1" }],
+    });
     expect(fetchSpy).toHaveBeenCalled();
   });
 

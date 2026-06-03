@@ -285,7 +285,7 @@ interface SeedAssigneePersonParams {
   connector: Connector;
   factContext: SyncFactContext;
   connectorType: ConnectorType;
-  assignee: { name: string; email?: string };
+  assignee: { name: string; email?: string; source?: string; sourceId?: string };
   providerFileId: string;
   indexedFileId: string;
   contentHash: string | null;
@@ -301,9 +301,12 @@ async function seedAssigneePerson({
   indexedFileId,
   contentHash,
 }: SeedAssigneePersonParams): Promise<void> {
-  const sourceRefKey = connector.assigneeSourceRefKey
-    ? connector.assigneeSourceRefKey(assignee.name)
-    : `${connectorType}:user:${assignee.name}`;
+  const sourceRefKey =
+    assignee.source && assignee.sourceId
+      ? `${assignee.source}:${assignee.sourceId}`
+      : connector.assigneeSourceRefKey
+        ? connector.assigneeSourceRefKey(assignee.name)
+        : `${connectorType}:user:${assignee.name}`;
   const [subjectSource, ...subjectSourceParts] = sourceRefKey.split(":");
   await factRepo.upsertFact({
     ...factContext,

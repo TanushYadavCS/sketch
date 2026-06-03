@@ -127,6 +127,17 @@ function lookupId(value: unknown): string | null {
   return lookup?.id?.trim() || null;
 }
 
+function lookupModuleApiName(value: unknown, fallback: StandardModule): StandardModule {
+  if (!isRecord(value)) return fallback;
+  const moduleName =
+    asNonEmptyString(value.$se_module) ??
+    asNonEmptyString(value.$module) ??
+    asNonEmptyString(value.module) ??
+    asNonEmptyString(value.Module);
+  if (!moduleName) return fallback;
+  return logicalModuleFor(moduleName) ?? fallback;
+}
+
 function fieldValue(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value === "string") return asNonEmptyString(value);
@@ -434,6 +445,18 @@ export function extractPeopleFromRecord(moduleApiName: string, record: ZohoRecor
     });
   }
 
+  const who = asLookup(record.Who_Id);
+  if (who?.id && who.name && ["tasks", "calls", "events", "meetings"].includes(normalized)) {
+    const whoModule = lookupModuleApiName(record.Who_Id, "Contacts");
+    seeds.push({
+      name: who.name,
+      email: who.email,
+      subtype: "external",
+      source: "zoho_crm",
+      sourceId: makeProviderFileId(whoModule, who.id),
+    });
+  }
+
   return seeds;
 }
 
@@ -452,13 +475,24 @@ export function extractParentEntities(moduleApiName: string, record: ZohoRecord)
     return parentFromLookup("Accounts", record.Account_Name, "Contact account");
   }
   if (["tasks", "notes", "calls", "events", "meetings"].includes(normalized)) {
+    const whatModule = lookupModuleApiName(record.What_Id, "Deals");
+    const whoModule = lookupModuleApiName(record.Who_Id, "Contacts");
+    const parentModule = lookupModuleApiName(record.Parent_Id, "Contacts");
     return [
-      ...parentFromLookup("Deals", record.What_Id, "CRM activity parent"),
-      ...parentFromLookup("Contacts", record.Who_Id, "CRM activity participant"),
-      ...parentFromLookup("Contacts", record.Parent_Id, "CRM note parent"),
+      ...parentFromLookup(whatModule, record.What_Id, "CRM activity parent"),
+      ...parentFromLookup(whoModule, record.Who_Id, "CRM activity participant"),
+      ...parentFromLookup(parentModule, record.Parent_Id, "CRM note parent"),
     ];
   }
   return [];
+}
+
+function extractTaskAssignees(moduleApiName: string, record: ZohoRecord): NonNullable<SyncedItem["assignees"]> {
+  if (normalizeModuleApiName(moduleApiName) !== "tasks") return [];
+  const owner = asLookup(record.Owner);
+  return owner?.id && owner.name
+    ? [{ name: owner.name, email: owner.email, source: "zoho_crm", sourceId: `user:${owner.id}` }]
+    : [];
 }
 
 function entitySeedsForRecord(moduleApiName: string, record: ZohoRecord): EntitySeed[] {
@@ -554,7 +588,9 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
   const content = formatCrmRecordContent(module.apiName, record);
   const entitySeeds = entitySeedsForRecord(module.apiName, record);
   const personSeeds = extractPeopleFromRecord(module.apiName, record);
+  const parentEntities = extractParentEntities(module.apiName, record);
   const relationships = relationshipsForRecord(module.apiName, record);
+  const assignees = extractTaskAssignees(module.apiName, record);
   return {
     providerFileId: makeProviderFileId(module.apiName, record.id),
     providerUrl: null,
@@ -569,14 +605,18 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
         modifiedTime: record.Modified_Time ?? null,
         entitySeeds,
         personSeeds,
+        parentEntities,
         relationships,
+        assignees,
       }),
     ),
     sourceCreatedAt: record.Created_Time ?? null,
     sourceUpdatedAt: record.Modified_Time ?? null,
     entitySeeds,
     personSeeds,
+    parentEntities,
     relationships,
+    assignees,
   };
 }
 
