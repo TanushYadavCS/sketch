@@ -64,6 +64,50 @@ function sortBySentAtAsc<T extends { sent_at: string | null; indexed_file_id: st
   });
 }
 
+interface IndexedFileRowForResponse {
+  id: string;
+  file_name: string;
+  file_type: string | null;
+  content_category: string;
+  source: string;
+  source_path: string | null;
+  provider_url: string | null;
+  synced_at: string;
+  source_created_at: string | null;
+  source_updated_at: string | null;
+  summary: string | null;
+  summary_status: string;
+  embedding_status: string;
+}
+
+/** Shared mapping from an indexed_files row to the Files-list response shape. */
+function mapIndexedFileRow(
+  f: IndexedFileRowForResponse,
+  accessInfo: { count: number } | undefined,
+  rollup?: { activityCount: number; summary: string },
+) {
+  return {
+    id: f.id,
+    fileName: f.file_name,
+    fileType: f.file_type,
+    contentCategory: f.content_category,
+    source: f.source,
+    sourcePath: f.source_path,
+    providerUrl: f.provider_url,
+    syncedAt: f.synced_at,
+    sourceCreatedAt: f.source_created_at,
+    sourceUpdatedAt: f.source_updated_at,
+    hasSummary: !!f.summary,
+    summaryStatus: f.summary_status,
+    embeddingStatus: f.embedding_status,
+    accessScope: accessInfo ? ("restricted" as const) : ("unrestricted" as const),
+    accessCount: accessInfo?.count ?? null,
+    ...(rollup
+      ? { resultKind: "crm_object" as const, activityCount: rollup.activityCount, rollupSummary: rollup.summary }
+      : {}),
+  };
+}
+
 /** Run sync in background. Enrichment runs separately on the scheduled sync cycle. */
 function syncInBackground(
   db: Kysely<DB>,
@@ -332,9 +376,10 @@ export function connectorRoutes(
 
     const viewer = getFileViewer(c);
     const filters = { connectorType: source, category, status, access };
+    // Collapse CRM activity members under their parent object rows.
     const [files, total, enrichedTotal] = await Promise.all([
-      connectorRepo.listAllFiles({ limit, offset, viewer, ...filters }),
-      connectorRepo.countAllFiles({ viewer, ...filters }),
+      connectorRepo.listAllFiles({ limit, offset, viewer, collapseRollups: true, ...filters }),
+      connectorRepo.countAllFiles({ viewer, collapseRollups: true, ...filters }),
       connectorRepo.countEnrichedFiles({ viewer, ...filters }),
     ]);
 
@@ -344,30 +389,54 @@ export function connectorRoutes(
         ? await connectorRepo.getFileAccessMap(fileIds)
         : new Map<string, { type: string; count: number }>();
 
+    // Annotate rollup anchors (parent objects with activities) with their count + summary.
+    const anchors = files
+      .filter((f) => f.rollup_group_id && f.rollup_group_id === f.provider_file_id)
+      .map((f) => ({ connectorConfigId: f.connector_config_id, groupId: f.provider_file_id }));
+    const rollupMap = await connectorRepo.getRollupSummaries(anchors);
+
     return c.json({
       files: files.map((f) => {
-        const accessInfo = accessMap.get(f.id);
-        return {
-          id: f.id,
-          fileName: f.file_name,
-          fileType: f.file_type,
-          contentCategory: f.content_category,
-          source: f.source,
-          sourcePath: f.source_path,
-          providerUrl: f.provider_url,
-          syncedAt: f.synced_at,
-          sourceCreatedAt: f.source_created_at,
-          sourceUpdatedAt: f.source_updated_at,
-          hasSummary: !!f.summary,
-          summaryStatus: f.summary_status,
-          embeddingStatus: f.embedding_status,
-          accessScope: accessInfo ? "restricted" : "unrestricted",
-          accessCount: accessInfo?.count ?? null,
-        };
+        const rollup =
+          f.rollup_group_id === f.provider_file_id
+            ? rollupMap.get(`${f.connector_config_id}::${f.provider_file_id}`)
+            : undefined;
+        return mapIndexedFileRow(f, accessMap.get(f.id), rollup);
       }),
       total,
       enrichedTotal,
       hasMore: offset + limit < total,
+    });
+  });
+
+  /** Activity members rolled up under a CRM object anchor (for the expand action). */
+  routes.get("/all-files/:id/activities", async (c) => {
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 100, 1), 500);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const viewer = getFileViewer(c);
+
+    const anchor = await connectorRepo.getRollupAnchorRef(c.req.param("id"), viewer);
+    if (!anchor) {
+      return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    }
+
+    const members = await connectorRepo.listGroupActivities({
+      connectorConfigId: anchor.connector_config_id,
+      groupId: anchor.provider_file_id,
+      viewer,
+      limit,
+      offset,
+    });
+
+    const memberIds = members.map((f) => f.id);
+    const accessMap =
+      memberIds.length > 0
+        ? await connectorRepo.getFileAccessMap(memberIds)
+        : new Map<string, { type: string; count: number }>();
+
+    return c.json({
+      files: members.map((f) => mapIndexedFileRow(f, accessMap.get(f.id))),
+      hasMore: members.length === limit,
     });
   });
 

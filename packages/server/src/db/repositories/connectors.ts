@@ -87,6 +87,16 @@ function decodeConnectorConfigRow<T extends { credentials: string }>(row: T, enc
   };
 }
 
+/**
+ * Keeps rollup *anchors* and ungrouped rows, dropping CRM activity members.
+ * A member is a row whose `rollup_group_id` points at a different parent record;
+ * anchors have `rollup_group_id = provider_file_id`, and non-CRM rows have it NULL.
+ */
+const rollupAnchorPredicate = sql<boolean>`(
+  indexed_files.rollup_group_id IS NULL
+  OR indexed_files.rollup_group_id = indexed_files.provider_file_id
+)`;
+
 export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string) {
   return {
     /** List all connector configs. */
@@ -754,12 +764,16 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       status?: string;
       access?: string;
       viewer: FileViewer;
+      /** Collapse CRM activity members under their parent object (default off). */
+      collapseRollups?: boolean;
     }) {
       let query = db
         .selectFrom("indexed_files")
         .select([
           "indexed_files.id",
           "indexed_files.connector_config_id",
+          "indexed_files.provider_file_id",
+          "indexed_files.rollup_group_id",
           "indexed_files.file_name",
           "indexed_files.file_type",
           "indexed_files.content_category",
@@ -775,6 +789,10 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           "indexed_files.access_scope_id",
         ])
         .where("indexed_files.is_archived", "=", 0);
+
+      if (opts.collapseRollups) {
+        query = query.where(rollupAnchorPredicate);
+      }
 
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
@@ -806,6 +824,97 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         query = query.where(fileVisibilityPredicate(opts.viewer));
       }
 
+      return query
+        .orderBy(
+          sql`coalesce(indexed_files.source_updated_at, indexed_files.source_created_at, indexed_files.synced_at) desc`,
+        )
+        .limit(opts.limit)
+        .offset(opts.offset)
+        .execute();
+    },
+
+    /**
+     * Look up CRM rollup summaries for a set of anchor objects.
+     * Keyed by `${connectorConfigId}::${groupId}` to drive the collapsed
+     * "N activities + summary" rows in the Files list.
+     */
+    async getRollupSummaries(
+      anchors: Array<{ connectorConfigId: string; groupId: string }>,
+    ): Promise<Map<string, { activityCount: number; summary: string }>> {
+      const map = new Map<string, { activityCount: number; summary: string }>();
+      if (anchors.length === 0) return map;
+      const configIds = [...new Set(anchors.map((a) => a.connectorConfigId))];
+      const groupIds = [...new Set(anchors.map((a) => a.groupId))];
+      const rows = await db
+        .selectFrom("crm_object_summaries")
+        .select(["connector_config_id", "group_id", "summary", "activity_count"])
+        .where("connector_config_id", "in", configIds)
+        .where("group_id", "in", groupIds)
+        .execute();
+      for (const r of rows) {
+        map.set(`${r.connector_config_id}::${r.group_id}`, {
+          activityCount: Number(r.activity_count),
+          summary: r.summary,
+        });
+      }
+      return map;
+    },
+
+    /** Resolve a file's group identity (for the rollup-members endpoint), viewer-scoped. */
+    async getRollupAnchorRef(fileId: string, viewer: FileViewer) {
+      let query = db
+        .selectFrom("indexed_files")
+        .select([
+          "indexed_files.id",
+          "indexed_files.connector_config_id",
+          "indexed_files.provider_file_id",
+          "indexed_files.rollup_group_id",
+          "indexed_files.source",
+        ])
+        .where("indexed_files.id", "=", fileId)
+        .where("indexed_files.is_archived", "=", 0);
+      if (!viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(viewer));
+      }
+      return query.executeTakeFirst();
+    },
+
+    /** List the activity member files rolled up under one parent object, viewer-scoped. */
+    async listGroupActivities(opts: {
+      connectorConfigId: string;
+      groupId: string;
+      viewer: FileViewer;
+      limit: number;
+      offset: number;
+    }) {
+      let query = db
+        .selectFrom("indexed_files")
+        .select([
+          "indexed_files.id",
+          "indexed_files.connector_config_id",
+          "indexed_files.provider_file_id",
+          "indexed_files.rollup_group_id",
+          "indexed_files.file_name",
+          "indexed_files.file_type",
+          "indexed_files.content_category",
+          "indexed_files.source",
+          "indexed_files.source_path",
+          "indexed_files.provider_url",
+          "indexed_files.synced_at",
+          "indexed_files.source_created_at",
+          "indexed_files.source_updated_at",
+          "indexed_files.summary",
+          "indexed_files.embedding_status",
+          "indexed_files.summary_status",
+          "indexed_files.access_scope_id",
+        ])
+        .where("indexed_files.is_archived", "=", 0)
+        .where("indexed_files.connector_config_id", "=", opts.connectorConfigId)
+        .where("indexed_files.rollup_group_id", "=", opts.groupId)
+        .where("indexed_files.provider_file_id", "!=", opts.groupId);
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
+      }
       return query
         .orderBy(
           sql`coalesce(indexed_files.source_updated_at, indexed_files.source_created_at, indexed_files.synced_at) desc`,
@@ -876,11 +985,16 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       category?: string;
       status?: string;
       access?: string;
+      collapseRollups?: boolean;
     }) {
       let query = db
         .selectFrom("indexed_files")
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
+
+      if (opts.collapseRollups) {
+        query = query.where(rollupAnchorPredicate);
+      }
 
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
@@ -931,6 +1045,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .selectFrom("indexed_files")
         .select(["indexed_files.source", sql<number>`count(*)`.as("count")])
         .where("indexed_files.is_archived", "=", 0)
+        .where(rollupAnchorPredicate)
         .groupBy("indexed_files.source");
       if (!viewer.isAdmin) {
         query = query.where(fileVisibilityPredicate(viewer));

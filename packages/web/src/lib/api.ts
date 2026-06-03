@@ -619,6 +619,10 @@ export interface ConnectorFile {
   embeddingStatus: string;
   accessScope: "restricted" | "unrestricted";
   accessCount: number | null;
+  /** Present on collapsed CRM object anchors that roll up activity members. */
+  resultKind?: "crm_object";
+  activityCount?: number;
+  rollupSummary?: string;
 }
 
 export interface FileContent {
@@ -1146,6 +1150,9 @@ export const api = {
       return request<{ files: UnifiedFile[]; total: number; enrichedTotal: number; hasMore: boolean }>(
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
       );
+    },
+    fileActivities(fileId: string) {
+      return request<{ files: UnifiedFile[]; hasMore: boolean }>(`/api/connectors/all-files/${fileId}/activities`);
     },
     search(opts: { query: string; source?: string; category?: string; limit?: number }) {
       const params = new URLSearchParams();
