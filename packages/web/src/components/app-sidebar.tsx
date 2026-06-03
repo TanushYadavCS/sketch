@@ -75,8 +75,6 @@ const allPrimaryNav: NavItem[] = [
     label: "Settings",
     icon: <GearIcon size={18} />,
     href: "/settings",
-    adminOnly: true,
-    memberVisibleWhenExperimental: true,
   },
 ];
 

@@ -99,6 +99,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__local_run_command",
+    label: "Run local Mac command",
+    description: "Run shell commands on a paired local Mac through Sketch Local.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__ManageScheduledTasks",
     label: "Manage scheduled tasks",
     description: "Create, list, update, pause, and run scheduled tasks.",

@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(73);
+      expect(logSpy).toHaveBeenCalledTimes(74);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(73);
+    expect(rows.rows).toHaveLength(74);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -127,6 +127,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[70]).toBe("075-conversation-messages");
     expect(names[71]).toBe("076-slack-conversation-thread-metadata");
     expect(names[72]).toBe("077-scheduled-task-output-thread");
+    expect(names[73]).toBe("078-local-devices");
   });
 
   it("creates the users table", async () => {
@@ -143,6 +144,17 @@ describe("runMigrations — full sequence", () => {
     await runMigrations(db, { quiet: true });
 
     for (const table of ["conversations", "conversation_messages", "conversation_cursors"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+  });
+
+  it("creates local device tables", async () => {
+    await runMigrations(db);
+
+    for (const table of ["local_devices", "local_device_tool_calls"]) {
       const result = await sql<{ name: string }>`
         SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
       `.execute(db);
@@ -259,7 +271,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(73);
+    expect(rows.rows).toHaveLength(74);
   });
 });
 
@@ -291,6 +303,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(73);
+    expect(rows.rows).toHaveLength(74);
   });
 });

@@ -244,6 +244,39 @@ export interface ExternalMcpToolCallsTable {
   called_at: Generated<string>;
 }
 
+export interface LocalDevicesTable {
+  id: string;
+  user_id: string;
+  name: string;
+  platform: string;
+  token_hash: string;
+  prefix: string;
+  status: Generated<string>;
+  last_seen_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  revoked_at: string | null;
+}
+
+export interface LocalDeviceToolCallsTable {
+  id: string;
+  device_id: string;
+  user_id: string;
+  tool_name: string;
+  command: string;
+  cwd: string | null;
+  success: number;
+  exit_code: number | null;
+  timed_out: number;
+  duration_ms: number;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  stdout_truncated: number;
+  stderr_truncated: number;
+  error_message: string | null;
+  called_at: Generated<string>;
+}
+
 export interface AgentEnvironmentVariablesTable {
   id: string;
   user_id: string;
@@ -609,6 +642,8 @@ export interface DB {
   magic_link_tokens: MagicLinkTokensTable;
   api_tokens: ApiTokensTable;
   external_mcp_tool_calls: ExternalMcpToolCallsTable;
+  local_devices: LocalDevicesTable;
+  local_device_tool_calls: LocalDeviceToolCallsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;

@@ -126,34 +126,10 @@ describe("AppSidebar", () => {
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
   });
 
-  it("hides Settings link for members", () => {
+  it("shows Settings link for members", () => {
     renderSidebar("member");
 
-    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
-  });
-
-  it("shows Settings link for members when experimental features are enabled", async () => {
-    server.use(
-      http.get("/api/setup/status", () =>
-        HttpResponse.json({
-          completed: true,
-          currentStep: 5,
-          adminEmail: "admin@test.com",
-          orgName: "Acme",
-          botName: "Sketch",
-          slackConnected: true,
-          llmConnected: true,
-          llmProvider: "anthropic",
-          experimentalFlag: true,
-        }),
-      ),
-    );
-
-    renderSidebar("member");
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
-    });
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
   });
 
   it("shows the signed-in user's auth role in the footer", () => {
