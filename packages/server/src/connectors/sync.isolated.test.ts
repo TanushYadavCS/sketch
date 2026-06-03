@@ -403,6 +403,98 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
     expect(indexedFiles).toHaveLength(1);
   });
 
+  it("upsertFile rekeys a changed message row by providerMessageId", async () => {
+    db = await createTestDb();
+    const repo = createConnectorRepository(db);
+
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "gmail-a",
+        connector_type: "fireflies",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "user-a",
+      })
+      .execute();
+
+    const first = await repo.upsertFile({
+      source: "gmail",
+      providerFileId: "inbox-message-id",
+      providerMessageId: "<shared-message@example.com>",
+      threadId: "thread-a",
+      providerUrl: null,
+      fileName: "Initial subject",
+      fileType: "email_message",
+      contentCategory: "document",
+      content: "Initial body",
+      sourcePath: null,
+      contentHash: "hash-v1",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+      connectorConfigId: "gmail-a",
+    });
+
+    await db
+      .updateTable("indexed_files")
+      .set({
+        embedding_status: "done",
+        summary_status: "done",
+        embedding_attempts: 3,
+        summary_attempts: 2,
+      })
+      .where("id", "=", first.id)
+      .execute();
+
+    const second = await repo.upsertFile({
+      source: "gmail",
+      providerFileId: "sent-message-id",
+      providerMessageId: "<shared-message@example.com>",
+      threadId: "thread-b",
+      providerUrl: null,
+      fileName: "Updated subject",
+      fileType: "email_message",
+      contentCategory: "document",
+      content: "Updated body",
+      sourcePath: null,
+      contentHash: "hash-v2",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+      connectorConfigId: "gmail-a",
+    });
+
+    expect(second).toEqual({ id: first.id, created: false, contentChanged: true });
+
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select([
+        "id",
+        "provider_file_id",
+        "provider_message_id",
+        "thread_id",
+        "content_hash",
+        "embedding_status",
+        "summary_status",
+        "embedding_attempts",
+        "summary_attempts",
+      ])
+      .where("connector_config_id", "=", "gmail-a")
+      .execute();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: first.id,
+      provider_file_id: "sent-message-id",
+      provider_message_id: "<shared-message@example.com>",
+      thread_id: "thread-b",
+      content_hash: "hash-v2",
+      embedding_status: "pending",
+      summary_status: "pending",
+      embedding_attempts: 0,
+      summary_attempts: 0,
+    });
+  });
+
   it("archiveConnectorsForOwner flips status to disabled and scrubs credentials", async () => {
     db = await createTestDb();
     const repo = createConnectorRepository(db);
@@ -623,6 +715,95 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
     const emails = accessRows.map((r) => r.email).sort();
     expect(emails).toEqual(["alice@example.com", "bob@example.com"]);
+  });
+
+  it("uses providerMessageId for unchanged detection and initial-sync reconcile", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-message-id",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-message-id",
+        connector_config_id: "connector-message-id",
+        provider_file_id: "provider-old",
+        provider_message_id: "<same-message@example.com>",
+        thread_id: "thread-old",
+        file_name: "message.eml",
+        file_type: "email_message",
+        content_category: "document",
+        source: "google_drive",
+        source_path: "/message.eml",
+        provider_url: null,
+        content: "same content",
+        summary: null,
+        context_note: null,
+        access_scope_id: null,
+        content_hash: "same-hash",
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+        embedding_status: "pending",
+      })
+      .execute();
+
+    await db
+      .insertInto("connector_files")
+      .values({ connector_config_id: "connector-message-id", indexed_file_id: "file-message-id" })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "provider-new",
+        providerMessageId: "<same-message@example.com>",
+        threadId: "thread-new",
+        providerUrl: null,
+        fileName: "message.eml",
+        fileType: "email_message",
+        contentCategory: "document" as const,
+        content: "same content",
+        sourcePath: "/message.eml",
+        contentHash: "same-hash",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const result = await runConnectorSync(db, "connector-message-id", logger);
+
+    expect(result.itemsProcessed).toBe(1);
+    expect(result.itemsCreated).toBe(0);
+    expect(result.itemsUpdated).toBe(0);
+    expect(result.itemsArchived).toBe(0);
+
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "provider_file_id", "provider_message_id", "thread_id", "is_archived"])
+      .where("connector_config_id", "=", "connector-message-id")
+      .execute();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: "file-message-id",
+      provider_file_id: "provider-new",
+      provider_message_id: "<same-message@example.com>",
+      thread_id: "thread-new",
+      is_archived: 0,
+    });
   });
 
   it("emits the same stable fact set for changed and unchanged item paths", async () => {

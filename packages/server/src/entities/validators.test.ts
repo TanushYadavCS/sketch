@@ -63,6 +63,44 @@ describe("validateLlmMention", () => {
       }),
     ).toEqual({ ok: true });
   });
+
+  it("permits thread-resolved references only when the current content has a real reference", () => {
+    expect(
+      validateLlmMention({
+        displayName: "Alice Patel",
+        fileContent: "She confirmed Tuesday for the onboarding review.",
+        resolutionContext: "Alice Patel proposed Tuesday for the onboarding review.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: true });
+
+    expect(
+      validateLlmMention({
+        displayName: "Alice Patel",
+        fileContent: "Yes, that works for Tuesday.",
+        resolutionContext: "Alice Patel proposed Tuesday for the onboarding review.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: false, reason: "missing_current_reference" });
+
+    expect(
+      validateLlmMention({
+        displayName: "Alice Patel",
+        fileContent: "ok",
+        resolutionContext: "Alice Patel proposed Tuesday for the onboarding review.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: false, reason: "missing_current_reference" });
+
+    expect(
+      validateLlmMention({
+        displayName: "Alice Patel",
+        fileContent: "Lunch menu attached.",
+        resolutionContext: "Alice Patel proposed Tuesday for the onboarding review.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: false, reason: "missing_current_reference" });
+  });
 });
 
 describe("validateLearnedFact", () => {

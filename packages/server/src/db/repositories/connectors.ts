@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
+import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
 import type { DB } from "../schema";
 
@@ -323,12 +324,14 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     },
 
     /**
-     * Upsert an indexed file by (source, provider_file_id).
-     * A file exists once regardless of how many connectors discover it.
+     * Upsert an indexed file by message identity when present, otherwise by the
+     * legacy global provider-file identity.
      */
     async upsertFile(data: {
       source: string;
       providerFileId: string;
+      providerMessageId?: string | null;
+      threadId?: string | null;
       providerUrl: string | null;
       fileName: string;
       fileType: string | null;
@@ -343,17 +346,28 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     }) {
       const now = new Date().toISOString();
 
-      const existing = await db
-        .selectFrom("indexed_files")
-        .selectAll()
-        .where("source", "=", data.source)
-        .where("provider_file_id", "=", data.providerFileId)
-        .executeTakeFirst();
+      const existing = data.providerMessageId
+        ? await db
+            .selectFrom("indexed_files")
+            .selectAll()
+            .where("connector_config_id", "=", data.connectorConfigId)
+            .where("provider_message_id", "=", data.providerMessageId)
+            .executeTakeFirst()
+        : await db
+            .selectFrom("indexed_files")
+            .selectAll()
+            .where("source", "=", data.source)
+            .where("provider_file_id", "=", data.providerFileId)
+            .where("provider_message_id", "is", null)
+            .executeTakeFirst();
 
       if (existing) {
         // If content changed, mark for re-embedding
         const contentChanged = data.contentHash !== existing.content_hash;
         const updates: Record<string, unknown> = {
+          provider_file_id: data.providerFileId,
+          provider_message_id: data.providerMessageId ?? null,
+          thread_id: data.threadId ?? null,
           provider_url: data.providerUrl,
           file_name: data.fileName,
           file_type: data.fileType,
@@ -388,6 +402,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           id,
           connector_config_id: data.connectorConfigId,
           provider_file_id: data.providerFileId,
+          provider_message_id: data.providerMessageId ?? null,
+          thread_id: data.threadId ?? null,
           provider_url: data.providerUrl,
           file_name: data.fileName,
           file_type: data.fileType,
@@ -602,18 +618,32 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     },
 
     /** Archive files not seen in this sync for a given connector. */
-    async archiveStaleFiles(connectorConfigId: string, seenProviderFileIds: Set<string>) {
-      if (seenProviderFileIds.size === 0) return 0;
+    async archiveStaleFiles(connectorConfigId: string, seenSyncIdentityKeys: Set<string>) {
+      if (seenSyncIdentityKeys.size === 0) return 0;
 
       const linkedFiles = await db
         .selectFrom("connector_files")
         .innerJoin("indexed_files", "indexed_files.id", "connector_files.indexed_file_id")
-        .select(["indexed_files.id", "indexed_files.provider_file_id"])
+        .select([
+          "indexed_files.id",
+          "indexed_files.connector_config_id",
+          "indexed_files.source",
+          "indexed_files.provider_file_id",
+          "indexed_files.provider_message_id",
+        ])
         .where("connector_files.connector_config_id", "=", connectorConfigId)
         .where("indexed_files.is_archived", "=", 0)
         .execute();
 
-      const stale = linkedFiles.filter((f) => !seenProviderFileIds.has(f.provider_file_id));
+      const stale = linkedFiles.filter((f) => {
+        const identity = getSyncIdentity({
+          connectorConfigId: f.connector_config_id,
+          connectorType: f.source,
+          providerFileId: f.provider_file_id,
+          providerMessageId: f.provider_message_id,
+        });
+        return !seenSyncIdentityKeys.has(syncIdentityKey(identity));
+      });
       if (stale.length === 0) return 0;
 
       const staleIds = stale.map((f) => f.id);

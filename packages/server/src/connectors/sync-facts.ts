@@ -16,6 +16,7 @@ interface EmitFactsForSyncedItemParams {
   factContext: SyncFactContext;
   item: SyncedItem;
   indexedFileId: string;
+  emitCorrespondentFacts?: boolean;
 }
 
 export async function emitFactsForSyncedItem({
@@ -25,6 +26,7 @@ export async function emitFactsForSyncedItem({
   factContext,
   item,
   indexedFileId,
+  emitCorrespondentFacts = false,
 }: EmitFactsForSyncedItemParams): Promise<void> {
   const promotable = connector.promotableFileTypes ?? [];
   if (item.fileType && promotable.includes(item.fileType)) {
@@ -67,15 +69,27 @@ export async function emitFactsForSyncedItem({
 
   if (item.attendees) {
     for (const attendee of item.attendees) {
-      await seedAttendeePerson({
-        factRepo,
-        factContext,
-        connectorType,
-        attendee,
-        providerFileId: item.providerFileId,
-        indexedFileId,
-        contentHash: item.contentHash,
-      });
+      if (emitCorrespondentFacts) {
+        await seedCorrespondentPerson({
+          factRepo,
+          factContext,
+          connectorType,
+          correspondent: attendee,
+          providerFileId: item.providerFileId,
+          indexedFileId,
+          contentHash: item.contentHash,
+        });
+      } else {
+        await seedAttendeePerson({
+          factRepo,
+          factContext,
+          connectorType,
+          attendee,
+          providerFileId: item.providerFileId,
+          indexedFileId,
+          contentHash: item.contentHash,
+        });
+      }
     }
   }
 
@@ -95,15 +109,27 @@ export async function emitFactsForSyncedItem({
   }
 
   if (item.authorEmail || item.authorName) {
-    await seedAuthorPerson({
-      factRepo,
-      factContext,
-      connectorType,
-      author: { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
-      providerFileId: item.providerFileId,
-      indexedFileId,
-      contentHash: item.contentHash,
-    });
+    if (emitCorrespondentFacts) {
+      await seedCorrespondentPerson({
+        factRepo,
+        factContext,
+        connectorType,
+        correspondent: { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
+        providerFileId: item.providerFileId,
+        indexedFileId,
+        contentHash: item.contentHash,
+      });
+    } else {
+      await seedAuthorPerson({
+        factRepo,
+        factContext,
+        connectorType,
+        author: { name: item.authorName, email: item.authorEmail, sourceId: item.authorSourceId },
+        providerFileId: item.providerFileId,
+        indexedFileId,
+        contentHash: item.contentHash,
+      });
+    }
   }
 }
 
@@ -140,6 +166,54 @@ async function seedAttendeePerson({
     subjectSourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
     contextSnippet: `Attended ${providerFileId}`,
     raw: { providerFileId, attendee },
+  });
+}
+
+interface SeedCorrespondentPersonParams {
+  factRepo: IndexedFileFactRepository;
+  factContext: SyncFactContext;
+  connectorType: ConnectorType;
+  correspondent: { name?: string; email?: string; sourceId?: string };
+  providerFileId: string;
+  indexedFileId: string;
+  contentHash: string | null;
+}
+
+function displayNameFromEmail(email: string | undefined): string | null {
+  const localPart = email?.split("@")[0]?.trim();
+  if (!localPart) return null;
+  const words = localPart
+    .replace(/[._+-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return null;
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(" ");
+}
+
+async function seedCorrespondentPerson({
+  factRepo,
+  factContext,
+  connectorType,
+  correspondent,
+  providerFileId,
+  indexedFileId,
+  contentHash,
+}: SeedCorrespondentPersonParams): Promise<void> {
+  const subjectName = correspondent.name ?? displayNameFromEmail(correspondent.email);
+  if (!subjectName) return;
+  await factRepo.upsertFact({
+    ...factContext,
+    indexedFileId,
+    contentHash,
+    source: connectorType,
+    factType: "correspondent",
+    relation: "corresponded",
+    subjectName,
+    subjectEmail: correspondent.email ?? null,
+    subjectSource: connectorType,
+    subjectSourceId: correspondent.sourceId ?? `${providerFileId}:${correspondent.email ?? subjectName}`,
+    contextSnippet: `Corresponded ${providerFileId}`,
+    raw: { providerFileId, correspondent },
   });
 }
 

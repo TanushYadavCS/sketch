@@ -5,6 +5,7 @@ import type { DB } from "../schema";
 
 export type IndexedFileFactType =
   | "attendee"
+  | "correspondent"
   | "assignee"
   | "author"
   | "parent_entity"
@@ -13,8 +14,19 @@ export type IndexedFileFactType =
   | "llm_extracted"
   | "llm_relation";
 
+/**
+ * Fact types whose subject is a person participating in a file (meeting attendee,
+ * email correspondent). Consumers that derive file participants — scope context,
+ * participant block, engagement floor, enrichment selection — must query this whole
+ * set, not the `attendee` literal, so a new participant fact type can't silently
+ * fall out of those paths. `author` is intentionally excluded: it is a single
+ * authorship role, not a participant set, and existing consumers never included it.
+ */
+export const PERSON_PARTICIPANT_FACT_TYPES = ["attendee", "correspondent"] as const satisfies IndexedFileFactType[];
+
 export type IndexedFileFactRelation =
   | "attended"
+  | "corresponded"
   | "assigned"
   | "authored"
   | "mentioned"
@@ -137,9 +149,10 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   }
   const raw = input.raw as Record<string, unknown>;
 
-  if (input.factType === "attendee") {
-    if (!hasString(raw, "providerFileId") || !isRecord(raw.attendee)) {
-      throw new Error("attendee facts require raw.providerFileId and raw.attendee");
+  if (input.factType === "attendee" || input.factType === "correspondent") {
+    const rawKey = input.factType === "attendee" ? "attendee" : "correspondent";
+    if (!hasString(raw, "providerFileId") || !isRecord(raw[rawKey])) {
+      throw new Error(`${input.factType} facts require raw.providerFileId and raw.${rawKey}`);
     }
   } else if (input.factType === "assignee") {
     if (!hasString(raw, "providerFileId") || !isRecord(raw.assignee) || !hasString(raw, "sourceRefKey")) {

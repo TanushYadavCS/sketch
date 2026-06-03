@@ -110,6 +110,8 @@ export interface IndexedFilesTable {
   id: string;
   connector_config_id: string;
   provider_file_id: string;
+  provider_message_id: string | null;
+  thread_id: string | null;
   provider_url: string | null;
   file_name: string;
   file_type: string | null;
@@ -135,6 +137,43 @@ export interface IndexedFilesTable {
   summary_attempts: Generated<number>;
   summary_next_retry_at: string | null;
   share_with_everyone: Generated<number>;
+}
+
+export interface EmailMessageEnvelopesTable {
+  indexed_file_id: string;
+  connector_config_id: string;
+  provider_file_id: string;
+  provider_message_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  sent_at: string | null;
+  from_json: string;
+  to_json: string;
+  cc_json: string;
+  owner_email: string | null;
+  provider_url: string | null;
+  updated_at: Generated<string>;
+}
+
+export interface EmailSuppressedMessagesTable {
+  id: string;
+  connector_config_id: string;
+  provider_file_id: string;
+  provider_message_id: string | null;
+  thread_id: string | null;
+  reason: string;
+  observed_at: string;
+}
+
+export interface EmailThreadSummariesTable {
+  connector_config_id: string;
+  thread_id: string;
+  summary: string;
+  message_count: number;
+  basis_first_sent_at: string | null;
+  basis_last_sent_at: string | null;
+  basis_hash: string;
+  updated_at: Generated<string>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -628,6 +667,9 @@ export interface DB {
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;
   indexed_files: IndexedFilesTable;
+  email_message_envelopes: EmailMessageEnvelopesTable;
+  email_suppressed_messages: EmailSuppressedMessagesTable;
+  email_thread_summaries: EmailThreadSummariesTable;
   access_scopes: AccessScopesTable;
   access_scope_members: AccessScopeMembersTable;
   connector_files: ConnectorFilesTable;

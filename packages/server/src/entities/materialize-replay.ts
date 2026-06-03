@@ -22,6 +22,7 @@ const FACT_REPLAY_ORDER = [
   "structural_seed",
   "person_seed",
   "attendee",
+  "correspondent",
   "assignee",
   "author",
   "parent_entity",
@@ -42,7 +43,12 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "llm_relation") {
     return materializeLlmRelationFact(deps, fact);
   }
-  if (fact.fact_type === "attendee" || fact.fact_type === "assignee" || fact.fact_type === "author") {
+  if (
+    fact.fact_type === "attendee" ||
+    fact.fact_type === "correspondent" ||
+    fact.fact_type === "assignee" ||
+    fact.fact_type === "author"
+  ) {
     return materializePersonFact(deps, fact);
   }
   if (fact.fact_type === "parent_entity") {

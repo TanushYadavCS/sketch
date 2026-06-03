@@ -15,7 +15,7 @@ export interface ReconcileConnectorSyncParams {
   connectorConfigId: string;
   connectorType: ConnectorType;
   syncRunId: string;
-  seenProviderFileIds: Set<string>;
+  seenSyncIdentityKeys: Set<string>;
   allowLargeReconcile?: boolean;
   maxReconcileRatio?: number;
   encryptionKey?: string;
@@ -34,7 +34,7 @@ export async function reconcileConnectorSync({
   connectorConfigId,
   connectorType,
   syncRunId,
-  seenProviderFileIds,
+  seenSyncIdentityKeys,
   allowLargeReconcile,
   maxReconcileRatio,
   encryptionKey,
@@ -66,7 +66,7 @@ export async function reconcileConnectorSync({
     return { itemsArchived: 0, affectedIndexedFileIds: [] };
   }
 
-  const itemsArchived = await repo.archiveStaleFiles(connectorConfigId, seenProviderFileIds);
+  const itemsArchived = await repo.archiveStaleFiles(connectorConfigId, seenSyncIdentityKeys);
   if (itemsArchived > 0) {
     await entityRepo.archiveEntitiesForArchivedFiles();
   }
@@ -90,6 +90,7 @@ async function deleteMaterializedFactMentions(
   if (indexedFileIds.length === 0) return;
   const sources = [
     `${connectorType}_attendee`,
+    `${connectorType}_correspondent`,
     `${connectorType}_assignee`,
     `${connectorType}_author`,
     `${connectorType}_parent_entity`,
