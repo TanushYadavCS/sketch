@@ -199,12 +199,15 @@ describe("IntegrationsSection", () => {
     await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByRole("switch", { name: "Share with organization" })).toBeDisabled();
-    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(within(dialog).queryByRole("switch", { name: "Share with organization" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(within(dialog).getAllByRole("button", { name: "Close" }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Settings unavailable for GitHub" })).not.toBeInTheDocument();
   });
 
-  it("hides access-control state when access settings are disabled", () => {
+  it("hides access-control state when access settings are disabled", async () => {
+    const user = userEvent.setup();
+
     renderSection(
       [
         {
@@ -228,6 +231,19 @@ describe("IntegrationsSection", () => {
     expect(screen.getByText("Engineering GitHub")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings for GitHub" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Open settings for GitHub" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Engineering GitHub")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Owned by:/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("switch", { name: "Share with organization" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Tara shared this connection with the organization. You can use it, but only the owner can manage access or credentials.",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps shared accounts non-destructive when Canvas omits canDelete", () => {

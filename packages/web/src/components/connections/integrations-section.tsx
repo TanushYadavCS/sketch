@@ -261,17 +261,18 @@ function AccessSettingsDialog({
     return <Dialog open={false} onOpenChange={onOpenChange} />;
   }
 
-  const canManageAccess = accessSettingsEnabled && connection.canManageAccess === true;
+  const showAccessSettings = accessSettingsEnabled;
+  const canManageAccess = showAccessSettings && connection.canManageAccess === true;
   const desiredAccess = shareWithOrg ? "organization" : "personal";
   const hasChanged = desiredAccess !== (connection.accessLevel ?? "personal");
   const ownerDisplayName = getOwnerDisplayName(connection);
-  const isOrgShared = connection.accessLevel === "organization";
+  const isOrgShared = showAccessSettings && connection.accessLevel === "organization";
   const isSharedByAnotherUser = isOrgShared && connection.isOwnedByViewer === false;
   const accountLabel = isSharedByAnotherUser ? null : getAccountDisplayName(connection);
-  const copy =
-    connection.isOwnedByViewer === false
+  const accessCopy =
+    showAccessSettings && connection.isOwnedByViewer === false
       ? `${ownerDisplayName} shared this connection with the organization. You can use it, but only the owner can manage access or credentials.`
-      : shareWithOrg
+      : showAccessSettings && shareWithOrg
         ? `Everyone in ${orgName ?? "the organization"} can select and run this connection.`
         : "Only you can use this connection.";
 
@@ -313,29 +314,33 @@ function AccessSettingsDialog({
           </div>
         </DialogHeader>
 
-        <div className="rounded-lg border border-border p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-sm font-medium">Share with organization</p>
-              <p className="mt-1 text-sm text-muted-foreground">{copy}</p>
+        {showAccessSettings && (
+          <div className="rounded-lg border border-border p-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Share with organization</p>
+                <p className="mt-1 text-sm text-muted-foreground">{accessCopy}</p>
+              </div>
+              <Switch
+                aria-label="Share with organization"
+                checked={shareWithOrg}
+                onCheckedChange={setShareWithOrg}
+                disabled={!canManageAccess || saving}
+              />
             </div>
-            <Switch
-              aria-label="Share with organization"
-              checked={shareWithOrg}
-              onCheckedChange={setShareWithOrg}
-              disabled={!canManageAccess || saving}
-            />
           </div>
-        </div>
+        )}
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            Cancel
+            {showAccessSettings ? "Cancel" : "Close"}
           </Button>
-          <Button onClick={save} disabled={!canManageAccess || !hasChanged || saving}>
-            {saving ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
-            Save
-          </Button>
+          {showAccessSettings && (
+            <Button onClick={save} disabled={!canManageAccess || !hasChanged || saving}>
+              {saving ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+              Save
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
