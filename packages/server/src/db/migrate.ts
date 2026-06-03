@@ -82,6 +82,7 @@ import * as m079 from "./migrations/079-conversation-message-search";
 import * as m080 from "./migrations/080-message-id-idempotency";
 import * as m081 from "./migrations/081-email-message-metadata";
 import * as m082 from "./migrations/082-email-thread-summaries";
+import * as m083 from "./migrations/083-crm-activity-rollups";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -168,6 +169,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "080-message-id-idempotency": m080,
           "081-email-message-metadata": m081,
           "082-email-thread-summaries": m082,
+          "083-crm-activity-rollups": m083,
         };
       },
     },

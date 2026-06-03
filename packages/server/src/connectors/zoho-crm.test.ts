@@ -359,8 +359,9 @@ describe("Zoho CRM connector", () => {
       fileType: "crm_account",
       contentCategory: "structured",
       sourcePath: "Zoho CRM / Zoho in / Accounts",
+      rollupGroupId: "Accounts:a1",
     });
-    expect(items[2]).toMatchObject({ fileType: "crm_deal", contentCategory: "structured" });
+    expect(items[2]).toMatchObject({ fileType: "crm_deal", contentCategory: "structured", rollupGroupId: "Deals:d1" });
     expect(items[1].parentEntities).toEqual([
       { source: "zoho_crm", sourceId: "Accounts:a1", contextSnippet: "Contact account" },
     ]);
@@ -372,6 +373,7 @@ describe("Zoho CRM connector", () => {
       fileType: "crm_task",
       fileName: "Follow up on renewal - Jane Buyer",
       contentCategory: "structured",
+      rollupGroupId: "Deals:d1",
       parentEntities: [
         { source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM activity parent" },
         { source: "zoho_crm", sourceId: "Contacts:c1", contextSnippet: "CRM activity participant" },
@@ -382,6 +384,7 @@ describe("Zoho CRM connector", () => {
       fileType: "crm_note",
       fileName: "Renewal context - Acme renewal",
       contentCategory: "document",
+      rollupGroupId: "Deals:d1",
       parentEntities: [{ source: "zoho_crm", sourceId: "Deals:d1", contextSnippet: "CRM note parent" }],
     });
     expect(items[4].content).toContain("Jane prefers annual billing with quarterly reviews.");

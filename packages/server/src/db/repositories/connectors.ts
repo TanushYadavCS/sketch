@@ -343,6 +343,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       sourceUpdatedAt: string | null;
       connectorConfigId: string;
       mimeType?: string | null;
+      rollupGroupId?: string | null;
     }) {
       const now = new Date().toISOString();
 
@@ -378,6 +379,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           is_archived: 0,
           source_created_at: data.sourceCreatedAt,
           source_updated_at: data.sourceUpdatedAt,
+          rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
@@ -414,6 +416,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           content_hash: data.contentHash,
           source_created_at: data.sourceCreatedAt,
           source_updated_at: data.sourceUpdatedAt,
+          rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
           mime_type: data.mimeType ?? null,
           embedding_status: "pending",

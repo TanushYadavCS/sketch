@@ -571,6 +571,24 @@ function extractTaskAssignees(moduleApiName: string, record: ZohoRecord): NonNul
     : [];
 }
 
+function rollupGroupIdForRecord(moduleApiName: string, record: ZohoRecord): string | null {
+  const normalized = normalizeModuleApiName(moduleApiName);
+  if (record.id && ["accounts", "contacts", "deals"].includes(normalized)) {
+    return makeProviderFileId(moduleApiName, record.id);
+  }
+  if (["tasks", "calls", "events", "meetings"].includes(normalized)) {
+    const whatId = lookupId(record.What_Id);
+    if (whatId) return makeProviderFileId(lookupModuleApiName(record.What_Id, "Deals"), whatId);
+    const whoId = lookupId(record.Who_Id);
+    if (whoId) return makeProviderFileId(lookupModuleApiName(record.Who_Id, "Contacts"), whoId);
+  }
+  if (normalized === "notes") {
+    const parentId = lookupId(record.Parent_Id);
+    if (parentId) return makeProviderFileId(lookupModuleApiName(record.Parent_Id, "Contacts"), parentId);
+  }
+  return null;
+}
+
 function entitySeedsForRecord(moduleApiName: string, record: ZohoRecord): EntitySeed[] {
   if (!record.id) return [];
   const normalized = normalizeModuleApiName(moduleApiName);
@@ -668,6 +686,7 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
   const parentEntities = extractParentEntities(module.apiName, record);
   const relationships = relationshipsForRecord(module.apiName, record);
   const assignees = extractTaskAssignees(module.apiName, record);
+  const rollupGroupId = rollupGroupIdForRecord(module.apiName, record);
   return {
     providerFileId: makeProviderFileId(module.apiName, record.id),
     providerUrl: null,
@@ -676,6 +695,7 @@ function recordToSyncedItem(module: DiscoveredZohoModule, record: ZohoRecord, or
     contentCategory,
     content,
     sourcePath: sourcePath(orgName, module.label),
+    rollupGroupId,
     contentHash: contentHash(
       JSON.stringify({
         rendererVersion: RENDERER_VERSION,

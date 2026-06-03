@@ -60,6 +60,11 @@ export interface SyncedItem {
   contentCategory: ContentCategory;
   content: string | null;
   sourcePath: string | null;
+  /**
+   * Optional display grouping key. For CRM this is the parent object provider id
+   * that should anchor activity rollups, for example `Deals:123`.
+   */
+  rollupGroupId?: string | null;
   contentHash: string | null;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;

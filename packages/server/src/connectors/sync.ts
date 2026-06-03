@@ -19,9 +19,11 @@ import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { runEnrichment } from "./enrichment";
+import { createGeminiGenerator } from "./gemini-generate";
 import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
@@ -181,6 +183,7 @@ export async function runConnectorSync(
 
     const seenSyncIdentityKeys = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
+    const dirtyCrmRollupGroupIds = new Set<string>();
 
     const connectorType = config.connector_type as ConnectorType;
     const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
@@ -250,6 +253,7 @@ export async function runConnectorSync(
         }
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
+        for (const groupId of itemResult.rollupGroupIds) dirtyCrmRollupGroupIds.add(groupId);
 
         if (isEmailSyncedItem(item)) {
           await persistEnvelopeMetadata(db, itemResult.indexedFileId, item.emailEnvelope);
@@ -321,6 +325,17 @@ export async function runConnectorSync(
       floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
     });
 
+    if (connectorType === "zoho_crm") {
+      await refreshCrmRollupsForSync({
+        db,
+        connectorConfigId: config.id,
+        dirtyGroupIds: [...dirtyCrmRollupGroupIds],
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        syncLogger,
+        appConfig,
+      });
+    }
+
     result.newCursor = await connector.getCursor({
       credentials,
       scopeConfig,
@@ -360,6 +375,52 @@ export async function runConnectorSync(
     });
 
     throw err;
+  }
+}
+
+async function refreshCrmRollupsForSync(params: {
+  db: Kysely<DB>;
+  connectorConfigId: string;
+  dirtyGroupIds: string[];
+  affectedIndexedFileIds: string[];
+  syncLogger: Logger;
+  appConfig?: Partial<Pick<Config, "GEMINI_MAX_RPM" | "GEMINI_MAX_RETRIES">>;
+}): Promise<void> {
+  try {
+    const settings = await params.db
+      .selectFrom("settings")
+      .select(["gemini_api_key", "enrichment_enabled"])
+      .where("id", "=", "default")
+      .executeTakeFirst();
+    const generator =
+      settings?.gemini_api_key && settings.enrichment_enabled !== 0
+        ? createGeminiGenerator(settings.gemini_api_key, {
+            maxRpm: params.appConfig?.GEMINI_MAX_RPM,
+            maxRetries: params.appConfig?.GEMINI_MAX_RETRIES,
+          })
+        : null;
+    const result = await refreshCrmActivityRollups({
+      db: params.db,
+      connectorConfigId: params.connectorConfigId,
+      dirtyGroupIds: params.dirtyGroupIds,
+      affectedIndexedFileIds: params.affectedIndexedFileIds,
+      generator,
+      logger: params.syncLogger,
+    });
+    if (result.groupsRefreshed > 0 || result.groupsDeleted > 0 || result.errors.length > 0 || result.groupsCapped > 0) {
+      params.syncLogger.info(
+        {
+          refreshed: result.groupsRefreshed,
+          deleted: result.groupsDeleted,
+          skipped: result.groupsSkipped,
+          capped: result.groupsCapped,
+          errors: result.errors.length,
+        },
+        "CRM activity rollups refreshed",
+      );
+    }
+  } catch (err) {
+    params.syncLogger.warn({ err }, "CRM activity rollup refresh failed");
   }
 }
 

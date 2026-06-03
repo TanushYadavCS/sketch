@@ -120,6 +120,7 @@ export interface IndexedFilesTable {
   summary: string | null;
   source: string;
   source_path: string | null;
+  rollup_group_id: string | null;
   content_hash: string | null;
   is_archived: Generated<number>;
   source_created_at: string | null;
@@ -482,6 +483,17 @@ export interface EntityShareEmailsTable {
   granted_at: Generated<string>;
 }
 
+export interface CrmObjectSummariesTable {
+  connector_config_id: string;
+  group_id: string;
+  summary: string;
+  activity_count: number;
+  basis_first_at: string | null;
+  basis_last_at: string | null;
+  basis_hash: string;
+  updated_at: Generated<string>;
+}
+
 export interface EntitySourceRefsTable {
   id: string;
   entity_id: string;
@@ -670,6 +682,7 @@ export interface DB {
   email_message_envelopes: EmailMessageEnvelopesTable;
   email_suppressed_messages: EmailSuppressedMessagesTable;
   email_thread_summaries: EmailThreadSummariesTable;
+  crm_object_summaries: CrmObjectSummariesTable;
   access_scopes: AccessScopesTable;
   access_scope_members: AccessScopeMembersTable;
   connector_files: ConnectorFilesTable;

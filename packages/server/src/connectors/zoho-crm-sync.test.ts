@@ -174,6 +174,7 @@ describe("Zoho CRM connector sync integration", () => {
         "content",
         "source",
         "source_path",
+        "rollup_group_id",
         "provider_url",
         "source_created_at",
         "source_updated_at",
@@ -190,6 +191,7 @@ describe("Zoho CRM connector sync integration", () => {
         fileType: file.file_type,
         contentCategory: file.content_category,
         sourcePath: file.source_path,
+        rollupGroupId: file.rollup_group_id,
         providerUrl: file.provider_url,
       })),
     ).toEqual([
@@ -199,6 +201,7 @@ describe("Zoho CRM connector sync integration", () => {
         fileType: "crm_account",
         contentCategory: "structured",
         sourcePath: "Zoho CRM / Zoho in / Accounts",
+        rollupGroupId: "Accounts:a1",
         providerUrl: null,
       },
       {
@@ -207,6 +210,7 @@ describe("Zoho CRM connector sync integration", () => {
         fileType: "crm_contact",
         contentCategory: "structured",
         sourcePath: "Zoho CRM / Zoho in / Contacts",
+        rollupGroupId: "Contacts:c1",
         providerUrl: null,
       },
       {
@@ -215,6 +219,7 @@ describe("Zoho CRM connector sync integration", () => {
         fileType: "crm_deal",
         contentCategory: "structured",
         sourcePath: "Zoho CRM / Zoho in / Deals",
+        rollupGroupId: "Deals:d1",
         providerUrl: null,
       },
       {
@@ -223,6 +228,7 @@ describe("Zoho CRM connector sync integration", () => {
         fileType: "crm_task",
         contentCategory: "document",
         sourcePath: "Zoho CRM / Zoho in / Tasks",
+        rollupGroupId: "Deals:d1",
         providerUrl: null,
       },
     ]);
@@ -235,6 +241,20 @@ describe("Zoho CRM connector sync integration", () => {
     expect(files[3].content).toContain("Status: Not Started");
     expect(files[3].content).toContain("Confirm renewal paperwork and next meeting date.");
     expect(files[3].content).not.toContain("Additional Fields");
+
+    const rollup = await db
+      .selectFrom("crm_object_summaries")
+      .select(["connector_config_id", "group_id", "summary", "activity_count", "basis_first_at", "basis_last_at"])
+      .executeTakeFirstOrThrow();
+    expect(rollup).toMatchObject({
+      connector_config_id: "zoho-crm-pr4",
+      group_id: "Deals:d1",
+      activity_count: 1,
+      basis_first_at: "2026-01-02T00:00:00+05:30",
+      basis_last_at: "2026-01-02T00:00:00+05:30",
+    });
+    expect(rollup.summary).toContain("Acme renewal has 1 CRM activity");
+    expect(rollup.summary).toContain("Follow up on renewal - Jane Buyer");
 
     const connectorFiles = await db
       .selectFrom("connector_files")
