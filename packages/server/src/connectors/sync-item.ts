@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { DB } from "../db/schema";
 import { clearEnrichmentData } from "./enrichment";
+import { getSyncIdentity, getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import type { ConnectorType, SyncedItem } from "./types";
 
 type ConnectorRepository = ReturnType<typeof createConnectorRepository>;
@@ -21,21 +22,31 @@ export interface ProcessSyncedItemParams {
   connectorType: ConnectorType;
   item: SyncedItem;
   existingHashes: ExistingContentHashMap;
+  encryptionKey?: string;
 }
 
 export async function loadExistingContentHashes(
   db: Kysely<DB>,
   connectorType: ConnectorType,
+  connectorConfigId: string,
 ): Promise<ExistingContentHashMap> {
   const existingHashes: ExistingContentHashMap = new Map();
   const existingFiles = await db
     .selectFrom("indexed_files")
-    .select(["id", "provider_file_id", "content_hash"])
+    .select(["id", "connector_config_id", "provider_file_id", "provider_message_id", "content_hash"])
     .where("source", "=", connectorType)
     .where("is_archived", "=", 0)
     .execute();
   for (const f of existingFiles) {
-    existingHashes.set(f.provider_file_id, { id: f.id, contentHash: f.content_hash });
+    const identity = getSyncIdentity({
+      connectorConfigId: f.connector_config_id,
+      connectorType,
+      providerFileId: f.provider_file_id,
+      providerMessageId: f.provider_message_id,
+    });
+    if (identity.kind === "provider_file_id" || identity.connectorConfigId === connectorConfigId) {
+      existingHashes.set(syncIdentityKey(identity), { id: f.id, contentHash: f.content_hash });
+    }
   }
   return existingHashes;
 }
@@ -53,17 +64,21 @@ export async function processSyncedItem({
   connectorType,
   item,
   existingHashes,
+  encryptionKey,
 }: ProcessSyncedItemParams): Promise<ProcessSyncedItemResult> {
   if (!item.fileName && !item.content) {
     return { kind: "skipped_empty" };
   }
 
-  const existing = existingHashes.get(item.providerFileId);
+  const existing = existingHashes.get(syncIdentityKey(getSyncIdentityForItem(item, connectorConfigId, connectorType)));
   if (existing && existing.contentHash === item.contentHash) {
     await db
       .updateTable("indexed_files")
       .set({
         synced_at: new Date().toISOString(),
+        provider_file_id: item.providerFileId,
+        provider_message_id: item.providerMessageId ?? undefined,
+        thread_id: item.threadId ?? undefined,
         file_name: item.fileName ?? undefined,
         source_path: item.sourcePath ?? undefined,
         provider_url: item.providerUrl ?? undefined,
@@ -82,11 +97,13 @@ export async function processSyncedItem({
   }
 
   const itemResult = await db.transaction().execute(async (trx) => {
-    const txRepo = createConnectorRepository(trx);
+    const txRepo = createConnectorRepository(trx, encryptionKey);
     const upsertResult = await txRepo.upsertFile({
       connectorConfigId,
       source: connectorType,
       providerFileId: item.providerFileId,
+      providerMessageId: item.providerMessageId,
+      threadId: item.threadId,
       providerUrl: item.providerUrl,
       fileName: item.fileName,
       fileType: item.fileType,

@@ -342,7 +342,7 @@ export function ConnectIntegrationDialog({
   };
 
   const handleConnectWithGoogle = () => {
-    const url = api.googleOAuth.authorizeUrl();
+    const url = api.googleOAuth.authorizeUrl(integration?.type);
     window.open(url, "_self");
   };
 
@@ -490,7 +490,7 @@ export function ConnectIntegrationDialog({
               </Button>
 
               <p className="text-center text-[11px] text-muted-foreground">
-                You'll be redirected to Google to authorize read-only access to your Drive.
+                You'll be redirected to Google to authorize read-only access to your {integration.name}.
               </p>
             </div>
 

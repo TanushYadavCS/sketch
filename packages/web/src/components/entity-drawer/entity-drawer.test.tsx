@@ -8,12 +8,13 @@
  *  - clicking a related entity pill pushes a new drawer level and shows a Back chip.
  */
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
+import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { useEffect } from "react";
+import { beforeEach, describe, expect, it } from "vitest";
 import { EntityDrawer } from "./entity-drawer";
 
 const SARAH = {
@@ -97,22 +98,18 @@ const relationsForSarah = {
 
 const emptyTimeline = { groups: [], truncated: false, totalCount: 0 };
 
-const handlers = [
-  http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
-  http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
-  http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
-  http.get("/api/entities/e-stripe/relations", () =>
-    HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
-  ),
-  http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
-  http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
-];
-
-const server = setupServer(...handlers);
-
-beforeAll(() => server.listen({ onUnhandledRequest: "warn" }));
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
+beforeEach(() => {
+  server.use(
+    http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
+    http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
+    http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
+    http.get("/api/entities/e-stripe/relations", () =>
+      HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
+    ),
+    http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
+    http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
+  );
+});
 
 function DrawerHarness({ initialId }: { initialId: string }) {
   return (
@@ -124,8 +121,10 @@ function DrawerHarness({ initialId }: { initialId: string }) {
 }
 
 function OpenOnMount({ id }: { id: string }) {
-  const ui = useEntityUi();
-  if (ui.stack.length === 0) ui.openEntity(id);
+  const { stack, openEntity } = useEntityUi();
+  useEffect(() => {
+    if (stack.length === 0) openEntity(id);
+  }, [stack, openEntity, id]);
   return null;
 }
 

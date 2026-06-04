@@ -68,14 +68,19 @@ describe("Users API — agent fields", () => {
         name: "Marketing Maven",
         type: "agent",
         description: "You are the marketing maven. Always cite source URLs.",
-        allowedTools: ["Read", "WebSearch", "mcp__sketch__Search"],
+        allowedTools: ["Read", "WebSearch", "mcp__sketch__Search", "mcp__sketch__local_run_command"],
       }),
     });
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.user.type).toBe("agent");
     expect(body.user.description).toBe("You are the marketing maven. Always cite source URLs.");
-    expect(body.user.allowed_tools).toEqual(["Read", "WebSearch", "mcp__sketch__Search"]);
+    expect(body.user.allowed_tools).toEqual([
+      "Read",
+      "WebSearch",
+      "mcp__sketch__Search",
+      "mcp__sketch__local_run_command",
+    ]);
   });
 
   it("rejects allowedTools when creating a human user", async () => {

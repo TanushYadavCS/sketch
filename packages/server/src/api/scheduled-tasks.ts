@@ -9,6 +9,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
+import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
@@ -51,7 +52,9 @@ interface ScheduledTaskListItem {
   triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
+  delivery: WorkflowDelivery & { label: string };
   lastRunStatus: string | null;
   runCount: number;
 }
@@ -134,16 +137,38 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
   const userIds = [...new Set(rows.map((row) => row.created_by).filter((id): id is string => Boolean(id)))];
   const slackChannelIds = [
     ...new Set(
-      rows
-        .filter((row) => row.platform === "slack" && row.context_type === "channel")
-        .map((row) => row.delivery_target),
+      rows.flatMap((row) => {
+        const ids: string[] = [];
+        if (row.platform === "slack" && row.context_type === "channel") ids.push(row.delivery_target);
+        const delivery = resolveWorkflowDelivery(row);
+        if (delivery.platform === "slack" && (delivery.targetType === "channel" || delivery.targetType === "thread")) {
+          ids.push(delivery.targetId);
+        }
+        return ids;
+      }),
+    ),
+  ];
+  const slackUserIds = [
+    ...new Set(
+      rows.flatMap((row) => {
+        const ids: string[] = [];
+        const delivery = resolveWorkflowDelivery(row);
+        if (delivery.platform === "slack" && delivery.targetType === "dm" && isSlackUserId(delivery.targetId)) {
+          ids.push(delivery.targetId);
+        }
+        return ids;
+      }),
     ),
   ];
   const whatsappGroupJids = [
     ...new Set(
-      rows
-        .filter((row) => row.platform === "whatsapp" && row.context_type === "group")
-        .map((row) => row.delivery_target),
+      rows.flatMap((row) => {
+        const jids: string[] = [];
+        if (row.platform === "whatsapp" && row.context_type === "group") jids.push(row.delivery_target);
+        const delivery = resolveWorkflowDelivery(row);
+        if (delivery.platform === "whatsapp" && delivery.targetType === "group") jids.push(delivery.targetId);
+        return jids;
+      }),
     ),
   ];
 
@@ -159,6 +184,12 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       return [id, channel?.name ?? null] as const;
     }),
   );
+  const slackUserEntries = await Promise.all(
+    slackUserIds.map(async (id) => {
+      const user = await users.findBySlackId(id);
+      return [id, user?.name ?? user?.email ?? null] as const;
+    }),
+  );
   const groupEntries = await Promise.all(
     whatsappGroupJids.map(async (jid) => {
       const group = await whatsappGroups.getByJid(jid);
@@ -168,6 +199,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
 
   const creatorNames = new Map(userEntries);
   const channelNames = new Map(channelEntries);
+  const slackUserNames = new Map(slackUserEntries);
   const groupNames = new Map(groupEntries);
 
   // Single grouped query — avoids N+1 per task.
@@ -204,6 +236,20 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
     const triggerConfig = parseTriggerConfig(normalizedSteps ?? null);
 
     const rd = runData.get(row.id);
+    const delivery = resolveWorkflowDelivery(row);
+    let deliveryLabel = delivery.targetId;
+    if (delivery.platform === "slack" && (delivery.targetType === "channel" || delivery.targetType === "thread")) {
+      deliveryLabel = channelNames.get(delivery.targetId)
+        ? `#${channelNames.get(delivery.targetId)}`
+        : delivery.targetId;
+      if (delivery.threadTs) deliveryLabel = `${deliveryLabel} · thread`;
+    } else if (delivery.platform === "whatsapp" && delivery.targetType === "group") {
+      deliveryLabel = groupNames.get(delivery.targetId) ?? delivery.targetId;
+    } else if (delivery.platform === "slack" && delivery.targetType === "dm" && isSlackUserId(delivery.targetId)) {
+      deliveryLabel = slackUserNames.get(delivery.targetId) ?? delivery.targetId;
+    } else if (delivery.targetType === "dm" && creatorName && delivery.targetId === row.delivery_target) {
+      deliveryLabel = creatorName;
+    }
 
     return {
       id: row.id,
@@ -235,7 +281,9 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       triggerConfig,
       outputTarget: row.output_target,
       outputPlatform: row.output_platform,
+      outputThreadTs: row.output_thread_ts,
       outputMode: row.output_mode === "silent" ? "silent" : "deliver",
+      delivery: { ...delivery, label: deliveryLabel },
       lastRunStatus: rd?.lastRunStatus ?? null,
       runCount: rd?.runCount ?? 0,
     };

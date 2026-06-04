@@ -74,6 +74,18 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__ReadChatHistory",
+    label: "Read chat history",
+    description: "Read persisted messages from the current chat conversation.",
+    category: "sketch",
+  },
+  {
+    name: "mcp__sketch__SearchChatHistory",
+    label: "Search chat history",
+    description: "Search persisted messages in the current chat conversation.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__TranscribeAudio",
     label: "Transcribe audio",
     description: "Convert an audio attachment in the workspace into text.",
@@ -90,6 +102,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     name: "mcp__sketch__getProviderConfig",
     label: "Check integration provider",
     description: "Check whether an integration provider is configured.",
+    category: "sketch",
+  },
+  {
+    name: "mcp__sketch__local_run_command",
+    label: "Run local Mac command",
+    description: "Run shell commands on a paired local Mac through Sketch Local.",
     category: "sketch",
   },
   {

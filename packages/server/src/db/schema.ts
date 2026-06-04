@@ -110,6 +110,8 @@ export interface IndexedFilesTable {
   id: string;
   connector_config_id: string;
   provider_file_id: string;
+  provider_message_id: string | null;
+  thread_id: string | null;
   provider_url: string | null;
   file_name: string;
   file_type: string | null;
@@ -135,6 +137,43 @@ export interface IndexedFilesTable {
   summary_attempts: Generated<number>;
   summary_next_retry_at: string | null;
   share_with_everyone: Generated<number>;
+}
+
+export interface EmailMessageEnvelopesTable {
+  indexed_file_id: string;
+  connector_config_id: string;
+  provider_file_id: string;
+  provider_message_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  sent_at: string | null;
+  from_json: string;
+  to_json: string;
+  cc_json: string;
+  owner_email: string | null;
+  provider_url: string | null;
+  updated_at: Generated<string>;
+}
+
+export interface EmailSuppressedMessagesTable {
+  id: string;
+  connector_config_id: string;
+  provider_file_id: string;
+  provider_message_id: string | null;
+  thread_id: string | null;
+  reason: string;
+  observed_at: string;
+}
+
+export interface EmailThreadSummariesTable {
+  connector_config_id: string;
+  thread_id: string;
+  summary: string;
+  message_count: number;
+  basis_first_sent_at: string | null;
+  basis_last_sent_at: string | null;
+  basis_hash: string;
+  updated_at: Generated<string>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -244,6 +283,39 @@ export interface ExternalMcpToolCallsTable {
   called_at: Generated<string>;
 }
 
+export interface LocalDevicesTable {
+  id: string;
+  user_id: string;
+  name: string;
+  platform: string;
+  token_hash: string;
+  prefix: string;
+  status: Generated<string>;
+  last_seen_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  revoked_at: string | null;
+}
+
+export interface LocalDeviceToolCallsTable {
+  id: string;
+  device_id: string;
+  user_id: string;
+  tool_name: string;
+  command: string;
+  cwd: string | null;
+  success: number;
+  exit_code: number | null;
+  timed_out: number;
+  duration_ms: number;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  stdout_truncated: number;
+  stderr_truncated: number;
+  error_message: string | null;
+  called_at: Generated<string>;
+}
+
 export interface AgentEnvironmentVariablesTable {
   id: string;
   user_id: string;
@@ -296,6 +368,16 @@ export interface ConversationsTable {
   updated_at: Generated<string>;
 }
 
+export interface ConversationCursorsTable {
+  id: Generated<number>;
+  conversation_id: number;
+  scope_type: string;
+  scope_key: string;
+  last_seen_message_id: number | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ConversationMessagesTable {
   id: Generated<number>;
   conversation_id: number;
@@ -307,6 +389,9 @@ export interface ConversationMessagesTable {
   addressed_to_sketch: Generated<number>;
   text: Generated<string>;
   attachments: string | null;
+  provider_thread_id: string | null;
+  provider_parent_message_id: string | null;
+  is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
   received_at: string;
   created_at: Generated<string>;
@@ -334,6 +419,7 @@ export interface ScheduledTasksTable {
   edges: string | null;
   output_target: string | null;
   output_platform: string | null;
+  output_thread_ts: string | null;
   output_mode: Generated<string>;
 }
 
@@ -598,6 +684,9 @@ export interface DB {
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;
   indexed_files: IndexedFilesTable;
+  email_message_envelopes: EmailMessageEnvelopesTable;
+  email_suppressed_messages: EmailSuppressedMessagesTable;
+  email_thread_summaries: EmailThreadSummariesTable;
   access_scopes: AccessScopesTable;
   access_scope_members: AccessScopeMembersTable;
   connector_files: ConnectorFilesTable;
@@ -612,11 +701,14 @@ export interface DB {
   magic_link_tokens: MagicLinkTokensTable;
   api_tokens: ApiTokensTable;
   external_mcp_tool_calls: ExternalMcpToolCallsTable;
+  local_devices: LocalDevicesTable;
+  local_device_tool_calls: LocalDeviceToolCallsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   conversations: ConversationsTable;
+  conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;

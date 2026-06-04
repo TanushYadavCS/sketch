@@ -75,12 +75,12 @@ async function userIdFor(db: Kysely<DB>, email: string): Promise<string> {
  */
 async function insertConfig(
   db: Kysely<DB>,
-  opts: { connectorType: "google_drive" | "fireflies" | "clickup" | "notion" | "linear"; createdBy: string },
+  opts: { connectorType: "google_drive" | "gmail" | "fireflies" | "clickup" | "notion" | "linear"; createdBy: string },
 ) {
   const repo = createConnectorRepository(db);
   return repo.createConfig({
     connectorType: opts.connectorType,
-    authType: opts.connectorType === "google_drive" ? "oauth" : "api_key",
+    authType: opts.connectorType === "google_drive" || opts.connectorType === "gmail" ? "oauth" : "api_key",
     credentials: JSON.stringify({ type: "api_key", api_key: "stub" }),
     createdBy: opts.createdBy,
   });
@@ -463,6 +463,21 @@ describe("Connectors API — authorization", () => {
       });
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toContain("accounts.google.com");
+    });
+
+    it("Gmail OAuth uses the same Google client config with Gmail scope", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ googleOauthClientId: "cid", googleOauthClientSecret: "csec" });
+
+      const res = await app.request("/api/oauth/google/authorize?connector=gmail", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+      expect(res.status).toBe(302);
+      const location = res.headers.get("location") ?? "";
+      expect(location).toContain("accounts.google.com");
+      expect(decodeURIComponent(location)).toContain("https://www.googleapis.com/auth/gmail.readonly");
+      expect(decodeURIComponent(location)).not.toContain("https://www.googleapis.com/auth/drive.readonly");
     });
   });
 

@@ -19,11 +19,13 @@ import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { runEnrichment } from "./enrichment";
 import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
+import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
 import { reconcileConnectorSync } from "./sync-reconcile";
@@ -108,6 +110,7 @@ export async function runConnectorSync(
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
     >
   >,
 ): Promise<SyncResult> {
@@ -123,7 +126,7 @@ export async function runConnectorSync(
     };
   }
 
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, appConfig?.ENCRYPTION_KEY);
   const entityRepo = createEntityRepository(db);
   const factRepo = createIndexedFileFactRepository(db);
   const userRepo = createUserRepository(db);
@@ -176,11 +179,11 @@ export async function runConnectorSync(
       errors: [],
     };
 
-    const seenProviderFileIds = new Set<string>();
+    const seenSyncIdentityKeys = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
 
     const connectorType = config.connector_type as ConnectorType;
-    const existingHashes = await loadExistingContentHashes(db, connectorType);
+    const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
     const syncRunId = randomUUID();
     const factContext = {
@@ -190,6 +193,7 @@ export async function runConnectorSync(
     };
 
     for await (const item of connector.sync({
+      connectorConfigId: config.id,
       credentials,
       scopeConfig,
       cursor: config.sync_cursor,
@@ -221,9 +225,15 @@ export async function runConnectorSync(
           raw: seed,
         });
       },
+      onEmailSuppressed: async (record) => {
+        await recordSuppressedEmailRecord(db, {
+          connectorConfigId: config.id,
+          record,
+        });
+      },
     })) {
       try {
-        seenProviderFileIds.add(item.providerFileId);
+        seenSyncIdentityKeys.add(syncIdentityKey(getSyncIdentityForItem(item, config.id, connectorType)));
 
         const itemResult = await processSyncedItem({
           db,
@@ -232,6 +242,7 @@ export async function runConnectorSync(
           connectorType,
           item,
           existingHashes,
+          encryptionKey: appConfig?.ENCRYPTION_KEY,
         });
 
         if (itemResult.kind === "skipped_empty") {
@@ -240,6 +251,10 @@ export async function runConnectorSync(
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
 
+        if (isEmailSyncedItem(item)) {
+          await persistEnvelopeMetadata(db, itemResult.indexedFileId, item.emailEnvelope);
+        }
+
         await emitFactsForSyncedItem({
           factRepo,
           connector,
@@ -247,6 +262,7 @@ export async function runConnectorSync(
           factContext,
           item,
           indexedFileId: itemResult.indexedFileId,
+          emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
         });
 
         if (itemResult.kind === "unchanged") {
@@ -280,16 +296,17 @@ export async function runConnectorSync(
       }
     }
 
-    if (!config.sync_cursor && seenProviderFileIds.size > 0) {
+    if (!config.sync_cursor && seenSyncIdentityKeys.size > 0) {
       const reconcileResult = await reconcileConnectorSync({
         db,
         factRepo,
         connectorConfigId: config.id,
         connectorType,
         syncRunId,
-        seenProviderFileIds,
+        seenSyncIdentityKeys,
         allowLargeReconcile: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
         maxReconcileRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
+        encryptionKey: appConfig?.ENCRYPTION_KEY,
         logger: syncLogger,
       });
       result.itemsArchived = reconcileResult.itemsArchived;
@@ -361,6 +378,7 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
     >
   >;
 }
@@ -395,12 +413,12 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     return;
   }
 
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, deps?.appConfig?.ENCRYPTION_KEY);
 
   // Auto-recover any connector stuck in `syncing` past the staleness threshold —
   // a row stuck mid-process is otherwise excluded from `findSyncableConfigs` and
   // would never retry until the server restarts.
-  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS);
+  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS, deps?.appConfig?.ENCRYPTION_KEY);
 
   // Same idea for enrichment: scheduled runs only claim `pending`/`failed` (so
   // an in-flight run can't be re-claimed mid-flight and race on chunk inserts),
@@ -502,8 +520,13 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
  * process. Recovered rows are flipped to "error" so `findSyncableConfigs` re-includes
  * them on the next eligibility pass.
  */
-async function recoverStaleSyncs(db: Kysely<DB>, logger: Logger, staleThresholdMs = 0): Promise<void> {
-  const repo = createConnectorRepository(db);
+async function recoverStaleSyncs(
+  db: Kysely<DB>,
+  logger: Logger,
+  staleThresholdMs = 0,
+  encryptionKey?: string,
+): Promise<void> {
+  const repo = createConnectorRepository(db, encryptionKey);
   const stale = await repo.findStaleSyncingConfigs(staleThresholdMs);
 
   if (stale.length === 0) return;
@@ -563,7 +586,7 @@ export function startSyncScheduler(
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   // Recover any connectors stuck in "syncing" from a previous crash
-  recoverStaleSyncs(db, logger).catch((err) => {
+  recoverStaleSyncs(db, logger, 0, deps?.appConfig?.ENCRYPTION_KEY).catch((err) => {
     logger.error({ err }, "Failed to recover stale syncs on startup");
   });
 

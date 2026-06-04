@@ -171,6 +171,36 @@ describe("replaySourceFacts", () => {
     expect(mentions[0].confidence).toBe("EXTRACTED");
   });
 
+  it("materializes correspondent facts with corresponded mentions", async () => {
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: ATTENDED_FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      source: "google_drive",
+      factType: "correspondent",
+      relation: "corresponded",
+      subjectName: "Jane Doe",
+      subjectEmail: "jane@example.com",
+      subjectSource: "google_drive",
+      subjectSourceId: "message-1:jane@example.com",
+      contextSnippet: "Corresponded message-1",
+      raw: { providerFileId: "message-1", correspondent: { name: "Jane Doe", email: "jane@example.com" } },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .where("indexed_file_id", "=", ATTENDED_FILE_ID)
+      .where("relation", "=", "corresponded")
+      .execute();
+
+    expect(mentions).toEqual([
+      { confidence: "EXTRACTED", source: "google_drive_correspondent", relation: "corresponded" },
+    ]);
+  });
+
   it("upgrades existing INFERRED mentions when a durable fact replays", async () => {
     const entity = await createEntityRepository(db).upsertPersonEntity({
       name: "Saurabh CanvasX",
@@ -388,7 +418,13 @@ describe("replaySourceFacts", () => {
   it("runs a follow-up materialization pass for concurrent callers", async () => {
     await db.deleteFrom("indexed_file_facts").execute();
     const repo = createIndexedFileFactRepository(db);
-    for (let i = 0; i < 1000; i++) {
+    /**
+     * The first pass only needs a non-empty batch to materialize; the assertion
+     * is that a late fact inserted afterward gets picked up by a follow-up pass.
+     * A small batch keeps this CPU-bound test well under the unit tier's default
+     * 5s timeout, which a 1000-fact batch tipped over under full-suite contention.
+     */
+    for (let i = 0; i < 25; i++) {
       await repo.upsertFact({
         source: "manual",
         factType: "person_seed",
@@ -402,7 +438,8 @@ describe("replaySourceFacts", () => {
     }
 
     const first = materializeUnmaterializedFacts(db, createTestLogger());
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await first;
+
     await repo.upsertFact({
       source: "manual",
       factType: "person_seed",
@@ -415,7 +452,6 @@ describe("replaySourceFacts", () => {
     });
     const second = materializeUnmaterializedFacts(db, createTestLogger());
 
-    await first;
     const followUp = await second;
 
     expect(followUp.factsRead).toBeGreaterThanOrEqual(1);

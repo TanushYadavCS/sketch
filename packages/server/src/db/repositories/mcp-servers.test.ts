@@ -59,8 +59,18 @@ describe("listAll()", () => {
   });
 
   it("returns servers ordered by created_at asc", async () => {
-    await repo.create({ ...validServer, displayName: "First" });
-    await repo.create({ ...validServer, displayName: "Second" });
+    const first = await repo.create({ ...validServer, displayName: "First" });
+    const second = await repo.create({ ...validServer, displayName: "Second" });
+    await db
+      .updateTable("mcp_servers")
+      .set({ created_at: "2020-01-01T00:00:00.000Z" })
+      .where("id", "=", first.id)
+      .execute();
+    await db
+      .updateTable("mcp_servers")
+      .set({ created_at: "2020-01-02T00:00:00.000Z" })
+      .where("id", "=", second.id)
+      .execute();
     const result = await repo.listAll();
     expect(result).toHaveLength(2);
     expect(result[0].display_name).toBe("First");

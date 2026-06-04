@@ -29,10 +29,14 @@ const TOOL_EMOJI: Record<string, string> = {
   Skill: "📚",
   SendFileToChat: "📎",
   TranscribeAudio: "🎙️",
+  VisualAnalysis: "🖼️",
   ManageScheduledTasks: "⏰",
+  SearchDeliveryTargets: "📍",
   SearchEntities: "🔍",
   GetEntityContext: "📊",
   ReadChatHistory: "💬",
+  SearchChatHistory: "🔎",
+  local_run_command: "💻",
 };
 
 const FALLBACK_EMOJI = "⚙️";
@@ -49,8 +53,11 @@ const PRIMARY_ARG: Record<string, string> = {
   Skill: "skill",
   SendFileToChat: "file_path",
   TranscribeAudio: "file_path",
+  VisualAnalysis: "file_path",
   ManageScheduledTasks: "action",
+  SearchDeliveryTargets: "query",
   SearchEntities: "queries",
+  SearchChatHistory: "query",
 };
 
 const EXTRA_FALLBACK_ARG_KEYS = ["path", "folder"];
@@ -70,17 +77,29 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
   Skill: { prefix: "Loading skill", keys: ["skill", "name"], fallback: "Loading a skill" },
   SendFileToChat: { prefix: "Sending file", keys: ["file_path"], fallback: "Sending a file" },
   TranscribeAudio: { prefix: "Transcribing audio", keys: ["file_path"], fallback: "Transcribing audio" },
+  VisualAnalysis: { prefix: "Analyzing image", keys: ["file_path"], fallback: "Analyzing image" },
   ManageScheduledTasks: {
     prefix: "Managing scheduled tasks:",
     keys: ["action"],
     fallback: "Managing scheduled tasks",
   },
+  SearchDeliveryTargets: {
+    prefix: "Searching delivery targets for",
+    keys: ["query"],
+    fallback: "Listing delivery targets",
+  },
   SearchEntities: { prefix: "Searching entities for", keys: ["queries"], fallback: "Searching entities" },
+  SearchChatHistory: {
+    prefix: "Searching chat history for",
+    keys: ["query"],
+    fallback: "Searching chat history",
+  },
 };
 
 const FRIENDLY_STATIC_LINES: Record<string, string> = {
   GetEntityContext: "Getting entity context",
   ReadChatHistory: "Reading Chat History",
+  local_run_command: "Running local Mac command",
 };
 
 const CANVAS_FRIENDLY_TARGET_PREFIX: Record<string, string> = {

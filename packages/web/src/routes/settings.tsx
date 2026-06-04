@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import {
   CopySimpleIcon,
+  DesktopIcon,
   EyeIcon,
   EyeSlashIcon,
   KeyIcon,
@@ -49,13 +50,11 @@ function SettingsPage() {
     return (
       <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <h1 className="text-xl font-semibold text-foreground">Settings</h1>
-        {showApiTokens ? (
-          <div className="mt-6">
-            <ApiTokensSection />
-          </div>
-        ) : (
-          <p className="mt-2 text-sm text-muted-foreground">Admin access is required to manage workspace settings.</p>
-        )}
+        <p className="mt-2 text-sm text-muted-foreground">Manage your personal Sketch settings.</p>
+        <div className="mt-6 space-y-8">
+          <LocalDevicesSection />
+          {showApiTokens ? <ApiTokensSection /> : null}
+        </div>
       </div>
     );
   }
@@ -67,6 +66,7 @@ function SettingsPage() {
 
       <div className="mt-6 space-y-8">
         <OrgContextSection />
+        <LocalDevicesSection />
         <AccessSection />
         <ApiKeySection />
         {showApiTokens ? <ApiTokensSection /> : null}
@@ -160,6 +160,203 @@ function OrgContextSection() {
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function LocalDevicesSection() {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("My Mac");
+  const [createdDevice, setCreatedDevice] = useState<{ plaintext: string; baseUrl: string } | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+
+  const devicesQuery = useQuery({
+    queryKey: ["local-devices"],
+    queryFn: () => api.localDevices.list(),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (payload: { name: string }) => api.localDevices.create({ ...payload, platform: "macos" }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["local-devices"] });
+      setCreatedDevice({ plaintext: result.plaintext, baseUrl: result.baseUrl });
+      toast.success("Local device token created");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (id: string) => api.localDevices.revoke(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["local-devices"] });
+      setConfirmRevokeId(null);
+      toast.success("Local device revoked");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const trimmedName = name.trim();
+  const activeDevices = (devicesQuery.data?.devices ?? []).filter((device) => !device.revokedAt);
+
+  return (
+    <section>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-muted-foreground">Local Mac</p>
+      </div>
+
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="h-9"
+            maxLength={120}
+            aria-label="Local device name"
+          />
+          <Button
+            size="sm"
+            className="shrink-0"
+            onClick={() => createMutation.mutate({ name: trimmedName })}
+            disabled={trimmedName.length === 0 || createMutation.isPending}
+          >
+            {createMutation.isPending ? (
+              <SpinnerGapIcon size={14} className="animate-spin" />
+            ) : (
+              <DesktopIcon size={14} />
+            )}
+            Pair Mac
+          </Button>
+        </div>
+
+        {createdDevice ? (
+          <div className="mt-4 rounded-md border border-brand-accent bg-brand-accent/[0.05] p-3">
+            <p className="text-sm font-medium">Sketch Local setup</p>
+            <div className="mt-2 grid gap-2">
+              <div className="grid gap-1.5">
+                <label htmlFor="local-device-sketch-domain" className="text-xs font-medium text-muted-foreground">
+                  Sketch Domain
+                </label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="local-device-sketch-domain"
+                    value={createdDevice.baseUrl}
+                    readOnly
+                    className="h-9 font-mono text-xs"
+                    aria-label="Sketch domain"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() =>
+                      copyTextToClipboard(createdDevice.baseUrl).then(() => toast.success("Sketch domain copied"))
+                    }
+                    aria-label="Copy Sketch domain"
+                  >
+                    <CopySimpleIcon size={16} />
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <label htmlFor="local-device-token" className="text-xs font-medium text-muted-foreground">
+                  Device token
+                </label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="local-device-token"
+                    value={createdDevice.plaintext}
+                    readOnly
+                    className="h-9 font-mono text-xs"
+                    aria-label="Device token"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() =>
+                      copyTextToClipboard(createdDevice.plaintext).then(() => toast.success("Token copied"))
+                    }
+                    aria-label="Copy device token"
+                  >
+                    <CopySimpleIcon size={16} />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-4 overflow-hidden rounded-md border border-border">
+          {devicesQuery.isLoading ? (
+            <Skeleton className="h-28 rounded-none" />
+          ) : activeDevices.length === 0 ? (
+            <div className="px-4 py-6 text-center text-sm text-muted-foreground">No paired Macs</div>
+          ) : (
+            <div className="divide-y divide-border">
+              {activeDevices.map((device) => (
+                <div key={device.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-medium">{device.name}</p>
+                      <span
+                        className={
+                          device.status === "online"
+                            ? "rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700"
+                            : "rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+                        }
+                      >
+                        {device.status}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {device.prefix}... · Created {formatDate(device.createdAt)}
+                      {device.lastSeenAt ? ` · Last seen ${formatDate(device.lastSeenAt)}` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="shrink-0 hover:text-destructive"
+                    onClick={() => setConfirmRevokeId(device.id)}
+                    aria-label={`Revoke ${device.name}`}
+                  >
+                    <TrashIcon size={16} />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <AlertDialog open={confirmRevokeId !== null} onOpenChange={(open) => !open && setConfirmRevokeId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke local Mac?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This Mac will disconnect and local commands will stop working.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revokeMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => confirmRevokeId && revokeMutation.mutate(confirmRevokeId)}
+              disabled={revokeMutation.isPending}
+            >
+              {revokeMutation.isPending ? (
+                <>
+                  <SpinnerGapIcon size={14} className="animate-spin" />
+                  Revoking...
+                </>
+              ) : (
+                "Revoke"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

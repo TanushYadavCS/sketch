@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildSketchContext, buildSystemContext, formatTimeAgo } from "./prompt";
+import {
+  buildSketchContext,
+  buildSystemContext,
+  formatTimeAgo,
+  getImageAttachmentPathsFromSketchContext,
+} from "./prompt";
 
 describe("buildSystemContext", () => {
   describe("agent instructions overlay", () => {
@@ -101,10 +106,11 @@ describe("buildSystemContext", () => {
   });
 
   describe("memory section", () => {
-    it("includes memory section with persistent memory guidance", () => {
+    it("includes memory section without encouraging unsupported memory claims", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("## Memory");
-      expect(result).toContain("persistent memory across conversations");
+      expect(result).not.toContain("You have persistent memory across conversations");
+      expect(result).toContain("Do not claim to remember past conversations unless");
     });
 
     it("mentions reducing future steering", () => {
@@ -137,6 +143,21 @@ describe("buildSystemContext", () => {
     it("instructs to patch outdated skills immediately", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("patch it immediately");
+    });
+  });
+
+  describe("chat history section", () => {
+    it("distinguishes chronological reads from chat-history search", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("## Chat History");
+      expect(result).toContain("Use ReadChatHistory for chronological paging");
+      expect(result).toContain("Use SearchChatHistory to find relevant stored chat messages");
+      expect(result).toContain("must call SearchChatHistory first");
+      expect(result).toContain('scope: "current_thread"');
+      expect(result).toContain('scope: "conversation"');
+      expect(result).toContain("does not replace the existing Search tool");
+      expect(result).toContain("call ReadChatHistory around that row id");
     });
   });
 
@@ -279,6 +300,29 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "whatsapp" });
       expect(result).not.toContain("mrkdwn");
       expect(result).not.toContain("<url|text>");
+    });
+  });
+
+  describe("web chat platform formatting", () => {
+    it("includes GitHub-flavored Markdown rules", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("Sketch web chat");
+      expect(result).toContain("GitHub-flavored Markdown");
+      expect(result).toContain("[descriptive link text](url)");
+      expect(result).toContain("fenced code blocks");
+    });
+
+    it("does not include Slack or WhatsApp link formatting", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).not.toContain("<url|text>");
+      expect(result).not.toContain("write URLs inline");
+    });
+
+    it("can mention delivery context without overriding web reply formatting", () => {
+      const result = buildSystemContext({ platform: "web", deliveryPlatform: "slack" });
+      expect(result).toContain("visible reply is rendered in web chat");
+      expect(result).toContain("must use web Markdown formatting");
+      expect(result).toContain("slack delivery context");
     });
   });
 
@@ -714,10 +758,48 @@ describe("buildSketchContext", () => {
         },
       });
 
-      expect(result).toContain("Missed WhatsApp messages are shown below using durable row ids.");
+      expect(result).toContain("Missed chat messages are shown below using durable row ids.");
       expect(result).toContain("Bob [messageId=11]: first missed message");
       expect(result).toContain("Carol [messageId=12]: See attached files.");
       expect(result).toContain('path="/ws/attachments/note.txt"');
+    });
+
+    it("adds vision hints and collects image paths from backlog attachments", () => {
+      const sketchContext = {
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "what did I miss?",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        visionAnalysisEnabled: true,
+        conversationBacklog: {
+          afterMessageId: 10,
+          beforeMessageId: 12,
+          hasMore: false,
+          messages: [
+            {
+              id: 11,
+              senderName: "Carol",
+              text: "",
+              attachments: [
+                {
+                  originalName: "photo.jpg",
+                  mimeType: "image/jpeg",
+                  localPath: "/ws/attachments/photo.jpg",
+                  sizeBytes: 120,
+                },
+              ],
+              providerTimestamp: null,
+              receivedAt: "2026-01-01T00:00:02.000Z",
+            },
+          ],
+        },
+      };
+
+      const result = buildSketchContext(sketchContext);
+
+      expect(result).toContain('hint="Use VisualAnalysis with this path to understand the image."');
+      expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/photo.jpg"]);
     });
 
     it("tells the agent how to continue when backlog is truncated", () => {
@@ -739,7 +821,10 @@ describe("buildSketchContext", () => {
       expect(result).toContain("<thread>");
       expect(result).toContain("after messageId 0 and before the current messageId 50");
       expect(result).toContain(
-        "Use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false to continue.",
+        "If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially.",
+      );
+      expect(result).toContain(
+        "For chronological continuation, use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false.",
       );
     });
   });

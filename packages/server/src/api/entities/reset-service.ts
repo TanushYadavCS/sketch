@@ -15,7 +15,7 @@ export interface ResetRequest {
 }
 
 export const FACT_TYPES_BY_CATEGORY: Record<ResetCategory, IndexedFileFactType[]> = {
-  connectors: ["structural_seed", "person_seed", "attendee", "assignee", "author", "parent_entity"],
+  connectors: ["structural_seed", "person_seed", "attendee", "correspondent", "assignee", "author", "parent_entity"],
   ai: ["llm_extracted", "llm_relation"],
   manual: [],
 };

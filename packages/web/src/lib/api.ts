@@ -30,6 +30,17 @@ export interface ApiTokenRecord {
   revokedAt: string | null;
 }
 
+export interface LocalDeviceRecord {
+  id: string;
+  name: string;
+  platform: string;
+  prefix: string;
+  status: "online" | "offline" | "revoked";
+  lastSeenAt: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
 export class ApiRequestError extends Error {
   status: number;
   code: string;
@@ -93,7 +104,16 @@ export interface ScheduledTaskListItem {
   triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
+  delivery: {
+    platform: "slack" | "whatsapp";
+    targetType: "dm" | "channel" | "group" | "thread";
+    targetId: string;
+    threadTs: string | null;
+    mode: "deliver" | "silent";
+    label: string;
+  };
   lastRunStatus: string | null;
   runCount: number;
 }
@@ -613,6 +633,33 @@ export interface FileContent {
   sourcePath: string | null;
   providerUrl: string | null;
   enrichmentStatus: string;
+  /** Present for email_message files — lets the detail sheet load the full thread. */
+  emailThread?: { connectorId: string; threadKey: string };
+}
+
+export interface EmailAddr {
+  name?: string | null;
+  email: string;
+}
+
+export interface EmailThreadSummary {
+  threadKey: string;
+  latestIndexedFileId: string;
+  latestSubject: string | null;
+  messageCount: number;
+  lastActivity: string | null;
+  participants: string[];
+}
+
+export interface EmailThreadMessage {
+  indexedFileId: string;
+  subject: string | null;
+  sentAt: string | null;
+  from: EmailAddr;
+  to: EmailAddr[];
+  cc: EmailAddr[];
+  providerUrl: string | null;
+  content: string | null;
 }
 
 export interface FileAccessMember {
@@ -635,7 +682,9 @@ export type UnifiedFile = ConnectorFile;
 
 /** A result from hybrid search (FTS5 + vector). */
 export interface SearchResult {
+  resultKind?: "file" | "email_thread";
   id: string;
+  hitFileId?: string;
   fileName: string;
   source: string;
   contentCategory: string;
@@ -647,6 +696,11 @@ export interface SearchResult {
   snippet: string | null;
   similarity: number | null;
   score: number;
+  threadKey?: string;
+  messageCount?: number;
+  latestSubject?: string;
+  lastActivity?: string | null;
+  participants?: string[];
 }
 
 export interface FileManualShare {
@@ -691,7 +745,80 @@ export interface SkillRecord {
   body: string;
 }
 
+export interface WorkspaceSummary {
+  automations: {
+    total: number;
+    active: number;
+    paused: number;
+    completed: number;
+    running: number;
+    nextRunAt: string | null;
+  };
+  skills: {
+    total: number;
+    yours: number;
+    shared: number;
+  };
+  integrations: {
+    connected: number;
+    appNames: string[];
+  };
+  team: {
+    total: number;
+    humans: number;
+    agents: number;
+  };
+}
+
+export type WebChatMessagePart =
+  | { type: "text"; text: string }
+  | { type: "data-progress"; id: string; data: { lines: string[] } }
+  | {
+      type: "data-file";
+      id: string;
+      data: {
+        name: string;
+        url: string;
+        mediaType: string;
+        sizeBytes?: number;
+      };
+    };
+
+export interface WebChatStoredMessage {
+  id: string;
+  role: "user" | "assistant";
+  createdAt?: string;
+  parts: WebChatMessagePart[];
+}
+
+export interface WebChatMessagesResponse {
+  messages: WebChatStoredMessage[];
+  updatedAt: string | null;
+}
+
+export interface WebChatConversationSummary {
+  id: string;
+  title: string;
+  channel: "web";
+  updatedAt: string;
+}
+
 export const api = {
+  webChat: {
+    messages(conversationId = "default") {
+      return request<WebChatMessagesResponse>(
+        `/api/web-chat/messages?conversationId=${encodeURIComponent(conversationId)}`,
+      );
+    },
+    conversations() {
+      return request<{ conversations: WebChatConversationSummary[] }>("/api/web-chat/conversations");
+    },
+    removeConversation(conversationId: string) {
+      return request<{ success: boolean }>(`/api/web-chat/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE",
+      });
+    },
+  },
   setup: {
     status() {
       return request<SetupStatus>("/api/setup/status");
@@ -876,6 +1003,23 @@ export const api = {
       return request<{ success: true }>(`/api/api-tokens/${id}`, { method: "DELETE" });
     },
   },
+  localDevices: {
+    list() {
+      return request<{ devices: LocalDeviceRecord[]; baseUrl: string; websocketUrl: string }>("/api/local-devices");
+    },
+    create(data: { name: string; platform?: string }) {
+      return request<{ device: LocalDeviceRecord; plaintext: string; baseUrl: string; websocketUrl: string }>(
+        "/api/local-devices",
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      );
+    },
+    revoke(id: string) {
+      return request<{ success: true }>(`/api/local-devices/${id}`, { method: "DELETE" });
+    },
+  },
   integrations: {
     list() {
       return request<{ connectors: ConnectorConfig[] }>("/api/connectors");
@@ -899,6 +1043,38 @@ export const api = {
     },
     entityCount(id: string) {
       return request<{ count: number }>(`/api/connectors/${id}/entity-count`);
+    },
+    suppressedEmails(id: string, opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{
+        countsByReason: Record<string, number>;
+        recent: Array<{
+          providerFileId: string;
+          providerMessageId: string | null;
+          threadId: string | null;
+          reason: string;
+          observedAt: string;
+        }>;
+        total: number;
+        hasMore: boolean;
+      }>(`/api/connectors/${id}/suppressed-emails${qs ? `?${qs}` : ""}`);
+    },
+    emailThreads(id: string, opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{ threads: EmailThreadSummary[]; total: number; hasMore: boolean }>(
+        `/api/connectors/${id}/email-threads${qs ? `?${qs}` : ""}`,
+      );
+    },
+    emailThread(id: string, threadKey: string) {
+      return request<{ messages: EmailThreadMessage[] }>(
+        `/api/connectors/${id}/email-threads/${encodeURIComponent(threadKey)}`,
+      );
     },
     sync(id: string) {
       return request<{ sync: { connectorId: string; status: string } }>(`/api/connectors/${id}/syncs`, {
@@ -1128,8 +1304,10 @@ export const api = {
         body: JSON.stringify({ clientId, clientSecret }),
       });
     },
-    authorizeUrl() {
-      return "/api/oauth/google/authorize";
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/google/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/google/authorize";
     },
   },
   identities: {
@@ -1627,6 +1805,10 @@ export const api = {
     },
   },
   workspace: {
+    summary() {
+      return request<WorkspaceSummary>("/api/workspace/summary");
+    },
+
     // List directory contents
     async listFiles(scope: WorkspaceScope, path: string): Promise<{ files: FileMetadata[] }> {
       const params = new URLSearchParams();

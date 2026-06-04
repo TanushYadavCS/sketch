@@ -5,9 +5,11 @@ import type { createConversationRepository } from "../../db/repositories/convers
 import type { createInboxMessagesRepository } from "../../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
+import type { LocalDeviceGateway } from "../../local-devices/gateway";
 import type { Logger } from "../../logger";
 import type { TaskScheduler } from "../../scheduler/service";
 import type { TaskContext } from "../../scheduler/types";
+import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
 
@@ -46,6 +48,7 @@ export interface SketchMcpDeps {
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   taskContext?: TaskContext;
+  getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -55,6 +58,7 @@ export interface SketchMcpDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
+  localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   activeQueueKey?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
@@ -69,6 +73,8 @@ export interface SketchMcpDeps {
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
+    currentMessageId?: number;
+    providerThreadId?: string | null;
   };
   publicMcp?: {
     userEmails?: string[];

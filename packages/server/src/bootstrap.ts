@@ -13,6 +13,7 @@ import { type AgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import type { Config } from "./config";
 import { startSyncScheduler } from "./connectors/sync";
+import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
 import { createAgentEnvironmentVariableRepository } from "./db/repositories/agent-environment-variables";
@@ -22,6 +23,7 @@ import { createAutomationStepContentRepository } from "./db/repositories/automat
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConversationRepository } from "./db/repositories/conversations";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
+import { createLocalDeviceRepository } from "./db/repositories/local-devices";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
@@ -31,6 +33,7 @@ import { configureMaterializeDefaults } from "./entities/materialize";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
 import type { IntegrationProvider, IntegrationStatus } from "./integrations/types";
+import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
 import { runManagedSeed } from "./managed-seed";
 import { QueueManager } from "./queue";
@@ -39,7 +42,6 @@ import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
 import { createSlackStartupManager } from "./slack/startup";
-import { ThreadBuffer } from "./slack/thread-buffer";
 import { UserCache } from "./slack/user-cache";
 import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
 import { initTelemetry } from "./telemetry/setup";
@@ -102,6 +104,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
+  await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
@@ -113,6 +116,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger.warn({ staleCount }, "Cleaned up automation runs interrupted by previous shutdown");
   }
   const inboxMessagesRepo = createInboxMessagesRepository(db);
+  const localDevicesRepo = createLocalDeviceRepository(db);
+  const localDeviceGateway = new LocalDeviceGateway(localDevicesRepo, logger);
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
   const tracer = trace.getTracer("sketch");
@@ -142,6 +147,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         maxRpm: config.GEMINI_MAX_RPM,
         maxRetries: config.GEMINI_MAX_RETRIES,
       },
+      localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
@@ -190,7 +196,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const queueManager = new QueueManager();
 
   // 7. Slack infrastructure
-  const threadBuffer = new ThreadBuffer();
   const userCache = new UserCache();
   let slack: SlackBot | null = null;
 
@@ -309,9 +314,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     config,
     logger,
-    repos: { users, channels, settings: settingsRepo },
+    repos: { users, channels, settings: settingsRepo, conversations: conversationsRepo },
     queue: queueManager,
-    slack: { threadBuffer, userCache },
+    slack: { userCache },
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
@@ -391,8 +396,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
       logger.info("SMTP configuration updated");
     },
     logger,
+    localDeviceGateway,
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
+  localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
   // 10. Start platforms

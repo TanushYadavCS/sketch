@@ -142,6 +142,26 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(['🧩 Canvas web search: "TypeScript best practices"']);
   });
 
+  it("renders delivery target search progress", () => {
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+      ]).lines,
+    ).toEqual(['📍 Searching delivery targets for "engineering"']);
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { platform: "slack" } },
+      ]).lines,
+    ).toEqual(["📍 Listing delivery targets"]);
+  });
+
+  it("renders delivery target search in technical mode", () => {
+    const { lines } = renderEvents({ toolProgress: "technical", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+    ]);
+    expect(lines).toEqual(['📍 SearchDeliveryTargets: "engineering"']);
+  });
+
   it("renders a clear fallback for unknown tools with safe available input", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "mcp__google_drive__list_files", input: { folder: "root" } },
@@ -154,6 +174,33 @@ describe("createProgressRenderer", () => {
       { kind: "tool_use", toolName: "mcp__sketch__ReadChatHistory", input: {} },
     ]);
     expect(lines).toEqual(["💬 Reading Chat History"]);
+  });
+
+  it("renders chat history searches with the query", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__SearchChatHistory", input: { query: "launch budget" } },
+    ]);
+    expect(lines).toEqual(['🔎 Searching chat history for "launch budget"']);
+  });
+
+  it("renders visual analysis with the image path", () => {
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__VisualAnalysis", input: { file_path: "attachments/photo.jpg" } },
+      ]).lines,
+    ).toEqual(['🖼️ Analyzing image "attachments/photo.jpg"']);
+    expect(
+      renderEvents({ toolProgress: "technical", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__VisualAnalysis", input: { file_path: "attachments/photo.jpg" } },
+      ]).lines,
+    ).toEqual(['🖼️ VisualAnalysis: "attachments/photo.jpg"']);
+  });
+
+  it("renders local Mac commands without echoing the command", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__local_run_command", input: { command: "cat ~/.ssh/id_rsa" } },
+    ]);
+    expect(lines).toEqual(["💻 Running local Mac command"]);
   });
 
   it("does not include unsafe fallback input fields", () => {

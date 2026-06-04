@@ -159,6 +159,31 @@ describe("formatAttachmentsForPrompt", () => {
     expect(result).toContain('name="b.png"');
   });
 
+  it("adds a visual analysis hint to image attachments when vision analysis is enabled", () => {
+    const result = formatAttachmentsForPrompt(
+      [
+        { originalName: "a.txt", localPath: "/w/a.txt", mimeType: "text/plain", sizeBytes: 10 },
+        { originalName: "b.png", localPath: "/w/b.png", mimeType: "image/png", sizeBytes: 2048 },
+      ],
+      { visionAnalysisEnabled: true },
+    );
+
+    expect(result).toContain(
+      '<file name="b.png" path="/w/b.png" mime="image/png" size="2048" hint="Use VisualAnalysis with this path to understand the image." />',
+    );
+    expect(result).toContain('<file name="a.txt" path="/w/a.txt" mime="text/plain" size="10" />');
+  });
+
+  it("does not add visual analysis hints when vision analysis is disabled", () => {
+    const result = formatAttachmentsForPrompt(
+      [{ originalName: "b.png", localPath: "/w/b.png", mimeType: "image/png", sizeBytes: 2048 }],
+      { visionAnalysisEnabled: false },
+    );
+
+    expect(result).not.toContain("VisualAnalysis");
+    expect(result).toContain('<file name="b.png" path="/w/b.png" mime="image/png" size="2048" />');
+  });
+
   it("formats inline audio transcription blocks", () => {
     const result = formatAttachmentsForPrompt([
       {

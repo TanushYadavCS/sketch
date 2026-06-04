@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.33.0] -- 2026-06-03
+
+- Web app: add the Sketch Home experience and full-window web chat with multi-conversation history, streamed progress, generated file links, workspace summaries, and Markdown rendering.
+- Chat memory: persist WhatsApp and Slack conversation history with row-id watermarks, durable missed-message recall, and a `ReadChatHistory` tool for group/channel context.
+- External MCP: add gated per-user API tokens, PAT-authenticated `/mcp` Streamable HTTP support, external search/tool-call auditing, and the Settings API-token UI.
+- Integrations: add org-level integration access controls, owner-name forwarding/display, and Google Workspace role propagation to Canvas integration calls.
+- Agent tools: add gated OpenRouter-backed `VisualAnalysis` support for text-only agent deployments that need OCR, screenshot, diagram, or image inspection.
+- Files/enrichment: graduate Files/knowledge surfaces from the experimental flag path, trim pasted Gemini keys, preserve summaries on embedding retry, and add Gemini pacing/retry controls with enrichment backoff.
+- Workflows: separate workflow creation context from delivery target, add `SearchDeliveryTargets`, support Slack channel/thread/DM and WhatsApp delivery routing, and show source versus delivery in the workflow UI.
+- Reliability: clean dependent rows when removing team members, serialize web chat transcript writes and agent runs, and improve Slack bootstrap history continuation.
+
 ## [0.32.0] -- 2026-06-01
 
 - Entity graph: add richer entity materialization with mention provenance, indexed source facts, domain/affiliation inference, typed relationships, relation evidence, and improved graph extraction quality.

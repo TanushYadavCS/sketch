@@ -16,13 +16,22 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import type { Config } from "../config";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
+import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/envelope-metadata";
+import type { EmailAddr } from "../connectors/email/normalized-email";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import { buildCredentialHint } from "../connectors/fireflies";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
 import { VALID_CONNECTOR_TYPES, getConnector } from "../connectors/registry";
-import { browseFiles, getFileContent, listIndexedSources, search, searchFiles } from "../connectors/search";
+import {
+  browseFiles,
+  filterAccessibleFileIds,
+  getFileContent,
+  listIndexedSources,
+  search,
+  searchFiles,
+} from "../connectors/search";
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import type { createConnectorRepository } from "../db/repositories/connectors";
@@ -42,6 +51,19 @@ import {
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
+function emailLabel(addr: EmailAddr): string {
+  return addr.name?.trim() || addr.email;
+}
+
+function sortBySentAtAsc<T extends { sent_at: string | null; indexed_file_id: string }>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    if (a.sent_at && b.sent_at && a.sent_at !== b.sent_at) return a.sent_at.localeCompare(b.sent_at);
+    if (a.sent_at && !b.sent_at) return -1;
+    if (!a.sent_at && b.sent_at) return 1;
+    return a.indexed_file_id.localeCompare(b.indexed_file_id);
+  });
+}
+
 /** Run sync in background. Enrichment runs separately on the scheduled sync cycle. */
 function syncInBackground(
   db: Kysely<DB>,
@@ -55,6 +77,7 @@ function syncInBackground(
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "ENCRYPTION_KEY"
     >
   >,
 ) {
@@ -465,8 +488,23 @@ export function connectorRoutes(
         subtype: m.subtype,
       }));
 
+    // For email files, hand the detail sheet enough to fetch the whole visible
+    // thread. Safe metadata for a file the caller can already open; also lets a
+    // search result opened on `hitFileId` render its conversation.
+    let emailThread: { connectorId: string; threadKey: string } | undefined;
+    if (file.fileType === "email_message") {
+      const env = await db
+        .selectFrom("email_message_envelopes")
+        .select(["connector_config_id", "thread_id"])
+        .where("indexed_file_id", "=", fileId)
+        .executeTakeFirst();
+      if (env) {
+        emailThread = { connectorId: env.connector_config_id, threadKey: env.thread_id ?? fileId };
+      }
+    }
+
     return c.json({
-      file,
+      file: { ...file, emailThread },
       access: {
         scope: accessDetails.length > 0 ? "restricted" : "unrestricted",
         members: accessDetails.map((a) => ({
@@ -1124,6 +1162,252 @@ export function connectorRoutes(
     const entityRepo = createEntityRepository(db);
     const count = await entityRepo.countEntitiesForFiles(fileIds);
     return c.json({ count });
+  });
+
+  /**
+   * Suppression transparency: what the shared email layer filtered out before
+   * indexing, and why. Connector-scoped (owner/admin) — the connector owner is a
+   * party to every message in their own perUserAuth mailbox, so no per-message
+   * visibility predicate is needed here.
+   *
+   * Counts-only: `email_suppressed_messages` persists only the reason + provider
+   * IDs, so sender/subject are intentionally absent (see GMAIL_CONNECTOR_UI §U3).
+   */
+  routes.get("/:id/suppressed-emails", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    if (denied) return denied;
+
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+
+    const [countRows, recentRows, totalRow] = await Promise.all([
+      db
+        .selectFrom("email_suppressed_messages")
+        .where("connector_config_id", "=", config.id)
+        .groupBy("reason")
+        .select((eb) => ["reason", eb.fn.count<number>("id").as("count")])
+        .execute(),
+      db
+        .selectFrom("email_suppressed_messages")
+        .where("connector_config_id", "=", config.id)
+        .select(["provider_file_id", "provider_message_id", "thread_id", "reason", "observed_at"])
+        .orderBy("observed_at", "desc")
+        .limit(limit)
+        .offset(offset)
+        .execute(),
+      db
+        .selectFrom("email_suppressed_messages")
+        .where("connector_config_id", "=", config.id)
+        .select((eb) => eb.fn.count<number>("id").as("count"))
+        .executeTakeFirst(),
+    ]);
+
+    const countsByReason: Record<string, number> = {
+      bulk: 0,
+      operational: 0,
+      role_account: 0,
+      inbound_only: 0,
+      missing_counterparty: 0,
+    };
+    for (const row of countRows) {
+      countsByReason[row.reason] = Number(row.count);
+    }
+    const total = Number(totalRow?.count ?? 0);
+
+    return c.json({
+      countsByReason,
+      recent: recentRows.map((row) => ({
+        providerFileId: row.provider_file_id,
+        providerMessageId: row.provider_message_id,
+        threadId: row.thread_id,
+        reason: row.reason,
+        observedAt: row.observed_at,
+      })),
+      total,
+      hasMore: offset + recentRows.length < total,
+    });
+  });
+
+  /**
+   * Thread-grouped email for the connector manage view. One row per conversation
+   * (`COALESCE(thread_id, indexed_file_id)`), ordered by latest activity.
+   * Connector-scoped (owner/admin): returns only envelope metadata (subject,
+   * participants, counts), never message bodies, so no per-viewer content
+   * predicate is needed here — see the detail route for body access.
+   */
+  routes.get("/:id/email-threads", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    if (denied) return denied;
+
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const threadKeyExpr = sql<string>`coalesce(email_message_envelopes.thread_id, email_message_envelopes.indexed_file_id)`;
+
+    const [pageRows, totalRow] = await Promise.all([
+      db
+        .selectFrom("email_message_envelopes")
+        .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+        .where("indexed_files.is_archived", "=", 0)
+        .where("email_message_envelopes.connector_config_id", "=", config.id)
+        .select((eb) => [
+          threadKeyExpr.as("thread_key"),
+          eb.fn.count<number>("email_message_envelopes.indexed_file_id").as("message_count"),
+        ])
+        .groupBy(threadKeyExpr)
+        .orderBy(sql`max(email_message_envelopes.sent_at)`, "desc")
+        .limit(limit)
+        .offset(offset)
+        .execute(),
+      db
+        .selectFrom((eb) =>
+          eb
+            .selectFrom("email_message_envelopes")
+            .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+            .where("indexed_files.is_archived", "=", 0)
+            .where("email_message_envelopes.connector_config_id", "=", config.id)
+            .select(threadKeyExpr.as("thread_key"))
+            .groupBy(threadKeyExpr)
+            .as("t"),
+        )
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .executeTakeFirst(),
+    ]);
+
+    const keys = pageRows.map((row) => row.thread_key);
+    const envelopes =
+      keys.length > 0
+        ? await db
+            .selectFrom("email_message_envelopes")
+            .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+            .where("indexed_files.is_archived", "=", 0)
+            .where("email_message_envelopes.connector_config_id", "=", config.id)
+            .where((eb) => eb(threadKeyExpr, "in", keys))
+            .select([
+              "email_message_envelopes.indexed_file_id",
+              "email_message_envelopes.thread_id",
+              "email_message_envelopes.subject",
+              "email_message_envelopes.sent_at",
+              "email_message_envelopes.from_json",
+              "email_message_envelopes.to_json",
+              "email_message_envelopes.cc_json",
+            ])
+            .execute()
+        : [];
+
+    const byThread = new Map<string, typeof envelopes>();
+    for (const env of envelopes) {
+      const key = env.thread_id ?? env.indexed_file_id;
+      const group = byThread.get(key) ?? [];
+      group.push(env);
+      byThread.set(key, group);
+    }
+
+    const total = Number(totalRow?.count ?? 0);
+    const threads = pageRows.map((row) => {
+      const group = sortBySentAtAsc(byThread.get(row.thread_key) ?? []);
+      const latest = group[group.length - 1];
+      const participants = new Map<string, string>();
+      for (const env of group) {
+        for (const addr of [
+          parseEmailAddrJson(env.from_json),
+          ...parseEmailAddrListJson(env.to_json),
+          ...parseEmailAddrListJson(env.cc_json),
+        ]) {
+          if (!participants.has(addr.email)) participants.set(addr.email, emailLabel(addr));
+        }
+      }
+      return {
+        threadKey: row.thread_key,
+        latestIndexedFileId: latest?.indexed_file_id ?? row.thread_key,
+        latestSubject: latest?.subject ?? null,
+        messageCount: Number(row.message_count),
+        lastActivity: latest?.sent_at ?? null,
+        participants: [...participants.values()].slice(0, 6),
+      };
+    });
+
+    return c.json({ threads, total, hasMore: offset + threads.length < total });
+  });
+
+  /**
+   * Structured thread detail (time-ordered messages with bodies).
+   *
+   * Content auth is load-bearing: connector owner/admin gates route access, but
+   * returning message *bodies* additionally requires file-content visibility —
+   * the same predicate as GET /files/:fileId/content. A non-bypass admin can
+   * manage the connector yet still cannot read private bodies. If no message is
+   * content-visible, respond 403 without leaking which messages exist.
+   */
+  routes.get("/:id/email-threads/:threadKey", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    if (denied) return denied;
+
+    const threadKey = c.req.param("threadKey");
+    const threadKeyExpr = sql<string>`coalesce(email_message_envelopes.thread_id, email_message_envelopes.indexed_file_id)`;
+    const rows = await db
+      .selectFrom("email_message_envelopes")
+      .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+      .where("indexed_files.is_archived", "=", 0)
+      .where("email_message_envelopes.connector_config_id", "=", config.id)
+      .where((eb) => eb(threadKeyExpr, "=", threadKey))
+      .select([
+        "email_message_envelopes.indexed_file_id",
+        "email_message_envelopes.subject",
+        "email_message_envelopes.sent_at",
+        "email_message_envelopes.from_json",
+        "email_message_envelopes.to_json",
+        "email_message_envelopes.cc_json",
+        "email_message_envelopes.provider_url",
+        "indexed_files.content",
+      ])
+      .orderBy("email_message_envelopes.sent_at", "asc")
+      .execute();
+
+    if (rows.length === 0) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Thread not found" } }, 404);
+    }
+
+    // Mirror GET /files/:fileId/content: admins bypass only with the
+    // admin_can_read_all_files setting; everyone else is filtered to visible files.
+    const contentViewer = getContentViewer(c);
+    const userEmails = contentViewer.isAdmin ? undefined : await getUserEmails(c);
+    const visibleIds = await filterAccessibleFileIds(
+      db,
+      rows.map((row) => row.indexed_file_id),
+      userEmails,
+    );
+    const visible = rows.filter((row) => visibleIds.has(row.indexed_file_id));
+    if (visible.length === 0) {
+      return c.json({ error: { code: "FORBIDDEN", message: "You don't have access to this thread's contents." } }, 403);
+    }
+
+    return c.json({
+      messages: visible.map((row) => ({
+        indexedFileId: row.indexed_file_id,
+        subject: row.subject,
+        sentAt: row.sent_at,
+        from: parseEmailAddrJson(row.from_json),
+        to: parseEmailAddrListJson(row.to_json),
+        cc: parseEmailAddrListJson(row.cc_json),
+        providerUrl: row.provider_url,
+        content: row.content,
+      })),
+    });
   });
 
   /**

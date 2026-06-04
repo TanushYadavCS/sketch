@@ -92,6 +92,18 @@ export const handlers = [
     return HttpResponse.json({ success: true });
   }),
 
+  http.get("/api/channels/slack", () => {
+    return HttpResponse.json({ channels: [] });
+  }),
+
+  http.get("/api/channels/whatsapp/groups", () => {
+    return HttpResponse.json({ groups: [] });
+  }),
+
+  http.delete("/api/channels/whatsapp/pair", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
   http.get("/api/channels/status", () => {
     return HttpResponse.json({
       channels: [
@@ -216,6 +228,14 @@ export const handlers = [
 
   http.get("/api/entities/rebuilds/jobs", () => {
     return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
+  }),
+
+  http.get("/api/settings/identity", () => {
+    return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
+  }),
+
+  http.get("/api/entity-review", () => {
+    return HttpResponse.json({ rows: [], total: 0 });
   }),
 
   http.get("/api/auth/session", () => {

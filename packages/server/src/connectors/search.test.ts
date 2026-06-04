@@ -13,6 +13,7 @@ import {
   browseFiles,
   filterAccessibleFileIds,
   getFileContent,
+  hybridSearch,
   listIndexedSourcesForPrompt,
   search,
   searchFiles,
@@ -475,6 +476,177 @@ describe("search — recency browse applies RBAC before limit", () => {
     const results = await search(db, "planning", { userEmails: [] });
 
     expect(results).toEqual([]);
+  });
+});
+
+describe("hybridSearch — email thread collapse", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-email-search",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function insertEmailMessage(input: {
+    id: string;
+    threadId?: string;
+    fileName: string;
+    subject: string;
+    sentAt: string;
+    body: string;
+    from?: { name: string; email: string };
+    accessEmails?: string[];
+  }) {
+    const from = input.from ?? { name: "Jane Doe", email: "jane@example.com" };
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: input.id,
+        connector_config_id: "connector-email-search",
+        provider_file_id: input.id,
+        provider_message_id: `<${input.id}@example.com>`,
+        thread_id: input.threadId ?? "thread-a",
+        file_name: input.fileName,
+        file_type: "email_message",
+        content_category: "document",
+        source: "google_drive",
+        source_path: `/mail/${input.fileName}`,
+        provider_url: null,
+        content: input.body,
+        summary: `${input.subject} summary`,
+        context_note: null,
+        access_scope_id: null,
+        source_created_at: input.sentAt,
+        source_updated_at: input.sentAt,
+        synced_at: input.sentAt,
+      })
+      .execute();
+
+    await db
+      .insertInto("email_message_envelopes")
+      .values({
+        indexed_file_id: input.id,
+        connector_config_id: "connector-email-search",
+        provider_file_id: input.id,
+        provider_message_id: `<${input.id}@example.com>`,
+        thread_id: input.threadId ?? "thread-a",
+        subject: input.subject,
+        sent_at: input.sentAt,
+        from_json: JSON.stringify(from),
+        to_json: JSON.stringify([{ name: "Owner", email: "owner@example.com" }]),
+        cc_json: JSON.stringify([]),
+        owner_email: "owner@example.com",
+        provider_url: null,
+      })
+      .execute();
+
+    for (const email of input.accessEmails ?? []) {
+      await db.insertInto("file_access").values({ indexed_file_id: input.id, email }).execute();
+    }
+  }
+
+  it("uses the best matching message as the hit and whole visible thread metadata for the card", async () => {
+    await insertEmailMessage({
+      id: "email-old",
+      fileName: "pricing-question.eml",
+      subject: "Pricing question",
+      sentAt: "2026-05-01T10:00:00.000Z",
+      body: "Can we discuss pricing?",
+    });
+    await insertEmailMessage({
+      id: "email-new",
+      fileName: "follow-up.eml",
+      subject: "Latest update",
+      sentAt: "2026-05-01T12:00:00.000Z",
+      body: "Tuesday works.",
+    });
+
+    const results = await hybridSearch(db, "pricing", { limit: 10 });
+    const thread = results.find((result) => result.resultKind === "email_thread");
+
+    expect(thread).toMatchObject({
+      id: "email-old",
+      hitFileId: "email-old",
+      threadKey: "connector-email-search:thread-a",
+      messageCount: 2,
+      latestSubject: "Latest update",
+      lastActivity: "2026-05-01T12:00:00.000Z",
+    });
+  });
+
+  it("collapses only the thread messages visible to the requesting user", async () => {
+    await insertEmailMessage({
+      id: "email-old",
+      fileName: "pricing-question.eml",
+      subject: "Pricing question",
+      sentAt: "2026-05-01T10:00:00.000Z",
+      body: "Can we discuss pricing?",
+      accessEmails: ["bob@example.com"],
+    });
+    await insertEmailMessage({
+      id: "email-new",
+      fileName: "follow-up.eml",
+      subject: "Confidential update",
+      sentAt: "2026-05-01T12:00:00.000Z",
+      body: "Tuesday works.",
+      from: { name: "Secret Sender", email: "secret@example.com" },
+      accessEmails: ["owner@example.com"],
+    });
+
+    const results = await hybridSearch(db, "pricing", { limit: 10, userEmails: ["bob@example.com"] });
+    const thread = results.find((result) => result.resultKind === "email_thread");
+
+    expect(thread).toMatchObject({
+      id: "email-old",
+      hitFileId: "email-old",
+      threadKey: "connector-email-search:thread-a",
+      messageCount: 1,
+      latestSubject: "Pricing question",
+      lastActivity: "2026-05-01T10:00:00.000Z",
+    });
+    expect(thread?.participants).not.toContain("Secret Sender");
+    expect(thread?.participants).not.toContain("secret@example.com");
+  });
+
+  it("overfetches before thread collapse so one long matching thread does not underfill results", async () => {
+    for (let i = 0; i < 55; i++) {
+      await insertEmailMessage({
+        id: `email-a-${i}`,
+        threadId: "thread-a",
+        fileName: `pricing-a-${i}.eml`,
+        subject: `Pricing A ${i}`,
+        sentAt: `2026-05-01T10:${String(i).padStart(2, "0")}:00.000Z`,
+        body: "pricing",
+      });
+    }
+    await insertEmailMessage({
+      id: "email-b-0",
+      threadId: "thread-b",
+      fileName: "pricing-b.eml",
+      subject: "Pricing B",
+      sentAt: "2026-05-01T12:00:00.000Z",
+      body: "pricing",
+    });
+
+    const results = await hybridSearch(db, "pricing", { limit: 2 });
+
+    expect(results).toHaveLength(2);
+    expect(results.map((result) => result.threadKey)).toEqual(
+      expect.arrayContaining(["connector-email-search:thread-a", "connector-email-search:thread-b"]),
+    );
   });
 });
 

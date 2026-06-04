@@ -8,6 +8,7 @@ import { type RankedCandidate, rankPersonLlmMention } from "./rank";
 
 const PERSON_FACT_RELATION = {
   attendee: "attended",
+  correspondent: "corresponded",
   assignee: "assigned",
   author: "authored",
   llm_extracted: "mentioned",

@@ -9,7 +9,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type GenerateContentResponse, GoogleGenAI } from "@google/genai";
+import type { GenerateContentResponse } from "@google/genai";
 import { type GeminiClientOptions, runGeminiRequest } from "./gemini-control";
 
 const MODEL = "gemini-2.5-flash";
@@ -57,7 +57,22 @@ export interface GenerateOptions {
 }
 
 export function createGeminiGenerator(apiKey: string, options?: GeminiClientOptions) {
-  const ai = new GoogleGenAI({ apiKey });
+  let ai: import("@google/genai").GoogleGenAI | undefined;
+
+  /**
+   * Lazily import and construct the genai client. Keeping `@google/genai` (a
+   * large SDK with deep zod schema trees) out of the static import graph stops it
+   * from being dragged — via the http.ts route graph — into the ~24 test files
+   * that never make a Gemini call, which is a primary driver of the per-worker
+   * memory floor.
+   */
+  async function getClient(): Promise<import("@google/genai").GoogleGenAI> {
+    if (!ai) {
+      const { GoogleGenAI } = await import("@google/genai");
+      ai = new GoogleGenAI({ apiKey });
+    }
+    return ai;
+  }
 
   /**
    * Generate text from a prompt.
@@ -75,10 +90,11 @@ export function createGeminiGenerator(apiKey: string, options?: GeminiClientOpti
 
     const labelPrefix = opts?.label ? `[${opts.label}] ` : "";
 
+    const client = await getClient();
     const response: GenerateContentResponse = await runGeminiRequest(
       apiKey,
       () =>
-        ai.models.generateContent({
+        client.models.generateContent({
           model: MODEL,
           contents: prompt,
           config: {

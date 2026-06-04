@@ -7,6 +7,8 @@
  * delivery metadata without requiring the agent to supply it explicitly.
  */
 
+import type { WorkflowDelivery } from "../workflows/delivery";
+
 export interface ScheduledTask {
   id: string;
   platform: "slack" | "whatsapp";
@@ -29,7 +31,9 @@ export interface ScheduledTask {
   edges: string | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
+  delivery: WorkflowDelivery;
 }
 
 export interface TaskContext {

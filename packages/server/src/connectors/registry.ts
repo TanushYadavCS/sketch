@@ -14,12 +14,14 @@ import type { Connector, ConnectorType } from "./types";
 
 import { createClickUpConnector } from "./clickup";
 import { createFirefliesConnector } from "./fireflies";
+import { createGmailConnector } from "./gmail";
 import { createGoogleDriveConnector } from "./google-drive";
 import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
 
 export const connectorFactories: Record<ConnectorType, () => Connector> = {
   google_drive: createGoogleDriveConnector,
+  gmail: createGmailConnector,
   clickup: createClickUpConnector,
   notion: createNotionConnector,
   linear: createLinearConnector,

@@ -19,6 +19,7 @@ import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
+import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
 import { providerIdentityRoutes } from "./api/provider-identities";
@@ -33,9 +34,11 @@ import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
+import { webChatRoutes } from "./api/web-chat";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
 import { createWorkspaceApi } from "./api/workspace";
+import { workspaceSummaryRoutes } from "./api/workspace-summary";
 import type { Config } from "./config";
 import {
   type AgentEnvironmentRuntimeContext,
@@ -57,6 +60,7 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
 import type { IntegrationProvider } from "./integrations/types";
+import type { LocalDeviceGateway } from "./local-devices/gateway";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
@@ -83,6 +87,7 @@ interface AppDeps {
     channelId: string;
     messageRef: string;
   }>;
+  localDeviceGateway?: LocalDeviceGateway;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -92,7 +97,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
-  const connectors = createConnectorRepository(db);
+  const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
@@ -234,6 +239,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         deps?.listAgentEnvForRuntime ?? ((context) => agentEnvVars.listForRuntimeContext(context)),
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
+      queueManager: deps?.queueManager,
     }),
   );
   if (deps?.runAgent) {
@@ -260,8 +266,29 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         sendDm: deps.sendDm,
       }),
     );
+    app.route(
+      "/api/web-chat",
+      webChatRoutes({
+        db,
+        config,
+        logger,
+        users,
+        settings,
+        inboxMessagesRepo: inboxMessages,
+        runAgent: deps.runAgent,
+        buildMcpServers: deps.buildMcpServers,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
+        scheduler: deps.scheduler as TaskScheduler | undefined,
+        stepContentRepo: deps.stepContentRepo,
+        automationRunsRepo: deps.automationRunsRepo,
+        queueManager: deps.queueManager,
+        getSlack: deps.getSlack,
+        sendDm: deps.sendDm,
+      }),
+    );
   }
-  app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users, { experimentalFlag: config.EXPERIMENTAL_FLAG }));
+  app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
+  app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
     app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));
@@ -283,6 +310,12 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
 
   app.route("/api/usage", usageRoutes(db));
+  if (deps?.localDeviceGateway) {
+    app.route(
+      "/api/local-devices",
+      localDeviceRoutes(db, { baseUrl: config.BASE_URL, port: config.PORT, gateway: deps.localDeviceGateway }),
+    );
+  }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/entity-review", entityReviewRoutes(db));
   if (config.EXPERIMENTAL_FLAG) {
@@ -300,11 +333,14 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
   }
 
-  const identities = createProviderIdentityRepository(db);
+  const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
   app.route("/api/identities", providerIdentityRoutes(identities, users));
 
   if (deps?.logger) {
-    app.route("/api/oauth", oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL));
+    app.route(
+      "/api/oauth",
+      oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL, config),
+    );
   }
 
   if (config.SYSTEM_SECRET) {

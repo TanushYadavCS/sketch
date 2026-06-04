@@ -5,7 +5,7 @@
  */
 import { ConnectorLogo } from "@/components/connector-logos";
 import { FileShareDialog } from "@/components/file-share-dialog";
-import type { FileAccess, FileContent, LinkedEntity } from "@/lib/api";
+import type { EmailAddr, EmailThreadMessage, FileAccess, FileContent, LinkedEntity } from "@/lib/api";
 import { ApiRequestError, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
@@ -222,7 +222,105 @@ function FileDetailContent({
         <AccessSection access={access} />
       )}
 
-      {file.content && <ContentPreview content={file.content} />}
+      {file.fileType === "email_message" && file.emailThread ? (
+        <EmailThreadView
+          connectorId={file.emailThread.connectorId}
+          threadKey={file.emailThread.threadKey}
+          fallbackContent={file.content}
+        />
+      ) : (
+        file.content && <ContentPreview content={file.content} />
+      )}
+    </div>
+  );
+}
+
+function formatAddr(addr: EmailAddr): string {
+  return addr.name?.trim() ? `${addr.name} <${addr.email}>` : addr.email;
+}
+
+/**
+ * Time-ordered thread view for email files. Falls back to the single-message
+ * content preview if the thread can't be loaded — e.g. the endpoint 403s
+ * because some messages aren't content-visible to this viewer.
+ */
+function EmailThreadView({
+  connectorId,
+  threadKey,
+  fallbackContent,
+}: { connectorId: string; threadKey: string; fallbackContent: string | null }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["email-thread", connectorId, threadKey],
+    queryFn: () => api.integrations.emailThread(connectorId, threadKey),
+    retry: (failureCount, err) =>
+      err instanceof ApiRequestError && (err.status === 403 || err.status === 404) ? false : failureCount < 3,
+  });
+
+  if (isLoading) {
+    return (
+      <div>
+        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Conversation</p>
+        <Skeleton className="mt-1 h-24 rounded-lg" />
+      </div>
+    );
+  }
+
+  if (error || !data || data.messages.length === 0) {
+    return fallbackContent ? <ContentPreview content={fallbackContent} /> : null;
+  }
+
+  return (
+    <div>
+      <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        Conversation ({data.messages.length})
+      </p>
+      <div className="mt-1 space-y-2">
+        {data.messages.map((message) => (
+          <EmailMessageCard key={message.indexedFileId} message={message} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const MESSAGE_PREVIEW_LIMIT = 600;
+
+function EmailMessageCard({ message }: { message: EmailThreadMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const content = message.content ?? "";
+  const isLong = content.length > MESSAGE_PREVIEW_LIMIT;
+  const shown = expanded || !isLong ? content : `${content.slice(0, MESSAGE_PREVIEW_LIMIT)}…`;
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 p-3">
+      <div className="space-y-0.5 text-[11px] text-muted-foreground">
+        <p className="font-medium text-foreground">{formatAddr(message.from)}</p>
+        <p>To: {message.to.map(formatAddr).join(", ") || "—"}</p>
+        {message.cc.length > 0 && <p>Cc: {message.cc.map(formatAddr).join(", ")}</p>}
+        {message.sentAt && <p>{new Date(message.sentAt).toLocaleString()}</p>}
+      </div>
+      {message.subject && <p className="mt-1 text-xs font-medium">{message.subject}</p>}
+      {content && <pre className="mt-1 whitespace-pre-wrap text-xs leading-relaxed">{shown}</pre>}
+      {isLong && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-[11px] text-primary hover:underline"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+      {message.providerUrl && (
+        <a
+          href={message.providerUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-1 inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+        >
+          Open in source
+          <ArrowSquareOutIcon size={10} />
+        </a>
+      )}
     </div>
   );
 }

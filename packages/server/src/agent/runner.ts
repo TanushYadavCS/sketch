@@ -25,15 +25,17 @@ import {
   cleanupIntegrationAccess,
   startIntegrationAccess,
 } from "../integrations/wrapper";
+import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
+import type { SlackBot } from "../slack/bot";
 import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
 import { createCanUseTool } from "./permissions";
-import { buildSystemContext } from "./prompt";
+import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
 
@@ -114,6 +116,7 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
+  responseSurface?: ResponseSurface;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
@@ -136,6 +139,7 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
+  getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -151,6 +155,7 @@ export interface RunAgentParams {
   };
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
+  localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -166,6 +171,7 @@ export interface RunAgentParams {
   agentEnv?: Record<string, string>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   visionConfig?: VisionConfig | null;
+  blockedReadPaths?: string[] | null;
   /**
    * Free-form instruction set for an agent persona, appended to the system
    * prompt. Set when the run is associated with a /team agent (channel-bound,
@@ -182,10 +188,21 @@ export interface RunAgentParams {
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
+    currentMessageId?: number;
+    providerThreadId?: string | null;
   };
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
+const VISUAL_ANALYSIS_TOOL_NAME = "mcp__sketch__VisualAnalysis";
+
+export function canUseVisualAnalysisTool(
+  visionConfig: VisionConfig | null,
+  agentAllowedTools?: string[] | null,
+): boolean {
+  if (!visionConfig) return false;
+  return agentAllowedTools == null || agentAllowedTools.includes(VISUAL_ANALYSIS_TOOL_NAME);
+}
 
 /**
  * Extracts text content from an SDK assistant message. Returns null if the
@@ -241,15 +258,17 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     : null;
   const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
   const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
+  const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, params.agentAllowedTools);
 
   const systemAppend = buildSystemContext({
-    platform: params.platform,
+    platform: params.responseSurface ?? params.platform,
+    deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
     orgName: params.orgName,
     orgDescription: params.orgDescription,
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,
-    visionAnalysisEnabled: Boolean(visionConfig),
+    visionAnalysisEnabled: visualAnalysisAllowed,
   });
 
   const sdkBuiltInTools = params.agentAllowedTools
@@ -307,7 +326,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       };
     })();
   } else {
-    prompt = userMessage + formatAttachmentsForPrompt(attachments);
+    prompt = userMessage + formatAttachmentsForPrompt(attachments, { visionAnalysisEnabled: visualAnalysisAllowed });
   }
 
   const uploadCollector = new UploadCollector();
@@ -315,6 +334,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     uploadCollector,
     workspaceDir: absWorkspace,
     db: params.db,
+    getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
@@ -327,18 +347,34 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
+    localDeviceInvoker: params.localDeviceInvoker,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),
     visionConfig,
-    visionAnalysisEnabled: Boolean(visionConfig),
+    visionAnalysisEnabled: visualAnalysisAllowed,
     logger,
     conversationRepo: params.conversationRepo,
     conversationContext: params.conversationContext,
   });
 
-  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);
+  const blockedReadPaths = new Set<string>();
+  if (useVisionToolForImages && visualAnalysisAllowed) {
+    for (const image of images) {
+      blockedReadPaths.add(image.localPath);
+    }
+  }
+  if (visualAnalysisAllowed) {
+    for (const path of params.blockedReadPaths ?? []) {
+      blockedReadPaths.add(path);
+    }
+  }
+
+  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
+    agentAllowedTools: params.agentAllowedTools,
+    blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
+  });
   const canUseToolTimings: CanUseToolTiming[] = [];
   const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
     canUseToolTimings.push({ toolName, calledAt: Date.now() });

@@ -8,7 +8,7 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
+export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
@@ -49,6 +49,8 @@ export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | Servic
  */
 export interface SyncedItem {
   providerFileId: string;
+  providerMessageId?: string;
+  threadId?: string;
   providerUrl: string | null;
   fileName: string;
   fileType: string | null;
@@ -155,6 +157,7 @@ export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>
 
 export type IndexedFileFactRaw =
   | { providerFileId: string; attendee: { name?: string; email?: string } }
+  | { providerFileId: string; correspondent: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
@@ -219,6 +222,13 @@ export interface NameResolution {
  */
 export type NameResolver = (name: string) => NameResolution | null;
 
+export interface SuppressedEmailRecord {
+  providerFileId: string;
+  providerMessageId?: string | null;
+  threadId?: string | null;
+  reason: string;
+}
+
 /**
  * Base interface all connectors must implement.
  */
@@ -247,6 +257,14 @@ export interface Connector {
   readonly promotableFileTypes?: string[];
 
   /**
+   * Whether this connector's people are email correspondents rather than meeting
+   * attendees / document authors. When true, `attendees` and `authorEmail` seed
+   * `correspondent`/`corresponded` person facts instead of `attendee`/`author`.
+   * Email connectors (Gmail, Outlook) set this; everything else leaves it false.
+   */
+  readonly emitsCorrespondentFacts?: boolean;
+
+  /**
    * Build the source ref key for an assignee (used to match against person entities).
    * Default: `{connectorType}:user:{name}`. Override for connectors with
    * different conventions (e.g. ClickUp uses `clickup:assignee:{name}`).
@@ -258,6 +276,7 @@ export interface Connector {
 
   /** Run initial or incremental sync. Returns items to index. */
   sync(opts: {
+    connectorConfigId?: string;
     credentials: ConnectorCredentials;
     scopeConfig: Record<string, unknown>;
     cursor: string | null;
@@ -278,6 +297,7 @@ export interface Connector {
     resolveNameToEmail?: NameResolver;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
+    onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;
   }): AsyncGenerator<SyncedItem>;
 
   /** Return the new sync cursor after a sync run. */
