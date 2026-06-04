@@ -19,11 +19,13 @@ import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { runEnrichment } from "./enrichment";
 import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
+import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
 import { reconcileConnectorSync } from "./sync-reconcile";
@@ -177,11 +179,11 @@ export async function runConnectorSync(
       errors: [],
     };
 
-    const seenProviderFileIds = new Set<string>();
+    const seenSyncIdentityKeys = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
 
     const connectorType = config.connector_type as ConnectorType;
-    const existingHashes = await loadExistingContentHashes(db, connectorType);
+    const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
     const syncRunId = randomUUID();
     const factContext = {
@@ -191,6 +193,7 @@ export async function runConnectorSync(
     };
 
     for await (const item of connector.sync({
+      connectorConfigId: config.id,
       credentials,
       scopeConfig,
       cursor: config.sync_cursor,
@@ -222,9 +225,15 @@ export async function runConnectorSync(
           raw: seed,
         });
       },
+      onEmailSuppressed: async (record) => {
+        await recordSuppressedEmailRecord(db, {
+          connectorConfigId: config.id,
+          record,
+        });
+      },
     })) {
       try {
-        seenProviderFileIds.add(item.providerFileId);
+        seenSyncIdentityKeys.add(syncIdentityKey(getSyncIdentityForItem(item, config.id, connectorType)));
 
         const itemResult = await processSyncedItem({
           db,
@@ -242,6 +251,10 @@ export async function runConnectorSync(
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
 
+        if (isEmailSyncedItem(item)) {
+          await persistEnvelopeMetadata(db, itemResult.indexedFileId, item.emailEnvelope);
+        }
+
         await emitFactsForSyncedItem({
           factRepo,
           connector,
@@ -249,6 +262,7 @@ export async function runConnectorSync(
           factContext,
           item,
           indexedFileId: itemResult.indexedFileId,
+          emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
         });
 
         if (itemResult.kind === "unchanged") {
@@ -282,14 +296,14 @@ export async function runConnectorSync(
       }
     }
 
-    if (!config.sync_cursor && seenProviderFileIds.size > 0) {
+    if (!config.sync_cursor && seenSyncIdentityKeys.size > 0) {
       const reconcileResult = await reconcileConnectorSync({
         db,
         factRepo,
         connectorConfigId: config.id,
         connectorType,
         syncRunId,
-        seenProviderFileIds,
+        seenSyncIdentityKeys,
         allowLargeReconcile: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
         maxReconcileRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
         encryptionKey: appConfig?.ENCRYPTION_KEY,

@@ -171,6 +171,36 @@ describe("replaySourceFacts", () => {
     expect(mentions[0].confidence).toBe("EXTRACTED");
   });
 
+  it("materializes correspondent facts with corresponded mentions", async () => {
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: ATTENDED_FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      source: "google_drive",
+      factType: "correspondent",
+      relation: "corresponded",
+      subjectName: "Jane Doe",
+      subjectEmail: "jane@example.com",
+      subjectSource: "google_drive",
+      subjectSourceId: "message-1:jane@example.com",
+      contextSnippet: "Corresponded message-1",
+      raw: { providerFileId: "message-1", correspondent: { name: "Jane Doe", email: "jane@example.com" } },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select(["confidence", "source", "relation"])
+      .where("indexed_file_id", "=", ATTENDED_FILE_ID)
+      .where("relation", "=", "corresponded")
+      .execute();
+
+    expect(mentions).toEqual([
+      { confidence: "EXTRACTED", source: "google_drive_correspondent", relation: "corresponded" },
+    ]);
+  });
+
   it("upgrades existing INFERRED mentions when a durable fact replays", async () => {
     const entity = await createEntityRepository(db).upsertPersonEntity({
       name: "Saurabh CanvasX",

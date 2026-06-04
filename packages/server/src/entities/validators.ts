@@ -4,7 +4,10 @@ import type { createEntityRepository } from "../db/repositories/entities";
 
 export type LlmMentionValidationResult =
   | { ok: true }
-  | { ok: false; reason: "name_absent_from_content" | "short_token_no_boundary" | "type_removed" };
+  | {
+      ok: false;
+      reason: "name_absent_from_content" | "short_token_no_boundary" | "type_removed" | "missing_current_reference";
+    };
 
 export type LearnedFactValidationResult = { ok: true } | { ok: false; reason: "negation" | "hedge" | "placeholder" };
 
@@ -13,6 +16,7 @@ export function validateLlmMention(input: {
   entityType?: string;
   aliases?: string[];
   fileContent: string;
+  resolutionContext?: string | null;
   source: "llm_extraction" | "connector_extracted";
 }): LlmMentionValidationResult {
   if (input.source !== "llm_extraction") return { ok: true };
@@ -23,11 +27,17 @@ export function validateLlmMention(input: {
     .map((name) => normalizePresenceText(name))
     .filter((name) => name.length > 0);
 
-  if (!names.some((name) => content.includes(name))) {
-    return { ok: false, reason: "name_absent_from_content" };
+  const presentInContent = names.some((name) => content.includes(name));
+  if (!presentInContent) {
+    if (!hasResolutionContextName(names, input.resolutionContext)) {
+      return { ok: false, reason: "name_absent_from_content" };
+    }
+    if (!hasCurrentMessageReference(input.fileContent)) {
+      return { ok: false, reason: "missing_current_reference" };
+    }
   }
 
-  for (const name of names) {
+  for (const name of names.filter((name) => content.includes(name))) {
     for (const token of name.split(" ").filter((part) => part.length > 0 && part.length < 4)) {
       const boundary = new RegExp(`(^|[^a-z0-9])${escapeRegExp(token)}([^a-z0-9]|$)`, "i");
       if (!boundary.test(input.fileContent)) return { ok: false, reason: "short_token_no_boundary" };
@@ -35,6 +45,20 @@ export function validateLlmMention(input: {
   }
 
   return { ok: true };
+}
+
+function hasResolutionContextName(names: string[], resolutionContext?: string | null): boolean {
+  if (!resolutionContext) return false;
+  const context = normalizePresenceText(resolutionContext);
+  return names.some((name) => context.includes(name));
+}
+
+function hasCurrentMessageReference(fileContent: string): boolean {
+  const normalized = normalizePresenceText(fileContent);
+  if (/\b(he|him|his|she|her|hers|they|them|their|theirs)\b/.test(normalized)) return true;
+  return /\b(this|that|these|those)\s+(person|people|company|team|proposal|plan|contract|renewal|review|meeting|thread|email|message|request|decision|timeline|deadline|owner|contact|vendor|client|customer|partner)\b/.test(
+    normalized,
+  );
 }
 
 export function validateLearnedFact(value: string): LearnedFactValidationResult {

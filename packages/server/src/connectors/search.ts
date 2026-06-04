@@ -21,6 +21,8 @@ import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-metadata";
+import type { EmailAddr } from "./email/normalized-email";
 import { createQueryEmbedder } from "./embeddings";
 
 export interface SearchResult {
@@ -611,7 +613,9 @@ export interface HybridSearchOptions extends SearchOptions {
 }
 
 export interface HybridSearchResult {
+  resultKind: "file" | "email_thread";
   id: string;
+  hitFileId: string;
   fileName: string;
   source: string;
   contentCategory: string;
@@ -629,6 +633,11 @@ export interface HybridSearchResult {
   similarity: number | null;
   /** Combined score (higher = more relevant). */
   score: number;
+  threadKey?: string;
+  messageCount?: number;
+  latestSubject?: string;
+  lastActivity?: string | null;
+  participants?: string[];
 }
 
 /** RRF constant — standard value from the original paper. */
@@ -653,6 +662,7 @@ export async function hybridSearch(
   opts?: HybridSearchOptions,
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
+  const candidateLimit = Math.max(limit * 40, 200);
   if (opts?.userEmails !== undefined && opts.userEmails.length === 0) return [];
   const ftsResults = new Map<string, { rank: number; snippet: string | null }>();
   const vecResults = new Map<string, { rank: number; similarity: number; snippet: string | null }>();
@@ -689,7 +699,7 @@ export async function hybridSearch(
         ${kindFilter}
         ${sourcesFilter}
         ORDER BY rank DESC
-        LIMIT ${limit * 3}
+        LIMIT ${candidateLimit}
       `.execute(db);
 
       for (let i = 0; i < pgFtsRows.rows.length; i++) {
@@ -714,7 +724,7 @@ export async function hybridSearch(
         ${kindFilter}
         ${sourcesFilter}
         ORDER BY rank
-        LIMIT ${limit * 3}
+        LIMIT ${candidateLimit}
       `.execute(db);
 
       for (let i = 0; i < ftsRows.rows.length; i++) {
@@ -727,7 +737,7 @@ export async function hybridSearch(
   // ── 2. Vector search (chunk embeddings + file embeddings) ───
   if (opts?.queryEmbedding) {
     const embeddingJson = JSON.stringify(opts.queryEmbedding);
-    const vecLimit = limit * 3;
+    const vecLimit = candidateLimit;
 
     let chunkRows: { rows: Array<{ indexed_file_id: string; chunk_content: string; distance: number }> };
     let fileRows: { rows: Array<{ indexed_file_id: string; distance: number }> };
@@ -863,7 +873,7 @@ export async function hybridSearch(
   scored.sort((a, b) => b.score - a.score);
 
   // ── 4. Fetch file metadata and apply filters ────────────────
-  const topFileIds = scored.slice(0, limit * 2).map((s) => s.fileId);
+  const topFileIds = scored.slice(0, candidateLimit).map((s) => s.fileId);
   if (topFileIds.length === 0) return [];
 
   const scoreMap = new Map(scored.map((s) => [s.fileId, s]));
@@ -877,6 +887,9 @@ export async function hybridSearch(
       "source",
       "content_category",
       "summary",
+      "connector_config_id",
+      "thread_id",
+      "file_type",
       "provider_file_id",
       "provider_url",
       "source_path",
@@ -975,29 +988,202 @@ export async function hybridSearch(
   }
 
   // ── 7. Build final results ─────────────────────────────────
-  const results: HybridSearchResult[] = accessFiltered
-    .map((f) => {
-      const scoreData = scoreMap.get(f.id);
-      return {
-        id: f.id,
-        fileName: f.file_name,
-        source: f.source,
-        contentCategory: f.content_category,
-        summary: f.summary,
-        providerFileId: f.provider_file_id,
-        providerUrl: f.provider_url,
-        sourcePath: f.source_path,
-        sourceUpdatedAt: f.source_updated_at,
-        sourceCreatedAt: f.source_created_at,
+  const collapsed = await collapseEmailSearchResults(db, accessFiltered, scoreMap, opts?.userEmails);
+
+  const results: HybridSearchResult[] = collapsed.sort((a, b) => b.score - a.score).slice(0, limit);
+
+  return results;
+}
+
+type SearchMetadataFile = {
+  id: string;
+  file_name: string;
+  source: string;
+  content_category: string;
+  summary: string | null;
+  connector_config_id: string;
+  thread_id: string | null;
+  file_type: string | null;
+  provider_file_id: string;
+  provider_url: string | null;
+  source_path: string | null;
+  source_updated_at: string | null;
+  source_created_at: string | null;
+  access_scope_id: string | null;
+};
+
+type SearchScoreData = { fileId: string; score: number; snippet: string | null; similarity: number | null };
+
+type EmailEnvelopeSearchRow = {
+  indexed_file_id: string;
+  connector_config_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  sent_at: string | null;
+  from_json: string;
+  to_json: string;
+  cc_json: string;
+};
+
+function emailLabel(addr: EmailAddr): string {
+  return addr.name?.trim() || addr.email;
+}
+
+async function collapseEmailSearchResults(
+  db: Kysely<DB>,
+  files: SearchMetadataFile[],
+  scoreMap: Map<string, SearchScoreData>,
+  userEmails?: string[],
+): Promise<HybridSearchResult[]> {
+  const emailFiles = files.filter((file) => file.file_type === "email_message");
+  const visibleThreadEnvelopes = await loadVisibleThreadEnvelopes(db, emailFiles, userEmails);
+  const groups = new Map<string, SearchMetadataFile[]>();
+  const output: HybridSearchResult[] = [];
+
+  for (const file of files) {
+    if (file.file_type !== "email_message") {
+      const scoreData = scoreMap.get(file.id);
+      output.push({
+        resultKind: "file",
+        id: file.id,
+        hitFileId: file.id,
+        fileName: file.file_name,
+        source: file.source,
+        contentCategory: file.content_category,
+        summary: file.summary,
+        providerFileId: file.provider_file_id,
+        providerUrl: file.provider_url,
+        sourcePath: file.source_path,
+        sourceUpdatedAt: file.source_updated_at,
+        sourceCreatedAt: file.source_created_at,
         snippet: scoreData?.snippet ?? null,
         similarity: scoreData?.similarity ?? null,
         score: scoreData?.score ?? 0,
-      };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+      });
+      continue;
+    }
 
-  return results;
+    const key = `${file.connector_config_id}:${file.thread_id ?? file.id}`;
+    const group = groups.get(key) ?? [];
+    group.push(file);
+    groups.set(key, group);
+  }
+
+  for (const [threadKey, group] of groups) {
+    const best = [...group].sort((a, b) => (scoreMap.get(b.id)?.score ?? 0) - (scoreMap.get(a.id)?.score ?? 0))[0];
+    const bestScore = scoreMap.get(best.id);
+    const envelopes = visibleThreadEnvelopes.get(threadKey) ?? [];
+    const latest = [...envelopes].sort((a, b) => {
+      if (a.sent_at && b.sent_at && a.sent_at !== b.sent_at) return b.sent_at.localeCompare(a.sent_at);
+      if (a.sent_at && !b.sent_at) return -1;
+      if (!a.sent_at && b.sent_at) return 1;
+      return b.indexed_file_id.localeCompare(a.indexed_file_id);
+    })[0];
+    const participants = new Map<string, string>();
+    for (const envelope of envelopes) {
+      for (const addr of [
+        parseEmailAddrJson(envelope.from_json),
+        ...parseEmailAddrListJson(envelope.to_json),
+        ...parseEmailAddrListJson(envelope.cc_json),
+      ]) {
+        if (!participants.has(addr.email)) participants.set(addr.email, emailLabel(addr));
+      }
+    }
+
+    output.push({
+      resultKind: "email_thread",
+      id: best.id,
+      hitFileId: best.id,
+      threadKey,
+      messageCount: envelopes.length || group.length,
+      latestSubject: latest?.subject ?? best.file_name,
+      lastActivity: latest?.sent_at ?? best.source_created_at ?? best.source_updated_at,
+      participants: [...participants.values()].slice(0, 6),
+      fileName: latest?.subject ?? best.file_name,
+      source: best.source,
+      contentCategory: best.content_category,
+      summary: best.summary,
+      providerFileId: best.provider_file_id,
+      providerUrl: best.provider_url,
+      sourcePath: best.source_path,
+      sourceUpdatedAt: best.source_updated_at,
+      sourceCreatedAt: best.source_created_at,
+      snippet: bestScore?.snippet ?? null,
+      similarity: bestScore?.similarity ?? null,
+      score: bestScore?.score ?? 0,
+    });
+  }
+
+  return output;
+}
+
+async function loadVisibleThreadEnvelopes(
+  db: Kysely<DB>,
+  emailFiles: SearchMetadataFile[],
+  userEmails?: string[],
+): Promise<Map<string, EmailEnvelopeSearchRow[]>> {
+  const rowsByThread = new Map<string, EmailEnvelopeSearchRow[]>();
+  if (emailFiles.length === 0) return rowsByThread;
+
+  const threadIds = [...new Set(emailFiles.map((file) => file.thread_id).filter((id): id is string => !!id))];
+  const directRows =
+    threadIds.length > 0
+      ? await db
+          .selectFrom("email_message_envelopes")
+          .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+          .select([
+            "email_message_envelopes.indexed_file_id",
+            "email_message_envelopes.connector_config_id",
+            "email_message_envelopes.thread_id",
+            "email_message_envelopes.subject",
+            "email_message_envelopes.sent_at",
+            "email_message_envelopes.from_json",
+            "email_message_envelopes.to_json",
+            "email_message_envelopes.cc_json",
+          ])
+          .where("indexed_files.is_archived", "=", 0)
+          .where("email_message_envelopes.thread_id", "in", threadIds)
+          .execute()
+      : [];
+
+  const singletonFileIds = emailFiles.filter((file) => !file.thread_id).map((file) => file.id);
+  const singletonRows =
+    singletonFileIds.length > 0
+      ? await db
+          .selectFrom("email_message_envelopes")
+          .select([
+            "indexed_file_id",
+            "connector_config_id",
+            "thread_id",
+            "subject",
+            "sent_at",
+            "from_json",
+            "to_json",
+            "cc_json",
+          ])
+          .where("indexed_file_id", "in", singletonFileIds)
+          .execute()
+      : [];
+
+  const candidateKeys = new Set(emailFiles.map((file) => `${file.connector_config_id}:${file.thread_id ?? file.id}`));
+  const allRows = [...directRows, ...singletonRows].filter((row) =>
+    candidateKeys.has(`${row.connector_config_id}:${row.thread_id ?? row.indexed_file_id}`),
+  );
+  const visibleIds = await filterAccessibleFileIds(
+    db,
+    allRows.map((row) => row.indexed_file_id),
+    userEmails,
+  );
+
+  for (const row of allRows) {
+    if (!visibleIds.has(row.indexed_file_id)) continue;
+    const key = `${row.connector_config_id}:${row.thread_id ?? row.indexed_file_id}`;
+    const group = rowsByThread.get(key) ?? [];
+    group.push(row);
+    rowsByThread.set(key, group);
+  }
+
+  return rowsByThread;
 }
 
 /**
@@ -1219,7 +1405,9 @@ async function browseLatest(
   const rows = await q.execute();
 
   return rows.slice(0, opts.limit).map((f) => ({
+    resultKind: "file" as const,
     id: f.id,
+    hitFileId: f.id,
     fileName: f.file_name,
     providerUrl: f.provider_url,
     providerFileId: f.provider_file_id,

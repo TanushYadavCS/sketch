@@ -84,6 +84,16 @@ describe("createIndexedFileFactRepository", () => {
 
     await expect(
       repo.upsertFact({
+        source: "google_drive",
+        factType: "correspondent",
+        relation: "corresponded",
+        subjectName: "Saurabh",
+        raw: { providerFileId: "message-1" } as never,
+      }),
+    ).rejects.toThrow("correspondent facts require raw.providerFileId and raw.correspondent");
+
+    await expect(
+      repo.upsertFact({
         source: "notion",
         factType: "author",
         relation: "authored",

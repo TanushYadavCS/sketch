@@ -149,6 +149,7 @@ interface FileContext {
   id: string;
   fileName: string;
   content: string;
+  threadContext?: string | null;
   contentCategory: string;
   source: string;
   sourcePath: string | null;
@@ -207,9 +208,12 @@ export async function extractEntities(
       : "";
 
   const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
+  const threadSection = file.threadContext
+    ? `\nEmail thread context for resolving references only. Do not emit entities or relationships that appear only in this context; emitted mentions and relationships must be supported by the current message content below.\n${file.threadContext}\n`
+    : "";
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
-${orgSection}${knownSection}${participantSection}
+${orgSection}${knownSection}${participantSection}${threadSection}
 File: ${file.fileName}
 Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
@@ -251,6 +255,8 @@ Type disambiguation:
 - Any mention ending in "Pvt Ltd", "Private Limited", "Inc", "LLC", "Ltd", "GmbH", "Consulting", "Solutions", or "Technologies" is type "company", never "person", regardless of where it appears (including the participant block).
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
+
+If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
 
 Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People and Teams** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
 
@@ -551,6 +557,7 @@ Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
 Date: ${file.sourceCreatedAt || file.sourceUpdatedAt || "unknown"}
 ${entityContext ? `Related entities:\n${entityContext}` : ""}
+${file.threadContext ? `\nEmail thread context for resolving this message:\n${file.threadContext}\n` : ""}
 
 Write a 2-3 sentence summary focusing on: what this document is about, key decisions or outcomes, and topics discussed. Be specific — use names, numbers, dates. Do not start with "This document".
 
@@ -615,9 +622,11 @@ Entities:
 ${entityDescriptions}
 
 Document: ${file.fileName} (${file.sourceCreatedAt || file.sourceUpdatedAt || "unknown"})
+${file.threadContext ? `\nEmail thread context for resolving references only:\n${file.threadContext}\n` : ""}
 
 Return JSON: { "entity-id": [{ "fact": "short fact" }] }
 Return {} if no new facts.
+Only return facts supported by the document content. Thread context may disambiguate references but is not evidence by itself.
 
 <content>
 ${truncatedContent}
@@ -828,6 +837,7 @@ async function reconcileLlmExtractionFacts(
       entityType: mention.type,
       aliases: mention.variations,
       fileContent: file.content,
+      resolutionContext: file.threadContext,
       source: "llm_extraction",
     });
     if (!validation.ok) {
