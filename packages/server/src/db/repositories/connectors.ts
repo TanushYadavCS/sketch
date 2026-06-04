@@ -771,6 +771,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       limit: number;
       offset: number;
       connectorType?: string;
+      excludedSources?: string[];
       category?: string;
       status?: string;
       access?: string;
@@ -807,6 +808,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.excludedSources && opts.excludedSources.length > 0) {
+        query = query.where("indexed_files.source", "not in", opts.excludedSources);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);
@@ -978,17 +982,25 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     async countEnrichedFiles(opts: {
       viewer: FileViewer;
       connectorType?: string;
+      excludedSources?: string[];
       category?: string;
       status?: string;
       access?: string;
+      collapseRollups?: boolean;
     }) {
       let query = db
         .selectFrom("indexed_files")
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
 
+      if (opts.collapseRollups) {
+        query = query.where(browseVisibilityPredicate);
+      }
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.excludedSources && opts.excludedSources.length > 0) {
+        query = query.where("indexed_files.source", "not in", opts.excludedSources);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);
@@ -1026,6 +1038,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     async countAllFiles(opts: {
       viewer: FileViewer;
       connectorType?: string;
+      excludedSources?: string[];
       category?: string;
       status?: string;
       access?: string;
@@ -1042,6 +1055,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.excludedSources && opts.excludedSources.length > 0) {
+        query = query.where("indexed_files.source", "not in", opts.excludedSources);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);

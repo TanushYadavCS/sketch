@@ -117,4 +117,22 @@ describe("connectors repo — CRM rollup collapse", () => {
     // All touches are listed (bodied + bodyless) so the object's full timeline is visible.
     expect(members.map((m) => m.provider_file_id).sort()).toEqual(["Calls:c1", "Tasks:t1"]);
   });
+
+  it("matches enriched counts to collapsed visible rows", async () => {
+    await seedFile("Accounts:a1", "crm_account", "Accounts:a1");
+    const member = await seedFile("Tasks:t1", "crm_task", "Accounts:a1", "document");
+    await db
+      .updateTable("indexed_files")
+      .set({ summary: "Hidden member summary" })
+      .where("id", "=", member.id)
+      .execute();
+
+    const files = await repo.listAllFiles({ limit: 50, offset: 0, viewer: ADMIN, collapseRollups: true });
+    const total = await repo.countAllFiles({ viewer: ADMIN, collapseRollups: true });
+    const enrichedTotal = await repo.countEnrichedFiles({ viewer: ADMIN, collapseRollups: true });
+
+    expect(files.map((file) => file.provider_file_id)).toEqual(["Accounts:a1"]);
+    expect(total).toBe(1);
+    expect(enrichedTotal).toBe(0);
+  });
 });

@@ -75,12 +75,18 @@ async function userIdFor(db: Kysely<DB>, email: string): Promise<string> {
  */
 async function insertConfig(
   db: Kysely<DB>,
-  opts: { connectorType: "google_drive" | "gmail" | "fireflies" | "clickup" | "notion" | "linear"; createdBy: string },
+  opts: {
+    connectorType: "google_drive" | "gmail" | "fireflies" | "clickup" | "notion" | "linear" | "zoho_crm";
+    createdBy: string;
+  },
 ) {
   const repo = createConnectorRepository(db);
   return repo.createConfig({
     connectorType: opts.connectorType,
-    authType: opts.connectorType === "google_drive" || opts.connectorType === "gmail" ? "oauth" : "api_key",
+    authType:
+      opts.connectorType === "google_drive" || opts.connectorType === "gmail" || opts.connectorType === "zoho_crm"
+        ? "oauth"
+        : "api_key",
     credentials: JSON.stringify({ type: "api_key", api_key: "stub" }),
     createdBy: opts.createdBy,
   });
@@ -488,6 +494,45 @@ describe("Connectors API — authorization", () => {
         headers: { Cookie: adminCookie },
       });
       expect(res.status).toBe(404);
+    });
+
+    it("hides existing Zoho configs and files when EXPERIMENTAL_FLAG is false", async () => {
+      const cfg = await insertConfig(db, { connectorType: "zoho_crm", createdBy: adminId });
+      await createConnectorRepository(db).upsertFile({
+        source: "zoho_crm",
+        providerFileId: "Accounts:a1",
+        providerUrl: null,
+        fileName: "Acme Corp",
+        fileType: "crm_account",
+        contentCategory: "structured",
+        content: null,
+        sourcePath: null,
+        contentHash: "account-hash",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        connectorConfigId: cfg.id,
+        rollupGroupId: "Accounts:a1",
+      });
+
+      const list = await app.request("/api/connectors", { headers: { Cookie: adminCookie } });
+      expect(await list.json()).toMatchObject({ connectors: [] });
+
+      const files = await app.request("/api/connectors/all-files", { headers: { Cookie: adminCookie } });
+      expect(await files.json()).toMatchObject({ files: [], total: 0, enrichedTotal: 0 });
+
+      const bySource = await app.request("/api/connectors/file-counts-by-source", {
+        headers: { Cookie: adminCookie },
+      });
+      expect(await bySource.json()).toMatchObject({ counts: [] });
+
+      const read = await app.request(`/api/connectors/${cfg.id}`, { headers: { Cookie: adminCookie } });
+      expect(read.status).toBe(404);
+
+      const sync = await app.request(`/api/connectors/${cfg.id}/syncs`, {
+        method: "POST",
+        headers: { Cookie: adminCookie },
+      });
+      expect(sync.status).toBe(404);
     });
 
     it("member cannot start Zoho OAuth when experimental features are enabled", async () => {

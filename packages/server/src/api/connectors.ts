@@ -203,6 +203,14 @@ export function connectorRoutes(
     return connectorType !== "zoho_crm" || appConfig?.EXPERIMENTAL_FLAG === true;
   }
 
+  function configEnabled(config: { connector_type: string }): boolean {
+    return connectorEnabled(config.connector_type as ConnectorType);
+  }
+
+  function hiddenSources(): string[] {
+    return connectorEnabled("zoho_crm") ? [] : ["zoho_crm"];
+  }
+
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
     if (!userRepo) return [];
     const userId = c.get("sub");
@@ -224,6 +232,7 @@ export function connectorRoutes(
     const configs = await connectorRepo.listConfigs();
 
     const visible = configs.filter((cfg) => {
+      if (!configEnabled(cfg)) return false;
       const meta = getConnector(cfg.connector_type as ConnectorType);
       if (!meta.perUserAuth) return true;
       if (callerIsAdmin) return true;
@@ -350,7 +359,7 @@ export function connectorRoutes(
     }
 
     const viewer = getFileViewer(c);
-    const configs = await connectorRepo.listByOwner(sub);
+    const configs = (await connectorRepo.listByOwner(sub)).filter(configEnabled);
     const result = await Promise.all(
       configs.map(async (config) => {
         const fileCount = await connectorRepo.countFilesByConnector(config.id, viewer);
@@ -379,12 +388,15 @@ export function connectorRoutes(
     const access = c.req.query("access") || undefined;
 
     const viewer = getFileViewer(c);
-    const filters = { connectorType: source, category, status, access };
+    if (source && !connectorEnabled(source as ConnectorType)) {
+      return c.json({ files: [], total: 0, enrichedTotal: 0, hasMore: false });
+    }
+    const filters = { connectorType: source, excludedSources: hiddenSources(), category, status, access };
     // Collapse CRM activity members under their parent object rows.
     const [files, total, enrichedTotal] = await Promise.all([
       connectorRepo.listAllFiles({ limit, offset, viewer, collapseRollups: true, ...filters }),
       connectorRepo.countAllFiles({ viewer, collapseRollups: true, ...filters }),
-      connectorRepo.countEnrichedFiles({ viewer, ...filters }),
+      connectorRepo.countEnrichedFiles({ viewer, collapseRollups: true, ...filters }),
     ]);
 
     const fileIds = files.map((f) => f.id);
@@ -424,7 +436,7 @@ export function connectorRoutes(
     const viewer = getFileViewer(c);
 
     const anchor = await connectorRepo.getRollupAnchorRef(c.req.param("id"), viewer);
-    if (!anchor) {
+    if (!anchor || !connectorEnabled(anchor.source as ConnectorType)) {
       return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     }
 
@@ -628,6 +640,7 @@ export function connectorRoutes(
   async function loadFileForShare(fileId: string) {
     const config = await connectorRepo.findConfigByFileId(fileId);
     if (!config) return null;
+    if (!configEnabled(config)) return null;
     return { connectorConfigId: config.id, createdBy: config.created_by };
   }
 
@@ -759,7 +772,7 @@ export function connectorRoutes(
 
   /** List indexed sources summary. */
   routes.get("/sources", async (c) => {
-    const sources = await listIndexedSources(db);
+    const sources = (await listIndexedSources(db)).filter((source) => connectorEnabled(source.source as ConnectorType));
     return c.json({ sources });
   });
 
@@ -769,7 +782,9 @@ export function connectorRoutes(
    * has access via per-file shares to files whose connector row they can't see.
    */
   routes.get("/file-counts-by-source", async (c) => {
-    const counts = await connectorRepo.countFilesBySource(getFileViewer(c));
+    const counts = (await connectorRepo.countFilesBySource(getFileViewer(c))).filter((row) =>
+      connectorEnabled(row.source as ConnectorType),
+    );
     return c.json({ counts });
   });
 
@@ -863,7 +878,7 @@ export function connectorRoutes(
   /** Browse scope items for an existing connector (generic). */
   routes.get("/:id/browse", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -925,7 +940,7 @@ export function connectorRoutes(
   /** Browse folder/subtree children for tree-type pickers (e.g. Google Drive). */
   routes.get("/:id/browse-children/:parentId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -999,7 +1014,7 @@ export function connectorRoutes(
    */
   routes.get("/google-drive/browse/:connectorId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1050,7 +1065,7 @@ export function connectorRoutes(
    */
   routes.get("/google-drive/browse/:connectorId/folder/:folderId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1102,7 +1117,7 @@ export function connectorRoutes(
   /** Browse ClickUp workspaces for an existing connector (uses stored credentials). */
   routes.get("/clickup/browse/:connectorId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     if (config.connector_type !== "clickup") {
@@ -1176,7 +1191,7 @@ export function connectorRoutes(
   /** Browse Notion root pages for an existing connector (uses stored credentials). */
   routes.get("/notion/browse/:connectorId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     if (config.connector_type !== "notion") {
@@ -1212,7 +1227,7 @@ export function connectorRoutes(
   /** Get a single connector. */
   routes.get("/:id", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1242,7 +1257,7 @@ export function connectorRoutes(
   /** Count entities associated with a connector's files (for disconnect confirmation). */
   routes.get("/:id/entity-count", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     const meta = getConnector(config.connector_type as ConnectorType);
@@ -1266,7 +1281,7 @@ export function connectorRoutes(
    */
   routes.get("/:id/suppressed-emails", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     const meta = getConnector(config.connector_type as ConnectorType);
@@ -1333,7 +1348,7 @@ export function connectorRoutes(
    */
   routes.get("/:id/email-threads", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     const meta = getConnector(config.connector_type as ConnectorType);
@@ -1441,7 +1456,7 @@ export function connectorRoutes(
    */
   routes.get("/:id/email-threads/:threadKey", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     const meta = getConnector(config.connector_type as ConnectorType);
@@ -1508,7 +1523,7 @@ export function connectorRoutes(
    */
   routes.delete("/:id", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1531,7 +1546,7 @@ export function connectorRoutes(
    */
   routes.post("/:id/rotate-key", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1568,7 +1583,7 @@ export function connectorRoutes(
   /** Update connector scope config (add/remove drives, folders, etc.). */
   routes.patch("/:id/scope", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1609,7 +1624,7 @@ export function connectorRoutes(
   /** Trigger a manual sync (creates a sync job). */
   routes.post("/:id/syncs", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1631,7 +1646,7 @@ export function connectorRoutes(
   /** List files for a connector, including access scope info. */
   routes.get("/:id/files", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1668,7 +1683,7 @@ export function connectorRoutes(
   /** Enrich files with AI-generated summaries and context (creates an enrichment job). */
   routes.post("/:id/enrichments", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1705,7 +1720,7 @@ export function connectorRoutes(
     }
 
     const owningConfig = await connectorRepo.findConfigByFileId(fileId);
-    if (!owningConfig) {
+    if (!owningConfig || !configEnabled(owningConfig)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Owning connector not found" } }, 404);
     }
     const denied = denyIfCannotEdit(c, owningConfig);
