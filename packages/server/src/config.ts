@@ -72,6 +72,10 @@ export const configSchema = z.object({
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   ZOHO_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
+  // Microsoft OAuth
+  MICROSOFT_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MICROSOFT_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+
   // PostHog (optional, enables LLM Analytics via OpenTelemetry)
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),

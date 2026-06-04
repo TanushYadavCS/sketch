@@ -1335,6 +1335,16 @@ export const api = {
       return `/api/oauth/zoho/authorize?region=${encodeURIComponent(region)}`;
     },
   },
+  microsoftOAuth: {
+    status() {
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null }>(
+        "/api/oauth/microsoft/status",
+      );
+    },
+    authorizeUrl() {
+      return "/api/oauth/microsoft/authorize";
+    },
+  },
   identities: {
     listForUser(userId: string) {
       return request<{ identities: ProviderIdentity[] }>(`/api/identities/user/${userId}`);

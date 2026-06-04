@@ -8,7 +8,15 @@
  * Today: 4 connectors. Tomorrow: 50+. This registry scales to both.
  */
 
-export type IntegrationType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies" | "zoho_crm";
+export type IntegrationType =
+  | "google_drive"
+  | "gmail"
+  | "outlook"
+  | "clickup"
+  | "notion"
+  | "linear"
+  | "fireflies"
+  | "zoho_crm";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -177,6 +185,28 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: true,
+  },
+  {
+    type: "outlook",
+    name: "Outlook",
+    description: "Microsoft 365 email messages and threads",
+    category: "Communication",
+    color: "#0078D4",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [],
+    scopeLabel: "mailbox",
+    scopeType: "none",
+    itemNoun: "emails",
+    credentialUrl: "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    connectSteps: [
+      "Register an app in Microsoft Entra",
+      "Add the redirect URI shown by your deployment",
+      "Grant delegated Mail.Read, User.Read, and offline_access permissions",
+      "Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET on the server",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "clickup",

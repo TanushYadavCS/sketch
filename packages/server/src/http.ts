@@ -360,6 +360,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         experimentalFlag: config.EXPERIMENTAL_FLAG,
         zohoClientId: config.ZOHO_CLIENT_ID,
         zohoClientSecret: config.ZOHO_CLIENT_SECRET,
+        microsoftClientId: config.MICROSOFT_CLIENT_ID,
+        microsoftClientSecret: config.MICROSOFT_CLIENT_SECRET,
       }),
     );
   }

@@ -46,6 +46,22 @@ export function GmailLogo({ size = 16, className, style }: LogoProps) {
   );
 }
 
+export function OutlookLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M3 4.5 13.5 2v20L3 19.5v-15Zm4.9 10.3c1.7 0 2.9-1.4 2.9-3.3s-1.2-3.3-2.9-3.3S5 9.6 5 11.5s1.2 3.3 2.9 3.3Zm0-1.4c-.8 0-1.3-.7-1.3-1.9s.5-1.9 1.3-1.9 1.3.7 1.3 1.9-.5 1.9-1.3 1.9ZM15 5h6v14h-6v-2h4v-6.1l-2.5 1.7L15 11.5V5Zm1.2 2v2.7l.3.2L19 8.2V7h-2.8Z" />
+    </svg>
+  );
+}
+
 export function ClickUpLogo({ size = 16, className, style }: LogoProps) {
   return (
     <svg
@@ -128,6 +144,8 @@ export function ConnectorLogo({
       return <GoogleDriveLogo {...props} />;
     case "gmail":
       return <GmailLogo {...props} />;
+    case "outlook":
+      return <OutlookLogo {...props} />;
     case "clickup":
       return <ClickUpLogo {...props} />;
     case "notion":

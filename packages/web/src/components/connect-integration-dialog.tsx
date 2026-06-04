@@ -103,6 +103,7 @@ export function ConnectIntegrationDialog({
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
   const isZoho = integration?.type === "zoho_crm";
+  const isMicrosoft = integration?.type === "outlook";
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -140,8 +141,9 @@ export function ConnectIntegrationDialog({
 
   // Check if the provider's OAuth is configured (for OAuth redirect integrations)
   const oauthStatus = useQuery({
-    queryKey: [isZoho ? "zoho-oauth-status" : "google-oauth-status"],
-    queryFn: () => (isZoho ? api.zohoOAuth.status() : api.googleOAuth.status()),
+    queryKey: [isZoho ? "zoho-oauth-status" : isMicrosoft ? "microsoft-oauth-status" : "google-oauth-status"],
+    queryFn: () =>
+      isZoho ? api.zohoOAuth.status() : isMicrosoft ? api.microsoftOAuth.status() : api.googleOAuth.status(),
     enabled: open && isOAuthRedirect,
   });
 
@@ -358,6 +360,10 @@ export function ConnectIntegrationDialog({
     window.open(url, "_self");
   };
 
+  const handleConnectWithMicrosoft = () => {
+    window.open(api.microsoftOAuth.authorizeUrl(), "_self");
+  };
+
   const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
   const toggleNotionPage = (pageId: string) => {
     setSelectedNotionPageIds((prev) => {
@@ -531,6 +537,36 @@ export function ConnectIntegrationDialog({
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
                 Zoho OAuth isn't configured on the server yet. Set <code>ZOHO_CLIENT_ID</code> and{" "}
                 <code>ZOHO_CLIENT_SECRET</code> in the environment, then reload.
+              </div>
+            )}
+          </>
+        ) : step === "credentials" && isOAuthRedirect && isMicrosoft ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Connect {integration.name}
+              </DialogTitle>
+              <DialogDescription>
+                Sign in with your Microsoft account to authorize read-only access to your mailbox.
+              </DialogDescription>
+            </DialogHeader>
+
+            <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
+              {integration.connectSteps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+
+            {isOAuthConfigured ? (
+              <Button size="lg" className="w-full gap-2" onClick={handleConnectWithMicrosoft}>
+                <ConnectorLogo type="outlook" size={16} className="text-white" />
+                Connect with Microsoft
+              </Button>
+            ) : (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                Microsoft OAuth isn't configured on the server yet. Set <code>MICROSOFT_CLIENT_ID</code> and{" "}
+                <code>MICROSOFT_CLIENT_SECRET</code> in the environment, then reload.
               </div>
             )}
           </>
