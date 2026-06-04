@@ -265,6 +265,15 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       return rows.map((r) => r.indexed_file_id);
     },
 
+    async getOwnedFileIdsForConnector(connectorId: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where("connector_config_id", "=", connectorId)
+        .execute();
+      return rows.map((r) => r.id);
+    },
+
     /**
      * Delete a connector config and all associated data.
      * Files discovered only by this connector are archived (not deleted).
