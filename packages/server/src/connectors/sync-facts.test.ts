@@ -43,6 +43,50 @@ describe("emitFactsForSyncedItem", () => {
     await db.destroy();
   });
 
+  it("emits contact point facts from synced items", async () => {
+    const factRepo = createIndexedFileFactRepository(db);
+
+    await emitFactsForSyncedItem({
+      factRepo,
+      connector: testConnector,
+      connectorType: "google_drive",
+      factContext: {
+        connectorConfigId: "connector-1",
+        createdByUserId: "user-1",
+        lastSeenSyncRunId: "run-1",
+      },
+      indexedFileId: "file-1",
+      item: {
+        ...baseItem,
+        contactPoints: [
+          {
+            subjectName: "Simran Suri",
+            subjectEmail: "simran@example.com",
+            subjectSource: "google_drive",
+            subjectSourceId: "email-1:simran@example.com",
+            kind: "email",
+            value: "simran@example.com",
+            source: "google_drive",
+          },
+        ],
+      },
+    });
+
+    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
+    expect(fact).toMatchObject({
+      indexed_file_id: "file-1",
+      connector_config_id: "connector-1",
+      source: "google_drive",
+      fact_type: "contact_point",
+      relation: "contactable",
+      subject_name: "Simran Suri",
+      subject_email: "simran@example.com",
+      subject_source: "google_drive",
+      subject_source_id: "email-1:simran@example.com",
+    });
+    expect(JSON.parse(fact.raw ?? "{}").contactPoint.value).toBe("simran@example.com");
+  });
+
   it("emits email correspondents without attendee or author facts when opted in", async () => {
     const factRepo = createIndexedFileFactRepository(db);
 

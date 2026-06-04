@@ -101,6 +101,7 @@ export interface SyncedItem {
    * `source` + `sourceId` are used to look up the entity.
    */
   parentEntities?: Array<{ source: string; sourceId: string; contextSnippet?: string }>;
+  contactPoints?: ContactPointSeed[];
 }
 
 /**
@@ -137,6 +138,20 @@ export interface PersonEntitySeed {
   sourceId: string;
 }
 
+export interface ContactPointSeed {
+  subjectName: string;
+  subjectEmail?: string;
+  subjectSource: string;
+  subjectSourceId: string;
+  kind: "email" | "phone" | "linkedin" | "whatsapp";
+  value: string;
+  displayValue?: string | null;
+  label?: string | null;
+  source: string;
+  verifiedAt?: string | null;
+  lastContactedAt?: string | null;
+}
+
 export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
@@ -146,6 +161,7 @@ export type IndexedFileFactRaw =
   | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
+  | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }
   | EntitySeed

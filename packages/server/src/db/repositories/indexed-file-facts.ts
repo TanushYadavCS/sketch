@@ -9,6 +9,7 @@ export type IndexedFileFactType =
   | "assignee"
   | "author"
   | "parent_entity"
+  | "contact_point"
   | "structural_seed"
   | "person_seed"
   | "llm_extracted"
@@ -30,6 +31,7 @@ export type IndexedFileFactRelation =
   | "assigned"
   | "authored"
   | "mentioned"
+  | "contactable"
   | "seeded"
   | "works_at"
   | "engaged_with"
@@ -96,6 +98,14 @@ function rawEndpoint(input: UpsertIndexedFileFactInput, key: "source" | "target"
   return typeof value === "string" ? normalizeName(value) : "";
 }
 
+function rawContactPoint(input: UpsertIndexedFileFactInput, field: "kind" | "value"): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const contactPoint = raw?.contactPoint;
+  if (!isRecord(contactPoint)) return "";
+  const value = contactPoint[field];
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
   const parts = [
     input.connectorConfigId ?? "",
@@ -117,6 +127,9 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
       rawEndpoint(input, "target", "name"),
       rawEndpoint(input, "target", "type"),
     );
+  }
+  if (input.factType === "contact_point") {
+    parts.push(rawContactPoint(input, "kind"), rawContactPoint(input, "value"));
   }
   return createHash("sha256").update(parts.join("|")).digest("hex");
 }
@@ -171,6 +184,23 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   } else if (input.factType === "parent_entity") {
     if (!hasString(raw, "providerFileId") || !isRecord(raw.parent)) {
       throw new Error("parent_entity facts require raw.providerFileId and raw.parent");
+    }
+  } else if (input.factType === "contact_point") {
+    if (!hasString(raw, "providerFileId") || !isRecord(raw.contactPoint)) {
+      throw new Error("contact_point facts require raw.providerFileId and raw.contactPoint");
+    }
+    const contactPoint = raw.contactPoint as Record<string, unknown>;
+    if (
+      !hasString(contactPoint, "subjectName") ||
+      !hasString(contactPoint, "subjectSource") ||
+      !hasString(contactPoint, "subjectSourceId") ||
+      !hasString(contactPoint, "kind") ||
+      !hasString(contactPoint, "value") ||
+      !hasString(contactPoint, "source")
+    ) {
+      throw new Error(
+        "contact_point facts require subjectName, subjectSource, subjectSourceId, kind, value, and source",
+      );
     }
   } else if (input.factType === "structural_seed") {
     if (!hasString(raw, "sourceType") && (!hasString(raw, "providerFileId") || !hasString(raw, "fileType"))) {

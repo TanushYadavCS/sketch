@@ -1,4 +1,5 @@
 import type { Kysely, Selectable } from "kysely";
+import type { Logger } from "pino";
 import type { createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -35,6 +36,7 @@ export interface LookupIndex {
 
 export interface MaterializeDeps {
   db: Kysely<DB>;
+  logger?: Logger;
   entityRepo: ReturnType<typeof createEntityRepository>;
   reviewRepo: ReturnType<typeof createEntityReviewRepo>;
   domainsRepo: EntityDomainsRepository;
