@@ -209,4 +209,60 @@ describe("connector delete relationship and review cleanup", () => {
       { id: "review-unrelated-empty", status: "pending" },
     ]);
   });
+
+  it("removes archived-file evidence before pruning scoped empty parents", async () => {
+    await seedConnector(db, "connector-archive", "owner-archive");
+    await seedFile(db, "file-archive", "connector-archive");
+
+    const entityRepo = createEntityRepository(db);
+    const source = await entityRepo.upsertPersonEntity({
+      name: "Archived Evidence Source",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "archived-source",
+    });
+    const target = await entityRepo.upsertPersonEntity({
+      name: "Archived Evidence Target",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "archived-target",
+    });
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id: "rel-archived-evidence",
+        source_entity_id: source.id,
+        target_entity_id: target.id,
+        relationship_type: "engaged_with",
+        confidence: "INFERRED",
+        confidence_score: 0.8,
+        source: "llm_extraction",
+      })
+      .execute();
+    await db
+      .insertInto("entity_relationship_evidence")
+      .values({
+        id: "rel-archived-evidence-row",
+        relationship_id: "rel-archived-evidence",
+        indexed_file_id: "file-archive",
+        note: null,
+        source_fact_id: null,
+        evidence_key: "rel-archived-evidence:file-archive",
+      })
+      .execute();
+    await seedReview(db, { id: "review-archived-evidence", status: "pending", evidenceFileIds: ["file-archive"] });
+
+    const domainsRepo = createEntityDomainsRepository(db);
+    const reviewRepo = createEntityReviewRepo(db);
+    const relationshipIds = await domainsRepo.relationshipIdsWithEvidenceInFiles(["file-archive"]);
+    const reviewIds = await reviewRepo.pendingReviewIdsWithEvidenceInFiles(["file-archive"]);
+    await db.updateTable("indexed_files").set({ is_archived: 1 }).where("id", "=", "file-archive").execute();
+    await domainsRepo.deleteRelationshipEvidenceForFiles(["file-archive"]);
+    await reviewRepo.deleteReviewEvidenceForFiles(["file-archive"]);
+    await domainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
+    await reviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
+
+    await expect(db.selectFrom("entity_relationships").selectAll().execute()).resolves.toHaveLength(0);
+    await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);
+  });
 });

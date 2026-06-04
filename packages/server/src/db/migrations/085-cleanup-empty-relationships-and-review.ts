@@ -8,7 +8,11 @@ import { type Kysely, sql } from "kysely";
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     DELETE FROM entity_relationships
-    WHERE NOT EXISTS (
+    WHERE NOT (
+      relationship_type = 'works_at'
+      AND source = 'email_domain'
+    )
+    AND NOT EXISTS (
       SELECT 1
       FROM entity_relationship_evidence ev
       WHERE ev.relationship_id = entity_relationships.id

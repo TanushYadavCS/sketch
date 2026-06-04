@@ -124,6 +124,15 @@ describe("085-cleanup-empty-relationships-and-review migration", () => {
           confidence_score: 0.8,
           source: "llm_extraction",
         },
+        {
+          id: "relationship-legitimate-email-domain",
+          source_entity_id: "migration-source",
+          target_entity_id: "migration-target",
+          relationship_type: "works_at",
+          confidence: "INFERRED",
+          confidence_score: 0.9,
+          source: "email_domain",
+        },
       ])
       .execute();
     await db
@@ -168,8 +177,11 @@ describe("085-cleanup-empty-relationships-and-review migration", () => {
     await up(db as unknown as Kysely<unknown>);
     await up(db as unknown as Kysely<unknown>);
 
-    const relationships = await db.selectFrom("entity_relationships").select("id").execute();
-    expect(relationships.map((row) => row.id)).toEqual(["relationship-evidenced"]);
+    const relationships = await db.selectFrom("entity_relationships").select("id").orderBy("id").execute();
+    expect(relationships.map((row) => row.id)).toEqual([
+      "relationship-evidenced",
+      "relationship-legitimate-email-domain",
+    ]);
 
     const reviews = await db.selectFrom("entity_review_queue").select(["id", "status"]).orderBy("id").execute();
     expect(reviews).toEqual([

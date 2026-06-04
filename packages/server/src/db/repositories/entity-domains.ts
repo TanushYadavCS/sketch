@@ -268,6 +268,7 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
     async cleanupEmptyRelationships(): Promise<number> {
       const result = await db
         .deleteFrom("entity_relationships")
+        .where((eb) => eb.not(eb.and([eb("relationship_type", "=", "works_at"), eb("source", "=", "email_domain")])))
         .where((eb) =>
           eb.not(
             eb.exists(
@@ -278,6 +279,15 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
             ),
           ),
         )
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async deleteRelationshipEvidenceForFiles(fileIds: string[]): Promise<number> {
+      if (fileIds.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_relationship_evidence")
+        .where("indexed_file_id", "in", fileIds)
         .executeTakeFirst();
       return Number(result.numDeletedRows ?? 0);
     },

@@ -330,6 +330,15 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return rows.map((row) => row.review_id);
     },
 
+    async deleteReviewEvidenceForFiles(fileIds: string[]): Promise<number> {
+      if (fileIds.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_review_evidence")
+        .where("indexed_file_id", "in", fileIds)
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
     async deleteEmptyPendingReviewsByIds(ids: string[]): Promise<number> {
       if (ids.length === 0) return 0;
       const result = await db

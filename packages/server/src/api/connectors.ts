@@ -1436,6 +1436,8 @@ export function connectorRoutes(
       const reviewIds = await txEntityReviewRepo.pendingReviewIdsWithEvidenceInFiles(fileIds);
       await txEntityRepo.deleteEntitiesForFiles(fileIds);
       await txConnectorRepo.deleteConfig(config.id);
+      await txEntityDomainsRepo.deleteRelationshipEvidenceForFiles(fileIds);
+      await txEntityReviewRepo.deleteReviewEvidenceForFiles(fileIds);
       await txEntityDomainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
       await txEntityReviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
     });
