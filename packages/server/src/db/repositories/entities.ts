@@ -593,6 +593,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectAll("entities")
         .where("entity_contact_points.kind", "=", "email")
         .where("entity_contact_points.value", "=", email)
+        .where("entities.source_type", "=", "person")
         .execute();
       const byMetadata = await db
         .selectFrom("entities")

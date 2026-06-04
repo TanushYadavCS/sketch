@@ -508,6 +508,10 @@ export function oauthRoutes(
 
         logger.info({ userId, connectorId: connectorConfig.id, region: pending.region }, "Zoho CRM OAuth tokens saved");
 
+        runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
+          logger.error({ err, connectorId: connectorConfig.id }, "Zoho CRM first sync failed");
+        });
+
         return c.redirect(`/files?oauth=success&connector=zoho_crm&connectorId=${connectorConfig.id}`);
       } catch (err) {
         logger.error({ err, userId }, "Zoho CRM OAuth callback failed");

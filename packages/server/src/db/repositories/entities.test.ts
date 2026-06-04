@@ -298,6 +298,17 @@ describe("createEntityRepository contact points", () => {
       value: "contact@example.com",
       source: "gmail",
     });
+    const company = await repo.upsertEntity({
+      name: "Contact Company",
+      sourceType: "company",
+      subtype: "external",
+    });
+    await repo.upsertContactPoint({
+      entityId: company.id,
+      kind: "email",
+      value: "contact@example.com",
+      source: "gmail",
+    });
 
     await expect(repo.getPersonEntitiesByEmail("METADATA@example.com")).resolves.toMatchObject([
       { id: metadataOnly.id },

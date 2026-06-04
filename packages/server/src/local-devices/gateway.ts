@@ -15,6 +15,7 @@ export interface LocalCommandRequest {
   cwd?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  auditCommand?: string;
 }
 
 export interface LocalCommandResult {
@@ -131,7 +132,7 @@ export class LocalDeviceGateway {
     const auditBase = {
       deviceId: connected.row.id,
       userId,
-      command: request.command,
+      command: request.auditCommand ?? request.command,
       cwd: request.cwd,
       startedAt,
     };
@@ -150,7 +151,7 @@ export class LocalDeviceGateway {
             timeout,
             deviceId: connected.row.id,
             userId,
-            command: request.command,
+            command: request.auditCommand ?? request.command,
             cwd: request.cwd,
             startedAt,
           });

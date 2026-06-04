@@ -173,6 +173,50 @@ describe("CRM activity rollups", () => {
     expect(await summaryGroupIds(db)).toEqual(["Deals:high", "Deals:low", "Deals:mid"]);
   });
 
+  it("does not treat sorted rollup activity as backlog when scan order differs", async () => {
+    db = await createTestDb();
+    await seedConnector(db);
+    await seedCrmFile(db, {
+      id: "deal-file",
+      providerFileId: "Deals:d1",
+      fileName: "Acme renewal",
+      fileType: "crm_deal",
+      rollupGroupId: "Deals:d1",
+      contentHash: "deal-hash",
+      sourceUpdatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "newer-note",
+      providerFileId: "Notes:n1",
+      fileName: "Newer note",
+      fileType: "crm_note",
+      rollupGroupId: "Deals:d1",
+      contentHash: "note-hash",
+      sourceUpdatedAt: "2026-01-03T00:00:00.000Z",
+    });
+    await seedCrmFile(db, {
+      id: "older-task",
+      providerFileId: "Tasks:t1",
+      fileName: "Older task",
+      fileType: "crm_task",
+      rollupGroupId: "Deals:d1",
+      contentHash: "task-hash",
+      sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    const first = await refreshCrmActivityRollups({
+      db,
+      connectorConfigId: "zoho-crm",
+      dirtyGroupIds: ["Deals:d1"],
+      logger,
+    });
+    expect(first).toMatchObject({ groupsConsidered: 1, groupsRefreshed: 1, errors: [] });
+
+    const second = await refreshCrmActivityRollups({ db, connectorConfigId: "zoho-crm", logger });
+
+    expect(second).toMatchObject({ groupsConsidered: 0, groupsRefreshed: 0, groupsSkipped: 0, errors: [] });
+  });
+
   it("refreshes new and deletes old groups when an activity is re-parented", async () => {
     db = await createTestDb();
     await seedConnector(db);

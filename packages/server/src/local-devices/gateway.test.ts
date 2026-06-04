@@ -80,6 +80,26 @@ describe("LocalDeviceGateway", () => {
     );
   });
 
+  it("uses an audit command override without changing the command sent to the device", async () => {
+    const { gateway, repo } = createGateway({
+      readyState: 1,
+      send: (data, cb) => {
+        expect(JSON.parse(data).command).toBe("echo secret");
+        cb(new Error("send failed"));
+      },
+    });
+
+    await expect(
+      gateway.invoke(USER_ID, { command: "echo secret", auditCommand: "redacted local command" }),
+    ).rejects.toThrow("send failed");
+
+    expect(repo.recordToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: "redacted local command",
+      }),
+    );
+  });
+
   it("audits pending local command attempts when the device disconnects", async () => {
     const { gateway, repo } = createGateway({
       readyState: 1,

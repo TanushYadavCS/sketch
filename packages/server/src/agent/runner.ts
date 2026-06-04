@@ -25,6 +25,7 @@ import {
   cleanupIntegrationAccess,
   startIntegrationAccess,
 } from "../integrations/wrapper";
+import type { LocalClaudeSessionService } from "../local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
@@ -156,6 +157,7 @@ export interface RunAgentParams {
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
+  localClaudeSessionService?: LocalClaudeSessionService;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -348,6 +350,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
     localDeviceInvoker: params.localDeviceInvoker,
+    localClaudeSessionService: params.localClaudeSessionService,
+    originThreadTs: params.threadTs,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,

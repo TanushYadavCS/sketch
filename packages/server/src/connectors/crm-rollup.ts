@@ -281,8 +281,9 @@ async function loadAnchorName(db: Kysely<DB>, connectorConfigId: string, groupId
 }
 
 function buildBasis(activities: BasisActivityRow[]): { firstAt: string | null; lastAt: string | null; hash: string } {
-  const times = activities.map(activityTime).filter(Boolean);
-  const payload = activities.map((activity) => ({
+  const sorted = sortBasisActivities(activities);
+  const times = sorted.map(activityTime).filter(Boolean);
+  const payload = sorted.map((activity) => ({
     providerFileId: activity.provider_file_id,
     contentHash: activity.content_hash,
     occurredAt: activityTime(activity),
@@ -292,6 +293,12 @@ function buildBasis(activities: BasisActivityRow[]): { firstAt: string | null; l
     lastAt: times[times.length - 1] ?? null,
     hash: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
   };
+}
+
+function sortBasisActivities<T extends BasisActivityRow>(activities: T[]): T[] {
+  return [...activities].sort(
+    (a, b) => activityTime(a).localeCompare(activityTime(b)) || a.provider_file_id.localeCompare(b.provider_file_id),
+  );
 }
 
 function activityTime(activity: BasisActivityRow): string {

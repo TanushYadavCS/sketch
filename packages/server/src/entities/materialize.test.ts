@@ -282,6 +282,73 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     });
   });
 
+  it("materializes contact point facts after same-batch person facts", async () => {
+    const [fileId] = await seedFiles(db, 1);
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: fileId,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: ADMIN_ID,
+      contentHash: "hash-1",
+      source: "fireflies",
+      factType: "contact_point",
+      relation: "contactable",
+      subjectName: "Nisha Rao",
+      subjectEmail: "nisha@example.com",
+      subjectSource: "fireflies",
+      subjectSourceId: "person:nisha",
+      raw: {
+        providerFileId: "meeting-1",
+        contactPoint: {
+          subjectName: "Nisha Rao",
+          subjectEmail: "nisha@example.com",
+          subjectSource: "fireflies",
+          subjectSourceId: "person:nisha",
+          kind: "linkedin",
+          value: "https://www.linkedin.com/in/Nisha-Rao/",
+          source: "fireflies",
+        },
+      },
+    });
+    await factRepo.upsertFact({
+      indexedFileId: fileId,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: ADMIN_ID,
+      contentHash: "hash-1",
+      source: "fireflies",
+      factType: "attendee",
+      relation: "attended",
+      subjectName: "Nisha Rao",
+      subjectEmail: "nisha@example.com",
+      subjectSource: "fireflies",
+      subjectSourceId: "person:nisha",
+      raw: {
+        providerFileId: "meeting-1",
+        attendee: {
+          name: "Nisha Rao",
+          email: "nisha@example.com",
+        },
+      },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+
+    expect(summary.materialized).toBe(2);
+    const entityRepo = createEntityRepository(db);
+    const [person] = await entityRepo.getPersonEntitiesByEmail("nisha@example.com");
+    expect(person).toMatchObject({ source_type: "person", name: "Nisha Rao" });
+    const rows = await entityRepo.getContactPointsForEntity(person.id);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        kind: "linkedin",
+        value: "nisha-rao",
+        source: "fireflies",
+      }),
+    ]);
+    const facts = await db.selectFrom("indexed_file_facts").select(["materialized_at"]).execute();
+    expect(facts.every((fact) => fact.materialized_at !== null)).toBe(true);
+  });
+
   it("skips facts with missing/invalid type and leaves them unmaterialized", async () => {
     await seedFiles(db, 1);
     await upsertLlmFact(db, "file-1", "Whatever", "foo");

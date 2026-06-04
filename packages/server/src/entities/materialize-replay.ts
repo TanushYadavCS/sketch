@@ -22,11 +22,11 @@ import type {
 const FACT_REPLAY_ORDER = [
   "structural_seed",
   "person_seed",
-  "contact_point",
   "attendee",
   "correspondent",
   "assignee",
   "author",
+  "contact_point",
   "parent_entity",
   "crm_relation",
   "llm_extracted",
@@ -248,7 +248,8 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
       result.reason !== "missing_parent_seed" &&
       result.reason !== "missing_crm_relation_endpoint" &&
       result.reason !== "unknown_fact_type" &&
-      result.reason !== "missing_or_invalid_mention_type"
+      result.reason !== "missing_or_invalid_mention_type" &&
+      result.reason !== "missing_contact_point_subject_entity"
     );
   }
   return false;

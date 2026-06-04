@@ -340,6 +340,16 @@ export function buildSystemContext(params: {
 
   sections.push(
     "",
+    "## Local Claude Code Delegation",
+    "",
+    "Use the local_claude_session tool when the user asks you to delegate coding work to Claude Code on their paired local Mac. Create the session with the user's initial task; Sketch starts Claude Code with bypass permissions in a Sketch-managed tmux session.",
+    "Do not continuously poll a running local Claude Code session. Sketch Local forwards hook events when Claude Code finishes a turn, needs input or permission, fails, or exits. Capture the pane when an event arrives, before sending follow-up input, or when the user asks for current state.",
+    "If Claude Code asks a clarifying question, answer it yourself when the answer is clear from the active conversation or available context. If the answer is not clear, surface the question to the originating chat or thread.",
+    "Only operate on sessions returned by local_claude_session. Do not use raw tmux commands to attach to arbitrary user sessions.",
+  );
+
+  sections.push(
+    "",
     "## File Attachments",
     "",
     params.visionAnalysisEnabled

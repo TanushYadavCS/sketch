@@ -23,6 +23,7 @@ import { createAutomationStepContentRepository } from "./db/repositories/automat
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConversationRepository } from "./db/repositories/conversations";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
+import { createLocalClaudeSessionRepository } from "./db/repositories/local-claude-sessions";
 import { createLocalDeviceRepository } from "./db/repositories/local-devices";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
@@ -33,6 +34,7 @@ import { configureMaterializeDefaults } from "./entities/materialize";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
 import type { IntegrationProvider, IntegrationStatus } from "./integrations/types";
+import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
 import { runManagedSeed } from "./managed-seed";
@@ -118,6 +120,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const inboxMessagesRepo = createInboxMessagesRepository(db);
   const localDevicesRepo = createLocalDeviceRepository(db);
   const localDeviceGateway = new LocalDeviceGateway(localDevicesRepo, logger);
+  const localClaudeSessionsRepo = createLocalClaudeSessionRepository(db);
+  const localClaudeSessionService = new LocalClaudeSessionService(localClaudeSessionsRepo, localDeviceGateway, {
+    baseUrl: config.BASE_URL,
+    port: config.PORT,
+  });
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
   const tracer = trace.getTracer("sketch");
@@ -148,6 +155,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         maxRetries: config.GEMINI_MAX_RETRIES,
       },
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
+      localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
@@ -397,6 +405,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     },
     logger,
     localDeviceGateway,
+    localClaudeSessionService,
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
   localDeviceGateway.attach(server);
