@@ -107,15 +107,19 @@ function FilesPage() {
 
     if (oauthStatus === "success" && connectorId) {
       const connector = connectors.find((c) => c.id === connectorId);
-      if (connector) {
-        const def = getIntegration(connector.connectorType as IntegrationType);
-        if (def) {
-          toast.success("Google account connected — now select which drives or folders to sync.");
+      const def = connector ? getIntegration(connector.connectorType as IntegrationType) : undefined;
+      if (connector && def) {
+        if (connector.connectorType === "gmail") {
+          // Gmail auto-syncs on connect (no folder picker), so don't push scope
+          // selection — just confirm it's importing.
+          toast.success("Gmail connected — importing your recent mail now.");
+        } else {
+          toast.success(`${def.name} connected — now select which ${def.scopeLabel} to sync.`);
           setManagingConnector({ definition: def, connector });
-          return;
         }
+        return;
       }
-      toast.success("Google Drive connected successfully.");
+      toast.success("Connected successfully.");
     } else if (oauthStatus === "error") {
       const reason = params.get("reason") ?? "unknown";
 
@@ -126,7 +130,7 @@ function FilesPage() {
         if (connector) {
           const def = getIntegration(connector.connectorType as IntegrationType);
           if (def) {
-            toast.info("You already have Google Drive connected. Manage it here.", {
+            toast.info(`You already have ${def.name} connected. Manage it here.`, {
               action: {
                 label: "Manage",
                 onClick: () => setManagingConnector({ definition: def, connector }),
@@ -135,7 +139,7 @@ function FilesPage() {
             return;
           }
         }
-        toast.info("You already have Google Drive connected. Open Files → Connections to manage it.");
+        toast.info("You already have this connected. Open Files → Connections to manage it.");
         return;
       }
 
@@ -359,7 +363,10 @@ function FilesPage() {
                 hasClientOnlyFilter={hasClientOnlyFilter}
                 allFilesCount={allFiles.length}
                 totalFiles={totalFiles}
-                onView={setViewingFile}
+                onView={(id) => {
+                  const result = searchResults.find((r) => r.id === id);
+                  setViewingFile(result?.hitFileId ?? id);
+                }}
                 onLoadMore={loadMore}
               />
             </div>
