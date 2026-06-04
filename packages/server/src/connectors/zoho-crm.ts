@@ -12,8 +12,22 @@ import type {
 
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 6;
 const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 30_000;
+
+/**
+ * Capped exponential backoff with jitter for transient Zoho/network failures.
+ * A full sync pulls tens of thousands of records over many minutes; a brief
+ * upstream blip can outlast a shallow fixed backoff and abort the whole run
+ * (losing all progress and skipping post-sync materialization). Widening the
+ * envelope — more attempts, capped exponential growth, jitter to avoid
+ * thundering-herd retries — lets the sync ride through normal blips.
+ */
+function zohoBackoffMs(attempt: number): number {
+  const capped = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1));
+  return Math.floor(capped / 2 + Math.random() * (capped / 2));
+}
 const PAGE_SIZE = 200;
 const CONTENT_LIMIT = 2000;
 const RENDERER_VERSION = "zoho-crm-activity-v2";
@@ -255,7 +269,7 @@ async function zohoApiRequest<T>(
     });
   } catch (err) {
     if (attempt < MAX_RETRIES) {
-      const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+      const waitMs = zohoBackoffMs(attempt);
       logger?.warn({ err, attempt, waitMs }, "Zoho CRM network error, retrying");
       await new Promise((resolve) => setTimeout(resolve, waitMs));
       return zohoApiRequest(credentials, path, logger, { ...opts, attempt: attempt + 1 });
@@ -284,7 +298,7 @@ async function zohoApiRequest<T>(
     return zohoApiRequest(credentials, path, logger, { ...opts, attempt: attempt + 1 });
   }
   if (response.status >= 500 && attempt < MAX_RETRIES) {
-    const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+    const waitMs = zohoBackoffMs(attempt);
     logger?.warn({ attempt, status: response.status, waitMs }, "Zoho CRM server error, retrying");
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     return zohoApiRequest(credentials, path, logger, { ...opts, attempt: attempt + 1 });
