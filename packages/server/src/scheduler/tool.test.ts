@@ -79,6 +79,17 @@ function makeMockStepContentRepo() {
   } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["stepContentRepo"]>;
 }
 
+function makeMockUserRepo(
+  overrides: Partial<NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["userRepo"]>> = {},
+) {
+  return {
+    findById: vi.fn().mockResolvedValue({ id: "U_OTHER", name: "roopak", email: "roopak@canvasx.ai" }),
+    list: vi.fn().mockResolvedValue([]),
+    getAllEmailsForUser: vi.fn().mockResolvedValue([]),
+    ...overrides,
+  } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["userRepo"]>;
+}
+
 const dmContext: TaskContext = {
   platform: "slack",
   contextType: "dm",
@@ -1034,11 +1045,13 @@ describe("handleManageScheduledTasks — ownership", () => {
       const result = await handleManageScheduledTasks(buildParams(action), {
         scheduler,
         stepContentRepo,
-        taskContext: dmContext, // createdBy: "U123"
+        userRepo: makeMockUserRepo(),
+        taskContext: dmContext,
       });
 
-      expect(result.content[0].text).toBe("Error: task not found.");
-      // No mutating / side-effecting operation should have fired.
+      expect(result.content[0].text).toBe(
+        `Error: You can't ${action === "remove" ? "delete" : action === "getRun" ? "inspect" : action === "updateStepContent" ? "update" : action} "Do a thing" because it was created by Roopak.`,
+      );
       expect(scheduler.updateTask).not.toHaveBeenCalled();
       expect(scheduler.removeTask).not.toHaveBeenCalled();
       expect(scheduler.pauseTask).not.toHaveBeenCalled();
@@ -1057,10 +1070,31 @@ describe("handleManageScheduledTasks — ownership", () => {
         taskContext: dmContext,
       });
 
-      // Same phrasing as the "not yours" branch — avoids existence leak.
       expect(result.content[0].text).toBe("Error: task not found.");
     });
   }
+
+  it("falls back when the task owner cannot be resolved", async () => {
+    const otherUsersTask = makeTask({ createdBy: "U_OTHER", title: "AWS Daily Cost Chart" });
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(otherUsersTask),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "pause", task_id: "task-1" },
+      {
+        scheduler,
+        stepContentRepo,
+        userRepo: makeMockUserRepo({ findById: vi.fn().mockResolvedValue(undefined) }),
+        taskContext: dmContext,
+      },
+    );
+
+    expect(result.content[0].text).toBe(
+      'Error: You can\'t pause "AWS Daily Cost Chart" because it was created by another user.',
+    );
+    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+  });
 
   it("allows a guarded action when the caller owns the task", async () => {
     const ownTask = makeTask({ createdBy: "U123" });

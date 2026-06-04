@@ -5,6 +5,7 @@ import type { createConversationRepository } from "../../db/repositories/convers
 import type { createInboxMessagesRepository } from "../../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
+import type { LocalClaudeSessionService } from "../../local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "../../local-devices/gateway";
 import type { Logger } from "../../logger";
 import type { TaskScheduler } from "../../scheduler/service";
@@ -59,6 +60,8 @@ export interface SketchMcpDeps {
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
+  localClaudeSessionService?: LocalClaudeSessionService;
+  originThreadTs?: string;
   activeQueueKey?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;

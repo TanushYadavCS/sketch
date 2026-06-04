@@ -37,6 +37,7 @@ const TOOL_EMOJI: Record<string, string> = {
   ReadChatHistory: "💬",
   SearchChatHistory: "🔎",
   local_run_command: "💻",
+  local_claude_session: "💻",
 };
 
 const FALLBACK_EMOJI = "⚙️";
@@ -57,6 +58,7 @@ const PRIMARY_ARG: Record<string, string> = {
   ManageScheduledTasks: "action",
   SearchDeliveryTargets: "query",
   SearchEntities: "queries",
+  local_claude_session: "action",
   SearchChatHistory: "query",
 };
 
@@ -100,6 +102,7 @@ const FRIENDLY_STATIC_LINES: Record<string, string> = {
   GetEntityContext: "Getting entity context",
   ReadChatHistory: "Reading Chat History",
   local_run_command: "Running local Mac command",
+  local_claude_session: "Supervising local Claude Code",
 };
 
 const CANVAS_FRIENDLY_TARGET_PREFIX: Record<string, string> = {

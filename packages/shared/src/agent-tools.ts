@@ -111,6 +111,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__local_claude_session",
+    label: "Run local Claude Code",
+    description: "Start and supervise Claude Code in a Sketch-managed tmux session on a paired local Mac.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__ManageScheduledTasks",
     label: "Manage scheduled tasks",
     description: "Create, list, update, pause, and run scheduled tasks.",

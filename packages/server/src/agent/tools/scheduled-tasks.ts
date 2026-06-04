@@ -9,6 +9,7 @@ import type { TaskScheduler } from "../../scheduler/service";
 import { normalizeScheduleTriggerSteps, normalizeScheduleTriggerStepsJson } from "../../scheduler/trigger-metadata";
 import type { ScheduledTask, TaskContext } from "../../scheduler/types";
 import type { WorkflowStep } from "../../workflows/types";
+import type { SearchableUserRepo } from "./types";
 
 const workflowStepSchema = z.object({
   id: z.string(),
@@ -164,6 +165,7 @@ export interface ManageScheduledTasksDeps {
   taskContext: TaskContext;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  userRepo?: SearchableUserRepo;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
@@ -199,6 +201,52 @@ function resolveScheduleTimezone(paramTz: string | undefined, ctxTz: string | nu
 
 function hasOwn<T extends object>(value: T, key: keyof T): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function titleCaseWords(value: string): string {
+  return value.replace(/\b[a-z]/g, (char) => char.toUpperCase());
+}
+
+function formatDisplayName(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (/^[a-z]+(?:[ ._-][a-z]+)*$/.test(trimmed)) {
+    return titleCaseWords(trimmed.replace(/[._-]+/g, " "));
+  }
+  return trimmed;
+}
+
+function taskDisplayName(task: ScheduledTask): string {
+  return task.title?.trim() || task.prompt.trim() || "this automation";
+}
+
+function guardedActionLabel(action: ManageScheduledTasksParams["action"]): string {
+  if (action === "remove") return "delete";
+  if (action === "resume") return "resume";
+  if (action === "pause") return "pause";
+  if (action === "run") return "run";
+  if (action === "getRun") return "inspect";
+  return "update";
+}
+
+async function resolveTaskOwnerName(task: ScheduledTask, userRepo: SearchableUserRepo | undefined): Promise<string> {
+  if (!task.createdBy || !userRepo) return "another user";
+  const owner = await userRepo.findById(task.createdBy).catch(() => undefined);
+  return (
+    formatDisplayName(owner?.name) ??
+    formatDisplayName(owner?.email?.split("@")[0]) ??
+    formatDisplayName(owner?.email) ??
+    "another user"
+  );
+}
+
+async function taskPermissionError(
+  task: ScheduledTask,
+  action: ManageScheduledTasksParams["action"],
+  userRepo: SearchableUserRepo | undefined,
+): Promise<string> {
+  const ownerName = await resolveTaskOwnerName(task, userRepo);
+  return `Error: You can't ${guardedActionLabel(action)} "${taskDisplayName(task)}" because it was created by ${ownerName}.`;
 }
 
 function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContext) {
@@ -254,16 +302,15 @@ export async function handleManageScheduledTasks(
     return null;
   };
 
-  // Ownership guard: creator-only for actions that mutate or inspect a specific task.
-  // Unified 404 phrasing ("task not found") for both missing and not-yours — avoids
-  // existence leaks. Admin bypass is deliberately not offered here; admins use the
-  // web UI for tenant-wide ops. Matches the HTTP layer's same-behavior guarantee.
   const OWNERSHIP_GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"];
   let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
-    if (!ctx.createdBy || !task || task.createdBy !== ctx.createdBy) {
+    if (!ctx.createdBy || !task) {
       return text("Error: task not found.");
+    }
+    if (task.createdBy !== ctx.createdBy) {
+      return text(await taskPermissionError(task, action, deps.userRepo));
     }
     guardedTask = task;
   }
@@ -713,6 +760,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         taskContext: deps.taskContext,
         stepContentRepo: deps.stepContentRepo,
         automationRunsRepo: deps.automationRunsRepo,
+        userRepo: deps.userRepo,
         loadIntegrationProvider: deps.loadIntegrationProvider,
         queueManager: deps.queueManager,
         activeQueueKey: deps.activeQueueKey,
