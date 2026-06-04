@@ -316,6 +316,36 @@ export interface LocalDeviceToolCallsTable {
   called_at: Generated<string>;
 }
 
+export interface LocalClaudeSessionsTable {
+  id: string;
+  user_id: string;
+  device_id: string;
+  tmux_session_name: string;
+  title: string;
+  cwd: string | null;
+  status: string;
+  event_token_hash: string;
+  origin_platform: string | null;
+  origin_context_type: string | null;
+  origin_delivery_target: string | null;
+  origin_thread_ts: string | null;
+  last_event_type: string | null;
+  last_event_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  ended_at: string | null;
+}
+
+export interface LocalClaudeSessionEventsTable {
+  id: string;
+  session_id: string;
+  event_type: string;
+  status: string;
+  message: string | null;
+  payload: string;
+  created_at: Generated<string>;
+}
+
 export interface AgentEnvironmentVariablesTable {
   id: string;
   user_id: string;
@@ -686,6 +716,8 @@ export interface DB {
   external_mcp_tool_calls: ExternalMcpToolCallsTable;
   local_devices: LocalDevicesTable;
   local_device_tool_calls: LocalDeviceToolCallsTable;
+  local_claude_sessions: LocalClaudeSessionsTable;
+  local_claude_session_events: LocalClaudeSessionEventsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;

@@ -19,6 +19,7 @@ import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
+import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
@@ -60,6 +61,7 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
 import type { IntegrationProvider } from "./integrations/types";
+import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
@@ -88,6 +90,7 @@ interface AppDeps {
     messageRef: string;
   }>;
   localDeviceGateway?: LocalDeviceGateway;
+  localClaudeSessionService?: LocalClaudeSessionService;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -101,6 +104,18 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
+
+  if (deps?.localClaudeSessionService) {
+    app.route(
+      "/api/local-claude-sessions",
+      localClaudeSessionEventRoutes({
+        service: deps.localClaudeSessionService,
+        logger,
+        getSlack: deps.getSlack,
+        whatsapp: deps.whatsapp,
+      }),
+    );
+  }
 
   // Slack HTTP events endpoint — must come before auth middleware so it doesn't
   // require JWT authentication. Only registered when SLACK_MODE=http.

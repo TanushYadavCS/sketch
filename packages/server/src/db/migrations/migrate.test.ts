@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(78);
+      expect(logSpy).toHaveBeenCalledTimes(79);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(78);
+    expect(rows.rows).toHaveLength(79);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -132,6 +132,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[75]).toBe("080-message-id-idempotency");
     expect(names[76]).toBe("081-email-message-metadata");
     expect(names[77]).toBe("082-email-thread-summaries");
+    expect(names[78]).toBe("083-local-claude-sessions");
   });
 
   it("creates the users table", async () => {
@@ -164,6 +165,17 @@ describe("runMigrations — full sequence", () => {
     await runMigrations(db);
 
     for (const table of ["local_devices", "local_device_tool_calls"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+  });
+
+  it("creates local Claude session tables", async () => {
+    await runMigrations(db);
+
+    for (const table of ["local_claude_sessions", "local_claude_session_events"]) {
       const result = await sql<{ name: string }>`
         SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
       `.execute(db);
@@ -280,7 +292,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(78);
+    expect(rows.rows).toHaveLength(79);
   });
 });
 
@@ -312,6 +324,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(78);
+    expect(rows.rows).toHaveLength(79);
   });
 });

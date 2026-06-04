@@ -3,6 +3,7 @@ import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
+import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
 import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
@@ -30,6 +31,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),
+    createLocalClaudeSessionTool(deps),
     createManageScheduledTasksTool({
       scheduler: deps.scheduler,
       taskContext: deps.taskContext,
