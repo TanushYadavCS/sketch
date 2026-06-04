@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
+import { materializeContactPointFact } from "./materialize-contact-points";
 import { buildMaterializeDeps } from "./materialize-deps";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializePersonFact, materializePersonSeed } from "./materialize-person";
@@ -21,6 +22,7 @@ import type {
 const FACT_REPLAY_ORDER = [
   "structural_seed",
   "person_seed",
+  "contact_point",
   "attendee",
   "assignee",
   "author",
@@ -35,6 +37,9 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   }
   if (fact.fact_type === "person_seed") {
     return materializePersonSeed(deps, fact);
+  }
+  if (fact.fact_type === "contact_point") {
+    return materializeContactPointFact(deps, fact);
   }
   if (fact.fact_type === "llm_extracted") {
     return materializeLlmExtractedFact(deps, fact);
@@ -101,7 +106,7 @@ export async function replaySourceFacts(
     skipped: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold });
+  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold, logger });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
     .filter((f) => orderRank.has(f.fact_type))
@@ -165,7 +170,7 @@ async function materializeUnmaterializedFactsInner(
     deferredBelowThreshold: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold });
+  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold, logger });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   let factsQuery = db
     .selectFrom("indexed_file_facts")

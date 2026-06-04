@@ -227,6 +227,61 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(queue).toHaveLength(0);
   });
 
+  it("materializes contact point facts onto the referenced person", async () => {
+    const [fileId] = await seedFiles(db, 1);
+    const entityRepo = createEntityRepository(db);
+    const person = await entityRepo.upsertPersonEntity({
+      name: "Simran Suri",
+      email: "simran@example.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "person:simran",
+    });
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: fileId,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: ADMIN_ID,
+      contentHash: "hash-1",
+      source: "fireflies",
+      factType: "contact_point",
+      relation: "contactable",
+      subjectName: "Simran Suri",
+      subjectEmail: "simran@example.com",
+      subjectSource: "fireflies",
+      subjectSourceId: "person:simran",
+      raw: {
+        providerFileId: "meeting-1",
+        contactPoint: {
+          subjectName: "Simran Suri",
+          subjectEmail: "simran@example.com",
+          subjectSource: "fireflies",
+          subjectSourceId: "person:simran",
+          kind: "email",
+          value: "SIMRAN@example.com",
+          displayValue: "SIMRAN@example.com",
+          source: "fireflies",
+          lastContactedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+
+    expect(summary.materialized).toBe(1);
+    const rows = await entityRepo.getContactPointsForEntity(person.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "email",
+      value: "simran@example.com",
+      display_value: "SIMRAN@example.com",
+      source: "fireflies",
+      connector_config_id: CONNECTOR_ID,
+      created_by_user_id: ADMIN_ID,
+      last_contacted_at: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
   it("skips facts with missing/invalid type and leaves them unmaterialized", async () => {
     await seedFiles(db, 1);
     await upsertLlmFact(db, "file-1", "Whatever", "foo");

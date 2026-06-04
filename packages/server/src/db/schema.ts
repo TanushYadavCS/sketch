@@ -405,6 +405,23 @@ export interface EntitySourceRefsTable {
   last_seen_at: string;
 }
 
+export interface EntityContactPointsTable {
+  id: string;
+  entity_id: string;
+  kind: string;
+  value: string;
+  display_value: string | null;
+  label: string | null;
+  is_primary: Generated<number>;
+  source: string;
+  connector_config_id: string | null;
+  created_by_user_id: string | null;
+  verified_at: string | null;
+  last_contacted_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface EntityMentionsTable {
   id: string;
   entity_id: string;
@@ -608,6 +625,7 @@ export interface DB {
   entities: EntitiesTable;
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
+  entity_contact_points: EntityContactPointsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;

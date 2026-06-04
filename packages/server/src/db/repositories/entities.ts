@@ -3,7 +3,7 @@ import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { isPg } from "../dialect";
-import type { DB, EntitiesTable } from "../schema";
+import type { DB, EntitiesTable, EntityContactPointsTable } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
@@ -82,6 +82,22 @@ export interface UpsertPersonEntityData {
   sourceId: string;
 }
 
+export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp";
+
+export interface UpsertContactPointData {
+  entityId: string;
+  kind: EntityContactPointKind;
+  value: string;
+  displayValue?: string | null;
+  label?: string | null;
+  source: string;
+  connectorConfigId?: string | null;
+  createdByUserId?: string | null;
+  verifiedAt?: string | null;
+  lastContactedAt?: string | null;
+  makePrimary?: boolean;
+}
+
 export type EntityMentionConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 export type EntityMentionRelation = "mentioned" | "attended" | "authored" | "assigned" | "organized" | "corresponded";
 
@@ -93,6 +109,44 @@ export interface CreateMentionData {
   confidence: EntityMentionConfidence;
   source: string;
   relation: EntityMentionRelation;
+}
+
+function normalizePhoneLike(value: string): string {
+  const trimmed = value.trim();
+  const compact = trimmed.replace(/[\s().-]/g, "");
+  const withPlus = compact.startsWith("00") ? `+${compact.slice(2)}` : compact;
+  if (!/^\+[1-9]\d{7,14}$/.test(withPlus)) {
+    throw new Error("Phone contact points must be E.164, for example +14155551234");
+  }
+  return withPlus;
+}
+
+function normalizeLinkedin(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("LinkedIn contact point cannot be empty");
+  const withoutAt = trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
+  const urlish = withoutAt.includes("linkedin.com") ? withoutAt : null;
+  if (!urlish) return withoutAt.replace(/^\/+|\/+$/g, "").toLowerCase();
+
+  const url = new URL(urlish.startsWith("http://") || urlish.startsWith("https://") ? urlish : `https://${urlish}`);
+  const parts = url.pathname.split("/").filter(Boolean);
+  const inIndex = parts.findIndex((part) => part.toLowerCase() === "in");
+  if (inIndex === -1 || !parts[inIndex + 1]) {
+    throw new Error("LinkedIn contact point must be a public identifier or /in/ profile URL");
+  }
+  return decodeURIComponent(parts[inIndex + 1]).toLowerCase();
+}
+
+export function normalizeContactPointValue(kind: EntityContactPointKind, value: string): string {
+  if (kind === "email") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || !normalized.includes("@")) {
+      throw new Error("Email contact point must be a valid email-like value");
+    }
+    return normalized;
+  }
+  if (kind === "phone" || kind === "whatsapp") return normalizePhoneLike(value);
+  return normalizeLinkedin(value);
 }
 
 export function createEntityRepository(db: Kysely<DB>) {
@@ -368,6 +422,142 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where("indexed_file_id", "=", indexedFileId)
         .where("confidence", "!=", "EXTRACTED")
         .execute();
+    },
+
+    /**
+     * Upsert a normalized contact point. On conflict, `source` is the last writer
+     * that refreshed the row, while `connector_config_id` and `created_by_user_id`
+     * preserve the first non-null observation so the row keeps its original
+     * ingestion anchor even when later manual/system refreshes omit connector
+     * context. Callers ingesting external phone-like values must catch
+     * normalization errors; only E.164-style values are accepted.
+     */
+    async upsertContactPoint(data: UpsertContactPointData): Promise<Selectable<EntityContactPointsTable>> {
+      const value = normalizeContactPointValue(data.kind, data.value);
+      const now = new Date().toISOString();
+
+      await db.transaction().execute(async (trx) => {
+        if (data.makePrimary) {
+          await trx
+            .updateTable("entity_contact_points")
+            .set({ is_primary: 0, updated_at: now })
+            .where("entity_id", "=", data.entityId)
+            .where("kind", "=", data.kind)
+            .execute();
+        }
+
+        await trx
+          .insertInto("entity_contact_points")
+          .values({
+            id: randomUUID(),
+            entity_id: data.entityId,
+            kind: data.kind,
+            value,
+            display_value: data.displayValue ?? null,
+            label: data.label ?? null,
+            is_primary: data.makePrimary ? 1 : 0,
+            source: data.source,
+            connector_config_id: data.connectorConfigId ?? null,
+            created_by_user_id: data.createdByUserId ?? null,
+            verified_at: data.verifiedAt ?? null,
+            last_contacted_at: data.lastContactedAt ?? null,
+            created_at: now,
+            updated_at: now,
+          })
+          .onConflict((oc) =>
+            oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
+              display_value: sql`COALESCE(entity_contact_points.display_value, excluded.display_value)`,
+              label: sql`COALESCE(excluded.label, entity_contact_points.label)`,
+              is_primary: data.makePrimary ? 1 : sql`entity_contact_points.is_primary`,
+              source: data.source,
+              connector_config_id: sql`COALESCE(excluded.connector_config_id, entity_contact_points.connector_config_id)`,
+              created_by_user_id: sql`COALESCE(excluded.created_by_user_id, entity_contact_points.created_by_user_id)`,
+              verified_at: sql`CASE
+                WHEN entity_contact_points.verified_at IS NULL THEN excluded.verified_at
+                WHEN excluded.verified_at IS NULL THEN entity_contact_points.verified_at
+                WHEN excluded.verified_at > entity_contact_points.verified_at THEN excluded.verified_at
+                ELSE entity_contact_points.verified_at
+              END`,
+              last_contacted_at: sql`CASE
+                WHEN entity_contact_points.last_contacted_at IS NULL THEN excluded.last_contacted_at
+                WHEN excluded.last_contacted_at IS NULL THEN entity_contact_points.last_contacted_at
+                WHEN excluded.last_contacted_at > entity_contact_points.last_contacted_at THEN excluded.last_contacted_at
+                ELSE entity_contact_points.last_contacted_at
+              END`,
+              updated_at: now,
+            }),
+          )
+          .execute();
+      });
+
+      return db
+        .selectFrom("entity_contact_points")
+        .selectAll()
+        .where("entity_id", "=", data.entityId)
+        .where("kind", "=", data.kind)
+        .where("value", "=", value)
+        .executeTakeFirstOrThrow();
+    },
+
+    async getContactPointsForEntity(entityId: string): Promise<Selectable<EntityContactPointsTable>[]> {
+      return db
+        .selectFrom("entity_contact_points")
+        .selectAll()
+        .where("entity_id", "=", entityId)
+        .orderBy("kind", "asc")
+        .orderBy("is_primary", "desc")
+        .orderBy(sql`COALESCE(last_contacted_at, '')`, "desc")
+        .orderBy("id", "asc")
+        .execute();
+    },
+
+    async getEntityByContactPoint(kind: EntityContactPointKind, rawValue: string) {
+      const value = normalizeContactPointValue(kind, rawValue);
+      const rows = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .where("entity_contact_points.kind", "=", kind)
+        .where("entity_contact_points.value", "=", value)
+        .limit(2)
+        .execute();
+      return rows.length === 1 ? rows[0] : null;
+    },
+
+    async getEntitiesByContactPoint(
+      kind: EntityContactPointKind,
+      rawValue: string,
+    ): Promise<Selectable<EntitiesTable>[]> {
+      const value = normalizeContactPointValue(kind, rawValue);
+      return db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .where("entity_contact_points.kind", "=", kind)
+        .where("entity_contact_points.value", "=", value)
+        .orderBy("entities.id", "asc")
+        .execute();
+    },
+
+    async getPersonEntitiesByEmail(rawEmail: string): Promise<Selectable<EntitiesTable>[]> {
+      const email = normalizeContactPointValue("email", rawEmail);
+      const byContactPoint = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .where("entity_contact_points.kind", "=", "email")
+        .where("entity_contact_points.value", "=", email)
+        .execute();
+      const byMetadata = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", "person")
+        .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "=", email)
+        .execute();
+
+      const byId = new Map<string, Selectable<EntitiesTable>>();
+      for (const entity of [...byContactPoint, ...byMetadata]) byId.set(entity.id, entity);
+      return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
     },
 
     // ── Search ──

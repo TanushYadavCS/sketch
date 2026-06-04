@@ -65,6 +65,25 @@ export async function emitFactsForSyncedItem({
     }
   }
 
+  if (item.contactPoints && item.contactPoints.length > 0) {
+    for (const contactPoint of item.contactPoints) {
+      await factRepo.upsertFact({
+        ...factContext,
+        indexedFileId,
+        contentHash: item.contentHash,
+        source: connectorType,
+        factType: "contact_point",
+        relation: "contactable",
+        subjectName: contactPoint.subjectName,
+        subjectEmail: contactPoint.subjectEmail ?? null,
+        subjectSource: contactPoint.subjectSource,
+        subjectSourceId: contactPoint.subjectSourceId,
+        contextSnippet: item.sourcePath,
+        raw: { providerFileId: item.providerFileId, contactPoint },
+      });
+    }
+  }
+
   if (item.attendees) {
     for (const attendee of item.attendees) {
       await seedAttendeePerson({
