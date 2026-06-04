@@ -6,21 +6,30 @@
  * All data is passed in as props; this component owns no fetch state.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import type { SearchResult, UnifiedFile } from "@/lib/api";
+import { type SearchResult, type UnifiedFile, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import {
   ArrowSquareOutIcon,
+  CalendarBlankIcon,
+  CheckCircleIcon,
   FileTextIcon,
   GlobeIcon,
   LockSimpleIcon,
   MagnifyingGlassIcon,
+  MinusIcon,
+  NoteIcon,
+  PhoneIcon,
+  PlusIcon,
   SparkleIcon,
   SpinnerGapIcon,
+  StackIcon,
   TableIcon,
 } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Skeleton } from "@sketch/ui/components/skeleton";
+import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 
 /** Relative time formatter — shared with FileDetailSheet via this module. */
 export function formatRelativeTime(iso: string): string {
@@ -134,9 +143,13 @@ export function FileList({
         <span className="w-24 text-right">Updated</span>
         <span className="w-5" />
       </div>
-      {filteredFiles.map((file) => (
-        <UnifiedFileRow key={file.id} file={file} onView={() => onView(file.id)} />
-      ))}
+      {filteredFiles.map((file) =>
+        file.resultKind === "crm_object" ? (
+          <CrmObjectGroup key={file.id} file={file} onView={onView} />
+        ) : (
+          <UnifiedFileRow key={file.id} file={file} onView={() => onView(file.id)} />
+        ),
+      )}
 
       {hasMore && !hasClientOnlyFilter && (
         <div className="flex items-center justify-center py-4">
@@ -239,17 +252,51 @@ function SearchResultRow({ result, onView }: { result: SearchResult; onView: () 
   );
 }
 
-function UnifiedFileRow({ file, onView }: { file: UnifiedFile; onView: () => void }) {
+function UnifiedFileRow({
+  file,
+  onView,
+  expand,
+}: {
+  file: UnifiedFile;
+  onView: () => void;
+  expand?: { expanded: boolean; onToggle: () => void; count: number };
+}) {
   const def = getIntegration(file.source as IntegrationType);
-  const Icon = file.contentCategory === "document" ? FileTextIcon : TableIcon;
+  const Icon = expand ? StackIcon : file.contentCategory === "document" ? FileTextIcon : TableIcon;
 
   return (
     <div className="flex items-center gap-3 border-b border-border px-3 py-2.5 text-sm transition-colors hover:bg-muted/30">
+      {expand ? (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            expand.onToggle();
+          }}
+          className="flex size-5 shrink-0 items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted/80"
+          title={expand.expanded ? "Collapse activities" : "Expand activities"}
+        >
+          {expand.expanded ? <MinusIcon size={12} /> : <PlusIcon size={12} />}
+        </button>
+      ) : (
+        <span className="w-5 shrink-0" />
+      )}
       <button type="button" onClick={onView} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <Icon size={16} className="shrink-0 text-muted-foreground" />
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium">{file.fileName}</p>
-          {file.sourcePath && <p className="truncate text-[11px] text-muted-foreground">{file.sourcePath}</p>}
+          <div className="flex items-center gap-2">
+            <p className="truncate text-sm font-medium">{file.fileName}</p>
+            {expand && (
+              <Badge variant="secondary" className="shrink-0 text-[10px]">
+                {expand.count} {expand.count === 1 ? "activity" : "activities"}
+              </Badge>
+            )}
+          </div>
+          {file.rollupSummary ? (
+            <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{file.rollupSummary}</p>
+          ) : file.sourcePath ? (
+            <p className="truncate text-[11px] text-muted-foreground">{file.sourcePath}</p>
+          ) : null}
         </div>
       </button>
 
@@ -287,7 +334,12 @@ function UnifiedFileRow({ file, onView }: { file: UnifiedFile; onView: () => voi
       </span>
 
       <span className="w-20 text-center">
-        {file.hasSummary ? (
+        {file.contentCategory === "structured" ? (
+          <Badge variant="outline" className="gap-0.5 text-[10px] text-muted-foreground">
+            <CheckCircleIcon size={10} weight="fill" className="text-emerald-500" />
+            Synced
+          </Badge>
+        ) : file.hasSummary ? (
           <Badge variant="outline" className="gap-0.5 text-[10px]">
             <SparkleIcon size={10} weight="fill" className="text-primary" />
             Enriched
@@ -322,5 +374,87 @@ function UnifiedFileRow({ file, onView }: { file: UnifiedFile; onView: () => voi
         <span className="w-5" />
       )}
     </div>
+  );
+}
+
+/**
+ * A collapsed CRM object anchor (Account/Contact/Deal) with its activity count
+ * and rolled-up summary. Expanding lazily fetches the member activity files.
+ */
+function CrmObjectGroup({ file, onView }: { file: UnifiedFile; onView: (fileId: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const { data, isFetching } = useQuery({
+    queryKey: ["file-activities", file.id],
+    queryFn: () => api.integrations.fileActivities(file.id),
+    enabled: expanded,
+  });
+  const members = data?.files ?? [];
+
+  return (
+    <>
+      <UnifiedFileRow
+        file={file}
+        onView={() => onView(file.id)}
+        expand={{ expanded, onToggle: () => setExpanded((v) => !v), count: file.activityCount ?? 0 }}
+      />
+      {expanded &&
+        (isFetching && members.length === 0 ? (
+          <div className="flex items-center gap-2 border-b border-border bg-muted/10 py-2 pr-3 pl-12 text-xs text-muted-foreground">
+            <SpinnerGapIcon size={12} className="animate-spin" />
+            Loading activities…
+          </div>
+        ) : members.length === 0 ? (
+          <div className="border-b border-border bg-muted/10 py-2 pr-3 pl-12 text-xs text-muted-foreground">
+            No activities to show.
+          </div>
+        ) : (
+          <>
+            {members.map((member) => (
+              <ActivityRow key={member.id} file={member} onView={() => onView(member.id)} />
+            ))}
+            {data?.hasMore ? (
+              <div className="border-b border-border bg-muted/10 py-2 pr-3 pl-12 text-[11px] text-muted-foreground">
+                + more activities — open the object to see all.
+              </div>
+            ) : null}
+          </>
+        ))}
+    </>
+  );
+}
+
+const ACTIVITY_META: Record<string, { Icon: typeof PhoneIcon; label: string }> = {
+  crm_call: { Icon: PhoneIcon, label: "Call" },
+  crm_task: { Icon: CheckCircleIcon, label: "Task" },
+  crm_event: { Icon: CalendarBlankIcon, label: "Event" },
+  crm_meeting: { Icon: CalendarBlankIcon, label: "Meeting" },
+  crm_note: { Icon: NoteIcon, label: "Note" },
+};
+
+/**
+ * A single CRM activity rendered as a compact timeline row under its parent
+ * object. Touches with notes (content_category 'document') are flagged; bodyless
+ * reminders still appear so the object's touch history is visible end to end.
+ */
+function ActivityRow({ file, onView }: { file: UnifiedFile; onView: () => void }) {
+  const meta = ACTIVITY_META[file.fileType ?? ""] ?? { Icon: FileTextIcon, label: "Activity" };
+  const ActIcon = meta.Icon;
+  const subject = file.fileName && file.fileName !== meta.label ? file.fileName : null;
+  const hasNotes = file.contentCategory === "document";
+
+  return (
+    <button
+      type="button"
+      onClick={onView}
+      className="flex w-full items-center gap-2 border-b border-border bg-muted/10 py-2 pr-3 pl-12 text-left text-xs transition-colors hover:bg-muted/30"
+    >
+      <ActIcon size={14} className="shrink-0 text-muted-foreground" />
+      <span className="shrink-0 font-medium text-muted-foreground">{meta.label}</span>
+      {subject ? <span className="truncate text-foreground">{subject}</span> : null}
+      {hasNotes ? <SparkleIcon size={10} weight="fill" className="shrink-0 text-primary" /> : null}
+      <span className="ml-auto shrink-0 text-muted-foreground">
+        {formatRelativeTime(file.sourceUpdatedAt ?? file.sourceCreatedAt ?? file.syncedAt)}
+      </span>
+    </button>
   );
 }

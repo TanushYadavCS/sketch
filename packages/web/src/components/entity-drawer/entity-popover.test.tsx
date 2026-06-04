@@ -35,6 +35,7 @@ const SARAH = {
     firstSeenAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-05-01T00:00:00.000Z",
     domainsForCompany: [],
+    crmActivityBrief: null,
     summary: {
       identity: "Person · works at Stripe.",
       activity: "Active in 5 files (5 mentions).",

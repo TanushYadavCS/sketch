@@ -35,7 +35,7 @@ export function normalizeEntityMatchName(entityType: string, name: string): stri
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team"];
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
   const entities = await db.selectFrom("entities").selectAll().where("source_type", "in", supportedTypes).execute();
   const entitiesByType = new Map<ProposeEntityType, EntityRow[]>();
   for (const t of supportedTypes) entitiesByType.set(t, []);

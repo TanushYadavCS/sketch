@@ -149,6 +149,52 @@ export function normalizeContactPointValue(kind: EntityContactPointKind, value: 
   return normalizeLinkedin(value);
 }
 
+export interface EntityCrmActivityBrief {
+  summary: string;
+  activityCount: number;
+  updatedAt: string;
+}
+
+const CRM_BRIEF_SOURCE_ID_PREFIXES = ["Accounts:", "Deals:", "Contacts:"];
+
+function isCrmObjectSourceId(sourceId: string): boolean {
+  return CRM_BRIEF_SOURCE_ID_PREFIXES.some((prefix) => sourceId.startsWith(prefix));
+}
+
+async function loadCrmActivityBrief(db: Kysely<DB>, entityId: string): Promise<EntityCrmActivityBrief | null> {
+  const configs = await db
+    .selectFrom("connector_configs")
+    .select("id")
+    .where("connector_type", "=", "zoho_crm")
+    .execute();
+  if (configs.length !== 1) return null;
+
+  const refs = await db
+    .selectFrom("entity_source_refs")
+    .select("source_id")
+    .where("entity_id", "=", entityId)
+    .where("source", "=", "zoho_crm")
+    .execute();
+  const groupIds = refs.map((ref) => ref.source_id).filter(isCrmObjectSourceId);
+  if (groupIds.length === 0) return null;
+
+  const row = await db
+    .selectFrom("crm_object_summaries")
+    .select(["summary", "activity_count", "updated_at"])
+    .where("connector_config_id", "=", configs[0].id)
+    .where("group_id", "in", groupIds)
+    .orderBy("updated_at", "desc")
+    .executeTakeFirst();
+
+  return row
+    ? {
+        summary: row.summary,
+        activityCount: Number(row.activity_count),
+        updatedAt: row.updated_at,
+      }
+    : null;
+}
+
 export function createEntityRepository(db: Kysely<DB>) {
   return {
     // ── CRUD ──
@@ -678,6 +724,7 @@ export function createEntityRepository(db: Kysely<DB>) {
       firstSeenAt: string | null;
       lastSeenAt: string | null;
       domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+      crmActivityBrief: EntityCrmActivityBrief | null;
     }> {
       const filterByVisibility = viewer !== undefined && !viewer.isAdmin;
 
@@ -735,6 +782,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .orderBy("is_primary", "desc")
         .orderBy("confidence", "desc")
         .execute();
+      const crmActivityBrief = await loadCrmActivityBrief(db, entityId);
 
       return {
         mentionCount,
@@ -746,6 +794,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           confidence: Number(d.confidence ?? 0),
           isPrimary: d.is_primary === 1,
         })),
+        crmActivityBrief,
       };
     },
 

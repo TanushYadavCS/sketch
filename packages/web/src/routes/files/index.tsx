@@ -110,11 +110,11 @@ function FilesPage() {
       const def = connector ? getIntegration(connector.connectorType as IntegrationType) : undefined;
       if (connector && def) {
         if (connector.connectorType === "gmail") {
-          // Gmail auto-syncs on connect (no folder picker), so don't push scope
-          // selection — just confirm it's importing.
           toast.success("Gmail connected — importing your recent mail now.");
+        } else if (def.scopeType === "none") {
+          toast.success(`${def.name} connected — syncing automatically.`);
         } else {
-          toast.success(`${def.name} connected — now select which ${def.scopeLabel} to sync.`);
+          toast.success(`${def.name} connected — now select what to sync.`);
           setManagingConnector({ definition: def, connector });
         }
         return;

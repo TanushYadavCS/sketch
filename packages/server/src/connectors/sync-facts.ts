@@ -1,4 +1,5 @@
 import type { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import { normalizeRelationType } from "../entities/graph";
 import type { Connector, ConnectorType, SyncedItem } from "./types";
 
 type IndexedFileFactRepository = ReturnType<typeof createIndexedFileFactRepository>;
@@ -28,6 +29,43 @@ export async function emitFactsForSyncedItem({
   indexedFileId,
   emitCorrespondentFacts = false,
 }: EmitFactsForSyncedItemParams): Promise<void> {
+  if (item.entitySeeds && item.entitySeeds.length > 0) {
+    for (const seed of item.entitySeeds) {
+      await factRepo.upsertFact({
+        ...factContext,
+        indexedFileId,
+        contentHash: item.contentHash,
+        source: seed.source,
+        factType: "structural_seed",
+        relation: "seeded",
+        subjectName: seed.name,
+        subjectSource: seed.source,
+        subjectSourceId: seed.sourceId,
+        contextSnippet: item.sourcePath,
+        raw: seed,
+      });
+    }
+  }
+
+  if (item.personSeeds && item.personSeeds.length > 0) {
+    for (const seed of item.personSeeds) {
+      await factRepo.upsertFact({
+        ...factContext,
+        indexedFileId,
+        contentHash: item.contentHash,
+        source: seed.source,
+        factType: "person_seed",
+        relation: "seeded",
+        subjectName: seed.name,
+        subjectEmail: seed.email ?? null,
+        subjectSource: seed.source,
+        subjectSourceId: seed.sourceId,
+        contextSnippet: item.sourcePath,
+        raw: seed,
+      });
+    }
+  }
+
   const promotable = connector.promotableFileTypes ?? [];
   if (item.fileType && promotable.includes(item.fileType)) {
     await factRepo.upsertFact({
@@ -82,6 +120,31 @@ export async function emitFactsForSyncedItem({
         subjectSourceId: contactPoint.subjectSourceId,
         contextSnippet: item.sourcePath,
         raw: { providerFileId: item.providerFileId, contactPoint },
+      });
+    }
+  }
+
+  if (item.relationships && item.relationships.length > 0) {
+    for (const relationship of item.relationships) {
+      const relationType = normalizeRelationType(relationship.relationType);
+      if (!relationType) continue;
+      await factRepo.upsertFact({
+        ...factContext,
+        indexedFileId,
+        contentHash: item.contentHash,
+        source: connectorType,
+        factType: "crm_relation",
+        relation: relationType,
+        subjectName: relationship.target.name,
+        subjectSource: relationship.target.source,
+        subjectSourceId: relationship.target.sourceId,
+        contextSnippet: relationship.contextSnippet ?? null,
+        raw: {
+          providerFileId: item.providerFileId,
+          relationType,
+          source: relationship.source,
+          target: relationship.target,
+        },
       });
     }
   }
@@ -241,7 +304,7 @@ interface SeedAssigneePersonParams {
   connector: Connector;
   factContext: SyncFactContext;
   connectorType: ConnectorType;
-  assignee: { name: string; email?: string };
+  assignee: { name: string; email?: string; source?: string; sourceId?: string };
   providerFileId: string;
   indexedFileId: string;
   contentHash: string | null;
@@ -257,9 +320,12 @@ async function seedAssigneePerson({
   indexedFileId,
   contentHash,
 }: SeedAssigneePersonParams): Promise<void> {
-  const sourceRefKey = connector.assigneeSourceRefKey
-    ? connector.assigneeSourceRefKey(assignee.name)
-    : `${connectorType}:user:${assignee.name}`;
+  const sourceRefKey =
+    assignee.source && assignee.sourceId
+      ? `${assignee.source}:${assignee.sourceId}`
+      : connector.assigneeSourceRefKey
+        ? connector.assigneeSourceRefKey(assignee.name)
+        : `${connectorType}:user:${assignee.name}`;
   const [subjectSource, ...subjectSourceParts] = sourceRefKey.split(":");
   await factRepo.upsertFact({
     ...factContext,

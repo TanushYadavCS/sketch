@@ -37,6 +37,7 @@ const SARAH = {
     firstSeenAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-05-01T00:00:00.000Z",
     domainsForCompany: [],
+    crmActivityBrief: null,
     summary: {
       identity: "Person · Engineer · works at Stripe (sarah@stripe.com). Engaged with Acme.",
       activity: "Active in 5 files (5 mentions) across 3 days. Most-frequent collaborators: Ada Lovelace.",
@@ -55,6 +56,11 @@ const STRIPE = {
     ...SARAH.profile,
     entityType: "company",
     domainsForCompany: [{ domain: "stripe.com", confidence: 0.95, isPrimary: true }],
+    crmActivityBrief: {
+      summary: "Recent CRM activity focused on renewal follow-ups and stakeholder alignment.",
+      activityCount: 47,
+      updatedAt: "2026-05-22T00:00:00.000Z",
+    },
     summary: {
       identity: "Company · stripe.com.",
       activity: "Active in 5 files (5 mentions) across 3 days.",
@@ -194,5 +200,8 @@ describe("EntityDrawer", () => {
     await screen.findByRole("heading", { name: /Stripe/ });
     expect(screen.getByText(/stripe\.com · primary/)).toBeInTheDocument();
     expect(screen.getByText(/Company · stripe\.com\./)).toBeInTheDocument();
+    expect(screen.getByText("CRM Activity")).toBeInTheDocument();
+    expect(screen.getByText(/Recent CRM activity focused on renewal follow-ups/)).toBeInTheDocument();
+    expect(screen.getByText(/47 activities · updated/)).toBeInTheDocument();
   });
 });

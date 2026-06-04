@@ -95,6 +95,22 @@ export function LinearLogo({ size = 16, className, style }: LogoProps) {
 }
 
 /** Returns the brand logo component for a connector type, or null if unknown. */
+export function ZohoLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M4 4h16v3.4l-9.4 9.4H20V20H4v-3.4L13.4 7.2H4z" />
+    </svg>
+  );
+}
+
 export function ConnectorLogo({
   type,
   size = 16,
@@ -118,6 +134,8 @@ export function ConnectorLogo({
       return <NotionLogo {...props} />;
     case "linear":
       return <LinearLogo {...props} />;
+    case "zoho_crm":
+      return <ZohoLogo {...props} />;
     default:
       return null;
   }

@@ -8,7 +8,7 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies";
+export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies" | "zoho_crm";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
@@ -30,6 +30,9 @@ export interface OAuthCredentials {
   expires_at?: string;
   client_id: string;
   client_secret: string;
+  accounts_server?: string;
+  api_domain?: string;
+  region?: string;
 }
 
 export interface ApiKeyCredentials {
@@ -57,6 +60,11 @@ export interface SyncedItem {
   contentCategory: ContentCategory;
   content: string | null;
   sourcePath: string | null;
+  /**
+   * Optional display grouping key. For CRM this is the parent object provider id
+   * that should anchor activity rollups, for example `Deals:123`.
+   */
+  rollupGroupId?: string | null;
   contentHash: string | null;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
@@ -85,7 +93,7 @@ export interface SyncedItem {
    * Structured assignee data for deterministic entity linking.
    * Each assignee is matched to a person entity and linked via entity_mentions.
    */
-  assignees?: Array<{ name: string; email?: string }>;
+  assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present; entries
@@ -102,6 +110,14 @@ export interface SyncedItem {
    */
   parentEntities?: Array<{ source: string; sourceId: string; contextSnippet?: string }>;
   contactPoints?: ContactPointSeed[];
+  entitySeeds?: EntitySeed[];
+  personSeeds?: PersonEntitySeed[];
+  relationships?: Array<{
+    relationType: string;
+    source: { source: string; sourceId: string; name: string; type: string };
+    target: { source: string; sourceId: string; name: string; type: string };
+    contextSnippet?: string;
+  }>;
 }
 
 /**
@@ -158,7 +174,11 @@ export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>
 export type IndexedFileFactRaw =
   | { providerFileId: string; attendee: { name?: string; email?: string } }
   | { providerFileId: string; correspondent: { name?: string; email?: string; sourceId?: string } }
-  | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
+  | {
+      providerFileId: string;
+      assignee: { name: string; email?: string; source?: string; sourceId?: string };
+      sourceRefKey: string;
+    }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
   | { providerFileId: string; contactPoint: ContactPointSeed }
@@ -186,6 +206,12 @@ export type IndexedFileFactRaw =
       context?: string;
       source: { name: string; type: string; variations: string[] };
       target: { name: string; type: string; variations: string[] };
+    }
+  | {
+      providerFileId: string;
+      relationType: string;
+      source: { source: string; sourceId: string; name: string; type: string };
+      target: { source: string; sourceId: string; name: string; type: string };
     }
   | {
       providerFileId: string;

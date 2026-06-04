@@ -361,6 +361,7 @@ export interface EntityProfile {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+  crmActivityBrief: { summary: string; activityCount: number; updatedAt: string } | null;
   summary: EntityProfileSummary;
 }
 
@@ -438,12 +439,19 @@ export interface EntityRelationEvidenceResponse {
 export interface EntityTimelineItem {
   fileId: string;
   fileName: string;
+  fileType: string | null;
+  contentCategory: string;
   sourceType: string;
   occurredAt: string;
   mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
   mentionCount: number;
   contextSnippet: string | null;
   url: string | null;
+  rollupGroupId: string | null;
+  crmActivity: {
+    activityType: "task" | "call" | "event" | "meeting" | "note";
+    hasBody: boolean;
+  } | null;
 }
 
 export interface EntityTimelineGroup {
@@ -619,6 +627,10 @@ export interface ConnectorFile {
   embeddingStatus: string;
   accessScope: "restricted" | "unrestricted";
   accessCount: number | null;
+  /** Present on collapsed CRM object anchors that roll up activity members. */
+  resultKind?: "crm_object";
+  activityCount?: number;
+  rollupSummary?: string;
 }
 
 export interface FileContent {
@@ -1147,6 +1159,9 @@ export const api = {
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
       );
     },
+    fileActivities(fileId: string) {
+      return request<{ files: UnifiedFile[]; hasMore: boolean }>(`/api/connectors/all-files/${fileId}/activities`);
+    },
     search(opts: { query: string; source?: string; category?: string; limit?: number }) {
       const params = new URLSearchParams();
       params.set("query", opts.query);
@@ -1308,6 +1323,16 @@ export const api = {
       return connectorType
         ? `/api/oauth/google/authorize?connector=${encodeURIComponent(connectorType)}`
         : "/api/oauth/google/authorize";
+    },
+  },
+  zohoOAuth: {
+    status() {
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; regions: string[] }>(
+        "/api/oauth/zoho/status",
+      );
+    },
+    authorizeUrl(region: string) {
+      return `/api/oauth/zoho/authorize?region=${encodeURIComponent(region)}`;
     },
   },
   identities: {
