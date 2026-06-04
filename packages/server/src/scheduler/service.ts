@@ -21,6 +21,7 @@ import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
@@ -34,6 +35,7 @@ import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
+import { createWorkflowDeliveryCapture, providerTimestampFromWhatsApp } from "./delivery-capture";
 import { parseOnceSchedule } from "./parse-once";
 import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
@@ -60,11 +62,17 @@ export interface TaskSchedulerDeps {
 export class TaskScheduler {
   private cronInstances: Map<string, Cron> = new Map();
   private repo: ReturnType<typeof createScheduledTaskRepository>;
+  private deliveryCapture: ReturnType<typeof createWorkflowDeliveryCapture>;
   private deps: TaskSchedulerDeps;
 
   constructor(deps: TaskSchedulerDeps) {
     this.deps = deps;
     this.repo = createScheduledTaskRepository(deps.db);
+    this.deliveryCapture = createWorkflowDeliveryCapture({
+      conversations: createConversationRepository(deps.db),
+      settingsRepo: deps.settingsRepo,
+      logger: deps.logger,
+    });
   }
 
   async start(): Promise<void> {
@@ -251,7 +259,13 @@ export class TaskScheduler {
 
       if (delivery.threadTs) {
         return async (text) => {
-          await slack.postThreadReply(delivery.targetId, delivery.threadTs as string, text);
+          const messageRef = await slack.postThreadReply(delivery.targetId, delivery.threadTs as string, text);
+          await this.deliveryCapture.captureSlack({
+            deliveryTarget: delivery.targetId,
+            threadTs: delivery.threadTs,
+            messageRef,
+            text,
+          });
         };
       }
 
@@ -266,7 +280,13 @@ export class TaskScheduler {
           }
           targetId = dmChannelId;
         }
-        await slack.postMessage(targetId, text);
+        const messageRef = await slack.postMessage(targetId, text);
+        await this.deliveryCapture.captureSlack({
+          deliveryTarget: targetId,
+          threadTs: null,
+          messageRef,
+          text,
+        });
       };
     }
 
@@ -276,7 +296,15 @@ export class TaskScheduler {
     }
 
     return async (text) => {
-      await whatsapp.sendText(delivery.targetId, text);
+      const sent = await whatsapp.sendText(delivery.targetId, text);
+      const messageRef = sent?.key?.id;
+      if (!messageRef) return;
+      await this.deliveryCapture.captureWhatsApp({
+        deliveryTarget: delivery.targetId,
+        messageRef,
+        providerTimestamp: providerTimestampFromWhatsApp(sent),
+        text,
+      });
     };
   }
 

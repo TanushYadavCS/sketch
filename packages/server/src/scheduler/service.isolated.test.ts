@@ -81,7 +81,7 @@ function buildMockSlack() {
 
 function buildMockWhatsApp(connected = true) {
   return {
-    sendText: vi.fn().mockResolvedValue(undefined),
+    sendText: vi.fn().mockResolvedValue({ key: { id: "wa-message-1" }, messageTimestamp: 1717480800 }),
     get isConnected() {
       return connected;
     },
@@ -607,6 +607,27 @@ describe("executeTask() delivery routing", () => {
       "Hello from task",
     );
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.openDmChannel).not.toHaveBeenCalled();
+
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+      .select([
+        "conversations.platform",
+        "conversations.kind",
+        "conversations.provider_conversation_id",
+        "conversation_messages.provider_message_id",
+        "conversation_messages.is_bot",
+        "conversation_messages.text",
+      ])
+      .executeTakeFirstOrThrow();
+    expect(captured).toMatchObject({
+      platform: "slack",
+      kind: "dm",
+      provider_conversation_id: "D_DM_CHANNEL",
+      provider_message_id: "ts-123",
+      is_bot: 1,
+      text: "Hello from task",
+    });
   });
 
   it("Slack DM user id: sendMessage opens the DM channel before posting", async () => {
@@ -678,6 +699,29 @@ describe("executeTask() delivery routing", () => {
       "Channel update",
     );
     expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
+
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+      .select([
+        "conversations.platform",
+        "conversations.kind",
+        "conversations.provider_conversation_id",
+        "conversation_messages.provider_message_id",
+        "conversation_messages.sender_jid",
+        "conversation_messages.is_bot",
+        "conversation_messages.text",
+      ])
+      .executeTakeFirstOrThrow();
+    expect(captured).toMatchObject({
+      platform: "slack",
+      kind: "channel",
+      provider_conversation_id: "C_CHANNEL1",
+      provider_message_id: "ts-123",
+      sender_jid: "bot",
+      is_bot: 1,
+      text: "Channel update",
+    });
   });
 
   it("Slack channel + fresh + source threadTs: sendMessage posts top-level by default", async () => {
@@ -729,6 +773,27 @@ describe("executeTask() delivery routing", () => {
       "1234567890.000100",
       "Thread reply",
     );
+
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+      .select([
+        "conversations.kind",
+        "conversation_messages.provider_message_id",
+        "conversation_messages.provider_thread_id",
+        "conversation_messages.provider_parent_message_id",
+        "conversation_messages.is_thread_reply",
+        "conversation_messages.text",
+      ])
+      .executeTakeFirstOrThrow();
+    expect(captured).toMatchObject({
+      kind: "channel",
+      provider_message_id: "ts-reply",
+      provider_thread_id: "1234567890.000100",
+      provider_parent_message_id: "1234567890.000100",
+      is_thread_reply: 1,
+      text: "Thread reply",
+    });
   });
 
   it("Slack channel + fresh + threadTs + output target: sendMessage posts a top-level message", async () => {
@@ -777,6 +842,72 @@ describe("executeTask() delivery routing", () => {
       "5511999999999@s.whatsapp.net",
       "WhatsApp message",
     );
+
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+      .select([
+        "conversations.platform",
+        "conversations.kind",
+        "conversations.provider_conversation_id",
+        "conversation_messages.provider_message_id",
+        "conversation_messages.sender_jid",
+        "conversation_messages.is_bot",
+        "conversation_messages.text",
+      ])
+      .executeTakeFirstOrThrow();
+    expect(captured).toMatchObject({
+      platform: "whatsapp",
+      kind: "dm",
+      provider_conversation_id: "5511999999999@s.whatsapp.net",
+      provider_message_id: "wa-message-1",
+      sender_jid: "bot",
+      is_bot: 1,
+      text: "WhatsApp message",
+    });
+  });
+
+  it("WhatsApp group: sendMessage captures the delivered bot message", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "whatsapp",
+      context_type: "group",
+      delivery_target: "987654321@g.us",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
+
+    await lastExecuteAutomationParams?.sendMessage?.("Group workflow result");
+
+    expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
+      "987654321@g.us",
+      "Group workflow result",
+    );
+
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+      .select([
+        "conversations.platform",
+        "conversations.kind",
+        "conversations.provider_conversation_id",
+        "conversation_messages.provider_message_id",
+        "conversation_messages.is_bot",
+        "conversation_messages.text",
+      ])
+      .executeTakeFirstOrThrow();
+    expect(captured).toMatchObject({
+      platform: "whatsapp",
+      kind: "group",
+      provider_conversation_id: "987654321@g.us",
+      provider_message_id: "wa-message-1",
+      is_bot: 1,
+      text: "Group workflow result",
+    });
   });
 });
 
