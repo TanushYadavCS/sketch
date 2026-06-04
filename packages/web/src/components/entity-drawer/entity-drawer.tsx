@@ -288,7 +288,8 @@ function IdentityChips({ entity }: { entity: EntityDetail }) {
  */
 function SummaryBlock({ entity, accent }: { entity: EntityDetail; accent: string }) {
   const { identity, activity } = entity.profile.summary;
-  const hasContent = identity.length > 0 || activity.length > 0;
+  const crmBrief = entity.profile.crmActivityBrief;
+  const hasContent = identity.length > 0 || activity.length > 0 || Boolean(crmBrief);
   return (
     <section aria-label="Summary" className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
       <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">Summary</div>
@@ -296,12 +297,30 @@ function SummaryBlock({ entity, accent }: { entity: EntityDetail; accent: string
         <div className="space-y-2 text-sm leading-snug">
           {identity ? <p>{identity}</p> : null}
           {activity ? <p className="text-muted-foreground">{activity}</p> : null}
+          {crmBrief ? (
+            <div className="border-t pt-2">
+              <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+                CRM Activity
+              </div>
+              <p>{crmBrief.summary}</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {crmBrief.activityCount} {crmBrief.activityCount === 1 ? "activity" : "activities"} · updated{" "}
+                {formatShortDate(crmBrief.updatedAt)}
+              </p>
+            </div>
+          ) : null}
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">No summary yet.</p>
       )}
     </section>
   );
+}
+
+function formatShortDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 interface DrawerTabsProps {

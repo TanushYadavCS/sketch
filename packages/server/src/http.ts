@@ -354,7 +354,13 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   if (deps?.logger) {
     app.route(
       "/api/oauth",
-      oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL, config),
+      oauthRoutes(settings, identities, connectors, users, db, deps.logger, {
+        baseUrl: config.BASE_URL,
+        appConfig: config,
+        experimentalFlag: config.EXPERIMENTAL_FLAG,
+        zohoClientId: config.ZOHO_CLIENT_ID,
+        zohoClientSecret: config.ZOHO_CLIENT_SECRET,
+      }),
     );
   }
 

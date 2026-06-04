@@ -2,6 +2,12 @@ import { readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
+function readCrmAccountDomains(metadata: Record<string, unknown> | undefined): string[] {
+  const value = metadata?.crmAccountDomains;
+  if (!Array.isArray(value)) return [];
+  return value.filter((domain): domain is string => typeof domain === "string" && domain.length > 0);
+}
+
 export async function materializeStructuralSeed(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
@@ -34,6 +40,38 @@ export async function materializeStructuralSeed(
     sourceRefId: fact.indexed_file_id ?? undefined,
     metadata,
   })) as unknown as EntityRow;
+  if (subjectSource === "zoho_crm" && sourceType === "company") {
+    const domains = readCrmAccountDomains(metadataFromRaw);
+    for (const [index, domain] of domains.entries()) {
+      const result = await deps.domainsRepo.upsertAuthoritativeCorporateDomain({
+        entityId: entity.id,
+        domain,
+        source: "zoho_crm",
+        confidence: 1,
+        isPrimary: index === 0,
+      });
+      if (result === "inserted" || result === "updated" || result === "unchanged") {
+        const bucket = deps.index.companyIdsByDomain.get(domain);
+        if (bucket) {
+          if (!bucket.includes(entity.id)) bucket.push(entity.id);
+        } else {
+          deps.index.companyIdsByDomain.set(domain, [entity.id]);
+        }
+      }
+      if (result === "skipped_manual_conflict" || result === "skipped_auto_conflict") {
+        deps.logger?.warn(
+          {
+            entityId: entity.id,
+            entityName: entity.name,
+            domain,
+            factId: fact.id,
+            result,
+          },
+          "Skipped conflicting Zoho CRM Account domain claim",
+        );
+      }
+    }
+  }
   deps.index.bySourceRef.set(`${subjectSource}:${subjectSourceId}`, entity);
   return { kind: "structural", entity };
 }

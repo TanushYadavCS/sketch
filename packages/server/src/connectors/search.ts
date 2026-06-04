@@ -99,6 +99,13 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
   const emailList = opts?.userEmails ?? [];
   const userFilter = emailList.length > 0 ? sql`AND ${fileAccessFilterSql(emailList)}` : sql``;
 
+  // Hide bodyless CRM activities ("empty reminders") from search — they're rolled
+  // up under their parent object, never surfaced as standalone results.
+  const excludeEmptyActivities = sql`AND NOT (
+    indexed_files.content_category = 'structured'
+    AND indexed_files.file_type IN ('crm_task', 'crm_call', 'crm_event', 'crm_meeting', 'crm_note')
+  )`;
+
   if (isPg(db)) {
     const tsQuery = sanitizeTsQuery(query);
     if (!tsQuery) return [];
@@ -118,6 +125,7 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
       FROM indexed_files
       WHERE indexed_files.search_vector @@ plainto_tsquery('english', ${query})
       AND indexed_files.is_archived = 0
+      ${excludeEmptyActivities}
       ${userFilter}
       ${opts?.source ? sql`AND indexed_files.source = ${opts.source}` : sql``}
       ${opts?.category ? sql`AND indexed_files.content_category = ${opts.category}` : sql``}
@@ -146,6 +154,7 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
 		INNER JOIN indexed_files_fts ON indexed_files.rowid = indexed_files_fts.rowid
 		WHERE indexed_files_fts MATCH ${ftsQuery}
 		AND indexed_files.is_archived = 0
+		${excludeEmptyActivities}
 		${userFilter}
 		${opts?.source ? sql`AND indexed_files.source = ${opts.source}` : sql``}
 		${opts?.category ? sql`AND indexed_files.content_category = ${opts.category}` : sql``}

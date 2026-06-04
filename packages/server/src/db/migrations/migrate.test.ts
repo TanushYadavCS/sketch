@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(80);
+      expect(logSpy).toHaveBeenCalledTimes(81);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(80);
+    expect(rows.rows).toHaveLength(81);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -134,6 +134,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[77]).toBe("082-email-thread-summaries");
     expect(names[78]).toBe("083-local-claude-sessions");
     expect(names[79]).toBe("084-entity-contact-points");
+    expect(names[80]).toBe("085-crm-activity-rollups");
   });
 
   it("creates the users table", async () => {
@@ -208,6 +209,28 @@ describe("runMigrations — full sequence", () => {
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
+
+    const columns = await sql<{ name: string }>`
+      PRAGMA table_info(indexed_files)
+    `.execute(db);
+    expect(columns.rows.map((row) => row.name)).toContain("rollup_group_id");
+  });
+
+  it("creates CRM object summaries table", async () => {
+    await runMigrations(db);
+
+    const result = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='crm_object_summaries'
+    `.execute(db);
+    expect(result.rows).toHaveLength(1);
+
+    const indexes = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type='index' AND tbl_name IN ('indexed_files', 'crm_object_summaries')
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining(["idx_indexed_files_rollup_group", "idx_crm_object_summaries_updated"]),
+    );
   });
 
   it("creates fact-aware relationship evidence columns and unique index", async () => {
@@ -293,7 +316,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(80);
+    expect(rows.rows).toHaveLength(81);
   });
 
   it("creates entity_contact_points table", async () => {
@@ -335,6 +358,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(80);
+    expect(rows.rows).toHaveLength(81);
   });
 });

@@ -7,13 +7,16 @@ import type { ConnectorType, SyncedItem } from "./types";
 
 type ConnectorRepository = ReturnType<typeof createConnectorRepository>;
 
-export type ExistingContentHashMap = Map<string, { id: string; contentHash: string | null }>;
+export type ExistingContentHashMap = Map<
+  string,
+  { id: string; contentHash: string | null; contentCategory: string; rollupGroupId: string | null }
+>;
 
 export type ProcessSyncedItemResult =
   | { kind: "skipped_empty" }
-  | { kind: "unchanged"; indexedFileId: string }
-  | { kind: "created"; indexedFileId: string }
-  | { kind: "updated"; indexedFileId: string };
+  | { kind: "unchanged"; indexedFileId: string; rollupGroupIds: string[] }
+  | { kind: "created"; indexedFileId: string; rollupGroupIds: string[] }
+  | { kind: "updated"; indexedFileId: string; rollupGroupIds: string[] };
 
 export interface ProcessSyncedItemParams {
   db: Kysely<DB>;
@@ -33,7 +36,15 @@ export async function loadExistingContentHashes(
   const existingHashes: ExistingContentHashMap = new Map();
   const existingFiles = await db
     .selectFrom("indexed_files")
-    .select(["id", "connector_config_id", "provider_file_id", "provider_message_id", "content_hash"])
+    .select([
+      "id",
+      "connector_config_id",
+      "provider_file_id",
+      "provider_message_id",
+      "content_hash",
+      "content_category",
+      "rollup_group_id",
+    ])
     .where("source", "=", connectorType)
     .where("is_archived", "=", 0)
     .execute();
@@ -45,7 +56,12 @@ export async function loadExistingContentHashes(
       providerMessageId: f.provider_message_id,
     });
     if (identity.kind === "provider_file_id" || identity.connectorConfigId === connectorConfigId) {
-      existingHashes.set(syncIdentityKey(identity), { id: f.id, contentHash: f.content_hash });
+      existingHashes.set(syncIdentityKey(identity), {
+        id: f.id,
+        contentHash: f.content_hash,
+        contentCategory: f.content_category,
+        rollupGroupId: f.rollup_group_id,
+      });
     }
   }
   return existingHashes;
@@ -71,7 +87,8 @@ export async function processSyncedItem({
   }
 
   const existing = existingHashes.get(syncIdentityKey(getSyncIdentityForItem(item, connectorConfigId, connectorType)));
-  if (existing && existing.contentHash === item.contentHash) {
+  const rollupGroupIds = uniqueRollupGroupIds([existing?.rollupGroupId, item.rollupGroupId ?? null]);
+  if (existing && existing.contentHash === item.contentHash && existing.contentCategory === item.contentCategory) {
     await db
       .updateTable("indexed_files")
       .set({
@@ -87,13 +104,14 @@ export async function processSyncedItem({
         source_created_at: item.sourceCreatedAt ?? undefined,
         source_updated_at: item.sourceUpdatedAt ?? undefined,
         mime_type: item.mimeType ?? undefined,
+        rollup_group_id: item.rollupGroupId ?? null,
       })
       .where("id", "=", existing.id)
       .execute();
 
     await repo.linkConnectorFile(connectorConfigId, existing.id);
     await syncItemAccess(repo, connectorConfigId, existing.id, item);
-    return { kind: "unchanged", indexedFileId: existing.id };
+    return { kind: "unchanged", indexedFileId: existing.id, rollupGroupIds };
   }
 
   const itemResult = await db.transaction().execute(async (trx) => {
@@ -114,9 +132,10 @@ export async function processSyncedItem({
       sourceCreatedAt: item.sourceCreatedAt,
       sourceUpdatedAt: item.sourceUpdatedAt,
       mimeType: item.mimeType,
+      rollupGroupId: item.rollupGroupId ?? null,
     });
 
-    if (upsertResult.contentChanged) {
+    if (upsertResult.contentChanged || upsertResult.categoryChanged) {
       await clearEnrichmentData(trx, upsertResult.id);
     }
 
@@ -125,7 +144,11 @@ export async function processSyncedItem({
     return upsertResult;
   });
 
-  return { kind: itemResult.created ? "created" : "updated", indexedFileId: itemResult.id };
+  return { kind: itemResult.created ? "created" : "updated", indexedFileId: itemResult.id, rollupGroupIds };
+}
+
+function uniqueRollupGroupIds(ids: Array<string | null | undefined>): string[] {
+  return [...new Set(ids.filter((id): id is string => Boolean(id)))];
 }
 
 async function syncItemAccess(

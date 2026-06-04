@@ -7,7 +7,7 @@ import { materializeContactPointFact } from "./materialize-contact-points";
 import { buildMaterializeDeps } from "./materialize-deps";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializePersonFact, materializePersonSeed } from "./materialize-person";
-import { materializeLlmRelationFact } from "./materialize-relations";
+import { materializeCrmRelationFact, materializeLlmRelationFact } from "./materialize-relations";
 import { materializeParentEntity, materializeStructuralSeed } from "./materialize-structural";
 import type {
   IndexedFileFactRow,
@@ -28,6 +28,7 @@ const FACT_REPLAY_ORDER = [
   "author",
   "contact_point",
   "parent_entity",
+  "crm_relation",
   "llm_extracted",
   "llm_relation",
 ] as const;
@@ -47,6 +48,9 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   }
   if (fact.fact_type === "llm_relation") {
     return materializeLlmRelationFact(deps, fact);
+  }
+  if (fact.fact_type === "crm_relation") {
+    return materializeCrmRelationFact(deps, fact);
   }
   if (
     fact.fact_type === "attendee" ||
@@ -242,6 +246,7 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
   if (result.kind === "skipped") {
     return (
       result.reason !== "missing_parent_seed" &&
+      result.reason !== "missing_crm_relation_endpoint" &&
       result.reason !== "unknown_fact_type" &&
       result.reason !== "missing_or_invalid_mention_type" &&
       result.reason !== "missing_contact_point_subject_entity"

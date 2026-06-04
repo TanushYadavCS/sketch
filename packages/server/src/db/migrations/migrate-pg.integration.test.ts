@@ -37,7 +37,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(80);
+    expect(rows.rows).toHaveLength(81);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -111,6 +111,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[77]).toBe("082-email-thread-summaries");
     expect(names[78]).toBe("083-local-claude-sessions");
     expect(names[79]).toBe("084-entity-contact-points");
+    expect(names[80]).toBe("085-crm-activity-rollups");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -126,7 +127,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       const rows = await sql<{ name: string }>`
         SELECT name FROM kysely_migration ORDER BY name ASC
       `.execute(freshDb);
-      expect(rows.rows).toHaveLength(80);
+      expect(rows.rows).toHaveLength(81);
     } finally {
       await freshDb.destroy();
     }
@@ -164,6 +165,33 @@ describe("runMigrations on Postgres — full sequence", () => {
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
+
+    const columns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'indexed_files'
+        AND column_name = 'rollup_group_id'
+    `.execute(db);
+    expect(columns.rows).toHaveLength(1);
+  });
+
+  it("creates CRM object summaries table", async () => {
+    const table = await sql<{ table_name: string }>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'crm_object_summaries'
+    `.execute(db);
+    expect(table.rows).toHaveLength(1);
+
+    const indexes = await sql<{ indexname: string }>`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename IN ('indexed_files', 'crm_object_summaries')
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(
+      expect.arrayContaining(["idx_indexed_files_rollup_group", "idx_crm_object_summaries_updated"]),
+    );
   });
 
   it("creates fact-aware relationship evidence columns and unique index", async () => {

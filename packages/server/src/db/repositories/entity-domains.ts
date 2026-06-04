@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { isPg } from "../dialect";
@@ -13,12 +14,30 @@ export type EntityRelationshipType =
   | "contributes_to"
   | "builds"
   | "part_of"
-  | "partner_of";
+  | "partner_of"
+  | "deal_for"
+  | "primary_contact";
 
 export interface UpsertDomainInput {
   entityId: string | null;
   domain: string;
   kind: DomainKind;
+  source: string;
+  confidence?: number;
+  isPrimary?: boolean;
+}
+
+export type AuthoritativeDomainUpsertResult =
+  | "inserted"
+  | "updated"
+  | "unchanged"
+  | "skipped_personal_or_shared"
+  | "skipped_manual_conflict"
+  | "skipped_auto_conflict";
+
+export interface UpsertAuthoritativeCorporateDomainInput {
+  entityId: string;
+  domain: string;
   source: string;
   confidence?: number;
   isPrimary?: boolean;
@@ -73,6 +92,30 @@ export function normalizeEmailDomain(email: string | null | undefined): string |
   if (at < 0 || at === trimmed.length - 1) return null;
   const host = trimmed.slice(at + 1).toLowerCase();
   if (host.length === 0 || !host.includes(".")) return null;
+  return host;
+}
+
+export function normalizeWebsiteDomain(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return null;
+  const withoutAngleBrackets = trimmed.replace(/^<+|>+$/g, "");
+  const withoutPathOnlyPrefix = withoutAngleBrackets.startsWith("//")
+    ? `https:${withoutAngleBrackets}`
+    : withoutAngleBrackets;
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(withoutPathOnlyPrefix)
+    ? withoutPathOnlyPrefix
+    : `https://${withoutPathOnlyPrefix}`;
+  let host: string;
+  try {
+    host = new URL(candidate).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  host = host.replace(/\.$/, "");
+  while (host.startsWith("www.")) host = host.slice(4);
+  if (!host.includes(".") || isIP(host) !== 0) return null;
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
   return host;
 }
 
@@ -133,6 +176,7 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
 
   return {
     normalizeEmailDomain,
+    normalizeWebsiteDomain,
 
     async isPersonalOrShared(domain: string): Promise<boolean> {
       const row = await db.selectFrom("entity_domains").select("kind").where("domain", "=", domain).executeTakeFirst();
@@ -197,6 +241,60 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
           source: input.source,
         })
         .execute();
+    },
+
+    async upsertAuthoritativeCorporateDomain(
+      input: UpsertAuthoritativeCorporateDomainInput,
+    ): Promise<AuthoritativeDomainUpsertResult> {
+      const domain = input.domain.toLowerCase();
+      const existing = await db
+        .selectFrom("entity_domains")
+        .selectAll()
+        .where("domain", "=", domain)
+        .executeTakeFirst();
+      if (existing) {
+        if (existing.kind === "personal" || existing.kind === "shared") return "skipped_personal_or_shared";
+        if (existing.entity_id && existing.entity_id !== input.entityId) {
+          return existing.source === "manual" ? "skipped_manual_conflict" : "skipped_auto_conflict";
+        }
+        if (existing.source === "manual") {
+          if (!existing.entity_id) {
+            await db
+              .updateTable("entity_domains")
+              .set({ entity_id: input.entityId, is_primary: input.isPrimary ? 1 : existing.is_primary })
+              .where("id", "=", existing.id)
+              .execute();
+            return "updated";
+          }
+          return "unchanged";
+        }
+        await db
+          .updateTable("entity_domains")
+          .set({
+            entity_id: input.entityId,
+            kind: "corporate",
+            source: input.source,
+            confidence: Math.max(Number(existing.confidence), input.confidence ?? 1.0),
+            is_primary: input.isPrimary ? 1 : existing.is_primary,
+          })
+          .where("id", "=", existing.id)
+          .execute();
+        return "updated";
+      }
+
+      await db
+        .insertInto("entity_domains")
+        .values({
+          id: randomUUID(),
+          entity_id: input.entityId,
+          domain,
+          kind: "corporate",
+          is_primary: input.isPrimary ? 1 : 0,
+          confidence: input.confidence ?? 1.0,
+          source: input.source,
+        })
+        .execute();
+      return "inserted";
     },
 
     upsertRelationship,

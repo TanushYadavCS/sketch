@@ -8,7 +8,7 @@
  * Today: 4 connectors. Tomorrow: 50+. This registry scales to both.
  */
 
-export type IntegrationType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies";
+export type IntegrationType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies" | "zoho_crm";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -92,6 +92,10 @@ export interface IntegrationDefinition {
   perUserAuth: boolean;
   /** true = admin must populate provider Client ID/Secret in settings before any user can authorize. */
   requiresOAuthClientSetup: boolean;
+  /** true = only shown when the experimental feature flag is enabled. */
+  experimentalOnly?: boolean;
+  /** OAuth-redirect connectors that pick a data center / region before authorizing. */
+  regionOptions?: { value: string; label: string }[];
 }
 
 /**
@@ -284,6 +288,37 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: false,
+  },
+  {
+    type: "zoho_crm",
+    name: "Zoho CRM",
+    description: "Accounts, contacts, deals, and activities",
+    category: "CRM",
+    color: "#E42527",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [],
+    scopeLabel: "modules",
+    scopeType: "none",
+    itemNoun: "records",
+    credentialUrl: "https://www.zoho.com/crm/developer/docs/api/v6/",
+    connectSteps: [
+      "Select your Zoho data center (region)",
+      "Sign in to Zoho and authorize read access to your CRM",
+      "Accounts, contacts, deals, and activities sync automatically",
+    ],
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
+    experimentalOnly: true,
+    regionOptions: [
+      { value: "com", label: "United States (.com)" },
+      { value: "eu", label: "Europe (.eu)" },
+      { value: "in", label: "India (.in)" },
+      { value: "com.au", label: "Australia (.com.au)" },
+      { value: "jp", label: "Japan (.jp)" },
+      { value: "ca", label: "Canada (.ca)" },
+      { value: "sa", label: "Saudi Arabia (.sa)" },
+    ],
   },
 ];
 
