@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildSketchContext, buildSystemContext, formatTimeAgo } from "./prompt";
+import {
+  buildSketchContext,
+  buildSystemContext,
+  formatTimeAgo,
+  getImageAttachmentPathsFromSketchContext,
+} from "./prompt";
 
 describe("buildSystemContext", () => {
   describe("agent instructions overlay", () => {
@@ -757,6 +762,44 @@ describe("buildSketchContext", () => {
       expect(result).toContain("Bob [messageId=11]: first missed message");
       expect(result).toContain("Carol [messageId=12]: See attached files.");
       expect(result).toContain('path="/ws/attachments/note.txt"');
+    });
+
+    it("adds vision hints and collects image paths from backlog attachments", () => {
+      const sketchContext = {
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "what did I miss?",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        visionAnalysisEnabled: true,
+        conversationBacklog: {
+          afterMessageId: 10,
+          beforeMessageId: 12,
+          hasMore: false,
+          messages: [
+            {
+              id: 11,
+              senderName: "Carol",
+              text: "",
+              attachments: [
+                {
+                  originalName: "photo.jpg",
+                  mimeType: "image/jpeg",
+                  localPath: "/ws/attachments/photo.jpg",
+                  sizeBytes: 120,
+                },
+              ],
+              providerTimestamp: null,
+              receivedAt: "2026-01-01T00:00:02.000Z",
+            },
+          ],
+        },
+      };
+
+      const result = buildSketchContext(sketchContext);
+
+      expect(result).toContain('hint="Use VisualAnalysis with this path to understand the image."');
+      expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/photo.jpg"]);
     });
 
     it("tells the agent how to continue when backlog is truncated", () => {

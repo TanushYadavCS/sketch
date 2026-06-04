@@ -30,6 +30,10 @@ export interface AudioTranscription {
   transcriptPath?: string;
 }
 
+export interface AttachmentPromptOptions {
+  visionAnalysisEnabled?: boolean;
+}
+
 function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -115,10 +119,16 @@ export async function downloadSlackFile(
  * Formats an array of attachments as an XML block to append to the agent prompt.
  * Returns empty string if no attachments.
  */
-export function formatAttachmentsForPrompt(attachments: Attachment[]): string {
+export function formatAttachmentsForPrompt(attachments: Attachment[], options: AttachmentPromptOptions = {}): string {
   if (!attachments.length) return "";
   const files = attachments
-    .map((a) => `<file name="${a.originalName}" path="${a.localPath}" mime="${a.mimeType}" size="${a.sizeBytes}" />`)
+    .map((a) => {
+      let visionHint = "";
+      if (options.visionAnalysisEnabled && isImageAttachment(a)) {
+        visionHint = ' hint="Use VisualAnalysis with this path to understand the image."';
+      }
+      return `<file name="${a.originalName}" path="${a.localPath}" mime="${a.mimeType}" size="${a.sizeBytes}"${visionHint} />`;
+    })
     .join("\n");
   return `\n\n<attachments>\n${files}\n</attachments>${formatAudioTranscriptionsForPrompt(attachments)}`;
 }

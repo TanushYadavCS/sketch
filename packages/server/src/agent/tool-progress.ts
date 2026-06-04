@@ -29,6 +29,7 @@ const TOOL_EMOJI: Record<string, string> = {
   Skill: "📚",
   SendFileToChat: "📎",
   TranscribeAudio: "🎙️",
+  VisualAnalysis: "🖼️",
   ManageScheduledTasks: "⏰",
   SearchDeliveryTargets: "📍",
   SearchEntities: "🔍",
@@ -52,6 +53,7 @@ const PRIMARY_ARG: Record<string, string> = {
   Skill: "skill",
   SendFileToChat: "file_path",
   TranscribeAudio: "file_path",
+  VisualAnalysis: "file_path",
   ManageScheduledTasks: "action",
   SearchDeliveryTargets: "query",
   SearchEntities: "queries",
@@ -75,6 +77,7 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
   Skill: { prefix: "Loading skill", keys: ["skill", "name"], fallback: "Loading a skill" },
   SendFileToChat: { prefix: "Sending file", keys: ["file_path"], fallback: "Sending a file" },
   TranscribeAudio: { prefix: "Transcribing audio", keys: ["file_path"], fallback: "Transcribing audio" },
+  VisualAnalysis: { prefix: "Analyzing image", keys: ["file_path"], fallback: "Analyzing image" },
   ManageScheduledTasks: {
     prefix: "Managing scheduled tasks:",
     keys: ["action"],

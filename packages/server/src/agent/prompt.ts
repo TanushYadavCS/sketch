@@ -1,5 +1,5 @@
-import type { Attachment } from "../files";
-import { formatAttachmentsForPrompt } from "../files";
+import type { Attachment, AttachmentPromptOptions } from "../files";
+import { formatAttachmentsForPrompt, isImageAttachment } from "../files";
 
 /**
  * Returns a human-readable relative time string for a given ISO timestamp.
@@ -76,14 +76,18 @@ export interface SketchContextParams {
     groupDescription?: string;
   };
   conversationBacklog?: ConversationBacklogContext;
+  visionAnalysisEnabled?: boolean;
 }
 
-function renderBufferedMessageLines(messages: BufferedMessage[]): string[] {
+function renderBufferedMessageLines(
+  messages: BufferedMessage[],
+  attachmentOptions: AttachmentPromptOptions = {},
+): string[] {
   const lines: string[] = [];
   for (const msg of messages) {
     lines.push(`${msg.userName}: ${msg.text}`);
     if (msg.attachments?.length) {
-      lines.push(formatAttachmentsForPrompt(msg.attachments));
+      lines.push(formatAttachmentsForPrompt(msg.attachments, attachmentOptions));
     }
   }
   return lines;
@@ -111,12 +115,35 @@ function buildConversationBacklogNotice(params: ConversationBacklogContext): str
   return lines.join("\n");
 }
 
-function renderConversationBacklogLines(backlog: ConversationBacklogContext | undefined): string[] {
+function renderConversationBacklogLines(
+  backlog: ConversationBacklogContext | undefined,
+  attachmentOptions: AttachmentPromptOptions = {},
+): string[] {
   if (!backlog || (backlog.messages.length === 0 && !backlog.hasMore)) return [];
 
   const lines = [buildConversationBacklogNotice(backlog)];
-  const messageLines = renderBufferedMessageLines(formatConversationBacklogMessages(backlog.messages));
+  const messageLines = renderBufferedMessageLines(
+    formatConversationBacklogMessages(backlog.messages),
+    attachmentOptions,
+  );
   return messageLines.length > 0 ? [...lines, "", ...messageLines] : lines;
+}
+
+export function getImageAttachmentPathsFromSketchContext(
+  params: Pick<SketchContextParams, "messages" | "conversationBacklog">,
+): string[] {
+  const paths: string[] = [];
+  for (const message of params.messages) {
+    for (const attachment of message.attachments ?? []) {
+      if (isImageAttachment(attachment)) paths.push(attachment.localPath);
+    }
+  }
+  for (const message of params.conversationBacklog?.messages ?? []) {
+    for (const attachment of message.attachments) {
+      if (isImageAttachment(attachment)) paths.push(attachment.localPath);
+    }
+  }
+  return paths;
 }
 
 function renderInboxMessage(message: InboxMessageContext): string[] {
@@ -514,8 +541,9 @@ export function buildSketchContext(params: SketchContextParams): string {
     sectionParts.push(`<user>\n${lines.join("\n")}\n</user>`);
   }
 
-  const backlogLines = renderConversationBacklogLines(params.conversationBacklog);
-  const messageLines = renderBufferedMessageLines(messages);
+  const attachmentOptions = { visionAnalysisEnabled: params.visionAnalysisEnabled };
+  const backlogLines = renderConversationBacklogLines(params.conversationBacklog, attachmentOptions);
+  const messageLines = renderBufferedMessageLines(messages, attachmentOptions);
   const separator = backlogLines.length > 0 && messageLines.length > 0 ? [""] : [];
   const threadLines = [...backlogLines, ...separator, ...messageLines];
 

@@ -183,6 +183,19 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(['🔎 Searching chat history for "launch budget"']);
   });
 
+  it("renders visual analysis with the image path", () => {
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__VisualAnalysis", input: { file_path: "attachments/photo.jpg" } },
+      ]).lines,
+    ).toEqual(['🖼️ Analyzing image "attachments/photo.jpg"']);
+    expect(
+      renderEvents({ toolProgress: "technical", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__VisualAnalysis", input: { file_path: "attachments/photo.jpg" } },
+      ]).lines,
+    ).toEqual(['🖼️ VisualAnalysis: "attachments/photo.jpg"']);
+  });
+
   it("renders local Mac commands without echoing the command", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "mcp__sketch__local_run_command", input: { command: "cat ~/.ssh/id_rsa" } },

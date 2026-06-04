@@ -343,10 +343,14 @@ describe("runAgent", () => {
 
   it("uses text attachment references for image prompts when the vision tool is configured", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const { createCanUseTool } = await import("./permissions");
     const tmpDir = await mkdtemp(join(tmpdir(), "sketch-runner-vision-"));
     const imagePath = join(tmpDir, "diagram.png");
+    const backlogImagePath = join(tmpDir, "backlog.png");
     await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(backlogImagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     let capturedPrompt: unknown;
+    vi.mocked(createCanUseTool).mockClear();
     vi.mocked(query).mockImplementation(((args: unknown) => {
       const callArgs = args as { prompt: unknown };
       capturedPrompt = callArgs.prompt;
@@ -374,15 +378,80 @@ describe("runAgent", () => {
             source: "env",
             providerMode: "env",
           },
+          blockedReadPaths: [backlogImagePath],
         }),
       );
 
       expect(typeof capturedPrompt).toBe("string");
       expect(capturedPrompt).toContain("<attachments>");
       expect(capturedPrompt).toContain(`path="${imagePath}"`);
+      expect(capturedPrompt).toContain('hint="Use VisualAnalysis with this path to understand the image."');
+      expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]).toMatchObject({
+        blockedReadPaths: [imagePath, backlogImagePath],
+      });
       expect(result.promptMode).toBe("text");
       expect(result.imageCount).toBe(1);
       expect(result.nonImageCount).toBe(0);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block image reads when VisualAnalysis is excluded by an agent allowlist", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const { createCanUseTool } = await import("./permissions");
+    const { createSketchMcpServer } = await import("./sketch-tools");
+    const tmpDir = await mkdtemp(join(tmpdir(), "sketch-runner-vision-allowlist-"));
+    const imagePath = join(tmpDir, "diagram.png");
+    const backlogImagePath = join(tmpDir, "backlog.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(backlogImagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    let capturedPrompt: unknown;
+    vi.mocked(createCanUseTool).mockClear();
+    vi.mocked(createSketchMcpServer).mockClear();
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      const callArgs = args as { prompt: unknown };
+      capturedPrompt = callArgs.prompt;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-vision-read" };
+        yield { type: "result", session_id: "sess-vision-read", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    try {
+      const result = await runAgent(
+        makeBaseParams({
+          workspaceDir: tmpDir,
+          attachments: [
+            {
+              originalName: "diagram.png",
+              mimeType: "image/png",
+              localPath: imagePath,
+              sizeBytes: 4,
+            },
+          ],
+          visionConfig: {
+            apiKey: "sk-or-vision",
+            model: "xiaomi/mimo-v2.5",
+            source: "env",
+            providerMode: "env",
+          },
+          agentAllowedTools: ["Read"],
+          blockedReadPaths: [backlogImagePath],
+        }),
+      );
+
+      expect(typeof capturedPrompt).toBe("string");
+      expect(capturedPrompt).toContain("<attachments>");
+      expect(capturedPrompt).not.toContain("Use VisualAnalysis");
+      expect(vi.mocked(createSketchMcpServer).mock.calls.at(-1)?.[0]).toMatchObject({
+        visionAnalysisEnabled: false,
+      });
+      expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]).toMatchObject({
+        agentAllowedTools: ["Read"],
+      });
+      expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]?.blockedReadPaths).toBeUndefined();
+      expect(result.promptMode).toBe("text");
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }

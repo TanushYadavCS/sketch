@@ -7,9 +7,9 @@ import { parseAllowedTools } from "@sketch/shared";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
-import type { InboxMessageContext } from "../agent/prompt";
-import { buildSketchContext } from "../agent/prompt";
-import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
+import type { InboxMessageContext, SketchContextParams } from "../agent/prompt";
+import { buildSketchContext, getImageAttachmentPathsFromSketchContext } from "../agent/prompt";
+import { type AgentResult, type McpServerConfig, type RunAgentParams, canUseVisualAnalysisTool } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
@@ -45,6 +45,7 @@ import {
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
+import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import type { WhatsAppBot, WhatsAppMessage } from "./bot";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { createWhatsAppProgressTransport } from "./progress-transport";
@@ -442,7 +443,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           const waIntegrationMcpServers = await buildMcpServers(user.email);
           const pendingInbox = await loadPendingInboxMessages(user.id);
 
-          const userMessage = buildSketchContext({
+          const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
+          const agentInstructions = fallbackAgent?.description ?? null;
+          const agentAllowedTools = fallbackAgent ? parseAllowedTools(fallbackAgent.allowed_tools) : null;
+          const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, agentAllowedTools);
+          const sketchContext: SketchContextParams = {
             messages: [],
             currentUserName: user.name,
             currentMessage: message.text || "See attached files.",
@@ -454,7 +459,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             isSharedContext: false,
             inboxMessages: pendingInbox.messages,
             conversationBacklog,
-          });
+            visionAnalysisEnabled: visualAnalysisAllowed,
+          };
+          const userMessage = buildSketchContext(sketchContext);
 
           const waTaskContext = {
             platform: "whatsapp" as const,
@@ -463,9 +470,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             createdBy: user.id,
             creatorTimezone: user.timezone,
           };
-
-          const agentInstructions = fallbackAgent?.description ?? null;
-          const agentAllowedTools = fallbackAgent ? parseAllowedTools(fallbackAgent.allowed_tools) : null;
 
           const result = await runAgent({
             db,
@@ -484,6 +488,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             orgName: settingsRow?.org_name,
             orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
             botName: settingsRow?.bot_name,
+            visionConfig,
+            blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
             attachments: attachments.length > 0 ? attachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
             loadIntegrationProvider,
@@ -713,7 +719,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           logger,
         });
 
-        const userMessage = buildSketchContext({
+        const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
+        const agentInstructions = boundAgent?.description ?? null;
+        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
+        const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, agentAllowedTools);
+        const sketchContext: SketchContextParams = {
           messages: [],
           currentUserName: userName,
           currentMessage: message.text || "See attached files.",
@@ -726,7 +736,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           threadTag: "thread",
           groupContext: { groupName, groupDescription },
           conversationBacklog,
-        });
+          visionAnalysisEnabled: visualAnalysisAllowed,
+        };
+        const userMessage = buildSketchContext(sketchContext);
 
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
         const progressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
@@ -744,9 +756,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
         const integrationMcpServers = await buildMcpServers(user?.email ?? null);
 
-        const agentInstructions = boundAgent?.description ?? null;
-        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
-
         const result = await runAgent({
           db,
           workspaceKey: groupWorkspaceKey,
@@ -762,6 +771,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           orgName: settingsRow?.org_name,
           orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
+          visionConfig,
+          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
           loadIntegrationProvider,

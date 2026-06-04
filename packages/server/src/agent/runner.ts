@@ -171,6 +171,7 @@ export interface RunAgentParams {
   agentEnv?: Record<string, string>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   visionConfig?: VisionConfig | null;
+  blockedReadPaths?: string[] | null;
   /**
    * Free-form instruction set for an agent persona, appended to the system
    * prompt. Set when the run is associated with a /team agent (channel-bound,
@@ -193,6 +194,15 @@ export interface RunAgentParams {
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
+const VISUAL_ANALYSIS_TOOL_NAME = "mcp__sketch__VisualAnalysis";
+
+export function canUseVisualAnalysisTool(
+  visionConfig: VisionConfig | null,
+  agentAllowedTools?: string[] | null,
+): boolean {
+  if (!visionConfig) return false;
+  return agentAllowedTools == null || agentAllowedTools.includes(VISUAL_ANALYSIS_TOOL_NAME);
+}
 
 /**
  * Extracts text content from an SDK assistant message. Returns null if the
@@ -248,6 +258,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     : null;
   const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
   const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
+  const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, params.agentAllowedTools);
 
   const systemAppend = buildSystemContext({
     platform: params.responseSurface ?? params.platform,
@@ -257,7 +268,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,
-    visionAnalysisEnabled: Boolean(visionConfig),
+    visionAnalysisEnabled: visualAnalysisAllowed,
   });
 
   const sdkBuiltInTools = params.agentAllowedTools
@@ -315,7 +326,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       };
     })();
   } else {
-    prompt = userMessage + formatAttachmentsForPrompt(attachments);
+    prompt = userMessage + formatAttachmentsForPrompt(attachments, { visionAnalysisEnabled: visualAnalysisAllowed });
   }
 
   const uploadCollector = new UploadCollector();
@@ -342,13 +353,28 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),
     visionConfig,
-    visionAnalysisEnabled: Boolean(visionConfig),
+    visionAnalysisEnabled: visualAnalysisAllowed,
     logger,
     conversationRepo: params.conversationRepo,
     conversationContext: params.conversationContext,
   });
 
-  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);
+  const blockedReadPaths = new Set<string>();
+  if (useVisionToolForImages && visualAnalysisAllowed) {
+    for (const image of images) {
+      blockedReadPaths.add(image.localPath);
+    }
+  }
+  if (visualAnalysisAllowed) {
+    for (const path of params.blockedReadPaths ?? []) {
+      blockedReadPaths.add(path);
+    }
+  }
+
+  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
+    agentAllowedTools: params.agentAllowedTools,
+    blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
+  });
   const canUseToolTimings: CanUseToolTiming[] = [];
   const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
     canUseToolTimings.push({ toolName, calledAt: Date.now() });

@@ -7,8 +7,14 @@ import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
-import { type BufferedMessage, type InboxMessageContext, buildSketchContext } from "../agent/prompt";
-import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
+import {
+  type BufferedMessage,
+  type InboxMessageContext,
+  type SketchContextParams,
+  buildSketchContext,
+  getImageAttachmentPathsFromSketchContext,
+} from "../agent/prompt";
+import { type AgentResult, type McpServerConfig, type RunAgentParams, canUseVisualAnalysisTool } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
@@ -47,6 +53,7 @@ import {
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
+import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile, type SlackMessageHandler } from "./bot";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
@@ -610,7 +617,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const integrationMcpServers = await buildMcpServers(user.email);
         pendingInbox = await loadPendingInboxMessages(user.id);
 
-        const userMessage = buildSketchContext({
+        const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
+        const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, null);
+        const sketchContext: SketchContextParams = {
           messages: [],
           currentUserName: user.name,
           currentMessage: message.text || "See attached files.",
@@ -621,7 +630,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           isSharedContext: false,
           inboxMessages: pendingInbox.messages,
           conversationBacklog,
-        });
+          visionAnalysisEnabled: visualAnalysisAllowed,
+        };
+        const userMessage = buildSketchContext(sketchContext);
 
         const result = await runAgent({
           db,
@@ -639,6 +650,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           orgName: settingsRow?.org_name,
           orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
+          visionConfig,
+          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
           loadIntegrationProvider,
@@ -913,7 +926,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const threadTag = message.threadTs ? "thread" : "channel_history";
 
         const rawText = message.text || "See attached files.";
-        const userMessage = buildSketchContext({
+        const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
+        const agentInstructions = boundAgent?.description ?? null;
+        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
+        const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, agentAllowedTools);
+        const sketchContext: SketchContextParams = {
           messages: bootstrapMessages,
           currentUserName: user.name,
           currentMessage: rawText,
@@ -925,7 +942,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           threadTag,
           channelContext: { channelName: channel.name },
           conversationBacklog,
-        });
+          visionAnalysisEnabled: visualAnalysisAllowed,
+        };
+        const userMessage = buildSketchContext(sketchContext);
 
         const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, threadTs);
         const shimmer = createShimmer(slackBot, message.channelId, threadTs, resolveProgressDisplaySettings(channel));
@@ -933,9 +952,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const onProgressEvent = shimmer.onProgressEvent;
 
         const integrationMcpServers = await buildMcpServers(user.email);
-
-        const agentInstructions = boundAgent?.description ?? null;
-        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
 
         const result = await runAgent({
           db,
@@ -953,6 +969,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           orgName: settingsRow?.org_name,
           orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
           botName: settingsRow?.bot_name,
+          visionConfig,
+          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
           attachments: attachments.length > 0 ? attachments : undefined,
           integrationMcpServers,
           loadIntegrationProvider,
