@@ -37,6 +37,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       taskContext: deps.taskContext,
       stepContentRepo: deps.stepContentRepo,
       automationRunsRepo: deps.automationRunsRepo,
+      userRepo: deps.userRepo,
       loadIntegrationProvider: deps.loadIntegrationProvider,
       queueManager: deps.queueManager,
       activeQueueKey: deps.activeQueueKey,
