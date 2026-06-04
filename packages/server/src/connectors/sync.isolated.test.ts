@@ -463,7 +463,7 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
       connectorConfigId: "gmail-a",
     });
 
-    expect(second).toEqual({ id: first.id, created: false, contentChanged: true });
+    expect(second).toEqual({ id: first.id, created: false, contentChanged: true, categoryChanged: false });
 
     const rows = await db
       .selectFrom("indexed_files")
@@ -939,6 +939,84 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     expect(result.itemsUpdated).toBe(1);
     expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
     expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-clear-enrichment");
+  });
+
+  it("clears enrichment data when an existing file's content category changes with the same hash", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-category-change",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-category-change",
+        connector_config_id: "connector-category-change",
+        provider_file_id: "provider-category-change",
+        file_name: "activity.md",
+        file_type: "crm_note",
+        content_category: "structured",
+        source: "google_drive",
+        source_path: "/activity.md",
+        provider_url: null,
+        content: "same content",
+        summary: "old skipped summary state",
+        context_note: null,
+        access_scope_id: null,
+        content_hash: "same-hash",
+        source_updated_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+        embedding_status: "done",
+        summary_status: "skipped",
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "provider-category-change",
+        providerUrl: null,
+        fileName: "activity.md",
+        fileType: "crm_note",
+        contentCategory: "document" as const,
+        content: "same content",
+        sourcePath: "/activity.md",
+        contentHash: "same-hash",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+    vi.mocked(clearEnrichmentData).mockClear();
+
+    const result = await runConnectorSync(db, "connector-category-change", logger);
+
+    expect(result.itemsProcessed).toBe(1);
+    expect(result.itemsUpdated).toBe(1);
+    expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
+    expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-category-change");
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(["content_category", "embedding_status", "summary_status"])
+      .where("id", "=", "file-category-change")
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({
+      content_category: "document",
+      embedding_status: "pending",
+      summary_status: "pending",
+    });
   });
 
   it("re-seeds person entities for attendees even when content hash is unchanged", async () => {

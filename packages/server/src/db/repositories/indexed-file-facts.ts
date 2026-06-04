@@ -9,10 +9,12 @@ export type IndexedFileFactType =
   | "assignee"
   | "author"
   | "parent_entity"
+  | "contact_point"
   | "structural_seed"
   | "person_seed"
   | "llm_extracted"
-  | "llm_relation";
+  | "llm_relation"
+  | "crm_relation";
 
 /**
  * Fact types whose subject is a person participating in a file (meeting attendee,
@@ -30,6 +32,7 @@ export type IndexedFileFactRelation =
   | "assigned"
   | "authored"
   | "mentioned"
+  | "contactable"
   | "seeded"
   | "works_at"
   | "engaged_with"
@@ -37,7 +40,9 @@ export type IndexedFileFactRelation =
   | "contributes_to"
   | "builds"
   | "part_of"
-  | "partner_of";
+  | "partner_of"
+  | "deal_for"
+  | "primary_contact";
 
 export interface UpsertIndexedFileFactInput {
   indexedFileId?: string | null;
@@ -96,6 +101,26 @@ function rawEndpoint(input: UpsertIndexedFileFactInput, key: "source" | "target"
   return typeof value === "string" ? normalizeName(value) : "";
 }
 
+function rawContactPoint(input: UpsertIndexedFileFactInput, field: "kind" | "value"): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const contactPoint = raw?.contactPoint;
+  if (!isRecord(contactPoint)) return "";
+  const value = contactPoint[field];
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function rawEndpointIdentity(
+  input: UpsertIndexedFileFactInput,
+  key: "source" | "target",
+  field: "source" | "sourceId",
+): string {
+  const raw = input.raw as Record<string, unknown> | undefined;
+  const endpoint = raw?.[key];
+  if (!isRecord(endpoint)) return "";
+  const value = endpoint[field];
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
   const parts = [
     input.connectorConfigId ?? "",
@@ -116,6 +141,18 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
       rawEndpoint(input, "source", "type"),
       rawEndpoint(input, "target", "name"),
       rawEndpoint(input, "target", "type"),
+    );
+  }
+  if (input.factType === "contact_point") {
+    parts.push(rawContactPoint(input, "kind"), rawContactPoint(input, "value"));
+  }
+  if (input.factType === "crm_relation") {
+    parts.push(
+      rawString(input, "relationType"),
+      rawEndpointIdentity(input, "source", "source"),
+      rawEndpointIdentity(input, "source", "sourceId"),
+      rawEndpointIdentity(input, "target", "source"),
+      rawEndpointIdentity(input, "target", "sourceId"),
     );
   }
   return createHash("sha256").update(parts.join("|")).digest("hex");
@@ -172,6 +209,23 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     if (!hasString(raw, "providerFileId") || !isRecord(raw.parent)) {
       throw new Error("parent_entity facts require raw.providerFileId and raw.parent");
     }
+  } else if (input.factType === "contact_point") {
+    if (!hasString(raw, "providerFileId") || !isRecord(raw.contactPoint)) {
+      throw new Error("contact_point facts require raw.providerFileId and raw.contactPoint");
+    }
+    const contactPoint = raw.contactPoint as Record<string, unknown>;
+    if (
+      !hasString(contactPoint, "subjectName") ||
+      !hasString(contactPoint, "subjectSource") ||
+      !hasString(contactPoint, "subjectSourceId") ||
+      !hasString(contactPoint, "kind") ||
+      !hasString(contactPoint, "value") ||
+      !hasString(contactPoint, "source")
+    ) {
+      throw new Error(
+        "contact_point facts require subjectName, subjectSource, subjectSourceId, kind, value, and source",
+      );
+    }
   } else if (input.factType === "structural_seed") {
     if (!hasString(raw, "sourceType") && (!hasString(raw, "providerFileId") || !hasString(raw, "fileType"))) {
       throw new Error("structural_seed facts require raw.sourceType or raw provider file metadata");
@@ -205,6 +259,29 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
       !hasString(target, "type")
     ) {
       throw new Error("llm_relation endpoints require name and type");
+    }
+  } else if (input.factType === "crm_relation") {
+    if (
+      !hasString(raw, "providerFileId") ||
+      !hasString(raw, "relationType") ||
+      !isRecord(raw.source) ||
+      !isRecord(raw.target)
+    ) {
+      throw new Error("crm_relation facts require raw.providerFileId, relationType, source, and target");
+    }
+    const source = raw.source as Record<string, unknown>;
+    const target = raw.target as Record<string, unknown>;
+    if (
+      !hasString(source, "source") ||
+      !hasString(source, "sourceId") ||
+      !hasString(source, "name") ||
+      !hasString(source, "type") ||
+      !hasString(target, "source") ||
+      !hasString(target, "sourceId") ||
+      !hasString(target, "name") ||
+      !hasString(target, "type")
+    ) {
+      throw new Error("crm_relation endpoints require source, sourceId, name, and type");
     }
   }
 

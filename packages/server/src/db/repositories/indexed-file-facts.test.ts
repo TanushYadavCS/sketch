@@ -117,6 +117,96 @@ describe("createIndexedFileFactRepository", () => {
     expect(JSON.parse(row.raw ?? "{}")).toEqual({ providerFileId: "meeting-1", attendee: { name: "Saurabh" } });
   });
 
+  it("validates and stores contact point facts", async () => {
+    const repo = createIndexedFileFactRepository(db);
+
+    await expect(
+      repo.upsertFact({
+        source: "gmail",
+        factType: "contact_point",
+        relation: "contactable",
+        subjectName: "Simran",
+        raw: { providerFileId: "message-1", contactPoint: { kind: "email", value: "simran@example.com" } } as never,
+      }),
+    ).rejects.toThrow(
+      "contact_point facts require subjectName, subjectSource, subjectSourceId, kind, value, and source",
+    );
+
+    await repo.upsertFact({
+      source: "gmail",
+      factType: "contact_point",
+      relation: "contactable",
+      subjectName: "Simran",
+      subjectEmail: "simran@example.com",
+      subjectSource: "gmail",
+      subjectSourceId: "person:simran",
+      raw: {
+        providerFileId: "message-1",
+        contactPoint: {
+          subjectName: "Simran",
+          subjectEmail: "simran@example.com",
+          subjectSource: "gmail",
+          subjectSourceId: "person:simran",
+          kind: "email",
+          value: "simran@example.com",
+          source: "gmail",
+        },
+      },
+    });
+
+    const row = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "relation", "raw"])
+      .executeTakeFirstOrThrow();
+    expect(row.fact_type).toBe("contact_point");
+    expect(row.relation).toBe("contactable");
+    expect(JSON.parse(row.raw ?? "{}").contactPoint.value).toBe("simran@example.com");
+  });
+
+  it("includes contact point kind and value in fact keys", async () => {
+    const repo = createIndexedFileFactRepository(db);
+    const base: Omit<UpsertIndexedFileFactInput, "raw"> = {
+      source: "gmail",
+      factType: "contact_point",
+      relation: "contactable",
+      subjectName: "Simran",
+      subjectSource: "gmail",
+      subjectSourceId: "person:simran",
+    };
+
+    await repo.upsertFact({
+      ...base,
+      raw: {
+        providerFileId: "message-1",
+        contactPoint: {
+          subjectName: "Simran",
+          subjectSource: "gmail",
+          subjectSourceId: "person:simran",
+          kind: "email",
+          value: "simran@example.com",
+          source: "gmail",
+        },
+      },
+    });
+    await repo.upsertFact({
+      ...base,
+      raw: {
+        providerFileId: "message-1",
+        contactPoint: {
+          subjectName: "Simran",
+          subjectSource: "gmail",
+          subjectSourceId: "person:simran",
+          kind: "linkedin",
+          value: "simran-suri",
+          source: "gmail",
+        },
+      },
+    });
+
+    const rows = await db.selectFrom("indexed_file_facts").select("id").execute();
+    expect(rows).toHaveLength(2);
+  });
+
   it("deduplicates facts when subject email only differs by whitespace", async () => {
     const repo = createIndexedFileFactRepository(db);
 

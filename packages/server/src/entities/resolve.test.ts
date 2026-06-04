@@ -401,6 +401,46 @@ describe("confirmReview", () => {
       })
       .execute();
 
+    await entityRepo.upsertContactPoint({
+      entityId: target.id,
+      kind: "email",
+      value: "simran@acme.com",
+      displayValue: "simran@acme.com",
+      source: "gmail",
+      connectorConfigId: "config-test",
+      lastContactedAt: "2026-01-01T00:00:00.000Z",
+      makePrimary: true,
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: stale.id,
+      kind: "email",
+      value: "SIMRAN@ACME.COM",
+      displayValue: "SIMRAN@ACME.COM",
+      source: "manual",
+      connectorConfigId: "config-test",
+      verifiedAt: "2026-01-04T00:00:00.000Z",
+      lastContactedAt: "2026-01-03T00:00:00.000Z",
+      makePrimary: true,
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: target.id,
+      kind: "linkedin",
+      value: "simran-old",
+      source: "manual",
+      connectorConfigId: "config-test",
+      lastContactedAt: "2026-01-01T00:00:00.000Z",
+      makePrimary: true,
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: stale.id,
+      kind: "linkedin",
+      value: "simran-new",
+      source: "manual",
+      connectorConfigId: "config-test",
+      lastContactedAt: "2026-01-05T00:00:00.000Z",
+      makePrimary: true,
+    });
+
     // Queue with the stale entity NOT as the candidate — the resolver
     // discovers it via the name+no-email predicate at step 5. proposeEntity
     // would have routed this through token-superset to land Simran Suri as
@@ -459,6 +499,24 @@ describe("confirmReview", () => {
     const fileIds = targetMentions.map((m) => m.indexed_file_id);
     expect(fileIds).toContain("file-stale");
     expect(fileIds).toContain("file-q");
+
+    const contactPoints = await entityRepo.getContactPointsForEntity(target.id);
+    expect(contactPoints.filter((point) => point.kind === "email")).toHaveLength(1);
+    expect(contactPoints.find((point) => point.kind === "email")).toMatchObject({
+      value: "simran@acme.com",
+      source: "manual",
+      verified_at: "2026-01-04T00:00:00.000Z",
+      last_contacted_at: "2026-01-03T00:00:00.000Z",
+      is_primary: 1,
+    });
+    expect(
+      contactPoints
+        .filter((point) => point.kind === "linkedin")
+        .map((point) => ({ value: point.value, isPrimary: point.is_primary })),
+    ).toEqual([
+      { value: "simran-new", isPrimary: 1 },
+      { value: "simran-old", isPrimary: 0 },
+    ]);
   });
 
   it("aborts with MULTIPLE_STALE_CANDIDATES when two stale entities match", async () => {

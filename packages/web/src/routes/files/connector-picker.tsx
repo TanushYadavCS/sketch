@@ -96,6 +96,12 @@ export function ConnectorPicker({
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
 
+  const setupStatus = useQuery({ queryKey: ["setup-status"], queryFn: () => api.setup.status() });
+  const experimentalEnabled = setupStatus.data?.experimentalFlag === true;
+  // Experimental connectors stay hidden until the flag is on (matches backend gating,
+  // which 404s their routes and rejects their connector creation otherwise).
+  const showDef = (def: IntegrationDefinition) => !def.experimentalOnly || experimentalEnabled;
+
   const connectedByType = new Map<string, ConnectorConfig>();
   // aggregatedByType drives sync-status indicator on the chip (which is
   // connector-row data). Chip *counts* read from `sourceCounts` so a member with
@@ -145,7 +151,7 @@ export function ConnectorPicker({
           icon={<FolderSimpleIcon size={12} />}
         />
 
-        {INTEGRATIONS.map((def) => {
+        {INTEGRATIONS.filter(showDef).map((def) => {
           const agg = aggregatedByType.get(def.type);
           const count = sourceCounts.get(def.type) ?? 0;
           // Render if the viewer either owns/can see a connector row of this
@@ -168,7 +174,7 @@ export function ConnectorPicker({
         })}
 
         {isAdmin &&
-          ORG_LEVEL_INTEGRATIONS.map((def) => {
+          ORG_LEVEL_INTEGRATIONS.filter(showDef).map((def) => {
             if (connectedByType.has(def.type)) return null;
             return (
               <button
@@ -199,6 +205,7 @@ export function ConnectorPicker({
         onOpenChange={setShowBrowseAll}
         connectors={connectors}
         isAdmin={isAdmin}
+        experimentalEnabled={experimentalEnabled}
         onConnect={(def) => {
           setShowBrowseAll(false);
           // All connectors — per-user (Fireflies, Drive) and org-wide (ClickUp,
@@ -296,6 +303,7 @@ function BrowseConnectorsDialog({
   onOpenChange,
   connectors,
   isAdmin,
+  experimentalEnabled,
   onConnect,
   onManage,
 }: {
@@ -303,6 +311,7 @@ function BrowseConnectorsDialog({
   onOpenChange: (open: boolean) => void;
   connectors: ConnectorConfig[];
   isAdmin: boolean;
+  experimentalEnabled: boolean;
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
 }) {
@@ -355,7 +364,7 @@ function BrowseConnectorsDialog({
         {tab === "connectors" ? (
           <>
             <div className="mt-2 space-y-2">
-              {INTEGRATIONS.map((def) => {
+              {INTEGRATIONS.filter((def) => !def.experimentalOnly || experimentalEnabled).map((def) => {
                 // For per-user connectors, the row visible to the caller in
                 // /api/connectors is their own (server filters); for org-wide, it's
                 // the shared row. Either way, show Manage when present, Connect when not.

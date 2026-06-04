@@ -83,8 +83,10 @@ import * as m080 from "./migrations/080-message-id-idempotency";
 import * as m081 from "./migrations/081-email-message-metadata";
 import * as m082 from "./migrations/082-email-thread-summaries";
 import * as m083 from "./migrations/083-local-claude-sessions";
-import * as m084 from "./migrations/084-orphan-entity-cleanup";
-import * as m085 from "./migrations/085-cleanup-empty-relationships-and-review";
+import * as m084 from "./migrations/084-entity-contact-points";
+import * as m085 from "./migrations/085-crm-activity-rollups";
+import * as m086 from "./migrations/086-orphan-entity-cleanup";
+import * as m087 from "./migrations/087-cleanup-empty-relationships-and-review";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -172,8 +174,10 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "081-email-message-metadata": m081,
           "082-email-thread-summaries": m082,
           "083-local-claude-sessions": m083,
-          "084-orphan-entity-cleanup": m084,
-          "085-cleanup-empty-relationships-and-review": m085,
+          "084-entity-contact-points": m084,
+          "085-crm-activity-rollups": m085,
+          "086-orphan-entity-cleanup": m086,
+          "087-cleanup-empty-relationships-and-review": m087,
         };
       },
     },

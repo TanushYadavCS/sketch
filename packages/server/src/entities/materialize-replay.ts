@@ -3,10 +3,11 @@ import type { Logger } from "pino";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
+import { materializeContactPointFact } from "./materialize-contact-points";
 import { buildMaterializeDeps } from "./materialize-deps";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializePersonFact, materializePersonSeed } from "./materialize-person";
-import { materializeLlmRelationFact } from "./materialize-relations";
+import { materializeCrmRelationFact, materializeLlmRelationFact } from "./materialize-relations";
 import { materializeParentEntity, materializeStructuralSeed } from "./materialize-structural";
 import type {
   IndexedFileFactRow,
@@ -25,7 +26,9 @@ const FACT_REPLAY_ORDER = [
   "correspondent",
   "assignee",
   "author",
+  "contact_point",
   "parent_entity",
+  "crm_relation",
   "llm_extracted",
   "llm_relation",
 ] as const;
@@ -37,11 +40,17 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "person_seed") {
     return materializePersonSeed(deps, fact);
   }
+  if (fact.fact_type === "contact_point") {
+    return materializeContactPointFact(deps, fact);
+  }
   if (fact.fact_type === "llm_extracted") {
     return materializeLlmExtractedFact(deps, fact);
   }
   if (fact.fact_type === "llm_relation") {
     return materializeLlmRelationFact(deps, fact);
+  }
+  if (fact.fact_type === "crm_relation") {
+    return materializeCrmRelationFact(deps, fact);
   }
   if (
     fact.fact_type === "attendee" ||
@@ -107,7 +116,7 @@ export async function replaySourceFacts(
     skipped: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold });
+  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold, logger });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
     .filter((f) => orderRank.has(f.fact_type))
@@ -171,7 +180,7 @@ async function materializeUnmaterializedFactsInner(
     deferredBelowThreshold: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold });
+  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold, logger });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   let factsQuery = db
     .selectFrom("indexed_file_facts")
@@ -237,8 +246,10 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
   if (result.kind === "skipped") {
     return (
       result.reason !== "missing_parent_seed" &&
+      result.reason !== "missing_crm_relation_endpoint" &&
       result.reason !== "unknown_fact_type" &&
-      result.reason !== "missing_or_invalid_mention_type"
+      result.reason !== "missing_or_invalid_mention_type" &&
+      result.reason !== "missing_contact_point_subject_entity"
     );
   }
   return false;

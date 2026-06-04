@@ -18,6 +18,7 @@ import { createGmailConnector } from "./gmail";
 import { createGoogleDriveConnector } from "./google-drive";
 import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
+import { createZohoCrmConnector } from "./zoho-crm";
 
 export const connectorFactories: Record<ConnectorType, () => Connector> = {
   google_drive: createGoogleDriveConnector,
@@ -26,6 +27,7 @@ export const connectorFactories: Record<ConnectorType, () => Connector> = {
   notion: createNotionConnector,
   linear: createLinearConnector,
   fireflies: createFirefliesConnector,
+  zoho_crm: createZohoCrmConnector,
 };
 
 export const VALID_CONNECTOR_TYPES: ConnectorType[] = Object.keys(connectorFactories) as ConnectorType[];

@@ -37,6 +37,7 @@ import {
 } from "@sketch/ui/components/dialog";
 import { Input } from "@sketch/ui/components/input";
 import { Label } from "@sketch/ui/components/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -76,6 +77,8 @@ export function ConnectIntegrationDialog({
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
+  // Zoho CRM (and any future multi-DC OAuth connector) picks a data center first.
+  const [region, setRegion] = useState<string>("com");
 
   // Google Drive OAuth state
   const [step, setStep] = useState<"credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "oauth-config">(
@@ -99,6 +102,7 @@ export function ConnectIntegrationDialog({
   const [notionScanDone, setNotionScanDone] = useState(false);
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
+  const isZoho = integration?.type === "zoho_crm";
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -134,23 +138,26 @@ export function ConnectIntegrationDialog({
     };
   }, [notionBrowseId]);
 
-  // Check if Google OAuth is configured (for OAuth redirect integrations)
+  // Check if the provider's OAuth is configured (for OAuth redirect integrations)
   const oauthStatus = useQuery({
-    queryKey: ["google-oauth-status"],
-    queryFn: () => api.googleOAuth.status(),
+    queryKey: [isZoho ? "zoho-oauth-status" : "google-oauth-status"],
+    queryFn: () => (isZoho ? api.zohoOAuth.status() : api.googleOAuth.status()),
     enabled: open && isOAuthRedirect,
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
+  // Only providers that require admin client-id/secret entry use the oauth-config step.
+  // Zoho's client lives in server env, so it always lands on the connect step.
+  const needsClientSetup = integration?.requiresOAuthClientSetup === true;
 
-  // For OAuth redirect: start with oauth-config step if not configured
+  // For OAuth redirect: start with oauth-config step if client setup is required and missing.
   useEffect(() => {
     if (open && isOAuthRedirect) {
       if (oauthStatus.isSuccess) {
-        setStep(isOAuthConfigured ? "credentials" : "oauth-config");
+        setStep(needsClientSetup && !isOAuthConfigured ? "oauth-config" : "credentials");
       }
     }
-  }, [open, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured]);
+  }, [open, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured, needsClientSetup]);
 
   /** Save Google OAuth client_id + client_secret. */
   const configureOAuthMutation = useMutation({
@@ -346,6 +353,11 @@ export function ConnectIntegrationDialog({
     window.open(url, "_self");
   };
 
+  const handleConnectWithZoho = () => {
+    const url = api.zohoOAuth.authorizeUrl(region);
+    window.open(url, "_self");
+  };
+
   const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
   const toggleNotionPage = (pageId: string) => {
     setSelectedNotionPageIds((prev) => {
@@ -469,6 +481,58 @@ export function ConnectIntegrationDialog({
                 )}
               </Button>
             </DialogFooter>
+          </>
+        ) : step === "credentials" && isOAuthRedirect && isZoho ? (
+          /* OAuth redirect (Zoho): data-center picker + connect button */
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Connect {integration.name}
+              </DialogTitle>
+              <DialogDescription>
+                Choose your Zoho data center, then sign in to authorize read-only access to your CRM.
+              </DialogDescription>
+            </DialogHeader>
+
+            <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
+              {integration.connectSteps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="zoho-region" className="text-xs">
+                Data center
+              </Label>
+              <Select value={region} onValueChange={setRegion}>
+                <SelectTrigger id="zoho-region">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(integration.regionOptions ?? []).map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                Match the domain of your Zoho CRM URL (e.g. crm.zoho.com → United States).
+              </p>
+            </div>
+
+            {isOAuthConfigured ? (
+              <Button size="lg" className="w-full gap-2" onClick={handleConnectWithZoho}>
+                <ConnectorLogo type="zoho_crm" size={16} className="text-white" />
+                Connect with Zoho
+              </Button>
+            ) : (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                Zoho OAuth isn't configured on the server yet. Set <code>ZOHO_CLIENT_ID</code> and{" "}
+                <code>ZOHO_CLIENT_SECRET</code> in the environment, then reload.
+              </div>
+            )}
           </>
         ) : step === "credentials" && isOAuthRedirect ? (
           /* OAuth redirect: "Connect with Google" button */

@@ -120,6 +120,7 @@ export interface IndexedFilesTable {
   summary: string | null;
   source: string;
   source_path: string | null;
+  rollup_group_id: string | null;
   content_hash: string | null;
   is_archived: Generated<number>;
   source_created_at: string | null;
@@ -512,6 +513,17 @@ export interface EntityShareEmailsTable {
   granted_at: Generated<string>;
 }
 
+export interface CrmObjectSummariesTable {
+  connector_config_id: string;
+  group_id: string;
+  summary: string;
+  activity_count: number;
+  basis_first_at: string | null;
+  basis_last_at: string | null;
+  basis_hash: string;
+  updated_at: Generated<string>;
+}
+
 export interface EntitySourceRefsTable {
   id: string;
   entity_id: string;
@@ -519,6 +531,23 @@ export interface EntitySourceRefsTable {
   source_id: string;
   source_url: string | null;
   last_seen_at: string;
+}
+
+export interface EntityContactPointsTable {
+  id: string;
+  entity_id: string;
+  kind: string;
+  value: string;
+  display_value: string | null;
+  label: string | null;
+  is_primary: Generated<number>;
+  source: string;
+  connector_config_id: string | null;
+  created_by_user_id: string | null;
+  verified_at: string | null;
+  last_contacted_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface EntityMentionsTable {
@@ -700,6 +729,7 @@ export interface DB {
   email_message_envelopes: EmailMessageEnvelopesTable;
   email_suppressed_messages: EmailSuppressedMessagesTable;
   email_thread_summaries: EmailThreadSummariesTable;
+  crm_object_summaries: CrmObjectSummariesTable;
   access_scopes: AccessScopesTable;
   access_scope_members: AccessScopeMembersTable;
   connector_files: ConnectorFilesTable;
@@ -732,6 +762,7 @@ export interface DB {
   entities: EntitiesTable;
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
+  entity_contact_points: EntityContactPointsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;

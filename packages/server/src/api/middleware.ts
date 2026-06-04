@@ -35,6 +35,7 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/magic-link/verify",
   "/api/health",
   "/api/oauth/google/callback",
+  "/api/oauth/zoho/callback",
 ]);
 const SETUP_PATHS_PREFIX = "/api/setup";
 const PUBLIC_SETUP_PATHS = new Set(["/api/setup/status", "/api/setup/account"]);

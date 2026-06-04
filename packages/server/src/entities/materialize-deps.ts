@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -34,7 +35,7 @@ export function normalizeEntityMatchName(entityType: string, name: string): stri
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team"];
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
   const entities = await db.selectFrom("entities").selectAll().where("source_type", "in", supportedTypes).execute();
   const entitiesByType = new Map<ProposeEntityType, EntityRow[]>();
   for (const t of supportedTypes) entitiesByType.set(t, []);
@@ -112,6 +113,7 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
 
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
+  logger?: Logger;
 }
 
 export async function buildMaterializeDeps(
@@ -143,6 +145,7 @@ export async function buildMaterializeDeps(
 
   return {
     db,
+    logger: opts.logger,
     entityRepo,
     reviewRepo,
     domainsRepo,
