@@ -8,7 +8,7 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
+export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
