@@ -50,6 +50,12 @@ describe("configSchema", () => {
         expect(result.data.SYNC_ALLOW_LARGE_RECONCILE).toBe(false);
         expect(result.data.SYNC_MAX_RECONCILE_RATIO).toBe(0.5);
         expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(3);
+        expect(result.data.MICROSOFT_TENANT).toBe("common");
+        expect(result.data.OUTLOOK_INITIAL_LOOKBACK_DAYS).toBe(365);
+        expect(result.data.OUTLOOK_MAX_INFLIGHT).toBe(4);
+        expect(result.data.TEAMS_INITIAL_LOOKBACK_DAYS).toBe(365);
+        expect(result.data.TEAMS_MAX_INFLIGHT).toBe(4);
+        expect(result.data.TEAMS_PROCESSING_LAG_MS).toBe(2 * 60 * 60 * 1000);
       }
     });
 
@@ -74,6 +80,26 @@ describe("configSchema", () => {
       if (result.success) {
         expect(result.data.SYNC_ALLOW_LARGE_RECONCILE).toBe(true);
         expect(result.data.SYNC_MAX_RECONCILE_RATIO).toBe(0.75);
+      }
+    });
+
+    it("parses Microsoft connector sync limits", () => {
+      const result = configSchema.safeParse({
+        MICROSOFT_TENANT: "organizations",
+        OUTLOOK_INITIAL_LOOKBACK_DAYS: "180",
+        OUTLOOK_MAX_INFLIGHT: "3",
+        TEAMS_INITIAL_LOOKBACK_DAYS: "120",
+        TEAMS_MAX_INFLIGHT: "2",
+        TEAMS_PROCESSING_LAG_MS: "300000",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.MICROSOFT_TENANT).toBe("organizations");
+        expect(result.data.OUTLOOK_INITIAL_LOOKBACK_DAYS).toBe(180);
+        expect(result.data.OUTLOOK_MAX_INFLIGHT).toBe(3);
+        expect(result.data.TEAMS_INITIAL_LOOKBACK_DAYS).toBe(120);
+        expect(result.data.TEAMS_MAX_INFLIGHT).toBe(2);
+        expect(result.data.TEAMS_PROCESSING_LAG_MS).toBe(300000);
       }
     });
 
@@ -121,6 +147,11 @@ describe("configSchema", () => {
     it("rejects co-mention thresholds below 2", () => {
       const result = configSchema.safeParse({ CO_MENTION_CONTRIBUTES_TO_THRESHOLD: "1" });
       expect(result.success).toBe(false);
+    });
+
+    it("rejects Microsoft connector concurrency outside the bounded Graph limit", () => {
+      expect(configSchema.safeParse({ OUTLOOK_MAX_INFLIGHT: "32" }).success).toBe(false);
+      expect(configSchema.safeParse({ TEAMS_MAX_INFLIGHT: "32" }).success).toBe(false);
     });
   });
 });

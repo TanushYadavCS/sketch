@@ -362,6 +362,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         zohoClientSecret: config.ZOHO_CLIENT_SECRET,
         microsoftClientId: config.MICROSOFT_CLIENT_ID,
         microsoftClientSecret: config.MICROSOFT_CLIENT_SECRET,
+        microsoftTenant: config.MICROSOFT_TENANT,
       }),
     );
   }

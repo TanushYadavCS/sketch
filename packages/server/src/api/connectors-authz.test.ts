@@ -76,7 +76,16 @@ async function userIdFor(db: Kysely<DB>, email: string): Promise<string> {
 async function insertConfig(
   db: Kysely<DB>,
   opts: {
-    connectorType: "google_drive" | "gmail" | "fireflies" | "clickup" | "notion" | "linear" | "zoho_crm";
+    connectorType:
+      | "google_drive"
+      | "gmail"
+      | "outlook"
+      | "teams"
+      | "fireflies"
+      | "clickup"
+      | "notion"
+      | "linear"
+      | "zoho_crm";
     createdBy: string;
   },
 ) {
@@ -84,7 +93,11 @@ async function insertConfig(
   return repo.createConfig({
     connectorType: opts.connectorType,
     authType:
-      opts.connectorType === "google_drive" || opts.connectorType === "gmail" || opts.connectorType === "zoho_crm"
+      opts.connectorType === "google_drive" ||
+      opts.connectorType === "gmail" ||
+      opts.connectorType === "outlook" ||
+      opts.connectorType === "teams" ||
+      opts.connectorType === "zoho_crm"
         ? "oauth"
         : "api_key",
     credentials: JSON.stringify({ type: "api_key", api_key: "stub" }),
@@ -485,6 +498,36 @@ describe("Connectors API — authorization", () => {
       expect(location).toContain("accounts.google.com");
       expect(decodeURIComponent(location)).toContain("https://www.googleapis.com/auth/gmail.readonly");
       expect(decodeURIComponent(location)).not.toContain("https://www.googleapis.com/auth/drive.readonly");
+    });
+  });
+
+  describe("OAuth /api/oauth/microsoft/authorize — connector-aware scopes", () => {
+    it("Microsoft OAuth callback accepts provider redirects without an active session", async () => {
+      const res = await app.request("/api/oauth/microsoft/callback", { redirect: "manual" });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("/files?oauth=error&connector=outlook&reason=missing_params");
+    });
+
+    it("Teams OAuth uses Teams scopes and connector-aware state", async () => {
+      const microsoftApp = createApp(
+        db,
+        createTestConfig({ MICROSOFT_CLIENT_ID: "cid", MICROSOFT_CLIENT_SECRET: "csec" }),
+        { logger },
+      );
+
+      const res = await microsoftApp.request("/api/oauth/microsoft/authorize?connector=teams", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = decodeURIComponent(res.headers.get("location") ?? "");
+      expect(location).toContain("login.microsoftonline.com/common/oauth2/v2.0/authorize");
+      expect(location).toContain("OnlineMeetingTranscript.Read.All");
+      expect(location).toContain("OnlineMeetingRecording.Read.All");
+      expect(location).toContain("Calendars.Read");
+      expect(location).toContain(`${memberId}:teams:`);
+      expect(location).not.toContain("Mail.Read");
     });
   });
 

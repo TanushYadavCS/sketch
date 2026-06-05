@@ -18,8 +18,15 @@ import { z } from "zod";
 import { verifyJwt } from "../auth/jwt";
 import type { Config } from "../config";
 import { ensureValidToken } from "../connectors/google-drive";
-import { validateOutlookCredentials } from "../connectors/outlook";
+import {
+  createMicrosoftGraphClient,
+  microsoftAuthorizeEndpoint,
+  microsoftTokenEndpoint,
+} from "../connectors/microsoft-graph";
+import { OUTLOOK_MICROSOFT_SCOPE } from "../connectors/outlook";
+import { getConnector } from "../connectors/registry";
 import { runConnectorSync } from "../connectors/sync";
+import { TEAMS_MICROSOFT_SCOPE } from "../connectors/teams";
 import type { ConnectorType, OAuthCredentials } from "../connectors/types";
 import { validateZohoCrmCredentials } from "../connectors/zoho-crm";
 import type { createConnectorRepository } from "../db/repositories/connectors";
@@ -45,12 +52,11 @@ const zohoRegionSchema = z.enum(ZOHO_REGIONS);
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
-const MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "gmail"]);
+const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
 
 /** In-memory nonce store. Entries expire after 10 minutes. */
@@ -79,6 +85,18 @@ function googleConnectorName(connectorType: ConnectorType): string {
   return connectorType === "gmail" ? "Gmail" : "Google Drive";
 }
 
+function microsoftConnectorFromQuery(value: string | undefined): ConnectorType {
+  return value === "teams" ? "teams" : "outlook";
+}
+
+function microsoftScopesFor(connectorType: ConnectorType): string {
+  return connectorType === "teams" ? TEAMS_MICROSOFT_SCOPE : OUTLOOK_MICROSOFT_SCOPE;
+}
+
+function microsoftConnectorName(connectorType: ConnectorType): string {
+  return connectorType === "teams" ? "Microsoft Teams" : "Outlook";
+}
+
 function parseGoogleState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
   const parts = state.split(":");
   if (parts.length === 2) {
@@ -87,6 +105,17 @@ function parseGoogleState(state: string): { userId: string; connectorType: Conne
   if (parts.length !== 3) return null;
   const connectorType = parts[1] as ConnectorType;
   if (!GOOGLE_OAUTH_CONNECTORS.has(connectorType)) return null;
+  return { userId: parts[0], connectorType, nonce: parts[2] };
+}
+
+function parseMicrosoftState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
+  const parts = state.split(":");
+  if (parts.length === 2) {
+    return { userId: parts[0], connectorType: "outlook", nonce: parts[1] };
+  }
+  if (parts.length !== 3) return null;
+  const connectorType = parts[1] as ConnectorType;
+  if (!MICROSOFT_OAUTH_CONNECTORS.has(connectorType)) return null;
   return { userId: parts[0], connectorType, nonce: parts[2] };
 }
 
@@ -107,6 +136,7 @@ export function oauthRoutes(
         zohoClientSecret?: string;
         microsoftClientId?: string;
         microsoftClientSecret?: string;
+        microsoftTenant?: string;
       } = {},
 ) {
   const routes = new Hono();
@@ -117,6 +147,7 @@ export function oauthRoutes(
   const zohoClientSecret = typeof opts === "string" ? undefined : opts.zohoClientSecret;
   const microsoftClientId = typeof opts === "string" ? undefined : opts.microsoftClientId;
   const microsoftClientSecret = typeof opts === "string" ? undefined : opts.microsoftClientSecret;
+  const microsoftTenant = typeof opts === "string" ? "common" : (opts.microsoftTenant ?? "common");
 
   /**
    * GET /google/authorize
@@ -334,13 +365,16 @@ export function oauthRoutes(
   });
 
   routes.get("/microsoft/authorize", async (c) => {
+    const connectorType = microsoftConnectorFromQuery(c.req.query("connector"));
+    const connectorName = microsoftConnectorName(connectorType);
+
     if (!microsoftClientId || !microsoftClientSecret) {
       return c.json(
         {
           error: {
             code: "OAUTH_CLIENT_NOT_CONFIGURED",
-            message: "Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET before connecting Outlook",
-            connector: "outlook",
+            message: `Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET before connecting ${connectorName}`,
+            connector: connectorType,
           },
         },
         412,
@@ -352,14 +386,14 @@ export function oauthRoutes(
       return c.json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } }, 401);
     }
 
-    const existingConnector = await connectors.findByTypeAndOwner("outlook", userId);
+    const existingConnector = await connectors.findByTypeAndOwner(connectorType, userId);
     if (existingConnector) {
       return c.json(
         {
           error: {
             code: "ALREADY_CONNECTED",
-            message: "Outlook is already connected for this user.",
-            connector: "outlook",
+            message: `${connectorName} is already connected for this user.`,
+            connector: connectorType,
           },
         },
         409,
@@ -369,8 +403,8 @@ export function oauthRoutes(
     cleanupExpiredStates();
 
     const nonce = randomBytes(16).toString("hex");
-    const state = `${userId}:${nonce}`;
-    pendingStates.set(nonce, { userId, connectorType: "outlook", expiresAt: Date.now() + 10 * 60 * 1000 });
+    const state = `${userId}:${connectorType}:${nonce}`;
+    pendingStates.set(nonce, { userId, connectorType, expiresAt: Date.now() + 10 * 60 * 1000 });
 
     const origin = baseUrl ?? new URL(c.req.url).origin;
     const redirectUri = `${origin}/api/oauth/microsoft/callback`;
@@ -379,11 +413,11 @@ export function oauthRoutes(
       redirect_uri: redirectUri,
       response_type: "code",
       response_mode: "query",
-      scope: "offline_access User.Read Mail.Read",
+      scope: microsoftScopesFor(connectorType),
       state,
     });
 
-    return c.redirect(`${MICROSOFT_AUTH_URL}?${params.toString()}`);
+    return c.redirect(`${microsoftAuthorizeEndpoint(microsoftTenant)}?${params.toString()}`);
   });
 
   routes.get("/microsoft/callback", async (c) => {
@@ -392,45 +426,46 @@ export function oauthRoutes(
     const error = c.req.query("error");
 
     if (error) {
+      const connectorType = state ? (parseMicrosoftState(state)?.connectorType ?? "outlook") : "outlook";
       logger.warn({ error }, "Microsoft OAuth denied");
-      return c.redirect("/files?oauth=error&connector=outlook&reason=denied");
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=denied`);
     }
 
     if (!code || !state) {
       return c.redirect("/files?oauth=error&connector=outlook&reason=missing_params");
     }
 
-    const colonIdx = state.indexOf(":");
-    if (colonIdx === -1) {
+    const parsedState = parseMicrosoftState(state);
+    if (!parsedState) {
       return c.redirect("/files?oauth=error&connector=outlook&reason=invalid_state");
     }
 
-    const userId = state.substring(0, colonIdx);
-    const nonce = state.substring(colonIdx + 1);
+    const { userId, connectorType, nonce } = parsedState;
 
     cleanupExpiredStates();
     const pending = pendingStates.get(nonce);
-    if (!pending || pending.userId !== userId || pending.connectorType !== "outlook") {
-      return c.redirect("/files?oauth=error&connector=outlook&reason=invalid_state");
+    if (!pending || pending.userId !== userId || pending.connectorType !== connectorType) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=invalid_state`);
     }
     pendingStates.delete(nonce);
 
     if (!microsoftClientId || !microsoftClientSecret) {
-      return c.redirect("/files?oauth=error&connector=outlook&reason=not_configured");
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=not_configured`);
     }
 
     const origin = baseUrl ?? new URL(c.req.url).origin;
     const redirectUri = `${origin}/api/oauth/microsoft/callback`;
+    const scope = microsoftScopesFor(connectorType);
 
     try {
-      const existingConnector = await connectors.findByTypeAndOwner("outlook", userId);
+      const existingConnector = await connectors.findByTypeAndOwner(connectorType, userId);
       if (existingConnector) {
         return c.redirect(
-          `/files?oauth=error&connector=outlook&reason=already_connected&connectorId=${existingConnector.id}`,
+          `/files?oauth=error&connector=${connectorType}&reason=already_connected&connectorId=${existingConnector.id}`,
         );
       }
 
-      const tokenRes = await fetch(MICROSOFT_TOKEN_URL, {
+      const tokenRes = await fetch(microsoftTokenEndpoint(microsoftTenant), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -439,14 +474,14 @@ export function oauthRoutes(
           client_secret: microsoftClientSecret,
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
-          scope: "offline_access User.Read Mail.Read",
+          scope,
         }),
       });
 
       if (!tokenRes.ok) {
         const errBody = await tokenRes.text();
         logger.error({ status: tokenRes.status, body: errBody }, "Microsoft token exchange failed");
-        return c.redirect("/files?oauth=error&connector=outlook&reason=token_exchange");
+        return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=token_exchange`);
       }
 
       const tokenData = (await tokenRes.json()) as {
@@ -458,7 +493,7 @@ export function oauthRoutes(
 
       if (!tokenData.refresh_token) {
         logger.error("No Microsoft refresh_token in response");
-        return c.redirect("/files?oauth=error&connector=outlook&reason=no_refresh_token");
+        return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=no_refresh_token`);
       }
 
       const expiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
@@ -470,16 +505,18 @@ export function oauthRoutes(
         expires_at: expiresAt,
         client_id: microsoftClientId,
         client_secret: microsoftClientSecret,
+        scope,
+        tenant: microsoftTenant,
       };
 
-      await validateOutlookCredentials(oauthCreds);
+      await getConnector(connectorType).validateCredentials(oauthCreds);
       const profile = await fetchMicrosoftCurrentUser(oauthCreds, logger);
       const providerEmail = profile.mail ?? profile.userPrincipalName ?? null;
       const providerUserId = profile.id ?? providerEmail ?? userId;
 
       await identities.upsert({
         userId,
-        provider: "outlook",
+        provider: "microsoft",
         providerUserId,
         providerEmail,
         accessToken: tokenData.access_token,
@@ -488,7 +525,7 @@ export function oauthRoutes(
       });
 
       const connectorConfig = await connectors.createConfig({
-        connectorType: "outlook",
+        connectorType,
         authType: "oauth",
         credentials: JSON.stringify(oauthCreds),
         scopeConfig: JSON.stringify({}),
@@ -496,16 +533,19 @@ export function oauthRoutes(
         credentialHint: providerEmail,
       });
 
-      logger.info({ userId, connectorId: connectorConfig.id, providerEmail }, "Microsoft OAuth tokens saved");
+      logger.info(
+        { userId, connectorId: connectorConfig.id, connectorType, providerEmail },
+        "Microsoft OAuth tokens saved",
+      );
 
       runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
-        logger.error({ err, connectorId: connectorConfig.id }, "Outlook first sync failed");
+        logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Microsoft first sync failed");
       });
 
-      return c.redirect(`/files?oauth=success&connector=outlook&connectorId=${connectorConfig.id}`);
+      return c.redirect(`/files?oauth=success&connector=${connectorType}&connectorId=${connectorConfig.id}`);
     } catch (err) {
       logger.error({ err, userId }, "Microsoft OAuth callback failed");
-      return c.redirect("/files?oauth=error&connector=outlook&reason=internal");
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=internal`);
     }
   });
 
@@ -514,6 +554,7 @@ export function oauthRoutes(
       configured: !!(microsoftClientId && microsoftClientSecret),
       clientId: microsoftClientId ?? null,
       baseUrl: baseUrl ?? null,
+      tenant: microsoftTenant,
     });
   });
 
@@ -769,13 +810,13 @@ async function fetchMicrosoftCurrentUser(
   logger: Logger,
 ): Promise<{ id?: string; mail?: string | null; userPrincipalName?: string | null }> {
   try {
-    const url = new URL("https://graph.microsoft.com/v1.0/me");
-    url.searchParams.set("$select", "id,mail,userPrincipalName");
-    const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${credentials.access_token}` },
+    const graph = createMicrosoftGraphClient(credentials, {
+      scope: credentials.scope,
+      tenant: credentials.tenant,
     });
-    if (!res.ok) return {};
-    return (await res.json()) as { id?: string; mail?: string | null; userPrincipalName?: string | null };
+    return graph.request<{ id?: string; mail?: string | null; userPrincipalName?: string | null }>("/me", {
+      params: { $select: "id,mail,userPrincipalName" },
+    });
   } catch (err) {
     logger.warn({ err }, "Failed to fetch Microsoft current user hint");
     return {};

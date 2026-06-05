@@ -1337,12 +1337,14 @@ export const api = {
   },
   microsoftOAuth: {
     status() {
-      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null }>(
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; tenant?: string }>(
         "/api/oauth/microsoft/status",
       );
     },
-    authorizeUrl() {
-      return "/api/oauth/microsoft/authorize";
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/microsoft/authorize";
     },
   },
   identities: {

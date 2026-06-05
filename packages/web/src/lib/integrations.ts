@@ -12,6 +12,7 @@ export type IntegrationType =
   | "google_drive"
   | "gmail"
   | "outlook"
+  | "teams"
   | "clickup"
   | "notion"
   | "linear"
@@ -204,6 +205,28 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Add the redirect URI shown by your deployment",
       "Grant delegated Mail.Read, User.Read, and offline_access permissions",
       "Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET on the server",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "teams",
+    name: "Microsoft Teams",
+    description: "Meeting transcripts and recording links",
+    category: "Meetings",
+    color: "#6264A7",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [],
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    connectSteps: [
+      "Sign in with your Microsoft work account",
+      "Authorize read-only calendar, online meeting, transcript, and recording metadata access",
+      "A tenant admin may need to grant consent once for online-meeting transcript and recording scopes",
+      "Only meetings your account can read in Microsoft Graph will sync",
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: false,

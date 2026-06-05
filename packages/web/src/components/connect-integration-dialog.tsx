@@ -103,7 +103,7 @@ export function ConnectIntegrationDialog({
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
   const isZoho = integration?.type === "zoho_crm";
-  const isMicrosoft = integration?.type === "outlook";
+  const isMicrosoft = integration?.type === "outlook" || integration?.type === "teams";
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -361,7 +361,7 @@ export function ConnectIntegrationDialog({
   };
 
   const handleConnectWithMicrosoft = () => {
-    window.open(api.microsoftOAuth.authorizeUrl(), "_self");
+    window.open(api.microsoftOAuth.authorizeUrl(integration?.type), "_self");
   };
 
   const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
@@ -548,7 +548,7 @@ export function ConnectIntegrationDialog({
                 Connect {integration.name}
               </DialogTitle>
               <DialogDescription>
-                Sign in with your Microsoft account to authorize read-only access to your mailbox.
+                Sign in with your Microsoft account to authorize read-only access to {integration.name}.
               </DialogDescription>
             </DialogHeader>
 
@@ -560,7 +560,7 @@ export function ConnectIntegrationDialog({
 
             {isOAuthConfigured ? (
               <Button size="lg" className="w-full gap-2" onClick={handleConnectWithMicrosoft}>
-                <ConnectorLogo type="outlook" size={16} className="text-white" />
+                <ConnectorLogo type={integration.type} size={16} className="text-white" />
                 Connect with Microsoft
               </Button>
             ) : (

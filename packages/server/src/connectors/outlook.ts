@@ -2,25 +2,38 @@ import type { Logger } from "pino";
 import { emailToSyncedItem } from "./email";
 import {
   type EmailAddr,
+  type EmailFolder,
   type NormalizedEmail,
   normalizeEmailValue,
   normalizeHeaderMap,
   shouldSuppressEmail,
   updateReciprocitySet,
 } from "./email";
+import {
+  MicrosoftGraphError,
+  createMicrosoftGraphClient,
+  ensureValidMicrosoftToken,
+  isMicrosoftTokenExpired,
+  refreshMicrosoftTokens,
+} from "./microsoft-graph";
 import { runWithConcurrency } from "./sync-utils";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SuppressedEmailRecord } from "./types";
+import type {
+  Connector,
+  ConnectorCredentials,
+  OAuthCredentials,
+  SourceItemRemovalRecord,
+  SuppressedEmailRecord,
+} from "./types";
 
-const GRAPH_API = "https://graph.microsoft.com/v1.0";
-const TOKEN_ENDPOINT = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
-const REQUEST_TIMEOUT_MS = 30_000;
-const MAX_RETRIES = 3;
-const RETRY_BASE_MS = 1000;
-const DEFAULT_INITIAL_DAYS = 90;
+export const OUTLOOK_MICROSOFT_SCOPE = "offline_access User.Read Mail.Read";
+
+const DEFAULT_INITIAL_DAYS = 365;
 const DEFAULT_MAX_MESSAGES = 500;
-const DEFAULT_RECIPROCITY_DAYS = 365;
-const DEFAULT_MAX_RECIPROCITY_SENT = 250;
-const MESSAGE_FETCH_CONCURRENCY = 12;
+const DEFAULT_MAX_INFLIGHT = 4;
+const PAGE_SIZE = 50;
+const RECIPROCITY_CURSOR_LIMIT = 5000;
+
+type GraphClient = ReturnType<typeof createMicrosoftGraphClient>;
 
 interface OutlookEmailAddress {
   name?: string | null;
@@ -52,14 +65,52 @@ export interface OutlookMessage {
   body?: { contentType?: string | null; content?: string | null } | null;
   bodyPreview?: string | null;
   internetMessageHeaders?: OutlookHeader[];
+  "@removed"?: { reason?: string };
 }
 
 interface OutlookListResponse<T> {
   value?: T[];
   "@odata.nextLink"?: string;
+  "@odata.deltaLink"?: string;
 }
 
-type OutlookCursor = { mode: "time"; since: string; reciprocityEmails?: string[] };
+interface OutlookCursor {
+  inboxDeltaLink?: string;
+  sentDeltaLink?: string;
+  lastSyncedAt: string;
+  syncWindowStart?: string;
+  reciprocityEmails?: string[];
+}
+
+interface FolderConfig {
+  key: EmailFolder;
+  graphId: "inbox" | "sentitems";
+  cursorKey: "inboxDeltaLink" | "sentDeltaLink";
+  dateField: "receivedDateTime" | "sentDateTime";
+}
+
+const FOLDERS: FolderConfig[] = [
+  { key: "inbox", graphId: "inbox", cursorKey: "inboxDeltaLink", dateField: "receivedDateTime" },
+  { key: "sent", graphId: "sentitems", cursorKey: "sentDeltaLink", dateField: "sentDateTime" },
+];
+
+const MESSAGE_SELECT = [
+  "id",
+  "internetMessageId",
+  "conversationId",
+  "subject",
+  "sentDateTime",
+  "receivedDateTime",
+  "webLink",
+  "from",
+  "sender",
+  "toRecipients",
+  "ccRecipients",
+  "bccRecipients",
+  "body",
+  "bodyPreview",
+  "internetMessageHeaders",
+].join(",");
 
 function assertOAuth(credentials: ConnectorCredentials): asserts credentials is OAuthCredentials {
   if (credentials.type !== "oauth") {
@@ -75,9 +126,21 @@ function parsePositiveInt(value: unknown, fallback: number, max: number): number
 function parseCursor(cursor: string | null): OutlookCursor | null {
   if (!cursor) return null;
   try {
-    const parsed = JSON.parse(cursor) as Partial<OutlookCursor>;
-    if (parsed.mode !== "time" || !parsed.since) return null;
-    return { mode: "time", since: parsed.since, reciprocityEmails: parsed.reciprocityEmails };
+    const parsed = JSON.parse(cursor) as Partial<OutlookCursor> & {
+      mode?: string;
+      since?: string;
+    };
+    if (parsed.mode === "time" && parsed.since) {
+      return { lastSyncedAt: parsed.since, reciprocityEmails: parsed.reciprocityEmails };
+    }
+    if (!parsed.lastSyncedAt) return null;
+    return {
+      inboxDeltaLink: parsed.inboxDeltaLink,
+      sentDeltaLink: parsed.sentDeltaLink,
+      lastSyncedAt: parsed.lastSyncedAt,
+      syncWindowStart: parsed.syncWindowStart,
+      reciprocityEmails: parsed.reciprocityEmails,
+    };
   } catch {
     return null;
   }
@@ -92,93 +155,7 @@ function cursorReciprocity(cursor: OutlookCursor | null): Set<string> {
 }
 
 function withReciprocity(cursor: Omit<OutlookCursor, "reciprocityEmails">, reciprocity: ReadonlySet<string>) {
-  return { ...cursor, reciprocityEmails: [...reciprocity].slice(0, 5000) };
-}
-
-function isTokenExpired(credentials: OAuthCredentials): boolean {
-  if (!credentials.expires_at) return true;
-  return new Date(credentials.expires_at).getTime() < Date.now() + 60_000;
-}
-
-async function refreshOAuthToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-  const response = await fetch(TOKEN_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: credentials.refresh_token,
-      client_id: credentials.client_id,
-      client_secret: credentials.client_secret,
-      scope: "offline_access User.Read Mail.Read",
-    }),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Microsoft token refresh failed (${response.status}): ${body}`);
-  }
-
-  const data = (await response.json()) as {
-    access_token: string;
-    refresh_token?: string;
-    expires_in: number;
-    token_type?: string;
-  };
-
-  return {
-    ...credentials,
-    access_token: data.access_token,
-    refresh_token: data.refresh_token ?? credentials.refresh_token,
-    token_type: data.token_type ?? credentials.token_type,
-    expires_at: new Date(Date.now() + data.expires_in * 1000).toISOString(),
-  };
-}
-
-async function ensureValidMicrosoftToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-  return isTokenExpired(credentials) ? refreshOAuthToken(credentials) : credentials;
-}
-
-async function graphRequest(
-  pathOrUrl: string,
-  accessToken: string,
-  opts?: { params?: Record<string, string> },
-  attempt = 1,
-): Promise<unknown> {
-  const url = pathOrUrl.startsWith("http") ? new URL(pathOrUrl) : new URL(`${GRAPH_API}${pathOrUrl}`);
-  for (const [key, value] of Object.entries(opts?.params ?? {})) {
-    url.searchParams.set(key, value);
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (err) {
-    if (attempt < MAX_RETRIES) {
-      await new Promise((resolve) => setTimeout(resolve, RETRY_BASE_MS * 2 ** (attempt - 1)));
-      return graphRequest(pathOrUrl, accessToken, opts, attempt + 1);
-    }
-    throw err;
-  }
-
-  if (response.status === 429 || response.status >= 500) {
-    if (attempt < MAX_RETRIES) {
-      const retryAfter = response.headers.get("Retry-After");
-      const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : RETRY_BASE_MS * 2 ** (attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return graphRequest(pathOrUrl, accessToken, opts, attempt + 1);
-    }
-  }
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Microsoft Graph ${url.pathname} failed (${response.status}): ${body}`);
-  }
-
-  return response.json();
+  return { ...cursor, reciprocityEmails: [...reciprocity].slice(0, RECIPROCITY_CURSOR_LIMIT) };
 }
 
 function toEmailAddr(recipient: OutlookRecipient | null | undefined): EmailAddr | null {
@@ -201,12 +178,15 @@ function normalizeDate(value: string | null | undefined): string | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
-function fallbackMessageId(message: OutlookMessage): string {
-  return `outlook:${message.id}`;
-}
-
-export function toNormalizedOutlookEmail(message: OutlookMessage, ownerEmail: string | null): NormalizedEmail | null {
+export function toNormalizedOutlookEmail(
+  message: OutlookMessage,
+  ownerEmail: string | null,
+  folder: EmailFolder,
+): NormalizedEmail | null {
   if (!message.id) return null;
+  const providerMessageId = message.internetMessageId?.trim();
+  if (!providerMessageId) return null;
+
   const from = toEmailAddr(message.from) ?? toEmailAddr(message.sender);
   if (!from) return null;
 
@@ -215,115 +195,208 @@ export function toNormalizedOutlookEmail(message: OutlookMessage, ownerEmail: st
   const headers = normalizeHeaderMap(
     (message.internetMessageHeaders ?? []).map((header) => [header.name ?? "", header.value ?? ""]),
   );
-  const owner = normalizeEmailValue(ownerEmail);
-  const fromOwner = Boolean(owner && normalizeEmailValue(from.email) === owner);
 
   return {
-    providerMessageId: message.internetMessageId?.trim() || fallbackMessageId(message),
+    providerMessageId,
     providerFileId: message.id,
     threadId: message.conversationId ?? null,
     subject: message.subject ?? null,
-    sentAt: normalizeDate(message.sentDateTime ?? message.receivedDateTime),
+    sentAt: normalizeDate(
+      folder === "sent"
+        ? (message.sentDateTime ?? message.receivedDateTime)
+        : (message.receivedDateTime ?? message.sentDateTime),
+    ),
     from,
     to: toEmailAddrs(message.toRecipients),
     cc: toEmailAddrs(message.ccRecipients),
     bcc: toEmailAddrs(message.bccRecipients),
     headers,
     bodyHtml: bodyType === "html" ? bodyContent : null,
-    bodyText: bodyType !== "html" ? (bodyContent ?? message.bodyPreview ?? null) : (message.bodyPreview ?? null),
+    bodyText: bodyType === "html" ? (message.bodyPreview ?? null) : (bodyContent ?? message.bodyPreview ?? null),
     providerUrl: message.webLink ?? null,
-    ownerEmail: owner,
-    folder: fromOwner ? "sent" : "inbox",
+    ownerEmail: normalizeEmailValue(ownerEmail),
+    folder,
   };
 }
 
-async function listMessages(
-  accessToken: string,
-  path: string,
-  params: Record<string, string>,
-  maxMessages: number,
-): Promise<OutlookMessage[]> {
-  const messages: OutlookMessage[] = [];
-  let nextUrl: string | undefined;
-  do {
-    const result = (await graphRequest(
-      nextUrl ?? path,
-      accessToken,
-      nextUrl ? undefined : { params },
-    )) as OutlookListResponse<OutlookMessage>;
-    messages.push(...(result.value ?? []));
-    nextUrl = result["@odata.nextLink"];
-  } while (nextUrl && messages.length < maxMessages);
-  return messages.slice(0, maxMessages);
+function hasFullMessageFields(message: OutlookMessage): boolean {
+  return Boolean(message.body && message.internetMessageHeaders !== undefined);
 }
 
-async function getMessage(accessToken: string, id: string): Promise<OutlookMessage> {
-  const select = [
-    "id",
-    "internetMessageId",
-    "conversationId",
-    "subject",
-    "sentDateTime",
-    "receivedDateTime",
-    "webLink",
-    "from",
-    "sender",
-    "toRecipients",
-    "ccRecipients",
-    "bccRecipients",
-    "body",
-    "bodyPreview",
-    "internetMessageHeaders",
-  ].join(",");
-  return (await graphRequest(`/me/messages/${encodeURIComponent(id)}`, accessToken, {
-    params: { $select: select },
-  })) as OutlookMessage;
+async function getMessage(graph: GraphClient, id: string): Promise<OutlookMessage> {
+  return graph.request<OutlookMessage>(`/me/messages/${encodeURIComponent(id)}`, {
+    params: { $select: MESSAGE_SELECT },
+  });
 }
 
 async function getNormalizedMessages(
-  accessToken: string,
+  graph: GraphClient,
   messages: OutlookMessage[],
   ownerEmail: string | null,
+  folder: EmailFolder,
+  maxInflight: number,
   logger: Logger,
+  onEmailSuppressed: ((record: SuppressedEmailRecord) => Promise<void>) | undefined,
 ): Promise<NormalizedEmail[]> {
   const normalized: Array<NormalizedEmail | null> = new Array(messages.length).fill(null);
   await runWithConcurrency(
     messages.map((message, index) => ({ message, index })),
-    MESSAGE_FETCH_CONCURRENCY,
+    maxInflight,
     async ({ message, index }) => {
       try {
-        const full =
-          message.body && message.internetMessageHeaders ? message : await getMessage(accessToken, message.id);
-        normalized[index] = toNormalizedOutlookEmail(full, ownerEmail);
+        const full = hasFullMessageFields(message) ? message : await getMessage(graph, message.id);
+        if (!full.internetMessageId?.trim()) {
+          logger.warn({ providerFileId: full.id, folder }, "Skipping Outlook message without internetMessageId");
+          await onEmailSuppressed?.({
+            providerFileId: full.id,
+            providerMessageId: null,
+            threadId: full.conversationId ?? null,
+            reason: "missing_internet_message_id",
+          });
+          return;
+        }
+        normalized[index] = toNormalizedOutlookEmail(full, ownerEmail, folder);
       } catch (err) {
-        logger.warn({ err, messageId: message.id }, "Failed to fetch Outlook message");
+        logger.warn({ err, providerFileId: message.id, folder }, "Failed to fetch Outlook message");
       }
     },
   );
   return normalized.filter((message): message is NormalizedEmail => Boolean(message));
 }
 
-async function loadRecentSentMessages(
-  accessToken: string,
-  ownerEmail: string | null,
-  scopeConfig: Record<string, unknown>,
+async function listFolderMessages(
+  graph: GraphClient,
+  folder: FolderConfig,
+  since: string,
+  maxMessages: number,
+): Promise<OutlookMessage[]> {
+  const messages: OutlookMessage[] = [];
+  let nextUrl: string | undefined;
+  do {
+    const result = await graph.request<OutlookListResponse<OutlookMessage>>(
+      nextUrl ?? `/me/mailFolders/${folder.graphId}/messages`,
+      nextUrl
+        ? undefined
+        : {
+            params: {
+              $top: String(PAGE_SIZE),
+              $filter: `${folder.dateField} ge ${since}`,
+              $orderby: `${folder.dateField} desc`,
+              $select: MESSAGE_SELECT,
+            },
+          },
+    );
+    messages.push(...(result.value ?? []));
+    nextUrl = result["@odata.nextLink"];
+  } while (nextUrl && messages.length < maxMessages);
+  return messages.slice(0, maxMessages);
+}
+
+async function readFolderDelta(
+  graph: GraphClient,
+  folder: FolderConfig,
+  deltaLink: string,
+  maxMessages: number,
+): Promise<{ messages: OutlookMessage[]; removedProviderFileIds: string[]; cursorLink: string | null }> {
+  const messages: OutlookMessage[] = [];
+  const removedProviderFileIds: string[] = [];
+  let nextUrl: string | undefined = deltaLink;
+  let cursorLink: string | null = null;
+
+  while (nextUrl && messages.length < maxMessages) {
+    const result: OutlookListResponse<OutlookMessage> =
+      await graph.request<OutlookListResponse<OutlookMessage>>(nextUrl);
+    for (const message of result.value ?? []) {
+      if (message["@removed"]) {
+        if (message.id) removedProviderFileIds.push(message.id);
+      } else {
+        messages.push(message);
+      }
+    }
+    cursorLink = result["@odata.deltaLink"] ?? null;
+    nextUrl = result["@odata.nextLink"];
+  }
+
+  return {
+    messages: messages.slice(0, maxMessages),
+    removedProviderFileIds,
+    cursorLink: cursorLink ?? nextUrl ?? null,
+  };
+}
+
+async function establishFolderDeltaLink(graph: GraphClient, folder: FolderConfig): Promise<string | null> {
+  let nextUrl: string | undefined;
+  do {
+    const result = await graph.request<OutlookListResponse<OutlookMessage>>(
+      nextUrl ?? `/me/mailFolders/${folder.graphId}/messages/delta`,
+      nextUrl
+        ? undefined
+        : {
+            params: {
+              $top: String(PAGE_SIZE),
+              $select: "id",
+            },
+          },
+    );
+    if (result["@odata.deltaLink"]) return result["@odata.deltaLink"];
+    nextUrl = result["@odata.nextLink"];
+  } while (nextUrl);
+  return null;
+}
+
+async function syncFolder(
+  graph: GraphClient,
+  folder: FolderConfig,
+  cursor: OutlookCursor | null,
+  since: string,
+  maxMessages: number,
   logger: Logger,
-): Promise<NormalizedEmail[]> {
-  const days = parsePositiveInt(scopeConfig.reciprocityDays, DEFAULT_RECIPROCITY_DAYS, 3650);
-  const maxMessages = parsePositiveInt(scopeConfig.maxReciprocitySent, DEFAULT_MAX_RECIPROCITY_SENT, 2000);
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  const messages = await listMessages(
-    accessToken,
-    "/me/mailFolders/sentitems/messages",
-    {
-      $top: String(Math.min(maxMessages, 100)),
-      $orderby: "sentDateTime desc",
-      $filter: `sentDateTime ge ${since}`,
-      $select: "id,internetMessageId,conversationId,subject,sentDateTime,webLink,from,toRecipients,ccRecipients",
-    },
-    maxMessages,
-  );
-  return getNormalizedMessages(accessToken, messages, ownerEmail, logger);
+): Promise<{
+  folder: EmailFolder;
+  messages: OutlookMessage[];
+  cursorLink: string | null;
+  removedProviderFileIds: string[];
+}> {
+  const deltaLink = cursor?.[folder.cursorKey];
+  if (deltaLink) {
+    try {
+      const result = await readFolderDelta(graph, folder, deltaLink, maxMessages);
+      logRemovedMessages(folder.key, result.removedProviderFileIds, logger);
+      return {
+        folder: folder.key,
+        messages: result.messages,
+        cursorLink: result.cursorLink ?? deltaLink,
+        removedProviderFileIds: result.removedProviderFileIds,
+      };
+    } catch (err) {
+      if (!(err instanceof MicrosoftGraphError && err.status === 410)) throw err;
+      logger.warn({ err, folder: folder.key }, "Outlook delta cursor expired; falling back to bounded folder sync");
+    }
+  }
+
+  const messages = await listFolderMessages(graph, folder, since, maxMessages);
+  return {
+    folder: folder.key,
+    messages,
+    cursorLink: await establishFolderDeltaLink(graph, folder),
+    removedProviderFileIds: [],
+  };
+}
+
+function logRemovedMessages(folder: EmailFolder, providerFileIds: string[], logger: Logger): void {
+  if (providerFileIds.length === 0) return;
+  logger.info({ folder, providerFileIds, count: providerFileIds.length }, "Outlook removal events observed");
+}
+
+async function emitWindowShrinkRemoval(
+  cursor: OutlookCursor | null,
+  windowStart: string,
+  onSourceItemRemoved: ((record: SourceItemRemovalRecord) => Promise<void>) | undefined,
+): Promise<void> {
+  if (!cursor?.syncWindowStart || new Date(windowStart).getTime() <= new Date(cursor.syncWindowStart).getTime()) {
+    return;
+  }
+  await onSourceItemRemoved?.({ sourceCreatedBefore: windowStart, reason: "outlook_sync_window_shrunk" });
 }
 
 function mergeReciprocity(
@@ -361,17 +434,17 @@ async function* emitFilteredEmails(
 }
 
 async function getMe(
-  accessToken: string,
+  graph: GraphClient,
 ): Promise<{ id?: string; mail?: string | null; userPrincipalName?: string | null }> {
-  return (await graphRequest("/me", accessToken, {
+  return graph.request<{ id?: string; mail?: string | null; userPrincipalName?: string | null }>("/me", {
     params: { $select: "id,mail,userPrincipalName" },
-  })) as { id?: string; mail?: string | null; userPrincipalName?: string | null };
+  });
 }
 
 export async function validateOutlookCredentials(credentials: ConnectorCredentials): Promise<void> {
   assertOAuth(credentials);
-  const valid = await ensureValidMicrosoftToken(credentials);
-  await getMe(valid.access_token);
+  const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+  await getMe(createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE }));
 }
 
 export function createOutlookConnector(): Connector {
@@ -381,6 +454,7 @@ export function createOutlookConnector(): Connector {
     type: "outlook",
     perUserAuth: true,
     requiresOAuthClientSetup: false,
+    promotableFileTypes: [],
     emitsCorrespondentFacts: true,
 
     validateCredentials: validateOutlookCredentials,
@@ -393,59 +467,96 @@ export function createOutlookConnector(): Connector {
       logger,
       ownerEmail,
       onEmailSuppressed,
+      onSourceItemRemoved,
     }) {
       assertOAuth(credentials);
-      const valid = await ensureValidMicrosoftToken(credentials);
+      const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE });
       const parsedCursor = parseCursor(cursor);
       const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, 3650);
       const maxMessages = parsePositiveInt(scopeConfig.maxMessages, DEFAULT_MAX_MESSAGES, 5000);
-      const since = parsedCursor?.since ?? new Date(Date.now() - initialDays * 24 * 60 * 60 * 1000).toISOString();
-      const select = [
-        "id",
-        "internetMessageId",
-        "conversationId",
-        "subject",
-        "sentDateTime",
-        "receivedDateTime",
-        "webLink",
-        "from",
-        "sender",
-        "toRecipients",
-        "ccRecipients",
-        "bodyPreview",
-      ].join(",");
-      const messages = await listMessages(
-        valid.access_token,
-        "/me/messages",
-        {
-          $top: String(Math.min(maxMessages, 100)),
-          $orderby: "receivedDateTime desc",
-          $filter: `receivedDateTime ge ${since}`,
-          $select: select,
-        },
-        maxMessages,
-      );
-      const emails = await getNormalizedMessages(valid.access_token, messages, ownerEmail ?? null, logger);
-      const recentSent = parsedCursor
-        ? []
-        : await loadRecentSentMessages(valid.access_token, ownerEmail ?? null, scopeConfig, logger);
-      const reciprocity = mergeReciprocity(cursorReciprocity(parsedCursor), emails, recentSent);
-      const maxSeen = emails
-        .map((email) => email.sentAt)
-        .filter((value): value is string => Boolean(value))
-        .sort()
-        .at(-1);
-      nextCursor = withReciprocity({ mode: "time", since: maxSeen ?? new Date().toISOString() }, reciprocity);
+      const maxInflight = parsePositiveInt(scopeConfig.maxInflight, DEFAULT_MAX_INFLIGHT, 16);
+      const windowStart = new Date(Date.now() - initialDays * 24 * 60 * 60 * 1000).toISOString();
+      const since = parsedCursor?.lastSyncedAt ?? windowStart;
+      await emitWindowShrinkRemoval(parsedCursor, windowStart, onSourceItemRemoved);
+      nextCursor = null;
+
+      const folderResults: Array<{
+        folder: EmailFolder;
+        messages: OutlookMessage[];
+        cursorLink: string | null;
+        removedProviderFileIds: string[];
+      }> = [];
+      await runWithConcurrency(FOLDERS, Math.min(maxInflight, FOLDERS.length), async (folder) => {
+        folderResults.push(await syncFolder(graph, folder, parsedCursor, since, maxMessages, logger));
+      });
+      folderResults.sort((a, b) => (a.folder === b.folder ? 0 : a.folder === "inbox" ? -1 : 1));
+
+      for (const result of folderResults) {
+        for (const providerFileId of result.removedProviderFileIds) {
+          await onSourceItemRemoved?.({ providerFileId, reason: `outlook_${result.folder}_removed` });
+        }
+      }
+
+      const emails: NormalizedEmail[] = [];
+      for (const result of folderResults) {
+        emails.push(
+          ...(await getNormalizedMessages(
+            graph,
+            result.messages,
+            ownerEmail ?? null,
+            result.folder,
+            maxInflight,
+            logger,
+            onEmailSuppressed,
+          )),
+        );
+      }
+
+      const reciprocity = mergeReciprocity(cursorReciprocity(parsedCursor), emails);
+      const cursorParts: Omit<OutlookCursor, "reciprocityEmails"> = {
+        lastSyncedAt: new Date().toISOString(),
+        syncWindowStart: windowStart,
+        inboxDeltaLink:
+          folderResults.find((result) => result.folder === "inbox")?.cursorLink ?? parsedCursor?.inboxDeltaLink,
+        sentDeltaLink:
+          folderResults.find((result) => result.folder === "sent")?.cursorLink ?? parsedCursor?.sentDeltaLink,
+      };
+      nextCursor = withReciprocity(cursorParts, reciprocity);
 
       yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
     },
 
-    async getCursor() {
-      return nextCursor ? serializeCursor(nextCursor) : null;
+    async getCursor({ credentials, currentCursor, logger }) {
+      assertOAuth(credentials);
+      if (nextCursor) return serializeCursor(nextCursor);
+
+      const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const parsedCursor = parseCursor(currentCursor);
+      const cursorParts: Omit<OutlookCursor, "reciprocityEmails"> = {
+        lastSyncedAt: parsedCursor?.lastSyncedAt ?? new Date().toISOString(),
+        syncWindowStart: parsedCursor?.syncWindowStart,
+        inboxDeltaLink: parsedCursor?.inboxDeltaLink,
+        sentDeltaLink: parsedCursor?.sentDeltaLink,
+      };
+
+      await runWithConcurrency(FOLDERS, FOLDERS.length, async (folder) => {
+        if (cursorParts[folder.cursorKey]) return;
+        try {
+          cursorParts[folder.cursorKey] = (await establishFolderDeltaLink(graph, folder)) ?? undefined;
+        } catch (err) {
+          logger.warn({ err, folder: folder.key }, "Failed to establish Outlook delta cursor");
+        }
+      });
+
+      return serializeCursor(withReciprocity(cursorParts, cursorReciprocity(parsedCursor)));
     },
 
     async refreshTokens(credentials) {
-      return isTokenExpired(credentials) ? refreshOAuthToken(credentials) : null;
+      return isMicrosoftTokenExpired(credentials)
+        ? refreshMicrosoftTokens(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE })
+        : null;
     },
   };
 }

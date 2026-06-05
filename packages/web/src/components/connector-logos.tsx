@@ -62,6 +62,22 @@ export function OutlookLogo({ size = 16, className, style }: LogoProps) {
   );
 }
 
+export function TeamsLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M10.5 4.5h7A2.5 2.5 0 0 1 20 7v1.25h1.25A1.75 1.75 0 0 1 23 10v3.5A4.5 4.5 0 0 1 18.5 18H18a4.5 4.5 0 0 1-4.5 4.5h-3A2.5 2.5 0 0 1 8 20v-2H3.5A2.5 2.5 0 0 1 1 15.5v-7A2.5 2.5 0 0 1 3.5 6H8.1a2.5 2.5 0 0 1 2.4-1.5ZM10 6v12h3.5A2.5 2.5 0 0 0 16 15.5V7a.5.5 0 0 0-.5-.5H10Zm8 4v5.5c0 .17-.01.34-.03.5h.53A2.5 2.5 0 0 0 21 13.5V10h-3ZM4 10v2h1.7v4h2.1v-4h1.7v-2H4Zm14-3v1.25h1.5V7a.5.5 0 0 0-.5-.5h-1.05c.03.16.05.33.05.5Z" />
+    </svg>
+  );
+}
+
 export function ClickUpLogo({ size = 16, className, style }: LogoProps) {
   return (
     <svg
@@ -146,6 +162,8 @@ export function ConnectorLogo({
       return <GmailLogo {...props} />;
     case "outlook":
       return <OutlookLogo {...props} />;
+    case "teams":
+      return <TeamsLogo {...props} />;
     case "clickup":
       return <ClickUpLogo {...props} />;
     case "notion":

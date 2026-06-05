@@ -22,6 +22,15 @@ export interface ReconcileConnectorSyncParams {
   logger: Logger;
 }
 
+export interface RemoveConnectorSourceItemsParams {
+  db: Kysely<DB>;
+  connectorConfigId: string;
+  connectorType: ConnectorType;
+  providerFileIds?: string[];
+  providerMessageIds?: string[];
+  sourceCreatedBefore?: string;
+}
+
 /**
  * Reconcile stale facts and archive files missing from a full connector sync.
  * A large stale ratio is treated as a probable adapter outage or partial API
@@ -80,6 +89,77 @@ export async function reconcileConnectorSync({
   }
 
   return { itemsArchived, affectedIndexedFileIds: reconcileResult.affectedIndexedFileIds };
+}
+
+export async function removeConnectorSourceItems({
+  db,
+  connectorConfigId,
+  connectorType,
+  providerFileIds = [],
+  providerMessageIds = [],
+  sourceCreatedBefore,
+}: RemoveConnectorSourceItemsParams): Promise<{ itemsDeleted: number; affectedIndexedFileIds: string[] }> {
+  const fileIdSet = new Set<string>();
+
+  if (providerFileIds.length > 0) {
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("connector_config_id", "=", connectorConfigId)
+      .where("provider_file_id", "in", providerFileIds)
+      .execute();
+    for (const row of rows) fileIdSet.add(row.id);
+  }
+
+  if (providerMessageIds.length > 0) {
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("connector_config_id", "=", connectorConfigId)
+      .where("provider_message_id", "in", providerMessageIds)
+      .execute();
+    for (const row of rows) fileIdSet.add(row.id);
+  }
+
+  if (sourceCreatedBefore) {
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("connector_config_id", "=", connectorConfigId)
+      .where("source_created_at", "<", sourceCreatedBefore)
+      .execute();
+    for (const row of rows) fileIdSet.add(row.id);
+  }
+
+  const indexedFileIds = [...fileIdSet];
+  if (indexedFileIds.length === 0) return { itemsDeleted: 0, affectedIndexedFileIds: [] };
+
+  await db.transaction().execute(async (trx) => {
+    const factRows = await trx
+      .selectFrom("indexed_file_facts")
+      .select("id")
+      .where("indexed_file_id", "in", indexedFileIds)
+      .where("deleted_at", "is", null)
+      .execute();
+    const factIds = factRows.map((row) => row.id);
+
+    if (factIds.length > 0) {
+      await cleanupRelationshipEvidenceForFacts(trx as unknown as Kysely<DB>, factIds);
+      await cleanupEmptyRelationships(trx as unknown as Kysely<DB>);
+      const now = new Date().toISOString();
+      await trx
+        .updateTable("indexed_file_facts")
+        .set({ indexed_file_id: null, deleted_at: now, materialized_at: null, updated_at: now })
+        .where("id", "in", factIds)
+        .execute();
+    }
+
+    await deleteMaterializedFactMentions(trx as unknown as Kysely<DB>, connectorType, indexedFileIds);
+    await trx.deleteFrom("entity_mentions").where("indexed_file_id", "in", indexedFileIds).execute();
+    await trx.deleteFrom("indexed_files").where("id", "in", indexedFileIds).execute();
+  });
+
+  return { itemsDeleted: indexedFileIds.length, affectedIndexedFileIds: indexedFileIds };
 }
 
 async function deleteMaterializedFactMentions(

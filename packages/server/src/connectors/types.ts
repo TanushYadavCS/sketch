@@ -12,6 +12,7 @@ export type ConnectorType =
   | "google_drive"
   | "gmail"
   | "outlook"
+  | "teams"
   | "clickup"
   | "notion"
   | "linear"
@@ -38,6 +39,8 @@ export interface OAuthCredentials {
   expires_at?: string;
   client_id: string;
   client_secret: string;
+  scope?: string;
+  tenant?: string;
   accounts_server?: string;
   api_domain?: string;
   region?: string;
@@ -263,6 +266,13 @@ export interface SuppressedEmailRecord {
   reason: string;
 }
 
+export interface SourceItemRemovalRecord {
+  providerFileId?: string;
+  providerMessageId?: string | null;
+  sourceCreatedBefore?: string;
+  reason: string;
+}
+
 /**
  * Base interface all connectors must implement.
  */
@@ -332,6 +342,7 @@ export interface Connector {
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;
+    onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void>;
   }): AsyncGenerator<SyncedItem>;
 
   /** Return the new sync cursor after a sync run. */

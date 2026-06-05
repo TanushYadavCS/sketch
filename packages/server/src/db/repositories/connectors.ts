@@ -384,13 +384,22 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .where("connector_config_id", "=", data.connectorConfigId)
             .where("provider_message_id", "=", data.providerMessageId)
             .executeTakeFirst()
-        : await db
-            .selectFrom("indexed_files")
-            .selectAll()
-            .where("source", "=", data.source)
-            .where("provider_file_id", "=", data.providerFileId)
-            .where("provider_message_id", "is", null)
-            .executeTakeFirst();
+        : data.source === "teams"
+          ? await db
+              .selectFrom("indexed_files")
+              .selectAll()
+              .where("connector_config_id", "=", data.connectorConfigId)
+              .where("source", "=", data.source)
+              .where("provider_file_id", "=", data.providerFileId)
+              .where("provider_message_id", "is", null)
+              .executeTakeFirst()
+          : await db
+              .selectFrom("indexed_files")
+              .selectAll()
+              .where("source", "=", data.source)
+              .where("provider_file_id", "=", data.providerFileId)
+              .where("provider_message_id", "is", null)
+              .executeTakeFirst();
 
       if (existing) {
         const contentChanged = data.contentHash !== existing.content_hash;
