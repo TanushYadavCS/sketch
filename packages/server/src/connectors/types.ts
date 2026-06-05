@@ -289,7 +289,7 @@ export interface Connector {
   /**
    * Whether an admin must populate provider Client ID/Secret in `settings`
    * before any user can authorize. Used to surface a "Ask your admin to
-   * configure X first" empty state. Currently only Google Drive.
+   * configure X first" empty state.
    */
   readonly requiresOAuthClientSetup: boolean;
 

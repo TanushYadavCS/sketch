@@ -558,7 +558,7 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
   return {
     type: "teams",
     perUserAuth: true,
-    requiresOAuthClientSetup: false,
+    requiresOAuthClientSetup: true,
     promotableFileTypes: [],
 
     validateCredentials: validateTeamsCredentials,

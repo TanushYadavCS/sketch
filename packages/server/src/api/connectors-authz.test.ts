@@ -434,11 +434,15 @@ describe("Connectors API — authorization", () => {
 
     it("each row carries perUserAuth + requiresOAuthClientSetup", async () => {
       await insertConfig(db, { connectorType: "google_drive", createdBy: adminId });
+      await insertConfig(db, { connectorType: "teams", createdBy: memberId });
       const res = await app.request("/api/connectors", { headers: { Cookie: adminCookie } });
       const body = await res.json();
       const drive = body.connectors.find((c: { connectorType: string }) => c.connectorType === "google_drive");
+      const teams = body.connectors.find((c: { connectorType: string }) => c.connectorType === "teams");
       expect(drive.perUserAuth).toBe(true);
       expect(drive.requiresOAuthClientSetup).toBe(true);
+      expect(teams.perUserAuth).toBe(true);
+      expect(teams.requiresOAuthClientSetup).toBe(true);
     });
   });
 
@@ -459,6 +463,31 @@ describe("Connectors API — authorization", () => {
         body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
       });
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe("OAuth /api/oauth/microsoft/config — admin only", () => {
+    it("member PUT /api/oauth/microsoft/config → 403", async () => {
+      const res = await app.request("/api/oauth/microsoft/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("admin PUT /api/oauth/microsoft/config → 200", async () => {
+      const res = await app.request("/api/oauth/microsoft/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(200);
+
+      const status = await app.request("/api/oauth/microsoft/status", { headers: { Cookie: adminCookie } });
+      const body = await status.json();
+      expect(body.configured).toBe(true);
+      expect(body.clientId).toBe("cid");
     });
   });
 
@@ -502,20 +531,27 @@ describe("Connectors API — authorization", () => {
   });
 
   describe("OAuth /api/oauth/microsoft/authorize — connector-aware scopes", () => {
+    it("member starts Microsoft OAuth before admin configured client → 412 OAUTH_CLIENT_NOT_CONFIGURED", async () => {
+      const res = await app.request("/api/oauth/microsoft/authorize?connector=teams", {
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(412);
+      const body = await res.json();
+      expect(body.error.code).toBe("OAUTH_CLIENT_NOT_CONFIGURED");
+      expect(body.error.connector).toBe("teams");
+    });
+
     it("Microsoft OAuth callback accepts provider redirects without an active session", async () => {
       const res = await app.request("/api/oauth/microsoft/callback", { redirect: "manual" });
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toContain("/files?oauth=error&connector=outlook&reason=missing_params");
     });
 
-    it("Teams OAuth uses Teams scopes and connector-aware state", async () => {
-      const microsoftApp = createApp(
-        db,
-        createTestConfig({ MICROSOFT_CLIENT_ID: "cid", MICROSOFT_CLIENT_SECRET: "csec" }),
-        { logger },
-      );
+    it("Teams OAuth uses saved Microsoft client settings, Teams scopes, and connector-aware state", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ microsoftOauthClientId: "cid", microsoftOauthClientSecret: "csec" });
 
-      const res = await microsoftApp.request("/api/oauth/microsoft/authorize?connector=teams", {
+      const res = await app.request("/api/oauth/microsoft/authorize?connector=teams", {
         headers: { Cookie: memberCookie },
         redirect: "manual",
       });

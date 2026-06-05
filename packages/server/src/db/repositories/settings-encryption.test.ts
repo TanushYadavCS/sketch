@@ -130,6 +130,18 @@ describe("Settings repository encryption", () => {
       expect(row?.google_oauth_client_secret).toBe("google-secret");
     });
 
+    it("stores microsoft_oauth_client_secret encrypted and decrypts on get()", async () => {
+      const settings = createSettingsRepository(db, TEST_KEY);
+      await settings.create(SEED);
+      await settings.update({ microsoftOauthClientSecret: "microsoft-secret" });
+
+      const raw = await rawField(db, "microsoft_oauth_client_secret");
+      expect((raw as string).startsWith("enc:")).toBe(true);
+
+      const row = await settings.get();
+      expect(row?.microsoft_oauth_client_secret).toBe("microsoft-secret");
+    });
+
     it("stores jwt_secret encrypted at create() time and decrypts on get()", async () => {
       const settings = createSettingsRepository(db, TEST_KEY);
       await settings.create(SEED);

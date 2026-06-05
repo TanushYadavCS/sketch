@@ -1341,6 +1341,12 @@ export const api = {
         "/api/oauth/microsoft/status",
       );
     },
+    configure(clientId: string, clientSecret: string) {
+      return request<{ success: boolean }>("/api/oauth/microsoft/config", {
+        method: "PUT",
+        body: JSON.stringify({ clientId, clientSecret }),
+      });
+    },
     authorizeUrl(connectorType?: string) {
       return connectorType
         ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`

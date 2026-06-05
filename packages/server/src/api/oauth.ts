@@ -1,9 +1,8 @@
 /**
- * OAuth redirect flow for per-user Google Drive connections.
+ * OAuth redirect flows for file connectors.
  *
- * Two endpoints:
- * - GET /google/authorize — redirects user to Google's consent screen
- * - GET /google/callback — Google redirects here with auth code, exchanges for tokens
+ * Each provider exposes an authorize endpoint that redirects the user to the
+ * provider consent screen and a callback endpoint that exchanges the auth code.
  *
  * The authorize endpoint encodes userId + nonce in the state param.
  * The callback verifies the nonce, exchanges the code, saves tokens,
@@ -42,7 +41,7 @@ type IdentityRepo = ReturnType<typeof createProviderIdentityRepository>;
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
-const googleConfigSchema = z.object({
+const oauthClientConfigSchema = z.object({
   clientId: z.string().min(1, "clientId is required"),
   clientSecret: z.string().min(1, "clientSecret is required"),
 });
@@ -95,6 +94,17 @@ function microsoftScopesFor(connectorType: ConnectorType): string {
 
 function microsoftConnectorName(connectorType: ConnectorType): string {
   return connectorType === "teams" ? "Microsoft Teams" : "Outlook";
+}
+
+function getMicrosoftOAuthConfig(
+  config: { microsoft_oauth_client_id?: string | null; microsoft_oauth_client_secret?: string | null } | null,
+  fallback: { clientId?: string; clientSecret?: string; tenant: string },
+) {
+  return {
+    clientId: config?.microsoft_oauth_client_id?.trim() || fallback.clientId?.trim(),
+    clientSecret: config?.microsoft_oauth_client_secret?.trim() || fallback.clientSecret?.trim(),
+    tenant: fallback.tenant,
+  };
 }
 
 function parseGoogleState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
@@ -367,13 +377,19 @@ export function oauthRoutes(
   routes.get("/microsoft/authorize", async (c) => {
     const connectorType = microsoftConnectorFromQuery(c.req.query("connector"));
     const connectorName = microsoftConnectorName(connectorType);
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
+      tenant: microsoftTenant,
+    });
 
-    if (!microsoftClientId || !microsoftClientSecret) {
+    if (!clientId || !clientSecret) {
       return c.json(
         {
           error: {
             code: "OAUTH_CLIENT_NOT_CONFIGURED",
-            message: `Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET before connecting ${connectorName}`,
+            message: `Ask your admin to configure ${connectorName} first`,
             connector: connectorType,
           },
         },
@@ -409,7 +425,7 @@ export function oauthRoutes(
     const origin = baseUrl ?? new URL(c.req.url).origin;
     const redirectUri = `${origin}/api/oauth/microsoft/callback`;
     const params = new URLSearchParams({
-      client_id: microsoftClientId,
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: "code",
       response_mode: "query",
@@ -417,7 +433,7 @@ export function oauthRoutes(
       state,
     });
 
-    return c.redirect(`${microsoftAuthorizeEndpoint(microsoftTenant)}?${params.toString()}`);
+    return c.redirect(`${microsoftAuthorizeEndpoint(tenant)}?${params.toString()}`);
   });
 
   routes.get("/microsoft/callback", async (c) => {
@@ -449,7 +465,14 @@ export function oauthRoutes(
     }
     pendingStates.delete(nonce);
 
-    if (!microsoftClientId || !microsoftClientSecret) {
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
+      tenant: microsoftTenant,
+    });
+
+    if (!clientId || !clientSecret) {
       return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=not_configured`);
     }
 
@@ -465,13 +488,13 @@ export function oauthRoutes(
         );
       }
 
-      const tokenRes = await fetch(microsoftTokenEndpoint(microsoftTenant), {
+      const tokenRes = await fetch(microsoftTokenEndpoint(tenant), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           code,
-          client_id: microsoftClientId,
-          client_secret: microsoftClientSecret,
+          client_id: clientId,
+          client_secret: clientSecret,
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
           scope,
@@ -503,10 +526,10 @@ export function oauthRoutes(
         refresh_token: tokenData.refresh_token,
         token_type: tokenData.token_type,
         expires_at: expiresAt,
-        client_id: microsoftClientId,
-        client_secret: microsoftClientSecret,
+        client_id: clientId,
+        client_secret: clientSecret,
         scope,
-        tenant: microsoftTenant,
+        tenant,
       };
 
       await getConnector(connectorType).validateCredentials(oauthCreds);
@@ -549,12 +572,18 @@ export function oauthRoutes(
     }
   });
 
-  routes.get("/microsoft/status", (c) => {
-    return c.json({
-      configured: !!(microsoftClientId && microsoftClientSecret),
-      clientId: microsoftClientId ?? null,
-      baseUrl: baseUrl ?? null,
+  routes.get("/microsoft/status", async (c) => {
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
       tenant: microsoftTenant,
+    });
+    return c.json({
+      configured: !!(clientId && clientSecret),
+      clientId: clientId ?? null,
+      baseUrl: baseUrl ?? null,
+      tenant,
     });
   });
 
@@ -767,7 +796,7 @@ export function oauthRoutes(
     if (denied) return denied;
 
     const body = await c.req.json().catch(() => ({}));
-    const parsed = googleConfigSchema.safeParse(body);
+    const parsed = oauthClientConfigSchema.safeParse(body);
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
@@ -776,6 +805,26 @@ export function oauthRoutes(
     await settings.update({
       googleOauthClientId: parsed.data.clientId.trim(),
       googleOauthClientSecret: parsed.data.clientSecret.trim(),
+    });
+
+    return c.json({ success: true });
+  });
+
+  /** PUT /microsoft/config — save Microsoft OAuth client_id + client_secret. Admin-only. */
+  routes.put("/microsoft/config", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = oauthClientConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    await settings.update({
+      microsoftOauthClientId: parsed.data.clientId.trim(),
+      microsoftOauthClientSecret: parsed.data.clientSecret.trim(),
     });
 
     return c.json({ success: true });

@@ -88,6 +88,7 @@ import * as m085 from "./migrations/085-crm-activity-rollups";
 import * as m086 from "./migrations/086-orphan-entity-cleanup";
 import * as m087 from "./migrations/087-cleanup-empty-relationships-and-review";
 import * as m088 from "./migrations/088-teams-provider-file-scope";
+import * as m089 from "./migrations/089-microsoft-oauth-settings";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -180,6 +181,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "086-orphan-entity-cleanup": m086,
           "087-cleanup-empty-relationships-and-review": m087,
           "088-teams-provider-file-scope": m088,
+          "089-microsoft-oauth-settings": m089,
         };
       },
     },
