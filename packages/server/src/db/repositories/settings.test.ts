@@ -99,11 +99,13 @@ describe("Settings repository", () => {
     await settings.update({
       microsoftOauthClientId: "client-id",
       microsoftOauthClientSecret: "client-secret",
+      microsoftOauthTenant: "tenant-id",
     });
 
     const row = await settings.get();
     expect(row?.microsoft_oauth_client_id).toBe("client-id");
     expect(row?.microsoft_oauth_client_secret).toBe("client-secret");
+    expect(row?.microsoft_oauth_tenant).toBe("tenant-id");
   });
 
   it("update() allows clearing Slack and LLM credentials with null values", async () => {

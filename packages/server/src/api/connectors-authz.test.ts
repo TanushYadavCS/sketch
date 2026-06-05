@@ -471,7 +471,7 @@ describe("Connectors API — authorization", () => {
       const res = await app.request("/api/oauth/microsoft/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+        body: JSON.stringify({ clientId: "cid", clientSecret: "csec", tenant: "tenant-id" }),
       });
       expect(res.status).toBe(403);
     });
@@ -480,7 +480,7 @@ describe("Connectors API — authorization", () => {
       const res = await app.request("/api/oauth/microsoft/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: adminCookie },
-        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+        body: JSON.stringify({ clientId: "cid", clientSecret: "csec", tenant: "tenant-id" }),
       });
       expect(res.status).toBe(200);
 
@@ -488,6 +488,19 @@ describe("Connectors API — authorization", () => {
       const body = await status.json();
       expect(body.configured).toBe(true);
       expect(body.clientId).toBe("cid");
+      expect(body.tenant).toBe("tenant-id");
+    });
+
+    it("admin PUT /api/oauth/microsoft/config requires tenant", async () => {
+      const res = await app.request("/api/oauth/microsoft/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.code).toBe("VALIDATION_ERROR");
+      expect(body.error.message).toBe("tenant is required");
     });
   });
 
@@ -549,7 +562,11 @@ describe("Connectors API — authorization", () => {
 
     it("Teams OAuth uses saved Microsoft client settings, Teams scopes, and connector-aware state", async () => {
       const settings = createSettingsRepository(db);
-      await settings.update({ microsoftOauthClientId: "cid", microsoftOauthClientSecret: "csec" });
+      await settings.update({
+        microsoftOauthClientId: "cid",
+        microsoftOauthClientSecret: "csec",
+        microsoftOauthTenant: "tenant-id",
+      });
 
       const res = await app.request("/api/oauth/microsoft/authorize?connector=teams", {
         headers: { Cookie: memberCookie },
@@ -558,7 +575,7 @@ describe("Connectors API — authorization", () => {
 
       expect(res.status).toBe(302);
       const location = decodeURIComponent(res.headers.get("location") ?? "");
-      expect(location).toContain("login.microsoftonline.com/common/oauth2/v2.0/authorize");
+      expect(location).toContain("login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize");
       expect(location).toContain("OnlineMeetingTranscript.Read.All");
       expect(location).toContain("OnlineMeetingRecording.Read.All");
       expect(location).toContain("Calendars.Read");

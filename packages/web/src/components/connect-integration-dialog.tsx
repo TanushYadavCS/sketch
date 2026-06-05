@@ -169,10 +169,13 @@ export function ConnectIntegrationDialog({
     mutationFn: async () => {
       const clientId = fieldValues.client_id?.trim();
       const clientSecret = fieldValues.client_secret?.trim();
-      if (!clientId || !clientSecret) throw new Error("Client ID and Secret are required");
       if (isMicrosoft) {
-        await api.microsoftOAuth.configure(clientId, clientSecret);
+        if (!clientId || !clientSecret) throw new Error("Application (client) ID and Client Secret are required");
+        const tenant = fieldValues.tenant?.trim();
+        if (!tenant) throw new Error("Directory (tenant) ID is required");
+        await api.microsoftOAuth.configure(clientId, clientSecret, tenant);
       } else {
+        if (!clientId || !clientSecret) throw new Error("Client ID and Secret are required");
         await api.googleOAuth.configure(clientId, clientSecret);
       }
     },

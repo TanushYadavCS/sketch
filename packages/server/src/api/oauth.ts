@@ -46,6 +46,17 @@ const oauthClientConfigSchema = z.object({
   clientSecret: z.string().min(1, "clientSecret is required"),
 });
 
+const microsoftOAuthClientConfigSchema = oauthClientConfigSchema.extend({
+  tenant: z.preprocess(
+    (value) => (typeof value === "string" ? value : ""),
+    z
+      .string()
+      .trim()
+      .min(1, "tenant is required")
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/, "tenant must be a directory ID, verified domain, or tenant alias"),
+  ),
+});
+
 const ZOHO_REGIONS = ["com", "eu", "in", "com.au", "jp", "ca", "sa"] as const;
 const zohoRegionSchema = z.enum(ZOHO_REGIONS);
 
@@ -97,13 +108,27 @@ function microsoftConnectorName(connectorType: ConnectorType): string {
 }
 
 function getMicrosoftOAuthConfig(
-  config: { microsoft_oauth_client_id?: string | null; microsoft_oauth_client_secret?: string | null } | null,
+  config: {
+    microsoft_oauth_client_id?: string | null;
+    microsoft_oauth_client_secret?: string | null;
+    microsoft_oauth_tenant?: string | null;
+  } | null,
   fallback: { clientId?: string; clientSecret?: string; tenant: string },
 ) {
+  const configuredClientId = config?.microsoft_oauth_client_id?.trim();
+  const configuredClientSecret = config?.microsoft_oauth_client_secret?.trim();
+  if (configuredClientId || configuredClientSecret) {
+    return {
+      clientId: configuredClientId,
+      clientSecret: configuredClientSecret,
+      tenant: config?.microsoft_oauth_tenant?.trim(),
+    };
+  }
+
   return {
-    clientId: config?.microsoft_oauth_client_id?.trim() || fallback.clientId?.trim(),
-    clientSecret: config?.microsoft_oauth_client_secret?.trim() || fallback.clientSecret?.trim(),
-    tenant: fallback.tenant,
+    clientId: fallback.clientId?.trim(),
+    clientSecret: fallback.clientSecret?.trim(),
+    tenant: fallback.tenant.trim(),
   };
 }
 
@@ -384,7 +409,7 @@ export function oauthRoutes(
       tenant: microsoftTenant,
     });
 
-    if (!clientId || !clientSecret) {
+    if (!clientId || !clientSecret || !tenant) {
       return c.json(
         {
           error: {
@@ -472,7 +497,7 @@ export function oauthRoutes(
       tenant: microsoftTenant,
     });
 
-    if (!clientId || !clientSecret) {
+    if (!clientId || !clientSecret || !tenant) {
       return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=not_configured`);
     }
 
@@ -580,10 +605,10 @@ export function oauthRoutes(
       tenant: microsoftTenant,
     });
     return c.json({
-      configured: !!(clientId && clientSecret),
+      configured: !!(clientId && clientSecret && tenant),
       clientId: clientId ?? null,
       baseUrl: baseUrl ?? null,
-      tenant,
+      tenant: tenant ?? null,
     });
   });
 
@@ -810,13 +835,13 @@ export function oauthRoutes(
     return c.json({ success: true });
   });
 
-  /** PUT /microsoft/config — save Microsoft OAuth client_id + client_secret. Admin-only. */
+  /** PUT /microsoft/config — save Microsoft OAuth client_id, tenant, and client_secret. Admin-only. */
   routes.put("/microsoft/config", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
     const body = await c.req.json().catch(() => ({}));
-    const parsed = oauthClientConfigSchema.safeParse(body);
+    const parsed = microsoftOAuthClientConfigSchema.safeParse(body);
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
@@ -825,6 +850,7 @@ export function oauthRoutes(
     await settings.update({
       microsoftOauthClientId: parsed.data.clientId.trim(),
       microsoftOauthClientSecret: parsed.data.clientSecret.trim(),
+      microsoftOauthTenant: parsed.data.tenant,
     });
 
     return c.json({ success: true });

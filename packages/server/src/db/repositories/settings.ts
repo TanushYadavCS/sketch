@@ -141,6 +141,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         googleOauthClientSecret: string | null;
         microsoftOauthClientId: string | null;
         microsoftOauthClientSecret: string | null;
+        microsoftOauthTenant: string | null;
         geminiApiKey: string | null;
         enrichmentEnabled: number | null;
         adminCanReadAllFiles: boolean;
@@ -178,6 +179,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       if (data.microsoftOauthClientSecret !== undefined) {
         updates.microsoft_oauth_client_secret = data.microsoftOauthClientSecret;
       }
+      if (data.microsoftOauthTenant !== undefined) updates.microsoft_oauth_tenant = data.microsoftOauthTenant;
       if (data.geminiApiKey !== undefined) updates.gemini_api_key = data.geminiApiKey;
       if (data.enrichmentEnabled !== undefined) updates.enrichment_enabled = data.enrichmentEnabled;
       if (data.adminCanReadAllFiles !== undefined) updates.admin_can_read_all_files = data.adminCanReadAllFiles ? 1 : 0;

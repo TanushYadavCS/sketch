@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(85);
+      expect(logSpy).toHaveBeenCalledTimes(86);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(85);
+    expect(rows.rows).toHaveLength(86);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -139,6 +139,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[82]).toBe("087-cleanup-empty-relationships-and-review");
     expect(names[83]).toBe("088-teams-provider-file-scope");
     expect(names[84]).toBe("089-microsoft-oauth-settings");
+    expect(names[85]).toBe("090-microsoft-oauth-tenant");
   });
 
   it("creates the users table", async () => {
@@ -308,6 +309,7 @@ describe("runMigrations — full sequence", () => {
         "google_oauth_client_secret",
         "microsoft_oauth_client_id",
         "microsoft_oauth_client_secret",
+        "microsoft_oauth_tenant",
         "gemini_api_key",
       ])
       .executeTakeFirst();
@@ -318,6 +320,7 @@ describe("runMigrations — full sequence", () => {
     expect(row?.google_oauth_client_secret).toBeNull();
     expect(row?.microsoft_oauth_client_id).toBeNull();
     expect(row?.microsoft_oauth_client_secret).toBeNull();
+    expect(row?.microsoft_oauth_tenant).toBeNull();
     expect(row?.gemini_api_key).toBeNull();
   });
 
@@ -329,7 +332,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(85);
+    expect(rows.rows).toHaveLength(86);
   });
 
   it("creates entity_contact_points table", async () => {
@@ -371,6 +374,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(85);
+    expect(rows.rows).toHaveLength(86);
   });
 });
