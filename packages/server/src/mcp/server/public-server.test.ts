@@ -1,5 +1,5 @@
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateApiToken, getApiTokenDisplayPrefix, hashApiToken } from "../../auth/api-token";
 import { createApiTokenRepository } from "../../db/repositories/api-tokens";
 import { createSettingsRepository } from "../../db/repositories/settings";
@@ -84,17 +84,23 @@ describe("public MCP server", () => {
     const token = await createPat();
     const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
     const statuses: number[] = [];
+    const fixedNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
 
-    for (let i = 0; i < 61; i += 1) {
-      const res = await app.request("/mcp", {
-        method: "POST",
-        headers: {
-          ...mcpHeaders(token),
-          "x-forwarded-for": `203.0.113.${i}`,
-        },
-        body: JSON.stringify({ jsonrpc: "2.0", id: i + 1, method: "tools/list" }),
-      });
-      statuses.push(res.status);
+    try {
+      for (let i = 0; i < 61; i += 1) {
+        const res = await app.request("/mcp", {
+          method: "POST",
+          headers: {
+            ...mcpHeaders(token),
+            "x-forwarded-for": `203.0.113.${i}`,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: i + 1, method: "tools/list" }),
+        });
+        statuses.push(res.status);
+      }
+    } finally {
+      nowSpy.mockRestore();
     }
 
     expect(statuses.filter((status) => status === 200)).toHaveLength(60);
