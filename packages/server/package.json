@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx --watch src/index.ts",
+    "dev": "bash ../../scripts/with-node-version.sh tsx --watch src/index.ts",
     "build": "tsdown",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
