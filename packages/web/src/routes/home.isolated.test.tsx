@@ -2,7 +2,13 @@ import type { WorkspaceSummary } from "@/lib/api";
 import { api } from "@/lib/api";
 import { router } from "@/router";
 import { describe, expect, it, vi } from "vitest";
-import { buildSummaryTiles, buildWebChatRecents, chatTargetFromPrompt } from "./home";
+import {
+  buildSummaryTiles,
+  buildWebChatRecents,
+  chatTargetFromPrompt,
+  setPendingWebChatSubmission,
+  takePendingWebChatSubmission,
+} from "./home";
 import { indexRoute } from "./index";
 
 vi.mock("@/lib/api", () => ({
@@ -181,5 +187,21 @@ describe("chatTargetFromPrompt", () => {
       params: { conversationId: "chat-alpha" },
       search: { message: "Hi Sketch" },
     });
+  });
+
+  it("stores and consumes pending attachment submissions for the new chat", () => {
+    const attachment = {
+      name: "notes.txt",
+      path: "attachments/123-notes.txt",
+      relativePath: "attachments/123-notes.txt",
+      url: "/api/web-chat/files?path=attachments%2F123-notes.txt",
+      mediaType: "text/plain",
+      sizeBytes: 11,
+    };
+
+    setPendingWebChatSubmission("chat-alpha", { text: "Read this", attachments: [attachment] });
+
+    expect(takePendingWebChatSubmission("chat-alpha")).toEqual({ text: "Read this", attachments: [attachment] });
+    expect(takePendingWebChatSubmission("chat-alpha")).toBeNull();
   });
 });

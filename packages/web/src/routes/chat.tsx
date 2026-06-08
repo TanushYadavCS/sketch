@@ -8,7 +8,7 @@ import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { dashboardRoute } from "./dashboard";
-import { createWebChatConversationId } from "./home";
+import { createWebChatConversationId, takePendingWebChatSubmission } from "./home";
 
 type WebChatDataParts = {
   progress: {
@@ -253,10 +253,20 @@ export function ChatPage() {
   }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
 
   useEffect(() => {
-    const initialMessageKey = search.message ? `${conversationId}:${search.message}` : null;
-    if (!historyReady || !search.message || sentInitialMessage.current === initialMessageKey) return;
+    if (!historyReady) return;
+
+    const pendingSubmission = takePendingWebChatSubmission(conversationId);
+    const initialText = pendingSubmission?.text || search.message;
+    const initialAttachments = pendingSubmission?.attachments ?? [];
+    const initialMessageKey = initialText ? `${conversationId}:${initialText}` : null;
+    if (!initialText || sentInitialMessage.current === initialMessageKey) return;
     sentInitialMessage.current = initialMessageKey;
-    void chat.sendMessage(outgoingTextMessage(search.message));
+    const requestOptions = outgoingRequestOptions(initialAttachments);
+    if (requestOptions) {
+      void chat.sendMessage(outgoingTextMessage(initialText, initialAttachments), requestOptions);
+    } else {
+      void chat.sendMessage(outgoingTextMessage(initialText));
+    }
     void navigate({ to: "/chat/$conversationId", params: { conversationId }, search: {}, replace: true });
   }, [chat.sendMessage, conversationId, historyReady, navigate, search.message]);
 

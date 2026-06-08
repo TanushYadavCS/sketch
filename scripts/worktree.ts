@@ -14,7 +14,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51,23 +51,6 @@ function createWorktreeEnv(worktreeDir: string) {
   writeFileSync(targetEnv, env);
 }
 
-function linkSharedDataDir(worktreeDir: string) {
-  const sourceDataDir = resolve(MAIN_REPO, "data");
-  const targetDataDir = resolve(worktreeDir, "data");
-
-  if (!existsSync(sourceDataDir)) {
-    console.log("No data directory found in main repo; skipping shared data symlink.");
-    return;
-  }
-
-  if (existsSync(targetDataDir)) {
-    console.log("Data path already exists in worktree; leaving unchanged.");
-    return;
-  }
-
-  symlinkSync(sourceDataDir, targetDataDir, "dir");
-}
-
 function create(branch: string) {
   const worktreeDir = resolve(MAIN_REPO, "..", `sketch-${branch}`);
 
@@ -81,9 +64,6 @@ function create(branch: string) {
 
   console.log("\nCreating worktree-local .env...");
   createWorktreeEnv(worktreeDir);
-
-  console.log("Symlinking shared data directory...");
-  linkSharedDataDir(worktreeDir);
 
   console.log("Initializing .planning submodule...");
   try {

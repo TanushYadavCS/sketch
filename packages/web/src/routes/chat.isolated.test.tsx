@@ -1,5 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPage,
   buildChatThreadMessages,
@@ -9,6 +9,7 @@ import {
   titleFromChatMessages,
   validateChatSearch,
 } from "./chat";
+import { setPendingWebChatSubmission, takePendingWebChatSubmission } from "./home";
 
 const sendMessage = vi.fn();
 const setMessages = vi.fn();
@@ -53,6 +54,10 @@ vi.mock("@tanstack/react-router", async () => {
 });
 
 describe("chat route", () => {
+  afterEach(() => {
+    takePendingWebChatSubmission("chat-alpha");
+  });
+
   it("validates optional initial message search state", () => {
     expect(validateChatSearch({ message: "  Hello  " })).toEqual({ message: "Hello" });
     expect(validateChatSearch({ message: "" })).toEqual({});
@@ -252,6 +257,50 @@ describe("chat route", () => {
         text: "Plan my day",
         metadata: { createdAt: expect.any(String) },
       }),
+    );
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/chat/$conversationId",
+      params: { conversationId: "chat-alpha" },
+      search: {},
+      replace: true,
+    });
+  });
+
+  it("submits pending Home attachments after history loads", async () => {
+    sendMessage.mockClear();
+    mocks.navigate.mockClear();
+    const attachment = {
+      name: "notes.txt",
+      path: "attachments/123-notes.txt",
+      relativePath: "attachments/123-notes.txt",
+      url: "/api/web-chat/files?path=attachments%2F123-notes.txt",
+      mediaType: "text/plain",
+      sizeBytes: 11,
+    };
+    setPendingWebChatSubmission("chat-alpha", { text: "Read this", attachments: [attachment] });
+
+    render(<ChatPage />);
+
+    await waitFor(() =>
+      expect(sendMessage).toHaveBeenCalledWith(
+        {
+          metadata: { createdAt: expect.any(String) },
+          parts: [
+            { type: "text", text: "Read this" },
+            {
+              type: "data-file",
+              id: "attachment-0",
+              data: {
+                name: "notes.txt",
+                url: "/api/web-chat/files?path=attachments%2F123-notes.txt",
+                mediaType: "text/plain",
+                sizeBytes: 11,
+              },
+            },
+          ],
+        },
+        { body: { attachments: [attachment] } },
+      ),
     );
     expect(mocks.navigate).toHaveBeenCalledWith({
       to: "/chat/$conversationId",

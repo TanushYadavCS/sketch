@@ -79,6 +79,8 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const mountedRef = useRef(true);
+  const discardRecordingRef = useRef(false);
 
   useImperativeHandle(ref, () => taRef.current as HTMLTextAreaElement, []);
 
@@ -88,12 +90,22 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
 
   useEffect(() => {
     return () => {
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
+      mountedRef.current = false;
+      discardRecordingRef.current = true;
+      const mediaRecorder = mediaRecorderRef.current;
+      if (mediaRecorder) {
+        mediaRecorder.ondataavailable = null;
+        mediaRecorder.onstop = null;
+        if (mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+        }
       }
+      mediaRecorderRef.current = null;
+      chunksRef.current = [];
       for (const track of streamRef.current?.getTracks() ?? []) {
         track.stop();
       }
+      streamRef.current = null;
     };
   }, []);
 
@@ -170,19 +182,32 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current) {
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
       streamRef.current = stream;
       const mimeType = supportedRecordingMimeType();
       const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       chunksRef.current = [];
+      discardRecordingRef.current = false;
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       mediaRecorder.onstop = async () => {
+        if (discardRecordingRef.current || !mountedRef.current) {
+          chunksRef.current = [];
+          return;
+        }
         setRecording(false);
         for (const track of stream.getTracks()) track.stop();
         streamRef.current = null;
+        if (mediaRecorderRef.current === mediaRecorder) {
+          mediaRecorderRef.current = null;
+        }
         const recordingType = mediaRecorder.mimeType || mimeType || "audio/webm";
         const blob = new Blob(chunksRef.current, { type: recordingType });
+        chunksRef.current = [];
         if (blob.size === 0) {
           setVoiceError("No audio was recorded.");
           return;
@@ -192,6 +217,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
         setVoiceError(null);
         try {
           const { text } = await api.webChat.transcribe(blob, recordingFilename(recordingType));
+          if (!mountedRef.current) return;
           if (text.trim()) {
             setValue((prev) => {
               const separator = prev.trim() ? " " : "";
@@ -207,9 +233,10 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
             setVoiceError("No speech was detected.");
           }
         } catch (err) {
+          if (!mountedRef.current) return;
           setVoiceError(err instanceof Error ? err.message : "Transcription failed.");
         } finally {
-          setTranscribing(false);
+          if (mountedRef.current) setTranscribing(false);
         }
       };
       mediaRecorderRef.current = mediaRecorder;
@@ -220,7 +247,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
         track.stop();
       }
       streamRef.current = null;
-      setVoiceError(err instanceof Error ? err.message : "Microphone access failed.");
+      if (mountedRef.current) setVoiceError(err instanceof Error ? err.message : "Microphone access failed.");
     }
   }
 

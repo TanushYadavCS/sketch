@@ -90,4 +90,53 @@ describe("ChatInput", () => {
     await waitFor(() => expect(screen.getByLabelText("Message Sketch")).toHaveValue("hello transcript"));
     expect(stopTrack).toHaveBeenCalled();
   });
+
+  it("discards active recordings during unmount cleanup", async () => {
+    const user = userEvent.setup();
+    const stopTrack = vi.fn();
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: stopTrack }],
+        }),
+      },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    class FakeMediaRecorder {
+      static isTypeSupported = vi.fn((mimeType: string) => mimeType === "audio/mp4");
+      state: RecordingState = "inactive";
+      mimeType: string;
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onstop: (() => void) | null = null;
+
+      constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+        this.mimeType = options?.mimeType ?? "";
+      }
+
+      start() {
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        this.ondataavailable?.({ data: new Blob(["voice"], { type: this.mimeType }) } as BlobEvent);
+        this.onstop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+
+    const view = render(<ChatInput onSubmit={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Record voice"));
+    expect(await screen.findByPlaceholderText("Recording... click stop when done")).toBeInTheDocument();
+
+    view.unmount();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stopTrack).toHaveBeenCalled();
+  });
 });
