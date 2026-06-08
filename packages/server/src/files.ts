@@ -225,10 +225,12 @@ const MIME_EXTENSION_MAP: Record<string, string> = {
   "image/webp": "webp",
   "image/gif": "gif",
   "video/mp4": "mp4",
+  "audio/webm": "webm",
   "audio/ogg; codecs=opus": "ogg",
   "audio/mp4": "m4a",
   "audio/mpeg": "mp3",
   "application/pdf": "pdf",
+  "text/plain": "txt",
 };
 
 export function mimeToExtension(mime: string | undefined | null): string {

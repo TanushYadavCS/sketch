@@ -1,6 +1,6 @@
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatThread, type ChatThreadFile, type ChatThreadMessage } from "@/components/sketch/chat-thread";
-import { api } from "@/lib/api";
+import { type WebChatUploadedAttachment, api } from "@/lib/api";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
@@ -64,8 +64,32 @@ function createdAtFromMessage(message: WebChatMessage): string | undefined {
   return message.metadata?.createdAt?.trim() || undefined;
 }
 
-function outgoingTextMessage(text: string) {
-  return { text, metadata: { createdAt: new Date().toISOString() } };
+export function outgoingTextMessage(text: string, attachments: WebChatUploadedAttachment[] = []) {
+  const metadata = { createdAt: new Date().toISOString() };
+  if (attachments.length === 0) {
+    return { text, metadata };
+  }
+
+  return {
+    metadata,
+    parts: [
+      { type: "text" as const, text },
+      ...attachments.map((attachment, index) => ({
+        type: "data-file" as const,
+        id: `attachment-${index}`,
+        data: {
+          name: attachment.name,
+          url: attachment.url,
+          mediaType: attachment.mediaType,
+          sizeBytes: attachment.sizeBytes,
+        },
+      })),
+    ],
+  };
+}
+
+export function outgoingRequestOptions(attachments: WebChatUploadedAttachment[]) {
+  return attachments.length > 0 ? { body: { attachments } } : undefined;
 }
 
 export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadMessage[] {
@@ -259,8 +283,8 @@ export function ChatPage() {
             disabled={chatBusy}
             disabledPlaceholder="Sketch is thinking..."
             placeholder="Reply to Sketch..."
-            onSubmit={(value) => {
-              void chat.sendMessage(outgoingTextMessage(value));
+            onSubmit={(value, attachments) => {
+              void chat.sendMessage(outgoingTextMessage(value, attachments), outgoingRequestOptions(attachments));
             }}
           />
         </div>

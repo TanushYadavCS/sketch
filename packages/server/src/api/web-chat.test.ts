@@ -91,6 +91,7 @@ describe("web chat API", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await db.destroy();
     await rm(dataDir, { recursive: true, force: true });
   });
@@ -233,6 +234,148 @@ describe("web chat API", () => {
     expect(text).toContain('"mediaType":"application/pdf"');
     expect(text).toContain(`/api/web-chat/files?path=${encodeURIComponent("skills-overview.pdf")}`);
     expect(text).toContain("skills-overview.pdf");
+  });
+
+  it("uploads web chat attachments and passes workspace-local files to the agent", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("I can see the attachment."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+    const form = new FormData();
+    form.append("file", new File(["hello notes"], "notes.txt", { type: "text/plain" }));
+
+    const uploadRes = await app.request("/api/web-chat/attachments", {
+      method: "POST",
+      headers: { Cookie: cookie },
+      body: form,
+    });
+
+    expect(uploadRes.status).toBe(200);
+    const upload = (await uploadRes.json()) as {
+      name: string;
+      path: string;
+      relativePath: string;
+      url: string;
+      mediaType: string;
+      sizeBytes: number;
+    };
+    expect(upload).toMatchObject({
+      name: "notes.txt",
+      path: expect.stringMatching(/^attachments\//),
+      relativePath: expect.stringMatching(/^attachments\//),
+      url: expect.stringContaining("/api/web-chat/files?path=attachments"),
+      mediaType: "text/plain",
+      sizeBytes: 11,
+    });
+    expect(upload.path).not.toContain(dataDir);
+
+    const chatRes = await app.request("/api/web-chat?conversationId=chat-attachments", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "user-msg-attachment",
+          role: "user",
+          parts: [{ type: "text", text: "Please inspect this file" }],
+        },
+        attachments: [upload],
+      }),
+    });
+
+    expect(chatRes.status).toBe(200);
+    await chatRes.text();
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.attachments).toEqual([
+      expect.objectContaining({
+        originalName: "notes.txt",
+        mimeType: "text/plain",
+        localPath: join(dataDir, "workspaces", admin.id, upload.relativePath),
+        sizeBytes: 11,
+      }),
+    ]);
+
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-attachments"), "utf-8"),
+    ) as { messages: unknown[] };
+    expect(transcript.messages[0]).toEqual({
+      id: "user-msg-attachment",
+      role: "user",
+      createdAt: expect.any(String),
+      parts: [
+        { type: "text", text: "Please inspect this file" },
+        {
+          type: "data-file",
+          id: "attachment-0",
+          data: {
+            name: "notes.txt",
+            url: upload.url,
+            mediaType: "text/plain",
+            sizeBytes: 11,
+          },
+        },
+      ],
+    });
+  });
+
+  it("rejects web chat attachments outside the user's workspace", async () => {
+    await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "Read this",
+        attachments: [{ name: "secret.txt", relativePath: "../secret.txt", mediaType: "text/plain" }],
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toEqual({
+      error: { code: "FORBIDDEN", message: "Attachment is outside workspace" },
+    });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("transcribes uploaded voice recordings with the configured OpenRouter key and audio MIME type", async () => {
+    await seedAdmin(db);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "hello from voice" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, OPENROUTER_API_KEY: "sk-or-test" }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+    const form = new FormData();
+    form.append("file", new File(["audio bytes"], "recording.m4a", { type: "audio/mp4" }));
+
+    const res = await app.request("/api/web-chat/transcribe", {
+      method: "POST",
+      headers: { Cookie: cookie },
+      body: form,
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ text: "hello from voice" });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.Authorization).toBe("Bearer sk-or-test");
+    const requestBody = JSON.parse(String(init.body));
+    expect(requestBody.model).toBe("openai/whisper-large-v3-turbo");
+    expect(requestBody.input_audio.format).toBe("m4a");
   });
 
   it("returns the current user's persisted web chat transcript", async () => {

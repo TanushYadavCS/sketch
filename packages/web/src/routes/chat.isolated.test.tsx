@@ -4,6 +4,8 @@ import {
   ChatPage,
   buildChatThreadMessages,
   hasPendingAssistantProgress,
+  outgoingRequestOptions,
+  outgoingTextMessage,
   titleFromChatMessages,
   validateChatSearch,
 } from "./chat";
@@ -179,6 +181,35 @@ describe("chat route", () => {
         ],
       },
     ]);
+  });
+
+  it("puts uploaded attachments in the AI SDK request body and visible message parts", () => {
+    const attachment = {
+      name: "notes.txt",
+      path: "attachments/123-notes.txt",
+      relativePath: "attachments/123-notes.txt",
+      url: "/api/web-chat/files?path=attachments%2F123-notes.txt",
+      mediaType: "text/plain",
+      sizeBytes: 11,
+    };
+
+    expect(outgoingTextMessage("Read this", [attachment])).toEqual({
+      metadata: { createdAt: expect.any(String) },
+      parts: [
+        { type: "text", text: "Read this" },
+        {
+          type: "data-file",
+          id: "attachment-0",
+          data: {
+            name: "notes.txt",
+            url: "/api/web-chat/files?path=attachments%2F123-notes.txt",
+            mediaType: "text/plain",
+            sizeBytes: 11,
+          },
+        },
+      ],
+    });
+    expect(outgoingRequestOptions([attachment])).toEqual({ body: { attachments: [attachment] } });
   });
 
   it("loads persisted web chat messages into the AI SDK chat state", async () => {

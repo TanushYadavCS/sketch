@@ -22,6 +22,7 @@ export interface TranscriptionServiceDeps {
   loadSettings?: () => Promise<TranscriptionSettings | null>;
   logger: Logger;
   env?: NodeJS.ProcessEnv;
+  mimeType?: string | null;
 }
 
 export type TranscribeAudioFileResult =
@@ -102,7 +103,7 @@ export async function transcribeAudioFile(
     throw new Error("Transcription is not configured.");
   }
 
-  const result = await transcribeWithOpenRouter(audioPath, config);
+  const result = await transcribeWithOpenRouter(audioPath, config, { mimeType: deps.mimeType });
   deps.logger.info(
     {
       model: config.model,

@@ -815,6 +815,15 @@ export interface WebChatConversationSummary {
   updatedAt: string;
 }
 
+export interface WebChatUploadedAttachment {
+  name: string;
+  path: string;
+  relativePath: string;
+  url: string;
+  mediaType: string;
+  sizeBytes: number;
+}
+
 export const api = {
   webChat: {
     messages(conversationId = "default") {
@@ -828,6 +837,24 @@ export const api = {
     removeConversation(conversationId: string) {
       return request<{ success: boolean }>(`/api/web-chat/conversations/${encodeURIComponent(conversationId)}`, {
         method: "DELETE",
+      });
+    },
+    transcribe(audioBlob: Blob, filename = "recording.webm") {
+      const form = new FormData();
+      const file =
+        audioBlob instanceof File ? audioBlob : new File([audioBlob], filename, { type: audioBlob.type || undefined });
+      form.append("file", file);
+      return request<{ text: string }>("/api/web-chat/transcribe", {
+        method: "POST",
+        body: form,
+      });
+    },
+    uploadAttachment(file: File) {
+      const form = new FormData();
+      form.append("file", file);
+      return request<WebChatUploadedAttachment>("/api/web-chat/attachments", {
+        method: "POST",
+        body: form,
       });
     },
   },
