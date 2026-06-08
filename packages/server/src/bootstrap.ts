@@ -353,10 +353,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
   });
 
-  if (connect) {
-    await startSlackBotIfConfigured().catch(() => {});
-  }
-
   wireWhatsAppHandlers(whatsapp, {
     db,
     config,
@@ -413,6 +409,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 10. Start platforms
   if (connect) {
+    await startSlackBotIfConfigured().catch(() => {});
+
     const whatsappConnected = await whatsapp.start();
     if (whatsappConnected) {
       logger.info("WhatsApp connected");
