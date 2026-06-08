@@ -89,6 +89,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       discardRecordingRef.current = true;
