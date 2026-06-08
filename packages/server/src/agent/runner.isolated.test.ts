@@ -385,7 +385,9 @@ describe("runAgent", () => {
       expect(typeof capturedPrompt).toBe("string");
       expect(capturedPrompt).toContain("<attachments>");
       expect(capturedPrompt).toContain(`path="${imagePath}"`);
-      expect(capturedPrompt).toContain('hint="Use VisualAnalysis with this path to understand the image."');
+      expect(capturedPrompt).toContain(
+        'hint="Use mcp__sketch__VisualAnalysis with this path to understand the image."',
+      );
       expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]).toMatchObject({
         blockedReadPaths: [imagePath, backlogImagePath],
       });
@@ -443,7 +445,7 @@ describe("runAgent", () => {
 
       expect(typeof capturedPrompt).toBe("string");
       expect(capturedPrompt).toContain("<attachments>");
-      expect(capturedPrompt).not.toContain("Use VisualAnalysis");
+      expect(capturedPrompt).not.toContain("mcp__sketch__VisualAnalysis");
       expect(vi.mocked(createSketchMcpServer).mock.calls.at(-1)?.[0]).toMatchObject({
         visionAnalysisEnabled: false,
       });

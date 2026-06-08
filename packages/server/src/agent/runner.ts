@@ -9,7 +9,7 @@
  */
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
-import { AGENT_BUILT_IN_TOOL_NAMES } from "@sketch/shared";
+import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -196,14 +196,13 @@ export interface RunAgentParams {
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
-const VISUAL_ANALYSIS_TOOL_NAME = "mcp__sketch__VisualAnalysis";
 
 export function canUseVisualAnalysisTool(
   visionConfig: VisionConfig | null,
   agentAllowedTools?: string[] | null,
 ): boolean {
   if (!visionConfig) return false;
-  return agentAllowedTools == null || agentAllowedTools.includes(VISUAL_ANALYSIS_TOOL_NAME);
+  return agentAllowedTools == null || agentAllowedTools.includes(VISUAL_ANALYSIS_AGENT_TOOL_NAME);
 }
 
 /**

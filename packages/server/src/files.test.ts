@@ -169,7 +169,7 @@ describe("formatAttachmentsForPrompt", () => {
     );
 
     expect(result).toContain(
-      '<file name="b.png" path="/w/b.png" mime="image/png" size="2048" hint="Use VisualAnalysis with this path to understand the image." />',
+      '<file name="b.png" path="/w/b.png" mime="image/png" size="2048" hint="Use mcp__sketch__VisualAnalysis with this path to understand the image." />',
     );
     expect(result).toContain('<file name="a.txt" path="/w/a.txt" mime="text/plain" size="10" />');
   });
@@ -180,7 +180,7 @@ describe("formatAttachmentsForPrompt", () => {
       { visionAnalysisEnabled: false },
     );
 
-    expect(result).not.toContain("VisualAnalysis");
+    expect(result).not.toContain("mcp__sketch__VisualAnalysis");
     expect(result).toContain('<file name="b.png" path="/w/b.png" mime="image/png" size="2048" />');
   });
 
