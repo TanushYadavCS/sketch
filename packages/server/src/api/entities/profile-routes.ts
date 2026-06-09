@@ -423,6 +423,58 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   });
 
   /**
+   * GET /api/entities/graph
+   * Whole-graph payload for the knowledge map: the top entities by hotness plus
+   * every relationship edge between them, in one round trip. Nodes carry just
+   * enough to render (id/name/type/hotness); the client derives size from degree.
+   * Visibility-scoped for non-admins via the same predicate as the entity list.
+   * Registered before /:id so "graph" isn't matched as an entity id.
+   */
+  routes.get("/graph", async (c) => {
+    const limit = Math.min(Number(c.req.query("limit")) || 500, 1000);
+    const includeSystem = c.req.query("includeSystem") === "true";
+    const systemTypes = [...SYSTEM_SOURCE_TYPES];
+    const viewer = getFileViewer(c);
+
+    let nodeQuery = db
+      .selectFrom("entities")
+      .select(["id", "name", "source_type", "hotness"])
+      .where("status", "!=", "archived");
+    if (!includeSystem && systemTypes.length > 0) {
+      nodeQuery = nodeQuery.where("source_type", "not in", systemTypes);
+    }
+    if (!viewer.isAdmin) {
+      nodeQuery = nodeQuery.where(entityVisibilityPredicate(viewer));
+    }
+    const nodeRows = await nodeQuery.orderBy("hotness", "desc").limit(limit).execute();
+
+    const ids = nodeRows.map((n) => n.id);
+    const edgeRows =
+      ids.length > 0
+        ? await db
+            .selectFrom("entity_relationships")
+            .select(["source_entity_id", "target_entity_id", "relationship_type"])
+            .where("source_entity_id", "in", ids)
+            .where("target_entity_id", "in", ids)
+            .execute()
+        : [];
+
+    return c.json({
+      nodes: nodeRows.map((n) => ({
+        id: n.id,
+        name: n.name,
+        sourceType: n.source_type,
+        hotness: n.hotness,
+      })),
+      edges: edgeRows.map((e) => ({
+        source: e.source_entity_id,
+        target: e.target_entity_id,
+        type: e.relationship_type,
+      })),
+    });
+  });
+
+  /**
    * DELETE /api/entities/tentative
    * Delete all tentative entities and their mentions.
    * Must be registered before /:id to prevent "tentative" matching as an ID.

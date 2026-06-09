@@ -418,6 +418,24 @@ export interface EntityRelationsResponse {
   totalCount: number;
 }
 
+export interface EntityGraphNode {
+  id: string;
+  name: string;
+  sourceType: string;
+  hotness: number;
+}
+
+export interface EntityGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+}
+
+export interface EntityGraphResponse {
+  nodes: EntityGraphNode[];
+  edges: EntityGraphEdge[];
+}
+
 export interface EntityRelationEvidenceRow {
   fileId: string;
   fileName: string;
@@ -1618,6 +1636,13 @@ export const api = {
     },
     relations(id: string) {
       return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);
+    },
+    graph(opts?: { limit?: number; includeSystem?: boolean }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.includeSystem) params.set("includeSystem", "true");
+      const qs = params.toString();
+      return request<EntityGraphResponse>(`/api/entities/graph${qs ? `?${qs}` : ""}`);
     },
     relationEvidence(id: string, relationId: string) {
       return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);
