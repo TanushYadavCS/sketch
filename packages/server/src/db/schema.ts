@@ -330,6 +330,14 @@ export interface LocalClaudeSessionsTable {
   origin_context_type: string | null;
   origin_delivery_target: string | null;
   origin_thread_ts: string | null;
+  origin_workspace_key: string | null;
+  origin_workspace_dir: string | null;
+  origin_active_queue_key: string | null;
+  origin_conversation_id: number | null;
+  origin_provider_thread_id: string | null;
+  origin_agent_instructions: string | null;
+  origin_agent_allowed_tools: string | null;
+  origin_org_context_enabled: number | null;
   last_event_type: string | null;
   last_event_at: string | null;
   created_at: Generated<string>;

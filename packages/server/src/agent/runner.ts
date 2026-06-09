@@ -351,6 +351,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     currentUserId: params.currentUserId ?? undefined,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,
+    workspaceKey: params.workspaceKey,
     originThreadTs: params.threadTs,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
@@ -361,6 +362,9 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     logger,
     conversationRepo: params.conversationRepo,
     conversationContext: params.conversationContext,
+    agentInstructions: params.agentInstructions,
+    agentAllowedTools: params.agentAllowedTools,
+    originOrgContextEnabled: params.claudeConfigDir !== undefined,
   });
 
   const blockedReadPaths = new Set<string>();

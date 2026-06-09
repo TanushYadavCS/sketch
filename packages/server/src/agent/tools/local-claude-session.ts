@@ -62,6 +62,14 @@ export async function handleLocalClaudeSession(args: LocalClaudeSessionArgs, dep
           contextType: deps.taskContext?.contextType,
           deliveryTarget: deps.taskContext?.deliveryTarget,
           threadTs: deps.taskContext?.threadTs ?? deps.originThreadTs ?? null,
+          workspaceKey: deps.workspaceKey,
+          workspaceDir: deps.workspaceDir,
+          activeQueueKey: deps.activeQueueKey,
+          conversationId: deps.conversationContext?.conversationId ?? null,
+          providerThreadId: deps.conversationContext?.providerThreadId ?? null,
+          agentInstructions: deps.agentInstructions ?? null,
+          agentAllowedTools: deps.agentAllowedTools ?? null,
+          orgContextEnabled: deps.originOrgContextEnabled,
         },
       });
       return jsonResult({

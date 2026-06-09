@@ -47,6 +47,7 @@ import {
 } from "./db/repositories/agent-environment-variables";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConnectorRepository } from "./db/repositories/connectors";
+import { createConversationRepository } from "./db/repositories/conversations";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
@@ -61,6 +62,7 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
 import type { IntegrationProvider } from "./integrations/types";
+import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
 import { mountPublicMcpServer } from "./mcp/server/transport";
@@ -99,11 +101,34 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
+  const conversations = createConversationRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
+  const localClaudeEventDispatcher =
+    deps?.localClaudeSessionService && deps.runAgent && deps.queueManager
+      ? createLocalClaudeEventDispatcher({
+          db,
+          config,
+          logger,
+          settingsRepo: settings,
+          users,
+          conversations,
+          queueManager: deps.queueManager,
+          runAgent: deps.runAgent,
+          buildMcpServers: deps.buildMcpServers,
+          loadIntegrationProvider: deps.loadIntegrationProvider,
+          scheduler: deps.scheduler as RunAgentParams["scheduler"],
+          stepContentRepo: deps.stepContentRepo,
+          automationRunsRepo: deps.automationRunsRepo,
+          inboxMessagesRepo: inboxMessages,
+          getSlack: deps.getSlack,
+          whatsapp: deps.whatsapp,
+          sendDm: deps.sendDm,
+        })
+      : null;
 
   if (deps?.localClaudeSessionService) {
     app.route(
@@ -111,8 +136,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       localClaudeSessionEventRoutes({
         service: deps.localClaudeSessionService,
         logger,
-        getSlack: deps.getSlack,
-        whatsapp: deps.whatsapp,
+        dispatchEvent: localClaudeEventDispatcher
+          ? (delivery) => localClaudeEventDispatcher.enqueue(delivery)
+          : undefined,
       }),
     );
   }

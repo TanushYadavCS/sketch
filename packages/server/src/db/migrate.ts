@@ -85,6 +85,7 @@ import * as m082 from "./migrations/082-email-thread-summaries";
 import * as m083 from "./migrations/083-local-claude-sessions";
 import * as m084 from "./migrations/084-entity-contact-points";
 import * as m085 from "./migrations/085-crm-activity-rollups";
+import * as m086 from "./migrations/086-local-claude-session-origin-runtime";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -174,6 +175,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "083-local-claude-sessions": m083,
           "084-entity-contact-points": m084,
           "085-crm-activity-rollups": m085,
+          "086-local-claude-session-origin-runtime": m086,
         };
       },
     },

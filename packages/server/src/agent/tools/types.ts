@@ -61,6 +61,7 @@ export interface SketchMcpDeps {
   currentUserId?: string;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
+  workspaceKey?: string;
   originThreadTs?: string;
   activeQueueKey?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
@@ -79,6 +80,9 @@ export interface SketchMcpDeps {
     currentMessageId?: number;
     providerThreadId?: string | null;
   };
+  agentInstructions?: string | null;
+  agentAllowedTools?: string[] | null;
+  originOrgContextEnabled?: boolean;
   publicMcp?: {
     userEmails?: string[];
     filterEntityMetadata?: boolean;
