@@ -4,8 +4,12 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { Config } from "../config";
-import { createEmbeddingProvider } from "../connectors/embeddings";
 import { runEnrichment } from "../connectors/enrichment";
+import {
+  createEnrichmentEmbeddingProvider,
+  createEnrichmentGenerator,
+  resolveOpenRouterEnrichmentConfig,
+} from "../connectors/enrichment-providers";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 
@@ -46,7 +50,7 @@ export function settingsRoutes(
   settings: SettingsRepo,
   db?: Kysely<DB>,
   logger?: Logger,
-  config?: Pick<Config, "GEMINI_MAX_RPM" | "GEMINI_MAX_RETRIES">,
+  config?: Pick<Config, "GEMINI_MAX_RPM" | "GEMINI_MAX_RETRIES" | "OPENROUTER_API_KEY">,
 ) {
   const routes = new Hono();
 
@@ -136,20 +140,23 @@ export function settingsRoutes(
       return c.json({ error: { code: "DISABLED", message: "Enrichment is disabled" } }, 400);
     }
 
-    const embeddingProvider = row?.gemini_api_key
-      ? createEmbeddingProvider({
-          provider: "gemini",
-          apiKey: row.gemini_api_key,
-          maxRpm: config?.GEMINI_MAX_RPM,
-          maxRetries: config?.GEMINI_MAX_RETRIES,
-        })
-      : null;
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(row, config?.OPENROUTER_API_KEY);
+    const providerConfig = {
+      geminiApiKey: row?.gemini_api_key,
+      geminiMaxRpm: config?.GEMINI_MAX_RPM,
+      geminiMaxRetries: config?.GEMINI_MAX_RETRIES,
+      logger,
+      ...openRouterConfig,
+    };
+    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
+    const generator = createEnrichmentGenerator(providerConfig);
 
     // Run in background
     runEnrichment({
       db,
       logger: logger.child({ component: "enrichment" }),
       embeddingProvider,
+      generator,
       geminiApiKey: row?.gemini_api_key,
       geminiMaxRpm: config?.GEMINI_MAX_RPM,
       geminiMaxRetries: config?.GEMINI_MAX_RETRIES,

@@ -177,6 +177,8 @@ export interface RunAgentParams {
   activeQueueKey?: string;
   toolConfig?: { BASE_URL?: string; PORT: number };
   geminiConfig?: { maxRpm?: number; maxRetries?: number };
+  openRouterApiKey?: string;
+  settingsEncryptionKey?: string;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
@@ -370,6 +372,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     activeQueueKey: params.activeQueueKey,
     toolConfig: params.toolConfig,
     geminiConfig: params.geminiConfig,
+    openRouterApiKey: params.openRouterApiKey,
+    settingsEncryptionKey: params.settingsEncryptionKey,
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,

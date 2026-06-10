@@ -169,6 +169,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
         maxRpm: config.GEMINI_MAX_RPM,
         maxRetries: config.GEMINI_MAX_RETRIES,
       },
+      openRouterApiKey: params.openRouterApiKey ?? config.OPENROUTER_API_KEY,
+      settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
       ...(Object.keys(resolvedAgentEnv).length > 0

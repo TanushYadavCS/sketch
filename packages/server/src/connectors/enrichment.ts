@@ -26,8 +26,7 @@ import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thr
 import type { EmbeddingProvider } from "./embeddings/types";
 import { applyEngagementFloor } from "./engagement-floor";
 import { type KnownEntityForPrompt, buildFileScopedKnownEntities } from "./file-scope-context";
-import { createGeminiGenerator } from "./gemini-generate";
-import type { GeminiGenerator } from "./gemini-generate";
+import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
 import { buildParticipantBlock } from "./participant-block";
 import { smartEnrichFile } from "./smart-enrichment";
 import { extractDatesFromText } from "./tagging";
@@ -131,7 +130,8 @@ export interface EnrichmentDeps {
   db: Kysely<DB>;
   logger: Logger;
   embeddingProvider: EmbeddingProvider | null;
-  /** Gemini API key for AI-powered enrichment (summaries, entity extraction). */
+  generator?: GeminiGenerator | null;
+  /** Gemini API key for AI-powered enrichment when a generator is not supplied. */
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
@@ -215,8 +215,9 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     // entities table may not exist yet — ignore
   }
 
-  let generatorForRun: GeminiGenerator | null = null;
+  let generatorForRun: GeminiGenerator | null = deps.generator ?? null;
   const getGenerator = () => {
+    if (generatorForRun) return generatorForRun;
     if (!deps.geminiApiKey) return null;
     generatorForRun ??= createGeminiGenerator(deps.geminiApiKey, {
       maxRpm: deps.geminiMaxRpm,
@@ -224,6 +225,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     });
     return generatorForRun;
   };
+  const hasGenerator = () => !!deps.generator || !!deps.geminiApiKey;
   const touchedEmailThreads = new Map<string, { connectorConfigId: string; threadId: string }>();
 
   // Find files needing enrichment
@@ -311,13 +313,13 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
         file.embedding_status === "done" && file.summary_status !== "done" && file.summary_status !== "skipped";
 
       if (needsSummaryOnly) {
-        if (file.content && !isImage && !isStructured && deps.geminiApiKey) {
+        if (file.content && !isImage && !isStructured && hasGenerator()) {
           const wordCount = file.content.split(/\s+/).filter(Boolean).length;
           const minWordsForSummary = isEmailMessage ? (threadContext ? 1 : 10) : 100;
           if (wordCount >= minWordsForSummary) {
             try {
               const generator = getGenerator();
-              if (!generator) throw new Error("Gemini generator unavailable");
+              if (!generator) throw new Error("Enrichment generator unavailable");
               const knownEntities = await buildFileScopedKnownEntities(
                 { db, logger },
                 file.id,
@@ -575,12 +577,17 @@ async function enrichTextDocument(
   const summaryAlreadyResolved = file.summary_status === "done" || file.summary_status === "skipped";
   const isEmailMessage = file.file_type === "email_message";
   const minWordsForSummary = isEmailMessage ? (threadContext ? 1 : 10) : 100;
-  if (!summaryAlreadyResolved && deps.geminiApiKey && wordCount >= minWordsForSummary) {
+  const generator =
+    deps.generator ??
+    (deps.geminiApiKey
+      ? createGeminiGenerator(deps.geminiApiKey, {
+          maxRpm: deps.geminiMaxRpm,
+          maxRetries: deps.geminiMaxRetries,
+        })
+      : null);
+
+  if (!summaryAlreadyResolved && generator && wordCount >= minWordsForSummary) {
     try {
-      const generator = createGeminiGenerator(deps.geminiApiKey, {
-        maxRpm: deps.geminiMaxRpm,
-        maxRetries: deps.geminiMaxRetries,
-      });
       const knownEntities = await buildFileScopedKnownEntities(
         { db, logger },
         file.id,
