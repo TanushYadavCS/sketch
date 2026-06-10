@@ -18,8 +18,12 @@ import type { Config } from "../config";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/envelope-metadata";
 import type { EmailAddr } from "../connectors/email/normalized-email";
-import { createEmbeddingProvider } from "../connectors/embeddings";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
+import {
+  createEnrichmentEmbeddingProvider,
+  createEnrichmentGenerator,
+  resolveOpenRouterEnrichmentConfig,
+} from "../connectors/enrichment-providers";
 import { buildCredentialHint } from "../connectors/fireflies";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
@@ -37,6 +41,7 @@ import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCrede
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import {
@@ -193,6 +198,8 @@ export function connectorRoutes(
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "EXPERIMENTAL_FLAG"
+      | "ENCRYPTION_KEY"
+      | "OPENROUTER_API_KEY"
     >
   >,
 ) {
@@ -1726,19 +1733,17 @@ export function connectorRoutes(
     const denied = denyIfCannotEdit(c, owningConfig);
     if (denied) return denied;
 
-    const settings = await db
-      .selectFrom("settings")
-      .select("gemini_api_key")
-      .where("id", "=", "default")
-      .executeTakeFirst();
-    const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({
-          provider: "gemini",
-          apiKey: settings.gemini_api_key,
-          maxRpm: appConfig?.GEMINI_MAX_RPM,
-          maxRetries: appConfig?.GEMINI_MAX_RETRIES,
-        })
-      : null;
+    const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+    const providerConfig = {
+      geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+      logger,
+      ...openRouterConfig,
+    };
+    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
+    const generator = createEnrichmentGenerator(providerConfig);
 
     // Enrich only this specific file.
     // This endpoint is the per-file "Enrich File" debug surface — always dump
@@ -1750,6 +1755,7 @@ export function connectorRoutes(
       db,
       logger: logger.child({ component: "enrichment", fileId }),
       embeddingProvider,
+      generator,
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,

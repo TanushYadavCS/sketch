@@ -21,8 +21,12 @@ import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
-import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
 import { runEnrichment } from "./enrichment";
+import {
+  createEnrichmentEmbeddingProvider,
+  createEnrichmentGenerator,
+  resolveOpenRouterEnrichmentConfig,
+} from "./enrichment-providers";
 import { createGeminiGenerator } from "./gemini-generate";
 import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
@@ -442,6 +446,7 @@ export interface SyncSchedulerDeps {
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
+      | "OPENROUTER_API_KEY"
     >
   >;
 }
@@ -506,30 +511,29 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   // Run enrichment after all syncs complete
   try {
-    const settings = await db
-      .selectFrom("settings")
-      .select(["gemini_api_key", "enrichment_enabled"])
-      .where("id", "=", "default")
-      .executeTakeFirst();
+    const settings = await createSettingsRepository(db, deps?.appConfig?.ENCRYPTION_KEY).get();
 
     if (settings?.enrichment_enabled === 0) {
       logger.info("Enrichment disabled, skipping post-sync enrichment");
       return;
     }
 
-    const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({
-          provider: "gemini",
-          apiKey: settings.gemini_api_key,
-          maxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
-          maxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
-        })
-      : null;
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, deps?.appConfig?.OPENROUTER_API_KEY);
+    const providerConfig = {
+      geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
+      logger,
+      ...openRouterConfig,
+    };
+    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
+    const generator = createEnrichmentGenerator(providerConfig);
 
     const enrichResult = await runEnrichment({
       db,
       logger: logger.child({ component: "enrichment" }),
       embeddingProvider,
+      generator,
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
