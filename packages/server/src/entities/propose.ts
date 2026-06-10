@@ -91,6 +91,7 @@ export interface ProposeDeps {
   lookup: EntityLookup;
   /** Read an entity's email from its metadata JSON. */
   readEmail: (entity: Entity) => string | null;
+  onEntityResolved?: (entity: Entity) => void | Promise<void>;
 }
 
 interface RankedCandidate {
@@ -350,6 +351,23 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     //    Auto-create instead of queuing.
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
+  }
+
+  if (input.entityType !== "person" && input.source && input.sourceId) {
+    const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+    if (found && found.source_type === input.entityType) {
+      await deps.entityRepo.upsertSourceRef({
+        entityId: found.id,
+        source: input.source,
+        sourceId: input.sourceId,
+      });
+      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+        await deps.entityRepo.appendAlias(found.id, input.name);
+      }
+      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
+      await deps.onEntityResolved?.(entity);
+      return { kind: "linked", entity };
+    }
   }
 
   // 3) Exact-name / alias fast-path — an entity already shares this canonical

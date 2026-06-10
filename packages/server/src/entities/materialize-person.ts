@@ -171,6 +171,7 @@ export async function materializePersonFact(
           reviewRepo: deps.reviewRepo,
           lookup: deps.lookup,
           readEmail: deps.readEmail,
+          onEntityResolved: deps.onEntityResolved,
         },
         {
           name: fact.subject_name,

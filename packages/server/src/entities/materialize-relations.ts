@@ -221,6 +221,7 @@ async function materializeRelationEndpoint(
       reviewRepo: deps.reviewRepo,
       lookup: deps.lookup,
       readEmail: deps.readEmail,
+      onEntityResolved: deps.onEntityResolved,
     },
     {
       name: endpoint.name,

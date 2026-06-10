@@ -6,6 +6,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
+import { buildMaterializeDeps } from "./materialize-deps";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 
 async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {
@@ -1241,5 +1242,152 @@ describe("proposeEntity", () => {
     const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
     expect(queue).toHaveLength(1);
     expect(queue[0].candidate_reason).toBe("exact-ambiguous");
+  });
+
+  it("24. source-ref fast-path links renamed non-person entity and aliases incoming name", async () => {
+    const entityRepo = createEntityRepository(db);
+    const project = await entityRepo.upsertEntity({
+      name: "Project Atlas",
+      sourceType: "project",
+      subtype: "external",
+      status: "confirmed",
+    });
+    await entityRepo.upsertSourceRef({ entityId: project.id, source: "linear", sourceId: "lin-123" });
+    await entityRepo.updateEntity(project.id, { name: "Atlas (TAQA)" });
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const result = await proposeEntity(
+      {
+        entityRepo,
+        reviewRepo: createEntityReviewRepo(db),
+        lookup: makeLookup(() => entities),
+        readEmail,
+      },
+      {
+        name: "Project Atlas",
+        entityType: "project",
+        subtype: "external",
+        source: "linear",
+        sourceId: "lin-123",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(project.id);
+    expect(result.entity.name).toBe("Atlas (TAQA)");
+    const refreshed = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", project.id)
+      .executeTakeFirstOrThrow();
+    expect(refreshed.name).toBe("Atlas (TAQA)");
+    expect(refreshed.aliases ? JSON.parse(refreshed.aliases) : []).toContain("Project Atlas");
+  });
+
+  it("25. person source-ref is skipped so email identity semantics still win", async () => {
+    const entityRepo = createEntityRepository(db);
+    const bob = await entityRepo.upsertPersonEntity({
+      name: "Bob Chen",
+      email: "bob@acme.com",
+      subtype: "external",
+      source: "crm",
+      sourceId: "contact-1",
+    });
+    const alice = await entityRepo.upsertPersonEntity({
+      name: "Alice Ng",
+      email: "alice@acme.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "alice-1",
+    });
+
+    const people = await fetchPersonEntities(db);
+    const result = await proposeEntity(
+      {
+        entityRepo,
+        reviewRepo: createEntityReviewRepo(db),
+        lookup: makeLookup(() => people),
+        readEmail,
+      },
+      {
+        name: "Alice Ng",
+        email: "alice@acme.com",
+        entityType: "person",
+        subtype: "external",
+        source: "crm",
+        sourceId: "contact-1",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(alice.id);
+    expect(result.entity.id).not.toBe(bob.id);
+  });
+
+  it("26. same-batch source-ref link refreshes materialization index and avoids double-create", async () => {
+    const entityRepo = createEntityRepository(db);
+    const project = await entityRepo.upsertEntity({
+      name: "Atlas (TAQA)",
+      sourceType: "project",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+    await entityRepo.upsertSourceRef({ entityId: project.id, source: "linear", sourceId: "lin-456" });
+
+    expect(materializeDeps.index.bySourceRef.has("linear:lin-456")).toBe(false);
+    const first = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Project Atlas",
+        entityType: "project",
+        subtype: "external",
+        source: "linear",
+        sourceId: "lin-456",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(first.kind).toBe("linked");
+    expect(materializeDeps.index.bySourceRef.get("linear:lin-456")?.id).toBe(project.id);
+    expect(materializeDeps.index.byNormalizedAlias.get(normalizeName("Project Atlas"))?.map((e) => e.id)).toContain(
+      project.id,
+    );
+
+    const second = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Project Atlas",
+        entityType: "project",
+        subtype: "external",
+        source: "linear",
+        sourceId: "lin-456",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+    const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();
+
+    expect(second.kind).toBe("linked");
+    expect(projects).toHaveLength(1);
   });
 });

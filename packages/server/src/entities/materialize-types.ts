@@ -43,6 +43,7 @@ export interface MaterializeDeps {
   lookup: EntityLookup;
   index: LookupIndex;
   readEmail: (entity: Entity) => string | null;
+  onEntityResolved: (entity: Entity) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
   llmPromotionThreshold: number;
 }

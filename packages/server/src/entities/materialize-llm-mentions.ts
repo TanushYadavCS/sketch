@@ -76,6 +76,7 @@ export async function materializeNonPersonLlmEntity(
       reviewRepo: deps.reviewRepo,
       lookup: deps.lookup,
       readEmail: deps.readEmail,
+      onEntityResolved: deps.onEntityResolved,
     },
     {
       name: fact.subject_name as string,
