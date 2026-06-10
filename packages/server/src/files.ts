@@ -12,6 +12,7 @@
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { WASocket, proto } from "@whiskeysockets/baileys";
 import type { Logger } from "./logger";
 import { shouldTreatAsAudioAttachment } from "./transcription/audio-types";
@@ -125,7 +126,7 @@ export function formatAttachmentsForPrompt(attachments: Attachment[], options: A
     .map((a) => {
       let visionHint = "";
       if (options.visionAnalysisEnabled && isImageAttachment(a)) {
-        visionHint = ' hint="Use VisualAnalysis with this path to understand the image."';
+        visionHint = ` hint="Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this path to understand the image."`;
       }
       return `<file name="${a.originalName}" path="${a.localPath}" mime="${a.mimeType}" size="${a.sizeBytes}"${visionHint} />`;
     })

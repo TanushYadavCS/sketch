@@ -833,7 +833,7 @@ describe("buildSketchContext", () => {
 
       const result = buildSketchContext(sketchContext);
 
-      expect(result).toContain('hint="Use VisualAnalysis with this path to understand the image."');
+      expect(result).toContain('hint="Use mcp__sketch__VisualAnalysis with this path to understand the image."');
       expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/photo.jpg"]);
     });
 

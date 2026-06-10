@@ -1,3 +1,4 @@
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { Attachment, AttachmentPromptOptions } from "../files";
 import { formatAttachmentsForPrompt, isImageAttachment } from "../files";
 
@@ -363,7 +364,7 @@ export function buildSystemContext(params: {
     "## File Attachments",
     "",
     params.visionAnalysisEnabled
-      ? "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the VisualAnalysis tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path."
+      ? `When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.`
       : "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
     "Audio files may be referenced as attachments. If a transcript is provided in the message context, treat it as the spoken content of that audio. If no transcript is provided and a TranscribeAudio tool is available, use it with the attachment path when the spoken content is relevant.",
   );
