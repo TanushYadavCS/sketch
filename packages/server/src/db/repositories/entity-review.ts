@@ -317,6 +317,48 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return map;
     },
 
+    async pendingReviewIdsWithEvidenceInFiles(fileIds: string[]): Promise<string[]> {
+      if (fileIds.length === 0) return [];
+      const rows = await db
+        .selectFrom("entity_review_evidence")
+        .innerJoin("entity_review_queue", "entity_review_queue.id", "entity_review_evidence.review_id")
+        .select("entity_review_evidence.review_id")
+        .distinct()
+        .where("entity_review_evidence.indexed_file_id", "in", fileIds)
+        .where("entity_review_queue.status", "=", "pending")
+        .execute();
+      return rows.map((row) => row.review_id);
+    },
+
+    async deleteReviewEvidenceForFiles(fileIds: string[]): Promise<number> {
+      if (fileIds.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_review_evidence")
+        .where("indexed_file_id", "in", fileIds)
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async deleteEmptyPendingReviewsByIds(ids: string[]): Promise<number> {
+      if (ids.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_review_queue")
+        .where("id", "in", ids)
+        .where("status", "=", "pending")
+        .where((eb) =>
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom("entity_review_evidence")
+                .select(sql`1`.as("x"))
+                .whereRef("entity_review_evidence.review_id", "=", "entity_review_queue.id"),
+            ),
+          ),
+        )
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
     /**
      * Fetch a single queue row by id, regardless of status.
      */
