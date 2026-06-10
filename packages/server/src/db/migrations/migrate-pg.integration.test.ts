@@ -134,8 +134,8 @@ describe("runMigrations on Postgres — full sequence", () => {
       await runMigrations(freshDb, { quiet: true });
 
       const rows = await sql<{ name: string }>`
-        SELECT name FROM kysely_migration ORDER BY name ASC
-      `.execute(freshDb);
+      SELECT name FROM kysely_migration ORDER BY name ASC
+    `.execute(freshDb);
       expect(rows.rows).toHaveLength(90);
     } finally {
       await freshDb.destroy();

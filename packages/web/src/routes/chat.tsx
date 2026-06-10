@@ -1,6 +1,6 @@
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatThread, type ChatThreadFile, type ChatThreadMessage } from "@/components/sketch/chat-thread";
-import { api } from "@/lib/api";
+import { type WebChatUploadedAttachment, api } from "@/lib/api";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
@@ -8,7 +8,7 @@ import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { dashboardRoute } from "./dashboard";
-import { createWebChatConversationId } from "./home";
+import { createWebChatConversationId, takePendingWebChatSubmission } from "./home";
 
 type WebChatDataParts = {
   progress: {
@@ -64,8 +64,32 @@ function createdAtFromMessage(message: WebChatMessage): string | undefined {
   return message.metadata?.createdAt?.trim() || undefined;
 }
 
-function outgoingTextMessage(text: string) {
-  return { text, metadata: { createdAt: new Date().toISOString() } };
+export function outgoingTextMessage(text: string, attachments: WebChatUploadedAttachment[] = []) {
+  const metadata = { createdAt: new Date().toISOString() };
+  if (attachments.length === 0) {
+    return { text, metadata };
+  }
+
+  return {
+    metadata,
+    parts: [
+      { type: "text" as const, text },
+      ...attachments.map((attachment, index) => ({
+        type: "data-file" as const,
+        id: `attachment-${index}`,
+        data: {
+          name: attachment.name,
+          url: attachment.url,
+          mediaType: attachment.mediaType,
+          sizeBytes: attachment.sizeBytes,
+        },
+      })),
+    ],
+  };
+}
+
+export function outgoingRequestOptions(attachments: WebChatUploadedAttachment[]) {
+  return attachments.length > 0 ? { body: { attachments } } : undefined;
 }
 
 export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadMessage[] {
@@ -229,10 +253,20 @@ export function ChatPage() {
   }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
 
   useEffect(() => {
-    const initialMessageKey = search.message ? `${conversationId}:${search.message}` : null;
-    if (!historyReady || !search.message || sentInitialMessage.current === initialMessageKey) return;
+    if (!historyReady) return;
+
+    const pendingSubmission = takePendingWebChatSubmission(conversationId);
+    const initialText = pendingSubmission?.text || search.message;
+    const initialAttachments = pendingSubmission?.attachments ?? [];
+    const initialMessageKey = initialText ? `${conversationId}:${initialText}` : null;
+    if (!initialText || sentInitialMessage.current === initialMessageKey) return;
     sentInitialMessage.current = initialMessageKey;
-    void chat.sendMessage(outgoingTextMessage(search.message));
+    const requestOptions = outgoingRequestOptions(initialAttachments);
+    if (requestOptions) {
+      void chat.sendMessage(outgoingTextMessage(initialText, initialAttachments), requestOptions);
+    } else {
+      void chat.sendMessage(outgoingTextMessage(initialText));
+    }
     void navigate({ to: "/chat/$conversationId", params: { conversationId }, search: {}, replace: true });
   }, [chat.sendMessage, conversationId, historyReady, navigate, search.message]);
 
@@ -259,8 +293,8 @@ export function ChatPage() {
             disabled={chatBusy}
             disabledPlaceholder="Sketch is thinking..."
             placeholder="Reply to Sketch..."
-            onSubmit={(value) => {
-              void chat.sendMessage(outgoingTextMessage(value));
+            onSubmit={(value, attachments) => {
+              void chat.sendMessage(outgoingTextMessage(value, attachments), outgoingRequestOptions(attachments));
             }}
           />
         </div>

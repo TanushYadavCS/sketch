@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HomePane } from "./home-pane";
 
 if (typeof globalThis.ResizeObserver === "undefined") {
@@ -29,7 +30,14 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
+const originalMediaDevices = navigator.mediaDevices;
+
 describe("HomePane", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: originalMediaDevices });
+  });
+
   it("uses the shared dashboard tab content width", () => {
     const { container } = render(<HomePane firstName="Karan" onSubmit={() => undefined} />);
 
@@ -52,6 +60,51 @@ describe("HomePane", () => {
     await user.click(screen.getByRole("button", { name: "Triage inbox" }));
 
     expect(screen.getByLabelText("Message Sketch")).toHaveValue("Triage my inbox from the last 24 hours");
+  });
+
+  it("keeps the recording state visible under the app StrictMode wrapper", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn() }],
+        }),
+      },
+    });
+
+    class FakeMediaRecorder {
+      static isTypeSupported = vi.fn(() => true);
+      state: RecordingState = "inactive";
+      mimeType: string;
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onstop: (() => void) | null = null;
+
+      constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+        this.mimeType = options?.mimeType ?? "";
+      }
+
+      start() {
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        this.onstop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+
+    render(
+      <StrictMode>
+        <HomePane firstName="Karan" onSubmit={() => undefined} />
+      </StrictMode>,
+    );
+
+    await user.click(screen.getByLabelText("Record voice"));
+
+    expect(await screen.findByPlaceholderText("Recording... click stop when done")).toBeInTheDocument();
+    expect(screen.getByLabelText("Stop recording")).toBeInTheDocument();
   });
 
   it("renders Recents with the same section and row copy as the provided design", () => {

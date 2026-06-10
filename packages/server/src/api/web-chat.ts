@@ -15,12 +15,14 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import type { Attachment } from "../files";
 import { extensionToMime } from "../files";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import { resolveProgressDisplaySettings } from "../progress-settings";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
+import { transcribeAudioFile } from "../transcription/service";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -117,6 +119,11 @@ interface WebChatConversationSummary {
 interface LatestUserMessage {
   id: string | null;
   text: string;
+}
+
+interface ParsedWebChatAttachment {
+  attachment: Attachment;
+  file: WebChatFile;
 }
 
 type WebChatUiChunk =
@@ -220,10 +227,86 @@ async function webChatFileForUpload(workspaceDir: string, filePath: string): Pro
   const ext = extname(filePath).slice(1);
   return {
     name: basename(filePath),
-    url: `/api/web-chat/files?path=${encodeURIComponent(relativePath)}`,
+    url: webChatFileUrl(relativePath),
     mediaType: extensionToMime(ext),
     sizeBytes: info.size,
   };
+}
+
+function webChatFileUrl(relativePath: string): string {
+  return `/api/web-chat/files?path=${encodeURIComponent(relativePath)}`;
+}
+
+async function parseWebChatAttachments(
+  rawAttachments: unknown[],
+  workspaceDir: string,
+): Promise<ParsedWebChatAttachment[]> {
+  const parsed: ParsedWebChatAttachment[] = [];
+
+  for (const rawAttachment of rawAttachments) {
+    if (!isRecord(rawAttachment)) {
+      throw new WebChatAttachmentError("VALIDATION_ERROR", "Attachment metadata is invalid", 400);
+    }
+
+    const originalName =
+      typeof rawAttachment.name === "string" && rawAttachment.name.trim() ? rawAttachment.name : null;
+    const requestedPath =
+      typeof rawAttachment.relativePath === "string" && rawAttachment.relativePath.trim()
+        ? rawAttachment.relativePath
+        : typeof rawAttachment.path === "string" && rawAttachment.path.trim()
+          ? rawAttachment.path
+          : null;
+
+    if (!originalName || !requestedPath) {
+      throw new WebChatAttachmentError("VALIDATION_ERROR", "Attachment metadata is incomplete", 400);
+    }
+
+    const filePath = resolve(workspaceDir, requestedPath);
+    const relativePath = relativeWorkspacePath(workspaceDir, filePath);
+    if (!relativePath) {
+      throw new WebChatAttachmentError("FORBIDDEN", "Attachment is outside workspace", 403);
+    }
+
+    const info = await stat(filePath).catch(() => null);
+    if (!info?.isFile()) {
+      throw new WebChatAttachmentError("FILE_NOT_FOUND", "Attachment file not found", 404);
+    }
+
+    const ext = extname(filePath).slice(1);
+    const mimeType =
+      typeof rawAttachment.mediaType === "string" && rawAttachment.mediaType.trim()
+        ? rawAttachment.mediaType
+        : extensionToMime(ext);
+
+    parsed.push({
+      attachment: {
+        originalName,
+        mimeType,
+        localPath: filePath,
+        sizeBytes: info.size,
+      },
+      file: {
+        name: originalName,
+        url: webChatFileUrl(relativePath),
+        mediaType: mimeType,
+        sizeBytes: info.size,
+      },
+    });
+  }
+
+  return parsed;
+}
+
+class WebChatAttachmentError extends Error {
+  code: string;
+  status: 400 | 403 | 404;
+
+  constructor(code: string, message: string, status: 400 | 403 | 404) {
+    super(message);
+    this.name = "WebChatAttachmentError";
+    this.code = code;
+    this.status = status;
+  }
 }
 
 const DEFAULT_WEB_CHAT_CONVERSATION_ID = "default";
@@ -451,12 +534,20 @@ async function writeWebChatTranscript(
   await writeFile(transcriptPath, `${JSON.stringify(transcript, null, 2)}\n`);
 }
 
-function createUserTranscriptMessage(message: LatestUserMessage): WebChatTranscriptMessage {
+function createUserTranscriptMessage(
+  message: LatestUserMessage,
+  files: Array<{ id: string; data: WebChatFile }> = [],
+): WebChatTranscriptMessage {
+  const parts: WebChatTranscriptPart[] = [{ type: "text", text: message.text }];
+  for (const file of files) {
+    parts.push({ type: "data-file", id: file.id, data: file.data });
+  }
+
   return {
     id: message.id ?? `user-${randomUUID()}`,
     role: "user",
     createdAt: new Date().toISOString(),
-    parts: [{ type: "text", text: message.text }],
+    parts,
   };
 }
 
@@ -749,6 +840,107 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     });
   });
 
+  routes.post("/transcribe", async (c) => {
+    const currentUser = await deps.users.findById(c.get("sub"));
+    if (!currentUser) {
+      return c.json(badRequest("USER_NOT_FOUND", "Current user not found"), 404);
+    }
+
+    const body = await c.req.parseBody();
+    const file = body.file;
+    if (!file || typeof file === "string") {
+      return c.json(badRequest("VALIDATION_ERROR", "Audio file is required"), 400);
+    }
+
+    const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    const ext = extname(file.name || "audio.webm").slice(1) || "webm";
+    const filename = `voice-${Date.now()}.${ext}`;
+    const filePath = resolve(workspaceDir, "attachments", filename);
+    const mimeType = file.type || extensionToMime(ext);
+    await mkdir(resolve(workspaceDir, "attachments"), { recursive: true });
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const maxSize = deps.config.MAX_FILE_SIZE_MB * 1024 * 1024;
+    if (buffer.length > maxSize) {
+      return c.json(
+        badRequest("FILE_TOO_LARGE", `File exceeds maximum size of ${deps.config.MAX_FILE_SIZE_MB}MB`),
+        413,
+      );
+    }
+    await writeFile(filePath, buffer);
+
+    let transcriptPath: string | null = null;
+    try {
+      const result = await transcribeAudioFile(filePath, {
+        loadSettings: () => deps.settings.get(),
+        logger: deps.logger,
+        env: { ...process.env, OPENROUTER_API_KEY: deps.config.OPENROUTER_API_KEY ?? process.env.OPENROUTER_API_KEY },
+        mimeType,
+      });
+      if (result.kind === "file") {
+        transcriptPath = result.transcriptPath;
+      }
+      const text = result.kind === "inline" ? result.text : await readFile(result.transcriptPath, "utf-8");
+      return c.json({ text });
+    } catch (err) {
+      deps.logger.warn({ err }, "Web chat transcription failed");
+      return c.json(badRequest("TRANSCRIPTION_FAILED", errorMessage(err)), 500);
+    } finally {
+      await rm(filePath, { force: true });
+      if (transcriptPath) {
+        await rm(transcriptPath, { force: true });
+      }
+    }
+  });
+
+  routes.post("/attachments", async (c) => {
+    const currentUser = await deps.users.findById(c.get("sub"));
+    if (!currentUser) {
+      return c.json(badRequest("USER_NOT_FOUND", "Current user not found"), 404);
+    }
+
+    const body = await c.req.parseBody();
+    const file = body.file;
+    if (!file || typeof file === "string") {
+      return c.json(badRequest("VALIDATION_ERROR", "File is required"), 400);
+    }
+
+    const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const maxSize = deps.config.MAX_FILE_SIZE_MB * 1024 * 1024;
+    if (buffer.length > maxSize) {
+      return c.json(
+        badRequest("FILE_TOO_LARGE", `File exceeds maximum size of ${deps.config.MAX_FILE_SIZE_MB}MB`),
+        413,
+      );
+    }
+
+    const originalName = file.name || "unnamed";
+    const sanitized = originalName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const filename = `${Date.now()}-${sanitized}`;
+    const attachmentsDir = resolve(workspaceDir, "attachments");
+    await mkdir(attachmentsDir, { recursive: true });
+    const filePath = resolve(attachmentsDir, filename);
+    await writeFile(filePath, buffer);
+
+    const ext = extname(filePath).slice(1);
+    const mimeType = file.type || extensionToMime(ext);
+    const relativePath = relativeWorkspacePath(workspaceDir, filePath);
+    if (!relativePath) {
+      await rm(filePath, { force: true });
+      return c.json(badRequest("FORBIDDEN", "File is outside workspace"), 403);
+    }
+
+    return c.json({
+      name: originalName,
+      path: relativePath,
+      relativePath,
+      url: webChatFileUrl(relativePath),
+      mediaType: mimeType,
+      sizeBytes: buffer.length,
+    });
+  });
+
   routes.post("/", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const latestUserMessage = extractLatestUserMessage(body);
@@ -769,12 +961,27 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const settingsRow = await deps.settings.get();
     const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
     const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    const rawAttachments = isRecord(body) && Array.isArray(body.attachments) ? body.attachments : [];
+    let parsedAttachments: ParsedWebChatAttachment[];
+    try {
+      parsedAttachments = await parseWebChatAttachments(rawAttachments, workspaceDir);
+    } catch (err) {
+      if (err instanceof WebChatAttachmentError) {
+        return c.json(badRequest(err.code, err.message), err.status);
+      }
+      throw err;
+    }
+    const attachments = parsedAttachments.map((item) => item.attachment);
+    const transcriptUserFiles = parsedAttachments.map((item, index) => ({
+      id: `attachment-${index}`,
+      data: item.file,
+    }));
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
     const deliveryPlatform = dmContext?.platform ?? "slack";
     const abortController = new AbortController();
     const progressRenderer = createProgressRenderer(resolveProgressDisplaySettings(currentUser));
-    const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage);
+    const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage, transcriptUserFiles);
     const progressMessageId = `assistant-progress-${transcriptUserMessage.id}`;
     await appendWebChatPendingTurn(
       deps.config,
@@ -851,6 +1058,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             userRepo: deps.users,
             currentUserId: currentUser.id,
             sendDm: deps.sendDm,
+            ...(attachments.length > 0 ? { attachments } : {}),
             ...(dmContext
               ? {
                   taskContext: {

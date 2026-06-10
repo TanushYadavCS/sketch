@@ -1,7 +1,7 @@
 import type { ConversationRowProps } from "@/components/sketch/conversation-row";
 import { HomePane } from "@/components/sketch/home-pane";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
-import { type WebChatConversationSummary, type WorkspaceSummary, api } from "@/lib/api";
+import { type WebChatConversationSummary, type WebChatUploadedAttachment, type WorkspaceSummary, api } from "@/lib/api";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -63,6 +63,23 @@ export function buildSummaryTiles(summary: WorkspaceSummary): TileDef[] {
 export function createWebChatConversationId(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   return `chat-${uuid ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
+}
+
+interface PendingWebChatSubmission {
+  text: string;
+  attachments: WebChatUploadedAttachment[];
+}
+
+const pendingWebChatSubmissions = new Map<string, PendingWebChatSubmission>();
+
+export function setPendingWebChatSubmission(conversationId: string, submission: PendingWebChatSubmission): void {
+  pendingWebChatSubmissions.set(conversationId, submission);
+}
+
+export function takePendingWebChatSubmission(conversationId: string): PendingWebChatSubmission | null {
+  const submission = pendingWebChatSubmissions.get(conversationId) ?? null;
+  pendingWebChatSubmissions.delete(conversationId);
+  return submission;
 }
 
 export function chatTargetFromPrompt(value: string, createId = createWebChatConversationId) {
@@ -136,8 +153,12 @@ export function HomePage() {
       onDeleteConversation={(conversation) => {
         deleteConversationMutation.mutate(conversation.id);
       }}
-      onSubmit={(value) => {
-        void navigate(chatTargetFromPrompt(value));
+      onSubmit={(value, attachments) => {
+        const target = chatTargetFromPrompt(value);
+        if (attachments.length > 0) {
+          setPendingWebChatSubmission(target.params.conversationId, { text: value.trim(), attachments });
+        }
+        void navigate(target);
       }}
     />
   );
