@@ -8,7 +8,16 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies" | "zoho_crm";
+export type ConnectorType =
+  | "google_drive"
+  | "gmail"
+  | "outlook"
+  | "teams"
+  | "clickup"
+  | "notion"
+  | "linear"
+  | "fireflies"
+  | "zoho_crm";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
@@ -30,6 +39,8 @@ export interface OAuthCredentials {
   expires_at?: string;
   client_id: string;
   client_secret: string;
+  scope?: string;
+  tenant?: string;
   accounts_server?: string;
   api_domain?: string;
   region?: string;
@@ -255,6 +266,13 @@ export interface SuppressedEmailRecord {
   reason: string;
 }
 
+export interface SourceItemRemovalRecord {
+  providerFileId?: string;
+  providerMessageId?: string | null;
+  sourceCreatedBefore?: string;
+  reason: string;
+}
+
 /**
  * Base interface all connectors must implement.
  */
@@ -271,7 +289,7 @@ export interface Connector {
   /**
    * Whether an admin must populate provider Client ID/Secret in `settings`
    * before any user can authorize. Used to surface a "Ask your admin to
-   * configure X first" empty state. Currently only Google Drive.
+   * configure X first" empty state.
    */
   readonly requiresOAuthClientSetup: boolean;
 
@@ -324,6 +342,7 @@ export interface Connector {
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;
+    onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void>;
   }): AsyncGenerator<SyncedItem>;
 
   /** Return the new sync cursor after a sync run. */

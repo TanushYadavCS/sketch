@@ -73,6 +73,21 @@ export const configSchema = z.object({
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   ZOHO_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
+  // Microsoft OAuth fallback (Files UI stores client credentials in settings)
+  MICROSOFT_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MICROSOFT_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MICROSOFT_TENANT: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("common")),
+  OUTLOOK_INITIAL_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+  OUTLOOK_MAX_INFLIGHT: z.coerce.number().int().min(1).max(16).default(4),
+  TEAMS_INITIAL_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+  TEAMS_MAX_INFLIGHT: z.coerce.number().int().min(1).max(16).default(4),
+  TEAMS_PROCESSING_LAG_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(7 * 24 * 60 * 60 * 1000)
+    .default(2 * 60 * 60 * 1000),
+
   // PostHog (optional, enables LLM Analytics via OpenTelemetry)
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),

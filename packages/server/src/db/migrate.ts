@@ -91,6 +91,9 @@ import * as m088 from "./migrations/088-agent-run-aux-cost";
 import * as m089 from "./migrations/089-mcp-oauth";
 import * as m090 from "./migrations/090-orphan-entity-cleanup";
 import * as m091 from "./migrations/091-cleanup-empty-relationships-and-review";
+import * as m092 from "./migrations/092-teams-provider-file-scope";
+import * as m093 from "./migrations/093-microsoft-oauth-settings";
+import * as m094 from "./migrations/094-microsoft-oauth-tenant";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -186,6 +189,9 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "089-mcp-oauth": m089,
           "090-orphan-entity-cleanup": m090,
           "091-cleanup-empty-relationships-and-review": m091,
+          "092-teams-provider-file-scope": m092,
+          "093-microsoft-oauth-settings": m093,
+          "094-microsoft-oauth-tenant": m094,
         };
       },
     },

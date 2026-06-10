@@ -1353,6 +1353,24 @@ export const api = {
       return `/api/oauth/zoho/authorize?region=${encodeURIComponent(region)}`;
     },
   },
+  microsoftOAuth: {
+    status() {
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; tenant: string | null }>(
+        "/api/oauth/microsoft/status",
+      );
+    },
+    configure(clientId: string, clientSecret: string, tenant: string) {
+      return request<{ success: boolean }>("/api/oauth/microsoft/config", {
+        method: "PUT",
+        body: JSON.stringify({ clientId, clientSecret, tenant }),
+      });
+    },
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/microsoft/authorize";
+    },
+  },
   identities: {
     listForUser(userId: string) {
       return request<{ identities: ProviderIdentity[] }>(`/api/identities/user/${userId}`);

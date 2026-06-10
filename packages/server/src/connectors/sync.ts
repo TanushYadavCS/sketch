@@ -30,7 +30,7 @@ import { emitFactsForSyncedItem } from "./sync-facts";
 import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
-import { reconcileConnectorSync } from "./sync-reconcile";
+import { reconcileConnectorSync, removeConnectorSourceItems } from "./sync-reconcile";
 import {
   extractErrorMessage,
   parseCredentials,
@@ -113,6 +113,10 @@ export async function runConnectorSync(
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
+      | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
+      | "OUTLOOK_MAX_INFLIGHT"
+      | "TEAMS_INITIAL_LOOKBACK_DAYS"
+      | "TEAMS_MAX_INFLIGHT"
     >
   >,
 ): Promise<SyncResult> {
@@ -140,7 +144,21 @@ export async function runConnectorSync(
 
   const connector = getConnector(config.connector_type as ConnectorType);
   let credentials = parseCredentials(config.credentials);
-  const scopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
+  const storedScopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
+  const scopeConfig =
+    config.connector_type === "outlook"
+      ? {
+          ...storedScopeConfig,
+          initialDays: storedScopeConfig.initialDays ?? appConfig?.OUTLOOK_INITIAL_LOOKBACK_DAYS,
+          maxInflight: storedScopeConfig.maxInflight ?? appConfig?.OUTLOOK_MAX_INFLIGHT,
+        }
+      : config.connector_type === "teams"
+        ? {
+            ...storedScopeConfig,
+            initialDays: storedScopeConfig.initialDays ?? appConfig?.TEAMS_INITIAL_LOOKBACK_DAYS,
+            maxInflight: storedScopeConfig.maxInflight ?? appConfig?.TEAMS_MAX_INFLIGHT,
+          }
+        : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
   const ownerEmail = owner?.email ?? null;
 
@@ -233,6 +251,18 @@ export async function runConnectorSync(
           connectorConfigId: config.id,
           record,
         });
+      },
+      onSourceItemRemoved: async (record) => {
+        const removal = await removeConnectorSourceItems({
+          db,
+          connectorConfigId: config.id,
+          connectorType,
+          providerFileIds: record.providerFileId ? [record.providerFileId] : undefined,
+          providerMessageIds: record.providerMessageId ? [record.providerMessageId] : undefined,
+          sourceCreatedBefore: record.sourceCreatedBefore,
+        });
+        result.itemsArchived += removal.itemsDeleted;
+        for (const indexedFileId of removal.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
       },
     })) {
       try {
@@ -441,6 +471,10 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
+      | "OUTLOOK_MAX_INFLIGHT"
+      | "TEAMS_INITIAL_LOOKBACK_DAYS"
+      | "TEAMS_MAX_INFLIGHT"
       | "ENCRYPTION_KEY"
     >
   >;

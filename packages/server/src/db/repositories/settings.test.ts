@@ -94,6 +94,20 @@ describe("Settings repository", () => {
     expect((await settings.get())?.admin_can_read_all_files).toBe(0);
   });
 
+  it("update() persists Microsoft OAuth client settings", async () => {
+    await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+    await settings.update({
+      microsoftOauthClientId: "client-id",
+      microsoftOauthClientSecret: "client-secret",
+      microsoftOauthTenant: "tenant-id",
+    });
+
+    const row = await settings.get();
+    expect(row?.microsoft_oauth_client_id).toBe("client-id");
+    expect(row?.microsoft_oauth_client_secret).toBe("client-secret");
+    expect(row?.microsoft_oauth_tenant).toBe("tenant-id");
+  });
+
   it("update() allows clearing Slack and LLM credentials with null values", async () => {
     await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
     await settings.update({

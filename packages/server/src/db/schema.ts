@@ -76,6 +76,9 @@ export interface SettingsTable {
   smtp_secure: Generated<number>;
   google_oauth_client_id: string | null;
   google_oauth_client_secret: string | null;
+  microsoft_oauth_client_id: string | null;
+  microsoft_oauth_client_secret: string | null;
+  microsoft_oauth_tenant: string | null;
   gemini_api_key: string | null;
   enrichment_enabled: Generated<number>;
   admin_can_read_all_files: Generated<number>;
