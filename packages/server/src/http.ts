@@ -65,6 +65,7 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
@@ -107,6 +108,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
+  const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
   const localClaudeEventDispatcher =
     deps?.localClaudeSessionService && deps.runAgent && deps.queueManager
       ? createLocalClaudeEventDispatcher({
@@ -129,6 +131,17 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           sendDm: deps.sendDm,
         })
       : null;
+
+  app.route(
+    "/",
+    mcpOAuthRoutes({
+      db,
+      settings,
+      users,
+      config,
+      logger,
+    }),
+  );
 
   if (deps?.localClaudeSessionService) {
     app.route(
@@ -358,22 +371,20 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/entity-review", entityReviewRoutes(db));
-  if (config.EXPERIMENTAL_FLAG) {
-    app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
-    mountPublicMcpServer({
-      app,
-      db,
-      userRepo: users,
-      workspaceDir: join(config.DATA_DIR, "external-mcp"),
-      logger,
-    });
-  }
+  app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
+  mountPublicMcpServer({
+    app,
+    db,
+    userRepo: users,
+    workspaceDir: join(config.DATA_DIR, "external-mcp"),
+    logger,
+    baseUrl: config.BASE_URL,
+  });
 
   if (deps?.logger) {
     app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
   }
 
-  const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
   app.route("/api/identities", providerIdentityRoutes(identities, users));
 
   if (deps?.logger) {
@@ -493,7 +504,12 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         !!(await verifyJwt(platformToken, config.MANAGED_AUTH_SECRET));
 
       if (!isValidPlatformSession) {
-        return c.redirect(`${config.MANAGED_URL}/login`);
+        const loginUrl = new URL("/login", config.MANAGED_URL);
+        const returnTo = new URL(c.req.url).searchParams.get("return_to");
+        if (path === "/login" && returnTo) {
+          loginUrl.searchParams.set("return_to", returnTo);
+        }
+        return c.redirect(loginUrl.toString());
       }
 
       return next();

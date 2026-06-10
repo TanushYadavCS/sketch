@@ -123,6 +123,23 @@ describe("managed login redirect", () => {
     expect(res.headers.get("location")).toBe("https://app.getsketch.ai/login");
   });
 
+  it("preserves return_to when redirecting /login to managed login", async () => {
+    const app = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://app.getsketch.ai",
+        MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
+      }),
+    );
+
+    const returnTo = "https://tenant.getsketch.ai/oauth/authorize?client_id=client";
+    const res = await app.request(`/login?return_to=${encodeURIComponent(returnTo)}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      `https://app.getsketch.ai/login?return_to=${encodeURIComponent(returnTo)}`,
+    );
+  });
+
   it("redirects non-API HTML routes to MANAGED_URL/login when no valid platform session exists", async () => {
     const app = createApp(
       db,

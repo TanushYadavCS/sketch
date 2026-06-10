@@ -37,7 +37,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(84);
+    expect(rows.rows).toHaveLength(85);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -115,6 +115,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[81]).toBe("086-local-claude-session-origin-runtime");
     expect(names[82]).toBe("087-rename-openrouter-provider");
     expect(names[83]).toBe("088-agent-run-aux-cost");
+    expect(names[84]).toBe("089-mcp-oauth");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -130,7 +131,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       const rows = await sql<{ name: string }>`
         SELECT name FROM kysely_migration ORDER BY name ASC
       `.execute(freshDb);
-      expect(rows.rows).toHaveLength(84);
+      expect(rows.rows).toHaveLength(85);
     } finally {
       await freshDb.destroy();
     }
@@ -195,6 +196,30 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(indexes.rows.map((row) => row.indexname)).toEqual(
       expect.arrayContaining(["idx_indexed_files_rollup_group", "idx_crm_object_summaries_updated"]),
     );
+  });
+
+  it("creates MCP OAuth tables and token columns", async () => {
+    for (const table of ["oauth_clients", "oauth_authorization_codes"]) {
+      const result = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+
+    const columns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'api_tokens'
+        AND column_name IN ('kind', 'client_id', 'scopes', 'refresh_token_hash')
+    `.execute(db);
+    expect(columns.rows.map((row) => row.column_name).sort()).toEqual([
+      "client_id",
+      "kind",
+      "refresh_token_hash",
+      "scopes",
+    ]);
   });
 
   it("creates fact-aware relationship evidence columns and unique index", async () => {

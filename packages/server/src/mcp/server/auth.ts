@@ -1,6 +1,6 @@
 import type { Context, Next } from "hono";
 import type { Logger } from "pino";
-import { hashApiToken, isSketchPat } from "../../auth/api-token";
+import { hashApiToken, isSketchOAuthAccessToken, isSketchPat } from "../../auth/api-token";
 import type { createApiTokenRepository } from "../../db/repositories/api-tokens";
 import type { createUserRepository } from "../../db/repositories/users";
 import { createTokenBucketRateLimiter } from "./rate-limit";
@@ -23,26 +23,50 @@ declare module "hono" {
 
 const limiter = createTokenBucketRateLimiter({ capacity: 60, refillPerMinute: 60 });
 
-export function createMcpAuthMiddleware(params: { apiTokens: ApiTokenRepo; users: UserRepo; logger: Logger }) {
+function resolveBaseUrl(c: Context, configuredBaseUrl?: string): string {
+  if (configuredBaseUrl) return configuredBaseUrl.replace(/\/+$/, "");
+  const proto = c.req.header("x-forwarded-proto") ?? "http";
+  const host = c.req.header("host") ?? "localhost:3000";
+  return `${proto}://${host}`;
+}
+
+function unauthorized(c: Context, message: string, configuredBaseUrl?: string) {
+  const baseUrl = resolveBaseUrl(c, configuredBaseUrl);
+  c.header("WWW-Authenticate", `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
+  return c.json({ error: { code: "UNAUTHORIZED", message } }, 401);
+}
+
+export function createMcpAuthMiddleware(params: {
+  apiTokens: ApiTokenRepo;
+  users: UserRepo;
+  logger: Logger;
+  baseUrl?: string;
+}) {
   return async (c: Context, next: Next) => {
     const authHeader = c.req.header("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
-      return c.json({ error: { code: "UNAUTHORIZED", message: "Bearer token required" } }, 401);
+      return unauthorized(c, "Bearer token required", params.baseUrl);
     }
 
     const token = authHeader.slice("Bearer ".length).trim();
-    if (!isSketchPat(token)) {
-      return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid token" } }, 401);
+    if (!isSketchPat(token) && !isSketchOAuthAccessToken(token)) {
+      return unauthorized(c, "Invalid token", params.baseUrl);
     }
 
     const row = await params.apiTokens.findByHash(hashApiToken(token));
     if (!row) {
-      return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid token" } }, 401);
+      return unauthorized(c, "Invalid token", params.baseUrl);
+    }
+    if (isSketchPat(token) && row.kind !== "pat") {
+      return unauthorized(c, "Invalid token", params.baseUrl);
+    }
+    if (isSketchOAuthAccessToken(token) && row.kind !== "oauth") {
+      return unauthorized(c, "Invalid token", params.baseUrl);
     }
 
     const user = await params.users.findById(row.user_id);
     if (!user) {
-      return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid token" } }, 401);
+      return unauthorized(c, "Invalid token", params.baseUrl);
     }
 
     if (!limiter.consume(row.id)) {

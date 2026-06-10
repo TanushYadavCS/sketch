@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(84);
+      expect(logSpy).toHaveBeenCalledTimes(85);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(84);
+    expect(rows.rows).toHaveLength(85);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -138,6 +138,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[81]).toBe("086-local-claude-session-origin-runtime");
     expect(names[82]).toBe("087-rename-openrouter-provider");
     expect(names[83]).toBe("088-agent-run-aux-cost");
+    expect(names[84]).toBe("089-mcp-oauth");
   });
 
   it("creates the users table", async () => {
@@ -236,6 +237,24 @@ describe("runMigrations — full sequence", () => {
     );
   });
 
+  it("creates MCP OAuth tables and token columns", async () => {
+    await runMigrations(db);
+
+    for (const table of ["oauth_clients", "oauth_authorization_codes"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+
+    const columns = await sql<{ name: string }>`
+      PRAGMA table_info(api_tokens)
+    `.execute(db);
+    expect(columns.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining(["kind", "client_id", "scopes", "refresh_token_hash"]),
+    );
+  });
+
   it("creates fact-aware relationship evidence columns and unique index", async () => {
     await runMigrations(db, { quiet: true });
 
@@ -319,7 +338,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(84);
+    expect(rows.rows).toHaveLength(85);
   });
 
   it("creates entity_contact_points table", async () => {
@@ -361,6 +380,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(84);
+    expect(rows.rows).toHaveLength(85);
   });
 });

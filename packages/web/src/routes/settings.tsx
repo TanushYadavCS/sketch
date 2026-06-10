@@ -40,11 +40,6 @@ export const settingsRoute = createRoute({
 
 function SettingsPage() {
   const auth = useDashboardAuth();
-  const setupStatusQuery = useQuery({
-    queryKey: ["setup", "status"],
-    queryFn: () => api.setup.status(),
-  });
-  const showApiTokens = setupStatusQuery.data?.experimentalFlag === true;
 
   if (auth.role !== "admin") {
     return (
@@ -53,7 +48,7 @@ function SettingsPage() {
         <p className="mt-2 text-sm text-muted-foreground">Manage your personal Sketch settings.</p>
         <div className="mt-6 space-y-8">
           <LocalDevicesSection />
-          {showApiTokens ? <ApiTokensSection /> : null}
+          <ApiTokensSection />
         </div>
       </div>
     );
@@ -69,7 +64,7 @@ function SettingsPage() {
         <LocalDevicesSection />
         <AccessSection />
         <ApiKeySection />
-        {showApiTokens ? <ApiTokensSection /> : null}
+        <ApiTokensSection />
       </div>
     </div>
   );
@@ -645,14 +640,36 @@ function ApiTokensSection() {
   const trimmedName = name.trim();
   const tokens = tokensQuery.data?.tokens ?? [];
   const activeTokens = tokens.filter((token) => !token.revokedAt);
+  const mcpUrl =
+    tokensQuery.data?.mcpUrl ??
+    (typeof window === "undefined" ? "https://<sketch-host>/mcp" : `${window.location.origin}/mcp`);
 
   return (
     <section>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-sm font-medium text-muted-foreground">API tokens</p>
+        <p className="text-sm font-medium text-muted-foreground">MCP access</p>
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-4 rounded-md border border-border bg-muted/30 p-3">
+          <p className="text-sm font-medium">Sketch MCP URL</p>
+          <div className="mt-2 flex items-center gap-2">
+            <Input value={mcpUrl} readOnly className="h-9 font-mono text-xs" aria-label="Sketch MCP URL" />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => copyTextToClipboard(mcpUrl).then(() => toast.success("MCP URL copied"))}
+              aria-label="Copy MCP URL"
+            >
+              <CopySimpleIcon size={16} />
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Use this URL in Claude app connectors; use PATs below for clients that require a manual Bearer header.
+          </p>
+        </div>
+
         <div className="flex flex-col gap-3 sm:flex-row">
           <Input
             value={name}
@@ -707,12 +724,7 @@ function ApiTokensSection() {
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setSetupToken({ mcpUrl: tokensQuery.data?.mcpUrl ?? null })}
-                    >
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setSetupToken({ mcpUrl })}>
                       Setup
                     </Button>
                     <Button
@@ -738,7 +750,7 @@ function ApiTokensSection() {
           <AlertDialogHeader>
             <AlertDialogTitle>Claude Code setup</AlertDialogTitle>
             <AlertDialogDescription>
-              Paste this server entry into your Claude Code MCP configuration.
+              Use this server entry for clients that support custom Authorization headers.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs">
@@ -747,7 +759,7 @@ function ApiTokensSection() {
                 mcpServers: {
                   sketch: {
                     type: "http",
-                    url: setupToken?.mcpUrl ?? "https://<sketch-host>/mcp",
+                    url: setupToken?.mcpUrl ?? mcpUrl,
                     headers: { Authorization: `Bearer ${setupToken?.plaintext ?? "skp_..."}` },
                   },
                 },
@@ -766,7 +778,7 @@ function ApiTokensSection() {
                       mcpServers: {
                         sketch: {
                           type: "http",
-                          url: setupToken?.mcpUrl ?? "https://<sketch-host>/mcp",
+                          url: setupToken?.mcpUrl ?? mcpUrl,
                           headers: { Authorization: `Bearer ${setupToken?.plaintext ?? "skp_..."}` },
                         },
                       },
