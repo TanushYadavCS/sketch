@@ -8,7 +8,7 @@
  * 3. Bash path validation — commands blocked if they reference absolute paths outside
  *    workspace/~/.claude.
  */
-import { isAbsolute, matchesGlob, relative, resolve } from "node:path";
+import { extname, isAbsolute, matchesGlob, relative, resolve } from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { Logger } from "../logger";
@@ -22,7 +22,10 @@ export const READ_ONLY_FILE_TOOLS = ["Read", "Glob", "Grep"];
 export interface CanUseToolOptions {
   agentAllowedTools?: string[] | null;
   blockedReadPaths?: Iterable<string> | null;
+  blockImageReads?: boolean;
 }
+
+const IMAGE_FILE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 
 /**
  * Returns true when filePath is exactly dir or a child of dir.
@@ -46,6 +49,10 @@ function commandWords(command: string): string[] {
 
 function hasGlobSyntax(value: string): boolean {
   return /[*?[\]{}]/.test(value);
+}
+
+function isImageFilePath(filePath: string): boolean {
+  return IMAGE_FILE_EXTENSIONS.has(extname(filePath).toLowerCase());
 }
 
 function matchesBlockedPathPattern(pattern: string, blockedPath: string, relativeBlockedPath: string): boolean {
@@ -116,11 +123,14 @@ export function createCanUseTool(
         };
       }
 
-      if (toolName === "Read" && blockedReadPaths.has(filePath)) {
+      if (
+        toolName === "Read" &&
+        (blockedReadPaths.has(filePath) || (options.blockImageReads && isImageFilePath(filePath)))
+      ) {
         logger.warn({ toolName, filePath }, "Blocked Read on attachment that requires VisualAnalysis");
         return {
           behavior: "deny",
-          message: `Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this path instead of Read: ${filePath}`,
+          message: `Direct image reads are not supported for this model. Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this exact path instead: ${filePath}. Do not use Read, Bash, cat, base64, or conversion workarounds for this image.`,
         };
       }
     }

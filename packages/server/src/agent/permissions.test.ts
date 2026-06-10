@@ -126,6 +126,53 @@ describe("createCanUseTool", () => {
       expect(result.message).toContain(blockedPath);
     });
 
+    it.each(["jpg", "jpeg", "png", "gif", "webp"])(
+      "denies Read for image extension .%s when image reads are disabled",
+      async (extension) => {
+        const logger = createTestLogger();
+        const imagePath = `${WORKSPACE}/attachments/photo.${extension}`;
+        const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: true });
+
+        const result = await agentTool("Read", { file_path: imagePath });
+
+        expectDeny(result);
+        expect(result.message).toContain("Direct image reads are not supported for this model");
+        expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+        expect(result.message).toContain("Do not use Read, Bash, cat, base64, or conversion workarounds");
+        expect(result.message).toContain(imagePath);
+      },
+    );
+
+    it("allows Read for image extensions when image reads are enabled", async () => {
+      const logger = createTestLogger();
+      const imagePath = `${WORKSPACE}/attachments/photo.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: false });
+
+      const result = await agentTool("Read", { file_path: imagePath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("allows Read for non-image extensions when image reads are disabled", async () => {
+      const logger = createTestLogger();
+      const textPath = `${WORKSPACE}/attachments/notes.txt`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: true });
+
+      const result = await agentTool("Read", { file_path: textPath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("allows non-Read file tools for image extensions when image reads are disabled", async () => {
+      const logger = createTestLogger();
+      const imagePath = `${WORKSPACE}/attachments/photo.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: true });
+
+      const result = await agentTool("Grep", { path: imagePath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
     it("resolves blocked attachment paths before comparing", async () => {
       const logger = createTestLogger();
       const blockedPath = `${WORKSPACE}/attachments/image.png`;
