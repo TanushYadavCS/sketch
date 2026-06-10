@@ -390,6 +390,7 @@ describe("runAgent", () => {
       );
       expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]).toMatchObject({
         blockedReadPaths: [imagePath, backlogImagePath],
+        blockImageReads: true,
       });
       expect(result.rawUsage.promptMode).toBe("text");
       expect(result.rawUsage.imageCount).toBe(1);
@@ -451,6 +452,7 @@ describe("runAgent", () => {
       });
       expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]).toMatchObject({
         agentAllowedTools: ["Read"],
+        blockImageReads: false,
       });
       expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]?.blockedReadPaths).toBeUndefined();
       expect(result.rawUsage.promptMode).toBe("text");

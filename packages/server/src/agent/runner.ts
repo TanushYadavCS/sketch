@@ -406,6 +406,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
     agentAllowedTools: params.agentAllowedTools,
     blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
+    blockImageReads: visualAnalysisAllowed,
   });
   const canUseToolTimings: CanUseToolTiming[] = [];
   const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
