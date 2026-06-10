@@ -306,6 +306,8 @@ async function queueProposal(
     proposedName: input.name,
     normalizedName: normalized,
     entityType: input.entityType,
+    source: input.source,
+    sourceId: input.sourceId,
     proposedEmail: input.email ?? null,
     candidateEntityId,
     candidateScore,

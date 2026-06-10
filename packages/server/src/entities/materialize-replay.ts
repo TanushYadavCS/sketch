@@ -5,8 +5,10 @@ import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { buildMaterializeDeps } from "./materialize-deps";
+import { readJsonObject } from "./materialize-json";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializePersonFact, materializePersonSeed } from "./materialize-person";
+import { materializeProjectSeed } from "./materialize-project";
 import { materializeCrmRelationFact, materializeLlmRelationFact } from "./materialize-relations";
 import { materializeParentEntity, materializeStructuralSeed } from "./materialize-structural";
 import type {
@@ -35,6 +37,10 @@ const FACT_REPLAY_ORDER = [
 
 export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   if (fact.fact_type === "structural_seed") {
+    const raw = readJsonObject(fact.raw);
+    if (raw.sourceType === "project") {
+      return materializeProjectSeed(deps, fact);
+    }
     return materializeStructuralSeed(deps, fact);
   }
   if (fact.fact_type === "person_seed") {

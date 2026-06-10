@@ -761,6 +761,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     if (row.entity_type === "company") {
       await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
+    await writeReviewSourceRef(trxCtx, row, target.id);
     await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // Pick-different: write rejection against original candidate so it isn't re-suggested.
@@ -804,6 +805,15 @@ async function findReResolveMatches(ctx: ResolveTxnCtx, row: QueueRow, excludeEn
     if (aliases.some((a) => normalizeName(a) === normalized)) out.push(c);
   }
   return out;
+}
+
+async function writeReviewSourceRef(ctx: ResolveTxnCtx, row: QueueRow, entityId: string): Promise<void> {
+  if (!row.source || !row.source_id) return;
+  await ctx.entityRepo.upsertSourceRef({
+    entityId,
+    source: row.source,
+    sourceId: row.source_id,
+  });
 }
 
 export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: RejectOptions): Promise<RejectResult> {
@@ -878,13 +888,11 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (reResolvedToExisting) {
       target = matches[0];
     } else {
-      // 3. Create new entity. Decision recorded in plan §Helpers:
-      // - source/sourceId derived from the first evidence row so source_refs
-      //   carries honest provenance. When there is no evidence (rare —
-      //   ECR-01 always writes at least one), fall back to a synthetic
-      //   `entity-review` source.
-      const sourceFromEvidence = evidence[0]?.source ?? "entity-review";
-      const sourceId = `review:${reviewId}`;
+      // 3. Create new entity. Connector-backed queue rows carry source/sourceId
+      // from proposal time; older rows fall back to the evidence source and a
+      // synthetic review id.
+      const sourceFromEvidence = row.source ?? evidence[0]?.source ?? "entity-review";
+      const sourceId = row.source_id ?? `review:${reviewId}`;
       if (row.entity_type === "person") {
         const personData: {
           name: string;
@@ -947,6 +955,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (row.entity_type === "company") {
       await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
+    await writeReviewSourceRef(trxCtx, row, target.id);
     await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // 6. Mark resolved.

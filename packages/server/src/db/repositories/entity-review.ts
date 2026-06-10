@@ -42,6 +42,8 @@ export interface UpsertQueueRowInput {
   proposedName: string;
   normalizedName: string;
   entityType: string;
+  source?: string | null;
+  sourceId?: string | null;
   proposedEmail?: string | null;
   candidateEntityId: string | null;
   candidateScore: number | null;
@@ -82,12 +84,23 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       const now = new Date().toISOString();
       const freezeMs = readReviewFreezeMs();
 
-      const existing = await db
-        .selectFrom("entity_review_queue")
-        .selectAll()
-        .where("normalized_name", "=", input.normalizedName)
-        .where("entity_type", "=", input.entityType)
-        .executeTakeFirst();
+      const existingBySource =
+        input.source && input.sourceId
+          ? await db
+              .selectFrom("entity_review_queue")
+              .selectAll()
+              .where("source", "=", input.source)
+              .where("source_id", "=", input.sourceId)
+              .executeTakeFirst()
+          : undefined;
+      const existing =
+        existingBySource ??
+        (await db
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("normalized_name", "=", input.normalizedName)
+          .where("entity_type", "=", input.entityType)
+          .executeTakeFirst());
 
       if (!existing) {
         const id = randomUUID();
@@ -98,6 +111,8 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             proposed_name: input.proposedName,
             normalized_name: input.normalizedName,
             entity_type: input.entityType,
+            source: input.source ?? null,
+            source_id: input.sourceId ?? null,
             proposed_email: input.proposedEmail ?? null,
             candidate_entity_id: input.candidateEntityId,
             candidate_score: input.candidateScore,
@@ -125,6 +140,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
 
       const reviewStartedAt = existing.review_started_at;
       const midReview = reviewStartedAt !== null && Date.now() - new Date(reviewStartedAt).getTime() < freezeMs;
+      const sourcePatch =
+        existing.source === null && existing.source_id === null && input.source && input.sourceId
+          ? { source: input.source, source_id: input.sourceId }
+          : {};
 
       if (midReview) {
         await db
@@ -132,6 +151,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           .set({
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            ...sourcePatch,
           })
           .where("id", "=", existing.id)
           .execute();
@@ -147,6 +167,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             candidate_generated_at: now,
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            ...sourcePatch,
           })
           .where("id", "=", existing.id)
           .execute();

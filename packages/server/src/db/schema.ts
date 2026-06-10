@@ -692,6 +692,8 @@ export interface EntityReviewQueueTable {
   proposed_name: string;
   normalized_name: string;
   entity_type: string;
+  source: string | null;
+  source_id: string | null;
   proposed_email: string | null;
   candidate_entity_id: string | null;
   candidate_score: number | null;
