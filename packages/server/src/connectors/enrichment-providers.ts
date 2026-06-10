@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { type EmbeddingProvider, createEmbeddingProvider } from "./embeddings";
+import { createGeminiQueryEmbedder } from "./embeddings/gemini";
 import { createOpenRouterEmbeddingProvider } from "./embeddings/openrouter";
 import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
 import { createOpenRouterGenerator } from "./openrouter-generate";
@@ -112,11 +113,30 @@ export function createEnrichmentEmbeddingProvider(config: EnrichmentProviderConf
 export function createEnrichmentQueryEmbedder(
   config: EnrichmentProviderConfig,
 ): ((query: string) => Promise<number[]>) | null {
-  const provider = createEnrichmentEmbeddingProvider(config);
-  if (!provider) return null;
-  return async (query) => {
-    const [embedding] = await provider.embedTexts([query]);
-    if (!embedding) throw new Error("Embedding provider did not return a query embedding");
-    return embedding;
+  const primary = config.geminiApiKey
+    ? createGeminiQueryEmbedder(config.geminiApiKey, {
+        maxRpm: config.geminiMaxRpm,
+        maxRetries: config.geminiMaxRetries,
+      })
+    : null;
+  const fallbackProvider = config.openRouterApiKey ? createOpenRouterEmbeddingProvider(config.openRouterApiKey) : null;
+  const fallback = fallbackProvider
+    ? async (query: string) => {
+        const [embedding] = await fallbackProvider.embedTexts([query]);
+        if (!embedding) throw new Error("OpenRouter did not return a query embedding");
+        return embedding;
+      }
+    : null;
+
+  if (!primary) return fallback;
+  if (!fallback) return primary;
+
+  return (query) => {
+    return withProviderFallback({
+      operation: "embedQuery",
+      primary: () => primary(query),
+      fallback: () => fallback(query),
+      logger: config.logger,
+    });
   };
 }
