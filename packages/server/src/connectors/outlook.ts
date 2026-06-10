@@ -178,6 +178,37 @@ function normalizeDate(value: string | null | undefined): string | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
+function folderMessageDate(message: OutlookMessage, folder: FolderConfig): string | null {
+  return normalizeDate(message[folder.dateField]);
+}
+
+function compareFolderMessagesDesc(folder: FolderConfig, a: OutlookMessage, b: OutlookMessage): number {
+  return (
+    (new Date(folderMessageDate(b, folder) ?? 0).getTime() || 0) -
+    (new Date(folderMessageDate(a, folder) ?? 0).getTime() || 0)
+  );
+}
+
+function trimFolderMessages(folder: FolderConfig, messages: OutlookMessage[], maxMessages: number): OutlookMessage[] {
+  return messages.sort((a, b) => compareFolderMessagesDesc(folder, a, b)).slice(0, maxMessages);
+}
+
+function mergeFolderMessages(
+  folder: FolderConfig,
+  listedMessages: OutlookMessage[],
+  deltaMessages: OutlookMessage[],
+  maxMessages: number,
+): OutlookMessage[] {
+  const byId = new Map<string, OutlookMessage>();
+  for (const message of deltaMessages) {
+    if (message.id) byId.set(message.id, message);
+  }
+  for (const message of listedMessages) {
+    if (message.id) byId.set(message.id, message);
+  }
+  return trimFolderMessages(folder, [...byId.values()], maxMessages);
+}
+
 export function toNormalizedOutlookEmail(
   message: OutlookMessage,
   ownerEmail: string | null,
@@ -324,7 +355,13 @@ async function readFolderDelta(
   };
 }
 
-async function establishFolderDeltaLink(graph: GraphClient, folder: FolderConfig): Promise<string | null> {
+async function establishFolderDeltaState(
+  graph: GraphClient,
+  folder: FolderConfig,
+  since: string,
+  maxMessages: number,
+): Promise<{ messages: OutlookMessage[]; cursorLink: string | null }> {
+  const messages: OutlookMessage[] = [];
   let nextUrl: string | undefined;
   do {
     const result = await graph.request<OutlookListResponse<OutlookMessage>>(
@@ -334,14 +371,30 @@ async function establishFolderDeltaLink(graph: GraphClient, folder: FolderConfig
         : {
             params: {
               $top: String(PAGE_SIZE),
-              $select: "id",
+              $select: `id,${folder.dateField}`,
             },
           },
     );
-    if (result["@odata.deltaLink"]) return result["@odata.deltaLink"];
+    for (const message of result.value ?? []) {
+      if (message["@removed"]) continue;
+      const messageDate = folderMessageDate(message, folder);
+      if (!messageDate || messageDate < since) continue;
+      messages.push(message);
+      if (messages.length > maxMessages * 2) {
+        messages.splice(0, messages.length, ...trimFolderMessages(folder, messages, maxMessages));
+      }
+    }
+    if (result["@odata.deltaLink"]) {
+      return { messages: trimFolderMessages(folder, messages, maxMessages), cursorLink: result["@odata.deltaLink"] };
+    }
     nextUrl = result["@odata.nextLink"];
   } while (nextUrl);
-  return null;
+  return { messages: trimFolderMessages(folder, messages, maxMessages), cursorLink: null };
+}
+
+async function establishFolderDeltaLink(graph: GraphClient, folder: FolderConfig): Promise<string | null> {
+  const result = await establishFolderDeltaState(graph, folder, "0000-01-01T00:00:00.000Z", 0);
+  return result.cursorLink;
 }
 
 async function syncFolder(
@@ -374,11 +427,12 @@ async function syncFolder(
     }
   }
 
-  const messages = await listFolderMessages(graph, folder, since, maxMessages);
+  const listedMessages = await listFolderMessages(graph, folder, since, maxMessages);
+  const deltaState = await establishFolderDeltaState(graph, folder, since, maxMessages);
   return {
     folder: folder.key,
-    messages,
-    cursorLink: await establishFolderDeltaLink(graph, folder),
+    messages: mergeFolderMessages(folder, listedMessages, deltaState.messages, maxMessages),
+    cursorLink: deltaState.cursorLink,
     removedProviderFileIds: [],
   };
 }

@@ -183,6 +183,53 @@ describe("Outlook connector", () => {
     expect(cursor.sentDeltaLink).toBe("https://graph.microsoft.com/sent-delta-1");
   });
 
+  it("processes messages returned while establishing the initial delta cursor", async () => {
+    const connector = createOutlookConnector();
+    const gapSentAt = new Date(Date.now() - 60_000).toISOString();
+
+    mockGraphFetch((url) => {
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages") {
+        return jsonResponse({ value: [] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages") {
+        return jsonResponse({ value: [] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta" });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
+        return jsonResponse({
+          value: [{ id: "sent-gap", sentDateTime: gapSentAt }],
+          "@odata.deltaLink": "https://graph.microsoft.com/sent-delta",
+        });
+      }
+      if (url.pathname === "/v1.0/me/messages/sent-gap") {
+        return jsonResponse(
+          outlookMessage("sent-gap", {
+            from: { name: "Owner", address: "owner@canvasx.ai" },
+            to: [{ name: "Jane Doe", address: "jane@example.com" }],
+            sentDateTime: gapSentAt,
+            receivedDateTime: gapSentAt,
+          }),
+        );
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        connectorConfigId: "connector-outlook",
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 90, maxMessages: 10 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["sent-gap"]);
+  });
+
   it("falls back from a stale 410 cursor for only the affected folder", async () => {
     const connector = createOutlookConnector();
     const requests: URL[] = [];
@@ -242,6 +289,59 @@ describe("Outlook connector", () => {
     ) as { inboxDeltaLink?: string; sentDeltaLink?: string };
     expect(nextCursor.inboxDeltaLink).toBe("https://graph.microsoft.com/inbox-delta-new");
     expect(nextCursor.sentDeltaLink).toBe("https://graph.microsoft.com/sent-delta-new");
+  });
+
+  it("processes messages returned while reestablishing a 410-expired delta cursor", async () => {
+    const connector = createOutlookConnector();
+    const gapSentAt = new Date(Date.now() - 60_000).toISOString();
+    const cursor = JSON.stringify({
+      inboxDeltaLink: "https://graph.microsoft.com/inbox-delta-current",
+      sentDeltaLink: "https://graph.microsoft.com/sent-delta-expired",
+      lastSyncedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      reciprocityEmails: ["jane@example.com"],
+    });
+
+    mockGraphFetch((url) => {
+      if (url.toString() === "https://graph.microsoft.com/inbox-delta-current") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta-next" });
+      }
+      if (url.toString() === "https://graph.microsoft.com/sent-delta-expired") {
+        return jsonResponse({ error: { code: "SyncStateNotFound" } }, 410);
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages") {
+        return jsonResponse({ value: [] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
+        return jsonResponse({
+          value: [{ id: "sent-gap-410", sentDateTime: gapSentAt }],
+          "@odata.deltaLink": "https://graph.microsoft.com/sent-delta-next",
+        });
+      }
+      if (url.pathname === "/v1.0/me/messages/sent-gap-410") {
+        return jsonResponse(
+          outlookMessage("sent-gap-410", {
+            from: { name: "Owner", address: "owner@canvasx.ai" },
+            to: [{ name: "Jane Doe", address: "jane@example.com" }],
+            sentDateTime: gapSentAt,
+            receivedDateTime: gapSentAt,
+          }),
+        );
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        connectorConfigId: "connector-outlook",
+        credentials: validCredentials(),
+        scopeConfig: { maxMessages: 10 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["sent-gap-410"]);
   });
 
   it("emits removal records for Graph removals and sync-window shrink", async () => {

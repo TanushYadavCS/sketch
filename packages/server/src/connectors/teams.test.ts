@@ -137,6 +137,119 @@ describe("Teams connector", () => {
     expect(maxActiveResolutions).toBe(1);
   });
 
+  it("keeps meetings without transcripts pending in the cursor", async () => {
+    const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
+    const eventStart = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+    const event = {
+      ...teamsEvent("event-pending", "Pending transcript", "https://teams.microsoft.com/l/meetup-join/pending"),
+      start: { dateTime: eventStart, timeZone: "UTC" },
+      end: { dateTime: new Date(Date.now() - 3 * 60 * 60_000).toISOString(), timeZone: "UTC" },
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/v1.0/me/calendarView") {
+        return jsonResponse({ value: [event] });
+      }
+
+      if (url.pathname === "/v1.0/me/onlineMeetings") {
+        return jsonResponse({ value: [{ id: "meeting-pending", subject: "Pending transcript" }] });
+      }
+
+      if (url.pathname === "/v1.0/me/onlineMeetings/meeting-pending/transcripts") {
+        return jsonResponse({ value: [] });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 30 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    const cursor = JSON.parse(
+      (await connector.getCursor({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        currentCursor: null,
+        logger,
+      })) ?? "{}",
+    ) as { lastSyncedAt?: string; observedMeetings?: Record<string, { transcriptIds: string[] }> };
+
+    expect(cursor.lastSyncedAt).toBe(eventStart);
+    expect(cursor.observedMeetings?.["event-pending"]?.transcriptIds).toEqual([]);
+  });
+
+  it("revisits cursor-observed meetings whose transcripts arrive after the processing lag", async () => {
+    const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
+    const eventStart = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+    const cursorLastSyncedAt = new Date(Date.now() - 30 * 60_000).toISOString();
+    let calendarViewStart: string | null = null;
+    const event = {
+      ...teamsEvent("event-late", "Late transcript", "https://teams.microsoft.com/l/meetup-join/late"),
+      start: { dateTime: eventStart, timeZone: "UTC" },
+      end: { dateTime: new Date(Date.now() - 3 * 60 * 60_000).toISOString(), timeZone: "UTC" },
+    };
+    const cursor = JSON.stringify({
+      lastSyncedAt: cursorLastSyncedAt,
+      syncWindowStart: new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString(),
+      observedMeetings: {
+        "event-late": {
+          transcriptIds: [],
+          sourceCreatedAt: eventStart,
+          observedAt: cursorLastSyncedAt,
+        },
+      },
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/v1.0/me/calendarView") {
+        calendarViewStart = url.searchParams.get("startDateTime");
+        return jsonResponse({ value: [event] });
+      }
+
+      if (url.pathname === "/v1.0/me/onlineMeetings") {
+        return jsonResponse({ value: [{ id: "meeting-late", subject: "Late transcript" }] });
+      }
+
+      if (url.pathname === "/v1.0/me/onlineMeetings/meeting-late/transcripts") {
+        return jsonResponse({ value: [{ id: "transcript-late", createdDateTime: new Date().toISOString() }] });
+      }
+
+      if (url.pathname === "/v1.0/me/onlineMeetings/meeting-late/recordings") {
+        return jsonResponse({ value: [] });
+      }
+
+      if (url.pathname === "/v1.0/me/onlineMeetings/meeting-late/transcripts/transcript-late/content") {
+        return new Response(["WEBVTT", "", "00:00:00.000 --> 00:00:02.000", "<v Jane Doe>Late recap.</v>"].join("\n"));
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 30 },
+        cursor,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(calendarViewStart).toBe(eventStart);
+    expect(items.map((item) => item.providerFileId)).toEqual(["transcript-late"]);
+  });
+
   it("emits a removal when a previously observed transcript disappears", async () => {
     const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
     mockTeamsGraph();
@@ -144,7 +257,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 7 },
+        scopeConfig: { initialDays: 30 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -163,7 +276,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 7 },
+        scopeConfig: { initialDays: 30 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -184,7 +297,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 7 }),
+      scopeConfig: JSON.stringify({ initialDays: 30 }),
       createdBy: "owner",
     });
     mockTeamsGraph();
@@ -249,7 +362,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 7 }),
+      scopeConfig: JSON.stringify({ initialDays: 30 }),
       createdBy: "owner",
     });
     mockTeamsGraph();

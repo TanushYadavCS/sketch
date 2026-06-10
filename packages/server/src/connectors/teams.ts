@@ -18,6 +18,7 @@ export const TEAMS_MICROSOFT_SCOPE =
 const DEFAULT_INITIAL_LOOKBACK_DAYS = 365;
 const DEFAULT_MAX_INFLIGHT = 4;
 const DEFAULT_PROCESSING_LAG_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_PENDING_TRANSCRIPT_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface TeamsEmailAddress {
   name?: string | null;
@@ -96,6 +97,7 @@ interface TeamsConnectorOptions {
   initialLookbackDays?: number;
   maxInflight?: number;
   processingLagMs?: number;
+  pendingTranscriptRetryMs?: number;
   sleep?: (ms: number) => Promise<void>;
   retryBaseMs?: number;
 }
@@ -170,6 +172,10 @@ function maxIso(a: string, b: string): string {
   return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
 }
 
+function minIso(a: string, b: string): string {
+  return new Date(a).getTime() <= new Date(b).getTime() ? a : b;
+}
+
 function meetingObservationKey(event: TeamsCalendarEvent): string | null {
   if (event.id) return event.id;
   const joinUrl = event.onlineMeeting?.joinUrl;
@@ -179,13 +185,42 @@ function meetingObservationKey(event: TeamsCalendarEvent): string | null {
 function pruneObservedMeetings(
   observed: Record<string, TeamsObservedMeeting>,
   windowStart: string,
+  pendingRetryCutoff: string,
 ): Record<string, TeamsObservedMeeting> {
   const pruned: Record<string, TeamsObservedMeeting> = {};
   for (const [key, observation] of Object.entries(observed)) {
     if (observation.sourceCreatedAt && observation.sourceCreatedAt < windowStart) continue;
+    if (
+      isPendingTranscriptObservation(observation) &&
+      !isWithinPendingTranscriptRetry(observation, pendingRetryCutoff)
+    ) {
+      continue;
+    }
     pruned[key] = observation;
   }
   return pruned;
+}
+
+function isPendingTranscriptObservation(observation: TeamsObservedMeeting): boolean {
+  return observation.transcriptIds.length === 0;
+}
+
+function isWithinPendingTranscriptRetry(observation: TeamsObservedMeeting, pendingRetryCutoff: string): boolean {
+  return Boolean(observation.sourceCreatedAt && observation.sourceCreatedAt >= pendingRetryCutoff);
+}
+
+function earliestPendingTranscriptSource(
+  observed: Record<string, TeamsObservedMeeting>,
+  pendingRetryCutoff: string,
+): string | null {
+  let earliest: string | null = null;
+  for (const observation of Object.values(observed)) {
+    if (!isPendingTranscriptObservation(observation)) continue;
+    if (!isWithinPendingTranscriptRetry(observation, pendingRetryCutoff)) continue;
+    if (!observation.sourceCreatedAt) continue;
+    earliest = earliest ? minIso(earliest, observation.sourceCreatedAt) : observation.sourceCreatedAt;
+  }
+  return earliest;
 }
 
 function observationFallsInRange(observation: TeamsObservedMeeting, since: string, until: string): boolean {
@@ -553,6 +588,9 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
   const processingLagMs =
     options.processingLagMs ??
     envPositiveInt("TEAMS_PROCESSING_LAG_MS", DEFAULT_PROCESSING_LAG_MS, 7 * 24 * 60 * 60 * 1000);
+  const pendingTranscriptRetryMs =
+    options.pendingTranscriptRetryMs ??
+    envPositiveInt("TEAMS_PENDING_TRANSCRIPT_RETRY_MS", DEFAULT_PENDING_TRANSCRIPT_RETRY_MS, 90 * 24 * 60 * 60 * 1000);
   let nextCursor: TeamsCursor | null = null;
 
   return {
@@ -576,13 +614,20 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
       const runMaxInflight = parsePositiveInt(scopeConfig.maxInflight, maxInflight, 16);
       const parsedCursor = parseCursor(cursor);
       const windowStart = new Date(Date.now() - initialDays * 24 * 60 * 60 * 1000).toISOString();
-      const since = parsedCursor?.lastSyncedAt ? maxIso(parsedCursor.lastSyncedAt, windowStart) : windowStart;
+      const pendingRetryCutoff = new Date(Date.now() - pendingTranscriptRetryMs).toISOString();
+      const observations = pruneObservedMeetings(parsedCursor?.observedMeetings ?? {}, windowStart, pendingRetryCutoff);
+      const pendingSince = earliestPendingTranscriptSource(observations, pendingRetryCutoff);
+      const cursorSince = parsedCursor?.lastSyncedAt
+        ? pendingSince
+          ? minIso(parsedCursor.lastSyncedAt, pendingSince)
+          : parsedCursor.lastSyncedAt
+        : windowStart;
+      const since = maxIso(cursorSince, windowStart);
       await emitWindowShrinkRemoval(parsedCursor, windowStart, onSourceItemRemoved);
       nextCursor = null;
 
       const events = (await listCalendarEvents(graph, since, now)).filter(isTeamsEvent);
       const itemGroups: SyncedItem[][] = new Array(events.length).fill(null).map(() => []);
-      const observations = pruneObservedMeetings(parsedCursor?.observedMeetings ?? {}, windowStart);
       const currentEventKeys = new Set<string>();
       const inspectedEventKeys = new Set<string>();
       const removalRecords: SourceItemRemovalRecord[] = [];
@@ -605,11 +650,16 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
               removalRecords.push({ providerFileId, reason: "teams_transcript_removed" });
             }
           }
-          observations[eventKey] = {
+          const observation = {
             transcriptIds: result.transcriptIds,
             sourceCreatedAt: graphDateTime(event.start?.dateTime) ?? graphDateTime(event.end?.dateTime),
             observedAt: now,
           };
+          if (result.transcriptIds.length > 0 || isWithinPendingTranscriptRetry(observation, pendingRetryCutoff)) {
+            observations[eventKey] = observation;
+          } else {
+            delete observations[eventKey];
+          }
         },
       );
 
@@ -626,8 +676,10 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
         await onSourceItemRemoved?.(record);
       }
 
+      const advanceableLastSyncedAt = new Date(Date.now() - processingLagMs).toISOString();
+      const nextPendingSince = earliestPendingTranscriptSource(observations, pendingRetryCutoff);
       nextCursor = {
-        lastSyncedAt: new Date(Date.now() - processingLagMs).toISOString(),
+        lastSyncedAt: nextPendingSince ? minIso(advanceableLastSyncedAt, nextPendingSince) : advanceableLastSyncedAt,
         syncWindowStart: windowStart,
         observedMeetings: observations,
       };
