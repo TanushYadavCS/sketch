@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.34.0] -- 2026-06-10
+
+- Microsoft connectors: add Outlook and Teams connector support with Microsoft Graph sync, tenant-aware OAuth setup, Files UI configuration, and cursor-gap hardening.
+- Web chat: add attachments and voice transcription support, preserving home-screen attachments and recording state across the chat handoff.
+- Files/knowledge: add the knowledge graph view and clean orphaned entities, relationships, and review rows when deleting connectors.
+- External MCP: add OAuth for public Sketch MCP clients alongside the existing token-authenticated MCP path.
+- OpenRouter/Gemini resilience: add OpenRouter fallbacks for enrichment and search embeddings, preserve Gemini query embeddings, and reprice OpenRouter usage from captured token counts while restoring gateway prompt caching.
+- Agent safety: block direct image reads in visual-analysis runs so image/OCR work routes through the intended VisualAnalysis path.
+- Licensing: switch the project license to Apache 2.0 and add the NOTICE file.
+
 ## [0.33.0] -- 2026-06-03
 
 - Web app: add the Sketch Home experience and full-window web chat with multi-conversation history, streamed progress, generated file links, workspace summaries, and Markdown rendering.
