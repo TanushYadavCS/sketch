@@ -86,6 +86,8 @@ import * as m083 from "./migrations/083-local-claude-sessions";
 import * as m084 from "./migrations/084-entity-contact-points";
 import * as m085 from "./migrations/085-crm-activity-rollups";
 import * as m086 from "./migrations/086-local-claude-session-origin-runtime";
+import * as m087 from "./migrations/087-rename-openrouter-provider";
+import * as m088 from "./migrations/088-agent-run-aux-cost";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -176,6 +178,8 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "084-entity-contact-points": m084,
           "085-crm-activity-rollups": m085,
           "086-local-claude-session-origin-runtime": m086,
+          "087-rename-openrouter-provider": m087,
+          "088-agent-run-aux-cost": m088,
         };
       },
     },

@@ -6,6 +6,7 @@
 import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import {
   type BufferedMessage,
@@ -14,7 +15,12 @@ import {
   buildSketchContext,
   getImageAttachmentPathsFromSketchContext,
 } from "../agent/prompt";
-import { type AgentResult, type McpServerConfig, type RunAgentParams, canUseVisualAnalysisTool } from "../agent/runner";
+import {
+  type McpServerConfig,
+  type RunAgentParams,
+  type RunAgentResult,
+  canUseVisualAnalysisTool,
+} from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
@@ -124,7 +130,7 @@ export interface SlackAdapterDeps {
   slack: {
     userCache: UserCache;
   };
-  runAgent: (params: RunAgentParams) => Promise<AgentResult>;
+  runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
@@ -566,9 +572,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         maxBytes: maxFileBytes,
         logger,
       });
+      const eagerAuxCalls: AuxLlmCall[] = [];
       attachments = await transcribeEagerAttachments(attachments, {
         loadSettings: () => repos.settings.get(),
         logger,
+        onUsage: (call) => eagerAuxCalls.push(call),
       });
       const capture = await captureSlackMessage({
         message,
@@ -637,6 +645,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const result = await runAgent({
           db,
           workspaceKey: user.id,
+          seedAuxCalls: eagerAuxCalls,
           userMessage,
           workspaceDir,
           claudeConfigDir: config.CLAUDE_CONFIG_DIR,
@@ -880,9 +889,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           maxBytes: maxFileBytes,
           logger,
         });
+        const eagerAuxCalls: AuxLlmCall[] = [];
         attachments = await transcribeEagerAttachments(attachments, {
           loadSettings: () => repos.settings.get(),
           logger,
+          onUsage: (call) => eagerAuxCalls.push(call),
         });
         const capture = await captureSlackMessage({
           message,
@@ -956,6 +967,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const result = await runAgent({
           db,
           workspaceKey: channelWorkspaceKey,
+          seedAuxCalls: eagerAuxCalls,
           userMessage,
           workspaceDir,
           claudeConfigDir: config.CLAUDE_CONFIG_DIR,

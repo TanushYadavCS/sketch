@@ -195,7 +195,7 @@ describe("runAgent", () => {
     expect(sessions.getSessionId).not.toHaveBeenCalled();
     expect(sessions.saveSessionId).not.toHaveBeenCalled();
     expect(result.sessionId).toBe("external-session-1");
-    expect(result.isResumedSession).toBe(true);
+    expect(result.rawUsage.isResumedSession).toBe(true);
   });
 
   it("clears a stale resumed session and retries once fresh before producing output", async () => {
@@ -230,7 +230,7 @@ describe("runAgent", () => {
     expect(capturedResume).toEqual(["sess-stale", undefined]);
     expect(sessions.deleteSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", undefined);
     expect(sessions.saveSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", "sess-fresh", undefined);
-    expect(result.isResumedSession).toBe(false);
+    expect(result.rawUsage.isResumedSession).toBe(false);
     expect(result.trace.finalText).toBe("Recovered");
   });
 
@@ -389,9 +389,9 @@ describe("runAgent", () => {
       expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]).toMatchObject({
         blockedReadPaths: [imagePath, backlogImagePath],
       });
-      expect(result.promptMode).toBe("text");
-      expect(result.imageCount).toBe(1);
-      expect(result.nonImageCount).toBe(0);
+      expect(result.rawUsage.promptMode).toBe("text");
+      expect(result.rawUsage.imageCount).toBe(1);
+      expect(result.rawUsage.nonImageCount).toBe(0);
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
@@ -451,7 +451,7 @@ describe("runAgent", () => {
         agentAllowedTools: ["Read"],
       });
       expect(vi.mocked(createCanUseTool).mock.calls.at(-1)?.[3]?.blockedReadPaths).toBeUndefined();
-      expect(result.promptMode).toBe("text");
+      expect(result.rawUsage.promptMode).toBe("text");
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
@@ -468,7 +468,7 @@ describe("runAgent", () => {
       await runAgent(
         makeBaseParams({
           loadTranscriptionSettings: vi.fn().mockResolvedValue({
-            llm_provider: "openrouter_bedrock",
+            llm_provider: "openrouter",
             anthropic_api_key: "sk-db",
           }),
         }),
@@ -478,7 +478,7 @@ describe("runAgent", () => {
         apiKey: "sk-db",
         model: "xiaomi/mimo-v2.5",
         source: "db",
-        providerMode: "openrouter_bedrock",
+        providerMode: "openrouter",
       });
     } finally {
       vi.unstubAllEnvs();
@@ -497,26 +497,25 @@ describe("runAgent", () => {
     const result = await runAgent(makeBaseParams());
 
     expect(result.costUsd).toBe(0.0042);
-    expect(result.durationMs).toBe(5200);
-    expect(result.durationApiMs).toBe(4800);
-    expect(result.numTurns).toBe(3);
-    expect(result.stopReason).toBe("end_turn");
-    expect(result.errorSubtype).toBeNull();
-    expect(result.inputTokens).toBe(1500);
-    expect(result.outputTokens).toBe(800);
-    expect(result.cacheReadTokens).toBe(200);
-    expect(result.cacheCreationTokens).toBe(100);
-    expect(result.webSearchRequests).toBe(1);
-    expect(result.webFetchRequests).toBe(2);
-    expect(result.model).toBe("claude-sonnet-4-20250514");
-    expect(result.isResumedSession).toBe(false);
-    expect(result.promptMode).toBe("text");
-    expect(result.totalAttachments).toBe(0);
-    expect(result.imageCount).toBe(0);
-    expect(result.nonImageCount).toBe(0);
-    expect(result.mimeTypes).toEqual([]);
-    expect(result.fileSizes).toEqual([]);
-    expect(result.toolCalls).toEqual([]);
+    expect(result.rawUsage.durationApiMs).toBe(4800);
+    expect(result.rawUsage.numTurns).toBe(3);
+    expect(result.rawUsage.stopReason).toBe("end_turn");
+    expect(result.rawUsage.errorSubtype).toBeNull();
+    expect(result.rawUsage.inputTokens).toBe(1500);
+    expect(result.rawUsage.outputTokens).toBe(800);
+    expect(result.rawUsage.cacheReadTokens).toBe(200);
+    expect(result.rawUsage.cacheCreationTokens).toBe(100);
+    expect(result.rawUsage.webSearchRequests).toBe(1);
+    expect(result.rawUsage.webFetchRequests).toBe(2);
+    expect(result.rawUsage.model).toBe("claude-sonnet-4-20250514");
+    expect(result.rawUsage.isResumedSession).toBe(false);
+    expect(result.rawUsage.promptMode).toBe("text");
+    expect(result.rawUsage.totalAttachments).toBe(0);
+    expect(result.rawUsage.imageCount).toBe(0);
+    expect(result.rawUsage.nonImageCount).toBe(0);
+    expect(result.rawUsage.mimeTypes).toEqual([]);
+    expect(result.rawUsage.fileSizes).toEqual([]);
+    expect(result.rawUsage.toolCalls).toEqual([]);
   });
 
   it("captures errorSubtype for non-success results", async () => {
@@ -530,8 +529,8 @@ describe("runAgent", () => {
 
     const result = await runAgent(makeBaseParams());
 
-    expect(result.errorSubtype).toBe("error_max_turns");
-    expect(result.stopReason).toBeNull();
+    expect(result.rawUsage.errorSubtype).toBe("error_max_turns");
+    expect(result.rawUsage.stopReason).toBeNull();
   });
 
   it("captures tool calls from assistant messages", async () => {
@@ -566,19 +565,19 @@ describe("runAgent", () => {
 
     const result = await runAgent(makeBaseParams());
 
-    expect(result.toolCalls).toHaveLength(3);
+    expect(result.rawUsage.toolCalls).toHaveLength(3);
     expect(result.trace.progressEvents).toEqual([
       { kind: "intermediate_text", text: "Let me check." },
       { kind: "tool_use", toolName: "Bash", input: { command: "ls" } },
       { kind: "tool_use", toolName: "Skill", input: { skill: "canvas" } },
       { kind: "tool_use", toolName: "mcp__plugin_pipedream__action", input: { app: "slack" } },
     ]);
-    expect(result.toolCalls[0]).toEqual(expect.objectContaining({ toolName: "Bash", skillName: null }));
-    expect(result.toolCalls[1]).toEqual(expect.objectContaining({ toolName: "Skill", skillName: "canvas" }));
-    expect(result.toolCalls[2]).toEqual(
+    expect(result.rawUsage.toolCalls[0]).toEqual(expect.objectContaining({ toolName: "Bash", skillName: null }));
+    expect(result.rawUsage.toolCalls[1]).toEqual(expect.objectContaining({ toolName: "Skill", skillName: "canvas" }));
+    expect(result.rawUsage.toolCalls[2]).toEqual(
       expect.objectContaining({ toolName: "mcp__plugin_pipedream__action", skillName: null }),
     );
-    for (const tc of result.toolCalls) {
+    for (const tc of result.rawUsage.toolCalls) {
       expect(tc.startedAt).toBeGreaterThan(0);
       expect(tc.endedAt).toBeGreaterThanOrEqual(tc.startedAt);
     }
@@ -601,8 +600,8 @@ describe("runAgent", () => {
 
     const result = await runAgent(makeBaseParams());
 
-    expect(result.toolCalls).toHaveLength(1);
-    expect(result.toolCalls[0]).toEqual(expect.objectContaining({ toolName: "Skill", skillName: null }));
+    expect(result.rawUsage.toolCalls).toHaveLength(1);
+    expect(result.rawUsage.toolCalls[0]).toEqual(expect.objectContaining({ toolName: "Skill", skillName: null }));
   });
 
   it("does not capture tool calls from replayed user messages (EC-8)", async () => {
@@ -623,7 +622,7 @@ describe("runAgent", () => {
 
     const result = await runAgent(makeBaseParams());
 
-    expect(result.toolCalls).toHaveLength(0);
+    expect(result.rawUsage.toolCalls).toHaveLength(0);
   });
 
   it("handles model=null when modelUsage is empty (EC-10)", async () => {
@@ -636,7 +635,7 @@ describe("runAgent", () => {
     }) as unknown as typeof query);
 
     const result = await runAgent(makeBaseParams());
-    expect(result.model).toBeNull();
+    expect(result.rawUsage.model).toBeNull();
   });
 
   it("defaults telemetry to zero when SDK result has no usage fields", async () => {
@@ -650,16 +649,15 @@ describe("runAgent", () => {
 
     const result = await runAgent(makeBaseParams());
 
-    expect(result.durationMs).toBe(0);
-    expect(result.durationApiMs).toBe(0);
-    expect(result.numTurns).toBe(0);
-    expect(result.inputTokens).toBe(0);
-    expect(result.outputTokens).toBe(0);
-    expect(result.cacheReadTokens).toBe(0);
-    expect(result.cacheCreationTokens).toBe(0);
-    expect(result.webSearchRequests).toBe(0);
-    expect(result.webFetchRequests).toBe(0);
-    expect(result.model).toBeNull();
+    expect(result.rawUsage.durationApiMs).toBe(0);
+    expect(result.rawUsage.numTurns).toBe(0);
+    expect(result.rawUsage.inputTokens).toBe(0);
+    expect(result.rawUsage.outputTokens).toBe(0);
+    expect(result.rawUsage.cacheReadTokens).toBe(0);
+    expect(result.rawUsage.cacheCreationTokens).toBe(0);
+    expect(result.rawUsage.webSearchRequests).toBe(0);
+    expect(result.rawUsage.webFetchRequests).toBe(0);
+    expect(result.rawUsage.model).toBeNull();
   });
 
   it("keeps the trailing text-only suffix as finalText", async () => {

@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(82);
+      expect(logSpy).toHaveBeenCalledTimes(84);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(82);
+    expect(rows.rows).toHaveLength(84);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -136,6 +136,8 @@ describe("runMigrations — full sequence", () => {
     expect(names[79]).toBe("084-entity-contact-points");
     expect(names[80]).toBe("085-crm-activity-rollups");
     expect(names[81]).toBe("086-local-claude-session-origin-runtime");
+    expect(names[82]).toBe("087-rename-openrouter-provider");
+    expect(names[83]).toBe("088-agent-run-aux-cost");
   });
 
   it("creates the users table", async () => {
@@ -317,7 +319,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(82);
+    expect(rows.rows).toHaveLength(84);
   });
 
   it("creates entity_contact_points table", async () => {
@@ -359,6 +361,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(82);
+    expect(rows.rows).toHaveLength(84);
   });
 });

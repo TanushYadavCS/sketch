@@ -72,7 +72,7 @@ export function applyLlmEnvFromSettings(settings: LlmSettings | null, logger?: L
     return;
   }
 
-  if (settings.llm_provider === "openrouter_bedrock") {
+  if (settings.llm_provider === "openrouter") {
     if (!settings.anthropic_api_key || !settings.model_id) {
       logger?.warn(
         {
@@ -91,7 +91,7 @@ export function applyLlmEnvFromSettings(settings: LlmSettings | null, logger?: L
     process.env.ANTHROPIC_AUTH_TOKEN = settings.anthropic_api_key;
     process.env.ANTHROPIC_API_KEY = "";
     process.env.ANTHROPIC_MODEL = settings.model_id;
-    logger?.info({ llmProvider: "openrouter_bedrock", source: "db" }, "Configured LLM provider from DB settings");
+    logger?.info({ llmProvider: "openrouter", source: "db" }, "Configured LLM provider from DB settings");
     return;
   }
 

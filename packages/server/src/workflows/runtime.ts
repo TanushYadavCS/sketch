@@ -24,6 +24,7 @@ import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "../integrations/wrapper";
 import type { Logger } from "../logger";
+import type { RecordWorkflowStep, WorkflowStepUsage } from "../telemetry/agent-run-telemetry";
 import { resolveWorkflowDelivery } from "./delivery";
 import type { StepOutput, WorkflowStep } from "./types";
 
@@ -45,6 +46,7 @@ export interface ExecuteAutomationParams {
   sendDm?: RunAgentParams["sendDm"];
   sendMessage?: (text: string) => Promise<void>;
   onEvent?: (event: AutomationExecutionEvent) => Promise<void>;
+  recordWorkflowStep?: RecordWorkflowStep;
 }
 
 export type AutomationExecutionEvent =
@@ -204,7 +206,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           listAgentEnvForRuntime: params.listAgentEnvForRuntime,
         });
       } else if (step.type === "agent") {
-        // Content from automation_step_content, fallback to task.prompt for legacy tasks
         const prompt = content?.content ?? (!task.steps ? task.prompt : null);
         if (!prompt) {
           throw new Error(`Agent step "${step.label}" has no prompt`);
@@ -227,9 +228,8 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
           userRepo: params.userRepo,
           inboxMessagesRepo: params.inboxMessagesRepo,
           sendDm: params.sendDm,
-          // output_platform lets a workflow deliver to a different channel than
-          // its trigger context; fall back to the task's own platform otherwise.
           outputPlatform: resolveWorkflowDelivery(task).platform,
+          recordWorkflowStep: params.recordWorkflowStep,
         });
       }
 
@@ -260,7 +260,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         error: { message: error.message, stack: error.stack },
       };
 
-      // Mark remaining steps as skipped
       let foundFailed = false;
       for (const s of steps) {
         if (s.id === step.id) {
@@ -294,7 +293,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         error: { message: error.message },
       });
 
-      // Send failure notification
       if (sendMessage) {
         await sendMessage(`Automation '${task.title ?? task.prompt}' failed at step '${step.label}': ${error.message}`);
       }
@@ -316,7 +314,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
     logger.info({ taskId: task.id, runId }, "Automation: execution completed");
 
-    // Deliver final step's output
     if (sendMessage && task.output_mode !== "silent") {
       if (finalOutput != null) {
         const message = typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput, null, 2);
@@ -591,10 +588,17 @@ interface AgentStepParams {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   outputPlatform: "slack" | "whatsapp";
+  recordWorkflowStep?: RecordWorkflowStep;
 }
 
+/**
+ * Runs an agent workflow step. Non-"light" steps delegate to
+ * executeSketchAgentStep; "light" steps run a non-interactive Claude Code
+ * subprocess with bypassPermissions and empty settingSources (no user settings,
+ * skills, or MCP servers loaded, and no permission prompts to block tool calls).
+ */
 async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
-  const { prompt, step, input, logger, workspaceDir, outputPlatform } = params;
+  const { prompt, step, input, task, logger, workspaceDir, outputPlatform, recordWorkflowStep } = params;
 
   if (step.agentMode !== "light") {
     return executeSketchAgentStep(params);
@@ -635,9 +639,6 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
       ...(modelOverride ? { model: modelOverride } : {}),
       cwd: workspaceDir,
       systemPrompt: systemPromptLines.join("\n"),
-      // bypassPermissions + empty settingSources: the agent step runs
-      // non-interactively, with no user settings / skills / MCP servers loaded,
-      // and no permission prompts to block tool calls.
       permissionMode: "bypassPermissions" as const,
       settingSources: [],
       stderr: (chunk: string) => {
@@ -647,15 +648,11 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   });
 
   let lastText = "";
+  let stepUsage: WorkflowStepUsage | null = null;
   try {
     for await (const message of run) {
-      if (
-        message &&
-        typeof message === "object" &&
-        "type" in message &&
-        message.type === "assistant" &&
-        "message" in message
-      ) {
+      if (!message || typeof message !== "object" || !("type" in message)) continue;
+      if (message.type === "assistant" && "message" in message) {
         const msg = message.message as { content?: Array<{ type: string; text?: string }> };
         if (msg.content) {
           for (const block of msg.content) {
@@ -664,6 +661,18 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
             }
           }
         }
+      } else if (message.type === "result") {
+        const resultMsg = message as Record<string, unknown>;
+        const u = resultMsg.usage as Record<string, unknown> | undefined;
+        const modelKeys = Object.keys((resultMsg.modelUsage as Record<string, unknown>) ?? {});
+        stepUsage = {
+          model: modelKeys.length > 0 ? modelKeys[0] : (modelOverride ?? null),
+          inputTokens: (u?.input_tokens as number) ?? 0,
+          outputTokens: (u?.output_tokens as number) ?? 0,
+          cacheReadTokens: (u?.cache_read_input_tokens as number) ?? 0,
+          cacheCreationTokens: (u?.cache_creation_input_tokens as number) ?? 0,
+          sdkCostUsd: (resultMsg.total_cost_usd as number) ?? 0,
+        };
       }
     }
   } catch (err) {
@@ -671,6 +680,18 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
     logger.error({ err, stepId: step.id, stderrText }, "Automation agent: step failed (Claude Code subprocess error)");
     const baseMsg = err instanceof Error ? err.message : String(err);
     throw new Error(stderrText ? `${baseMsg}\nstderr: ${stderrText}` : baseMsg);
+  }
+
+  if (stepUsage && recordWorkflowStep) {
+    await recordWorkflowStep(
+      {
+        platform: outputPlatform,
+        contextType: "scheduled_task",
+        userId: task.created_by,
+        workspaceKey: resolveWorkspaceKey(task),
+      },
+      stepUsage,
+    );
   }
 
   logger.info(
@@ -762,7 +783,11 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
   }
 
   logger.info(
-    { stepId: step.id, responseLength: result.trace.finalText?.length ?? 0, toolCalls: result.toolCalls.length },
+    {
+      stepId: step.id,
+      responseLength: result.trace.finalText?.length ?? 0,
+      toolCalls: result.rawUsage.toolCalls.length,
+    },
     "Automation agent: sketch-mode step completed",
   );
 
@@ -810,7 +835,6 @@ async function writeAutomationContext(params: {
   const fileName = `${params.taskId}-${params.runId}.md`;
   await writeFile(join(contextDir, fileName), lines.join("\n"), "utf-8");
 
-  // Rotate: keep last 5
   const files = await readdir(contextDir);
   const taskFiles = files.filter((f) => f.startsWith(params.taskId)).sort();
   if (taskFiles.length > 5) {

@@ -16,7 +16,7 @@ interface OnboardingData {
 const LLM_LABELS: Record<LlmProvider, string> = {
   anthropic: "Anthropic (Sonnet)",
   bedrock: "AWS Bedrock (Sonnet)",
-  openrouter_bedrock: "OpenRouter (Sonnet)",
+  openrouter: "OpenRouter",
 };
 
 interface StepCompletionProps {

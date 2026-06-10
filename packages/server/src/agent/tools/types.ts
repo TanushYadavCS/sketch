@@ -13,6 +13,7 @@ import type { TaskContext } from "../../scheduler/types";
 import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
+import type { AuxCostCollector } from "../aux-cost";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -73,6 +74,7 @@ export interface SketchMcpDeps {
   transcriptionEnabled?: boolean;
   visionConfig?: VisionConfig | null;
   visionAnalysisEnabled?: boolean;
+  auxCostCollector?: AuxCostCollector;
   logger?: Logger;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {

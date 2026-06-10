@@ -37,7 +37,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(82);
+    expect(rows.rows).toHaveLength(84);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -113,6 +113,8 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[79]).toBe("084-entity-contact-points");
     expect(names[80]).toBe("085-crm-activity-rollups");
     expect(names[81]).toBe("086-local-claude-session-origin-runtime");
+    expect(names[82]).toBe("087-rename-openrouter-provider");
+    expect(names[83]).toBe("088-agent-run-aux-cost");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -128,7 +130,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       const rows = await sql<{ name: string }>`
         SELECT name FROM kysely_migration ORDER BY name ASC
       `.execute(freshDb);
-      expect(rows.rows).toHaveLength(82);
+      expect(rows.rows).toHaveLength(84);
     } finally {
       await freshDb.destroy();
     }

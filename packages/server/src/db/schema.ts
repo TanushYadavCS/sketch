@@ -578,6 +578,7 @@ export interface AgentRunsTable {
   platform: string;
   context_type: string;
   cost_usd: number;
+  aux_cost_usd: Generated<number>;
   is_error: Generated<number>;
   duration_ms: number | null;
   created_at: Generated<string>;

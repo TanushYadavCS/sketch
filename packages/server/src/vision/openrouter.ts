@@ -101,6 +101,7 @@ export async function analyzeImageWithOpenRouter(
       },
       body: JSON.stringify({
         model: config.model,
+        usage: { include: true },
         messages: [
           {
             role: "user",

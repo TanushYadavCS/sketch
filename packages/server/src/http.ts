@@ -53,7 +53,7 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
 
-import type { AgentResult, McpServerConfig, RunAgentParams } from "./agent/runner";
+import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
 import { getSmtpConfig } from "./api/shared";
 import type { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
@@ -80,7 +80,7 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
-  runAgent?: (params: RunAgentParams) => Promise<AgentResult>;
+  runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
@@ -167,7 +167,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     });
   }
 
-  // Auth middleware on all /api/* routes (with setup mode + auth checks)
   app.use(
     "/api/*",
     createAuthMiddleware(settings, {

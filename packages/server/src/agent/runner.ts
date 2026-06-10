@@ -35,17 +35,21 @@ import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
+import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
 
+/**
+ * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
+ * start comes from canUseTool (falling back to message arrival), end from the
+ * next canUseTool call (falling back to run end).
+ */
 export interface ToolCallRecord {
   toolName: string;
   skillName: string | null;
-  /** Epoch ms when tool execution started (from canUseTool, or message arrival fallback) */
   startedAt: number;
-  /** Epoch ms when tool execution ended (next canUseTool call, or run end) */
   endedAt: number;
 }
 
@@ -72,23 +76,42 @@ export interface RunTrace {
   finalText: string | null;
 }
 
+/**
+ * Business result of an agent run. `costUsd` is the authoritative agent-model
+ * USD cost: the runner defaults it to the SDK's own figure
+ * (`rawUsage.sdkCostUsd`), and the telemetry boundary overwrites it with the
+ * provider-aware repriced value (correct for OpenRouter). `auxCostUsd` is the
+ * separate, additive sum of transcription/vision sub-call costs for this run
+ * (OpenRouter's own figures); total turn cost is `costUsd + auxCostUsd`.
+ */
 export interface AgentResult {
   messageSent: boolean;
   sessionId: string;
   costUsd: number;
+  auxCostUsd: number;
   pendingUploads: string[];
-  durationMs: number;
-  durationApiMs: number;
-  numTurns: number;
-  stopReason: string | null;
-  errorSubtype: string | null;
+  trace: RunTrace;
+}
+
+/**
+ * Raw, un-priced usage facts captured from the SDK message stream and the
+ * request params. Consumed by the telemetry boundary (OTel span attributes)
+ * and the pricing service. The runner produces these but does not interpret
+ * them (no cost decision, no telemetry mapping). `sdkCostUsd` is the SDK's own
+ * total_cost_usd, unreliable for non-Anthropic providers.
+ */
+export interface RawRunUsage {
+  model: string | null;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   webSearchRequests: number;
   webFetchRequests: number;
-  model: string | null;
+  durationApiMs: number;
+  numTurns: number;
+  stopReason: string | null;
+  errorSubtype: string | null;
   isResumedSession: boolean;
   totalAttachments: number;
   imageCount: number;
@@ -97,8 +120,12 @@ export interface AgentResult {
   fileSizes: number[];
   promptMode: "text" | "multimodal";
   toolCalls: ToolCallRecord[];
-  trace: RunTrace;
+  auxLlmCalls: AuxLlmCall[];
+  sdkCostUsd: number;
 }
+
+/** Business result plus the raw usage payload for the telemetry/pricing boundary. */
+export type RunAgentResult = AgentResult & { rawUsage: RawRunUsage };
 
 export interface McpServerConfig {
   type: "http";
@@ -106,6 +133,14 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
 }
 
+/**
+ * Inputs to a single agent run. A few fields carry non-obvious behaviour:
+ * `sessionMode` controls session persistence ("fresh" skips both resume and
+ * save for a fully ephemeral run; "persistent"/"chat"/undefined do the normal
+ * get+save); `agentInstructions` is a /team persona's system-prompt append; and
+ * `agentAllowedTools`, when set, restricts the exposed and permitted toolset to
+ * that persona's allowlist (undefined keeps the runner default).
+ */
 export interface RunAgentParams {
   db: Kysely<DB>;
   workspaceKey: string;
@@ -131,12 +166,6 @@ export interface RunAgentParams {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   model?: string;
   maxTurns?: number;
-  /**
-   * Controls session behaviour for scheduled tasks.
-   * - "fresh": skip session resume and skip session save (fully ephemeral run)
-   * - "persistent" or "chat": normal get+save behaviour (same as undefined)
-   * When omitted, behaves exactly as before (always get + save).
-   */
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
@@ -175,17 +204,12 @@ export interface RunAgentParams {
   visionConfig?: VisionConfig | null;
   blockedReadPaths?: string[] | null;
   /**
-   * Free-form instruction set for an agent persona, appended to the system
-   * prompt. Set when the run is associated with a /team agent (channel-bound,
-   * group-bound, or fallback). Null/undefined for runs that are not under an
-   * agent persona.
+   * Aux LLM costs incurred before the run (eager transcription of voice-message
+   * attachments in the adapters) to fold into this run's aux total, since they
+   * happen outside the run's own tool-call collector.
    */
+  seedAuxCalls?: AuxLlmCall[];
   agentInstructions?: string | null;
-  /**
-   * Canonical tool-name allowlist for an agent persona. When provided, only
-   * tools in this list are exposed to the SDK and permitted by canUseTool.
-   * Null/undefined preserves the runner's default toolset.
-   */
   agentAllowedTools?: string[] | null;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
@@ -231,7 +255,7 @@ export function extractAssistantText(message: unknown): string | null {
   return joined.trim() ? joined : null;
 }
 
-export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
+export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
   const isFresh = params.sessionMode === "fresh";
   const shouldPersistSession = params.persistSession ?? !isFresh;
@@ -278,8 +302,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     : DEFAULT_RUN_TOOLS;
 
   let sessionId = "";
-  let costUsd = 0;
-  let durationMs = 0;
+  let sdkCostUsd = 0;
   let durationApiMs = 0;
   let numTurns = 0;
   let stopReason: string | null = null;
@@ -332,8 +355,10 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   }
 
   const uploadCollector = new UploadCollector();
+  const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
+    auxCostCollector,
     workspaceDir: absWorkspace,
     db: params.db,
     getSlack: params.getSlack,
@@ -427,6 +452,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     }
   };
 
+  /**
+   * Runs a single SDK query() pass and processes its message stream. When the
+   * caller skips the org config dir (e.g. the WhatsApp fallback agent for
+   * external users), the SDK is pointed at the workspace itself so it does not
+   * inherit the org's CLAUDE.md.
+   */
   const executeSdkRun = async (resumeSessionId: string | undefined) => {
     const notifySessionId = async (nextSessionId: string) => {
       if (!nextSessionId || nextSessionId === notifiedSessionId) return;
@@ -447,9 +478,6 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
         resume: resumeSessionId,
         env: {
           ...process.env,
-          // When the caller intentionally skips the org config dir (e.g. the
-          // WhatsApp fallback agent for external users), point the SDK at the
-          // workspace itself so it does not pick up the org's CLAUDE.md.
           ...(params.claudeConfigDir === undefined ? { CLAUDE_CONFIG_DIR: workspaceDir } : {}),
           ...integrationAccess.envVars,
           ...params.agentEnv,
@@ -533,9 +561,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       if (message.type === "result") {
         sessionId = message.session_id;
         await notifySessionId(sessionId);
-        costUsd = message.total_cost_usd;
+        sdkCostUsd = message.total_cost_usd;
         const resultMsg = message as Record<string, unknown>;
-        durationMs = (resultMsg.duration_ms as number) ?? 0;
         durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
         numTurns = (resultMsg.num_turns as number) ?? 0;
         stopReason = (resultMsg.stop_reason as string) ?? null;
@@ -613,37 +640,46 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
   }
 
   const pendingUploads = uploadCollector.drain();
-  logger.info({ userId: userName, sessionId, costUsd, pendingUploads: pendingUploads.length }, "Agent run completed");
+  const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
+  const auxCostUsd = sumAuxCost(auxLlmCalls);
+  logger.info(
+    { userId: userName, sessionId, sdkCostUsd, auxCostUsd, pendingUploads: pendingUploads.length },
+    "Agent run completed",
+  );
   const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
     messageSent: finalText !== null,
     sessionId,
-    costUsd,
+    costUsd: sdkCostUsd,
+    auxCostUsd,
     pendingUploads,
-    durationMs,
-    durationApiMs,
-    numTurns,
-    stopReason,
-    errorSubtype,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    webSearchRequests,
-    webFetchRequests,
-    model,
-    isResumedSession: usedExistingSession,
-    totalAttachments: attachments.length,
-    imageCount: images.length,
-    nonImageCount: nonImages.length,
-    mimeTypes: attachments.map((a) => a.mimeType),
-    fileSizes: attachments.map((a) => a.sizeBytes),
-    promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
-    toolCalls,
     trace: {
       progressEvents,
       finalText,
+    },
+    rawUsage: {
+      model,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      webSearchRequests,
+      webFetchRequests,
+      durationApiMs,
+      numTurns,
+      stopReason,
+      errorSubtype,
+      isResumedSession: usedExistingSession,
+      totalAttachments: attachments.length,
+      imageCount: images.length,
+      nonImageCount: nonImages.length,
+      mimeTypes: attachments.map((a) => a.mimeType),
+      fileSizes: attachments.map((a) => a.sizeBytes),
+      promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
+      toolCalls,
+      auxLlmCalls,
+      sdkCostUsd,
     },
   };
 }
