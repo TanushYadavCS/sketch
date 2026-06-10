@@ -122,7 +122,7 @@ describe("createCanUseTool", () => {
       const result = await agentTool("Read", { file_path: blockedPath });
 
       expectDeny(result);
-      expect(result.message).toContain("Use VisualAnalysis");
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
       expect(result.message).toContain(blockedPath);
     });
 
@@ -134,7 +134,7 @@ describe("createCanUseTool", () => {
       const result = await agentTool("Read", { file_path: `${WORKSPACE}/attachments/../attachments/image.png` });
 
       expectDeny(result);
-      expect(result.message).toContain("Use VisualAnalysis");
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
     });
 
     it("allows non-Read file tools for blocked attachment paths", async () => {
@@ -155,7 +155,7 @@ describe("createCanUseTool", () => {
       const result = await agentTool("Bash", { command: `base64 "${blockedPath}"` });
 
       expectDeny(result);
-      expect(result.message).toContain("Use VisualAnalysis");
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
       expect(result.message).toContain(blockedPath);
     });
 
@@ -167,7 +167,7 @@ describe("createCanUseTool", () => {
       const result = await agentTool("Bash", { command: "cat ./attachments/image.png" });
 
       expectDeny(result);
-      expect(result.message).toContain("Use VisualAnalysis");
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
     });
 
     it("denies Bash commands with relative globs that match blocked attachment paths", async () => {
@@ -178,7 +178,7 @@ describe("createCanUseTool", () => {
       const result = await agentTool("Bash", { command: "base64 attachments/*.png" });
 
       expectDeny(result);
-      expect(result.message).toContain("Use VisualAnalysis");
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
     });
 
     it("denies Bash commands with absolute globs that match blocked attachment paths", async () => {
@@ -189,7 +189,7 @@ describe("createCanUseTool", () => {
       const result = await agentTool("Bash", { command: `cat ${WORKSPACE}/attachments/photo.*` });
 
       expectDeny(result);
-      expect(result.message).toContain("Use VisualAnalysis");
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
     });
 
     it("allows Bash commands that do not reference blocked attachment paths", async () => {

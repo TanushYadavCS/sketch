@@ -74,6 +74,11 @@ const llmSchema = z.discriminatedUnion("provider", [
     modelId: z.string().optional(),
   }),
   z.object({
+    provider: z.literal("openrouter"),
+    apiKey: z.string().min(1),
+    modelId: z.string().min(1),
+  }),
+  z.object({
     provider: z.literal("openrouter_bedrock"),
     apiKey: z.string().min(1),
     modelId: z.string().min(1),
@@ -300,6 +305,16 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     return c.json({ ok: true });
   });
 
+  /**
+   * Persists LLM provider settings. Anthropic credentials are verified before
+   * persist; Bedrock verification is deferred. For OpenRouter the platform
+   * provisioner has just minted the key, so there is no verification call: the
+   * anthropic_api_key column is reused for the OpenRouter virtual key and
+   * model_id holds the `<model>@preset/<alias>` composite. The deprecated
+   * provider alias "openrouter_bedrock" is accepted and normalized to
+   * "openrouter" on persist, so the managed provisioner keeps working without a
+   * synchronized deploy.
+   */
   routes.put("/llm", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const parsed = llmSchema.safeParse(body);
@@ -331,10 +346,8 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         modelId: data.modelId,
       });
     } else {
-      // openrouter_bedrock: caller (platform provisioner) just minted the key, no verification call.
-      // anthropic_api_key column reused for the OR virtual key, model_id holds the <model>@preset/<alias> composite.
       await settings.update({
-        llmProvider: "openrouter_bedrock",
+        llmProvider: "openrouter",
         anthropicApiKey: data.apiKey,
         modelId: data.modelId,
       });

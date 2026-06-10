@@ -165,8 +165,8 @@ describe("executeAutomation agent steps", () => {
   it("defaults scheduled agent steps without an explicit mode to the Sketch runtime", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
-      toolCalls: [],
       trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
     });
     const params = makeParams({
       runAgent,
@@ -200,8 +200,8 @@ describe("executeAutomation agent steps", () => {
   it("does not deliver successful final output for silent workflows", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
-      toolCalls: [],
       trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
     });
     const params = makeParams({
       runAgent,
@@ -216,8 +216,8 @@ describe("executeAutomation agent steps", () => {
   it("routes sketch-mode agent steps through runAgent with workflow context", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
-      toolCalls: [],
       trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
     });
     const buildMcpServers = vi.fn().mockResolvedValue({ canvas: { type: "http", url: "https://mcp.test" } });
     const sendDm = vi.fn();
@@ -257,8 +257,8 @@ describe("executeAutomation agent steps", () => {
   it("keeps channel task context for creator-less sketch-mode agent steps", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
-      toolCalls: [],
       trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
     });
     const params = makeParams({
       runAgent,

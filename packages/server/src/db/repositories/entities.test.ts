@@ -1,7 +1,7 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
-import { up as cleanupOrphanEntities } from "../migrations/086-orphan-entity-cleanup";
+import { up as cleanupOrphanEntities } from "../migrations/090-orphan-entity-cleanup";
 import type { DB } from "../schema";
 import { createConnectorRepository } from "./connectors";
 import { createEntityRepository, normalizeContactPointValue } from "./entities";
@@ -337,7 +337,7 @@ describe("createEntityRepository deleteEntitiesForFiles", () => {
   });
 });
 
-describe("086-orphan-entity-cleanup migration", () => {
+describe("090-orphan-entity-cleanup migration", () => {
   let db: Kysely<DB>;
   let repo: ReturnType<typeof createEntityRepository>;
 

@@ -10,6 +10,7 @@
  */
 import { isAbsolute, matchesGlob, relative, resolve } from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { Logger } from "../logger";
 
 export const PERMITTED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Skill"];
@@ -119,7 +120,7 @@ export function createCanUseTool(
         logger.warn({ toolName, filePath }, "Blocked Read on attachment that requires VisualAnalysis");
         return {
           behavior: "deny",
-          message: `Use VisualAnalysis with this path instead of Read: ${filePath}`,
+          message: `Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this path instead of Read: ${filePath}`,
         };
       }
     }
@@ -132,7 +133,7 @@ export function createCanUseTool(
           logger.warn({ toolName, blockedPath }, "Blocked Bash command on attachment that requires VisualAnalysis");
           return {
             behavior: "deny",
-            message: `Use VisualAnalysis with this path instead of Bash: ${blockedPath}`,
+            message: `Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this path instead of Bash: ${blockedPath}`,
           };
         }
       }

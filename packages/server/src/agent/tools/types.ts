@@ -13,6 +13,7 @@ import type { TaskContext } from "../../scheduler/types";
 import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
+import type { AuxCostCollector } from "../aux-cost";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -61,6 +62,7 @@ export interface SketchMcpDeps {
   currentUserId?: string;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
+  workspaceKey?: string;
   originThreadTs?: string;
   activeQueueKey?: string;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
@@ -72,6 +74,7 @@ export interface SketchMcpDeps {
   transcriptionEnabled?: boolean;
   visionConfig?: VisionConfig | null;
   visionAnalysisEnabled?: boolean;
+  auxCostCollector?: AuxCostCollector;
   logger?: Logger;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
@@ -79,6 +82,9 @@ export interface SketchMcpDeps {
     currentMessageId?: number;
     providerThreadId?: string | null;
   };
+  agentInstructions?: string | null;
+  agentAllowedTools?: string[] | null;
+  originOrgContextEnabled?: boolean;
   publicMcp?: {
     userEmails?: string[];
     filterEntityMetadata?: boolean;

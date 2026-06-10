@@ -6,10 +6,16 @@ import { basename, join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
+import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { InboxMessageContext, SketchContextParams } from "../agent/prompt";
 import { buildSketchContext, getImageAttachmentPathsFromSketchContext } from "../agent/prompt";
-import { type AgentResult, type McpServerConfig, type RunAgentParams, canUseVisualAnalysisTool } from "../agent/runner";
+import {
+  type McpServerConfig,
+  type RunAgentParams,
+  type RunAgentResult,
+  canUseVisualAnalysisTool,
+} from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
@@ -82,7 +88,7 @@ export interface WhatsAppAdapterDeps {
     conversations: ConversationRepository;
   };
   queue: QueueManager;
-  runAgent: (params: RunAgentParams) => Promise<AgentResult>;
+  runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
@@ -421,9 +427,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
         try {
           let attachments: Attachment[] = capture.attachments;
+          const eagerAuxCalls: AuxLlmCall[] = [];
           attachments = await transcribeEagerAttachments(attachments, {
             loadSettings: () => repos.settings.get(),
             logger,
+            onUsage: (call) => eagerAuxCalls.push(call),
           });
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
@@ -474,6 +482,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           const result = await runAgent({
             db,
             workspaceKey: dmWorkspaceKey,
+            seedAuxCalls: eagerAuxCalls,
             userMessage,
             workspaceDir,
             // Skip ~/.claude org context for fallback runs so external users
@@ -714,9 +723,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
       try {
         let attachments: Attachment[] = capture.attachments;
+        const eagerAuxCalls: AuxLlmCall[] = [];
         attachments = await transcribeEagerAttachments(attachments, {
           loadSettings: () => repos.settings.get(),
           logger,
+          onUsage: (call) => eagerAuxCalls.push(call),
         });
 
         const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
@@ -759,6 +770,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         const result = await runAgent({
           db,
           workspaceKey: groupWorkspaceKey,
+          seedAuxCalls: eagerAuxCalls,
           userMessage,
           workspaceDir,
           claudeConfigDir: config.CLAUDE_CONFIG_DIR,

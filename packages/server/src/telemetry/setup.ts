@@ -6,6 +6,7 @@
  * backends (Jaeger, Grafana, Datadog, etc.) — zero changes to instrumentation code.
  * When POSTHOG_API_KEY is set, adds a PostHog exporter for LLM Analytics.
  */
+import { trace } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
@@ -46,6 +47,7 @@ export function initTelemetry(repo: ReturnType<typeof createAgentRunsRepo>, logg
   logger.info({ exporters }, "Telemetry initialized (OpenTelemetry)");
 
   return {
+    tracer: trace.getTracer("sketch"),
     shutdown: () => provider.shutdown(),
   };
 }

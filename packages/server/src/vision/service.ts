@@ -1,4 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
+import type { AuxLlmCall } from "../agent/aux-cost";
 import type { Config } from "../config";
 import type { SettingsTable } from "../db/schema";
 import type { Logger } from "../logger";
@@ -8,7 +9,7 @@ export interface VisionConfig {
   apiKey: string;
   model: string;
   source: "db" | "env";
-  providerMode: "openrouter" | "openrouter_bedrock" | "env";
+  providerMode: "openrouter" | "env";
 }
 
 export type VisionSettings = Pick<SettingsTable, "llm_provider" | "anthropic_api_key">;
@@ -16,6 +17,7 @@ export type VisionSettings = Pick<SettingsTable, "llm_provider" | "anthropic_api
 export interface VisionServiceDeps {
   config?: VisionConfig | null;
   logger: Logger;
+  onUsage?: (call: AuxLlmCall) => void;
 }
 
 function resolveOpenRouterKey(
@@ -24,7 +26,7 @@ function resolveOpenRouterKey(
 ): Pick<VisionConfig, "apiKey" | "source" | "providerMode"> | null {
   const provider = settings?.llm_provider;
   const dbKey = settings?.anthropic_api_key?.trim();
-  if ((provider === "openrouter" || provider === "openrouter_bedrock") && dbKey) {
+  if (provider === "openrouter" && dbKey) {
     return { apiKey: dbKey, source: "db", providerMode: provider };
   }
 
@@ -73,6 +75,14 @@ export async function analyzeImageFile(imagePath: string, question: string, deps
   const result = await analyzeImageWithOpenRouter(imagePath, question, {
     apiKey: config.apiKey,
     model: config.model,
+  });
+  deps.onUsage?.({
+    op: "vision",
+    model: config.model,
+    costUsd: result.usage?.cost ?? 0,
+    inputTokens: result.usage?.prompt_tokens,
+    outputTokens: result.usage?.completion_tokens,
+    source: result.usage?.cost != null ? "openrouter" : "unknown",
   });
   deps.logger.info(
     {

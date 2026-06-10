@@ -1,22 +1,36 @@
-import { describe, expect, it } from "vitest";
-import { resolveVisionConfig, resolveVisionConfigFromAppConfig, validateWorkspaceVisualPath } from "./service";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  analyzeImageFile,
+  resolveVisionConfig,
+  resolveVisionConfigFromAppConfig,
+  validateWorkspaceVisualPath,
+} from "./service";
+
+const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+
+function logger() {
+  return { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() };
+}
 
 describe("resolveVisionConfig", () => {
-  it("uses openrouter_bedrock DB key before OPENROUTER_API_KEY", () => {
+  it("uses openrouter DB key before OPENROUTER_API_KEY", () => {
     const result = resolveVisionConfig(
       {
         VISION_ENABLED: "true",
         VISION_MODEL: "xiaomi/mimo-v2.5",
         OPENROUTER_API_KEY: "sk-env",
       } as NodeJS.ProcessEnv,
-      { llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" },
+      { llm_provider: "openrouter", anthropic_api_key: "sk-db" },
     );
 
     expect(result).toEqual({
       apiKey: "sk-db",
       model: "xiaomi/mimo-v2.5",
       source: "db",
-      providerMode: "openrouter_bedrock",
+      providerMode: "openrouter",
     });
   });
 
@@ -103,15 +117,79 @@ describe("resolveVisionConfig", () => {
         VISION_MODEL: "xiaomi/mimo-v2.5",
         OPENROUTER_API_KEY: "sk-env",
       },
-      { llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" },
+      { llm_provider: "openrouter", anthropic_api_key: "sk-db" },
     );
 
     expect(result).toEqual({
       apiKey: "sk-db",
       model: "xiaomi/mimo-v2.5",
       source: "db",
-      providerMode: "openrouter_bedrock",
+      providerMode: "openrouter",
     });
+  });
+});
+
+describe("analyzeImageFile aux cost", () => {
+  let tmpDir: string;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "sketch-vision-"));
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reports vision aux cost via onUsage from OpenRouter usage.cost", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: "a cat" } }],
+        usage: { prompt_tokens: 80, completion_tokens: 12, cost: 0.002 },
+      }),
+    });
+    const imagePath = join(tmpDir, "img.png");
+    await writeFile(imagePath, PNG_HEADER);
+    const onUsage = vi.fn();
+
+    const text = await analyzeImageFile(imagePath, "what is this?", {
+      config: { apiKey: "sk", model: "xiaomi/mimo-v2.5", source: "db", providerMode: "openrouter" },
+      logger: logger() as never,
+      onUsage,
+    });
+
+    expect(text).toBe("a cat");
+    expect(onUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        op: "vision",
+        model: "xiaomi/mimo-v2.5",
+        costUsd: 0.002,
+        inputTokens: 80,
+        outputTokens: 12,
+        source: "openrouter",
+      }),
+    );
+  });
+
+  it("requests cost reporting from OpenRouter via usage.include", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "x" } }] }),
+    });
+    const imagePath = join(tmpDir, "img.png");
+    await writeFile(imagePath, PNG_HEADER);
+
+    await analyzeImageFile(imagePath, "q", {
+      config: { apiKey: "sk", model: "m", source: "db", providerMode: "openrouter" },
+      logger: logger() as never,
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init.body)).usage).toEqual({ include: true });
   });
 });
 

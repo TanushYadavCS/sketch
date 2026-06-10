@@ -16,12 +16,12 @@ function logger() {
 }
 
 describe("resolveTranscriptionConfig", () => {
-  it("uses openrouter_bedrock DB key first", () => {
-    const result = resolveTranscriptionConfig({ llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" }, {
+  it("uses openrouter DB key first", () => {
+    const result = resolveTranscriptionConfig({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }, {
       OPENROUTER_API_KEY: "sk-env",
     } as NodeJS.ProcessEnv);
 
-    expect(result).toMatchObject({ apiKey: "sk-db", source: "db", providerMode: "openrouter_bedrock" });
+    expect(result).toMatchObject({ apiKey: "sk-db", source: "db", providerMode: "openrouter" });
   });
 
   it("uses openrouter DB key", () => {
@@ -92,7 +92,7 @@ describe("transcribeEagerAttachments", () => {
     const result = await transcribeEagerAttachments(
       [{ originalName: "voice.ogg", mimeType: "audio/ogg", localPath: audioPath, sizeBytes: 5 }],
       {
-        loadSettings: async () => ({ llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" }),
+        loadSettings: async () => ({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }),
         logger: logger() as never,
       },
     );
@@ -101,6 +101,52 @@ describe("transcribeEagerAttachments", () => {
     expect(result[0].transcription).toEqual({ status: "completed", text: "hello from audio" });
     expect(formatAttachmentsForPrompt(result)).toContain("<audio_transcription>");
     expect(formatAttachmentsForPrompt(result)).toContain("hello from audio");
+  });
+
+  it("reports aux cost via onUsage from OpenRouter's own usage.cost", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "hello", usage: { seconds: 12, cost: 0.004 } }),
+    });
+    const audioPath = join(tmpDir, "voice.ogg");
+    await writeFile(audioPath, "audio");
+    const onUsage = vi.fn();
+
+    await transcribeEagerAttachments(
+      [{ originalName: "voice.ogg", mimeType: "audio/ogg", localPath: audioPath, sizeBytes: 5 }],
+      {
+        loadSettings: async () => ({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }),
+        logger: logger() as never,
+        onUsage,
+      },
+    );
+
+    expect(onUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "transcription", costUsd: 0.004, seconds: 12, source: "openrouter" }),
+    );
+  });
+
+  it("flags aux cost source as unknown when OpenRouter omits cost", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "hi", usage: { seconds: 3 } }),
+    });
+    const audioPath = join(tmpDir, "voice.ogg");
+    await writeFile(audioPath, "audio");
+    const onUsage = vi.fn();
+
+    await transcribeEagerAttachments(
+      [{ originalName: "voice.ogg", mimeType: "audio/ogg", localPath: audioPath, sizeBytes: 5 }],
+      {
+        loadSettings: async () => ({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }),
+        logger: logger() as never,
+        onUsage,
+      },
+    );
+
+    expect(onUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "transcription", costUsd: 0, source: "unknown" }),
+    );
   });
 
   it("uses attachment MIME type when transcribing generic file names", async () => {
@@ -114,7 +160,7 @@ describe("transcribeEagerAttachments", () => {
     await transcribeEagerAttachments(
       [{ originalName: "voice.bin", mimeType: "audio/mp4", localPath: audioPath, sizeBytes: 5 }],
       {
-        loadSettings: async () => ({ llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" }),
+        loadSettings: async () => ({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }),
         logger: logger() as never,
       },
     );
@@ -135,7 +181,7 @@ describe("transcribeEagerAttachments", () => {
     };
 
     const result = await transcribeEagerAttachments([attachment], {
-      loadSettings: async () => ({ llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" }),
+      loadSettings: async () => ({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }),
       logger: logger() as never,
     });
 
@@ -155,7 +201,7 @@ describe("transcribeEagerAttachments", () => {
     const result = await transcribeEagerAttachments(
       [{ originalName: "voice.ogg", mimeType: "audio/ogg", localPath: audioPath, sizeBytes: 5 }],
       {
-        loadSettings: async () => ({ llm_provider: "openrouter_bedrock", anthropic_api_key: "sk-db" }),
+        loadSettings: async () => ({ llm_provider: "openrouter", anthropic_api_key: "sk-db" }),
         logger: logger() as never,
       },
     );

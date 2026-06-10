@@ -20,6 +20,25 @@ export interface LocalClaudeSessionOrigin {
   contextType?: string | null;
   deliveryTarget?: string | null;
   threadTs?: string | null;
+  workspaceKey?: string | null;
+  workspaceDir?: string | null;
+  activeQueueKey?: string | null;
+  conversationId?: number | null;
+  providerThreadId?: string | null;
+  agentInstructions?: string | null;
+  agentAllowedTools?: string[] | null;
+  orgContextEnabled?: boolean | null;
+}
+
+function nullableBooleanToNumber(value: boolean | null | undefined): number | null {
+  if (value === undefined || value === null) return null;
+  if (value) return 1;
+  return 0;
+}
+
+function stringifyAllowedTools(value: string[] | null | undefined): string | null {
+  if (!value) return null;
+  return JSON.stringify(value);
 }
 
 export function createLocalClaudeSessionRepository(db: Kysely<DB>) {
@@ -51,6 +70,14 @@ export function createLocalClaudeSessionRepository(db: Kysely<DB>) {
           origin_context_type: input.origin?.contextType ?? null,
           origin_delivery_target: input.origin?.deliveryTarget ?? null,
           origin_thread_ts: input.origin?.threadTs ?? null,
+          origin_workspace_key: input.origin?.workspaceKey ?? null,
+          origin_workspace_dir: input.origin?.workspaceDir ?? null,
+          origin_active_queue_key: input.origin?.activeQueueKey ?? null,
+          origin_conversation_id: input.origin?.conversationId ?? null,
+          origin_provider_thread_id: input.origin?.providerThreadId ?? null,
+          origin_agent_instructions: input.origin?.agentInstructions ?? null,
+          origin_agent_allowed_tools: stringifyAllowedTools(input.origin?.agentAllowedTools),
+          origin_org_context_enabled: nullableBooleanToNumber(input.origin?.orgContextEnabled),
         })
         .execute();
       return db.selectFrom("local_claude_sessions").selectAll().where("id", "=", id).executeTakeFirstOrThrow();

@@ -30,11 +30,41 @@ export function createApiTokenRepository(db: Kysely<DB>) {
       return db.selectFrom("api_tokens").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
     },
 
+    async createOAuth(input: {
+      userId: string;
+      name: string;
+      tokenHash: string;
+      prefix: string;
+      clientId: string;
+      scopes: string[];
+      refreshTokenHash: string;
+      expiresAt: string;
+    }): Promise<ApiTokenRow> {
+      const id = randomUUID();
+      await db
+        .insertInto("api_tokens")
+        .values({
+          id,
+          user_id: input.userId,
+          name: input.name,
+          token_hash: input.tokenHash,
+          prefix: input.prefix,
+          kind: "oauth",
+          client_id: input.clientId,
+          scopes: JSON.stringify(input.scopes),
+          refresh_token_hash: input.refreshTokenHash,
+          expires_at: input.expiresAt,
+        })
+        .execute();
+      return db.selectFrom("api_tokens").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    },
+
     async listForUser(userId: string): Promise<ApiTokenRow[]> {
       return db
         .selectFrom("api_tokens")
         .selectAll()
         .where("user_id", "=", userId)
+        .where("kind", "=", "pat")
         .orderBy("created_at", "desc")
         .execute();
     },
@@ -47,6 +77,46 @@ export function createApiTokenRepository(db: Kysely<DB>) {
         .where("revoked_at", "is", null)
         .where((eb) => eb.or([eb("expires_at", "is", null), eb("expires_at", ">", now.toISOString())]))
         .executeTakeFirst();
+    },
+
+    async findByRefreshHash(refreshTokenHash: string): Promise<ApiTokenRow | undefined> {
+      return db
+        .selectFrom("api_tokens")
+        .selectAll()
+        .where("refresh_token_hash", "=", refreshTokenHash)
+        .where("kind", "=", "oauth")
+        .where("revoked_at", "is", null)
+        .executeTakeFirst();
+    },
+
+    async rotateOAuthToken(
+      tokenId: string,
+      input: {
+        previousRefreshTokenHash: string;
+        tokenHash: string;
+        prefix: string;
+        refreshTokenHash: string;
+        expiresAt: string;
+      },
+    ): Promise<ApiTokenRow | undefined> {
+      const result = await db
+        .updateTable("api_tokens")
+        .set({
+          token_hash: input.tokenHash,
+          prefix: input.prefix,
+          refresh_token_hash: input.refreshTokenHash,
+          expires_at: input.expiresAt,
+          last_used_at: null,
+        })
+        .where("id", "=", tokenId)
+        .where("kind", "=", "oauth")
+        .where("refresh_token_hash", "=", input.previousRefreshTokenHash)
+        .where("revoked_at", "is", null)
+        .executeTakeFirst();
+
+      if (Number(result.numUpdatedRows) === 0) return undefined;
+
+      return db.selectFrom("api_tokens").selectAll().where("id", "=", tokenId).executeTakeFirst();
     },
 
     async revoke(userId: string, tokenId: string): Promise<boolean> {
