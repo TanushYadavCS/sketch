@@ -30,6 +30,12 @@ export interface OpenRouterTranscriptionConfig {
   timeoutMs?: number;
 }
 
+/**
+ * Unlike chat completions (where cost accounting requires opting in via
+ * `usage: {include: true}`, as the vision client does), the dedicated
+ * /audio/transcriptions endpoint accepts no usage parameter and returns the
+ * usage object — including `cost` in USD — by default.
+ */
 export interface OpenRouterTranscriptionResult {
   text: string;
   usage?: {

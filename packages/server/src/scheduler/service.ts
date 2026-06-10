@@ -32,6 +32,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
+import type { RecordWorkflowStep } from "../telemetry/agent-run-telemetry";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
@@ -57,6 +58,7 @@ export interface TaskSchedulerDeps {
   userRepo: ReturnType<typeof createUserRepository>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: Parameters<typeof runAgent>[0]["sendDm"];
+  recordWorkflowStep?: RecordWorkflowStep;
 }
 
 export class TaskScheduler {
@@ -194,6 +196,7 @@ export class TaskScheduler {
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
       sendMessage: sendMessage ?? undefined,
+      recordWorkflowStep: this.deps.recordWorkflowStep,
     });
 
     const now = new Date().toISOString();

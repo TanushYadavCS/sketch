@@ -1114,7 +1114,34 @@ describe("PUT /api/system/llm", () => {
     expect(settings?.aws_region).toBe("us-east-1");
   });
 
-  it("stores OpenRouter Bedrock credentials in settings", async () => {
+  it("stores OpenRouter credentials in settings", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/llm", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "openrouter",
+        apiKey: "sk-or-v1-tenant-virtual-key",
+        modelId: "anthropic/claude-sonnet-4.6@preset/sketch-bedrock",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true });
+
+    const settings = await settingsRepo.get();
+    expect(settings?.llm_provider).toBe("openrouter");
+    expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
+    expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+  });
+
+  it("normalizes the legacy openrouter_bedrock provider alias to openrouter", async () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
@@ -1132,16 +1159,12 @@ describe("PUT /api/system/llm", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ ok: true });
 
     const settings = await settingsRepo.get();
-    expect(settings?.llm_provider).toBe("openrouter_bedrock");
-    expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
-    expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+    expect(settings?.llm_provider).toBe("openrouter");
   });
 
-  it("creates settings before storing OpenRouter Bedrock credentials when the row is missing", async () => {
+  it("creates settings before storing OpenRouter credentials when the row is missing", async () => {
     await db.deleteFrom("settings").where("id", "=", "default").execute();
     const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
@@ -1153,7 +1176,7 @@ describe("PUT /api/system/llm", () => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        provider: "openrouter_bedrock",
+        provider: "openrouter",
         apiKey: "sk-or-v1-tenant-virtual-key",
         modelId: "anthropic/claude-sonnet-4.6@preset/sketch-bedrock",
       }),
@@ -1162,7 +1185,7 @@ describe("PUT /api/system/llm", () => {
     expect(res.status).toBe(200);
 
     const settings = await settingsRepo.get();
-    expect(settings?.llm_provider).toBe("openrouter_bedrock");
+    expect(settings?.llm_provider).toBe("openrouter");
     expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
     expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
 
@@ -1171,7 +1194,7 @@ describe("PUT /api/system/llm", () => {
     expect((rawApiKey as string).startsWith("enc:")).toBe(true);
   });
 
-  it("rejects openrouter_bedrock without modelId", async () => {
+  it("rejects openrouter without modelId", async () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
@@ -1182,7 +1205,7 @@ describe("PUT /api/system/llm", () => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        provider: "openrouter_bedrock",
+        provider: "openrouter",
         apiKey: "sk-or-v1-tenant-virtual-key",
       }),
     });

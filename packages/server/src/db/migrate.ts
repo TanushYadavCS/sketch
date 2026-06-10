@@ -85,8 +85,12 @@ import * as m082 from "./migrations/082-email-thread-summaries";
 import * as m083 from "./migrations/083-local-claude-sessions";
 import * as m084 from "./migrations/084-entity-contact-points";
 import * as m085 from "./migrations/085-crm-activity-rollups";
-import * as m086 from "./migrations/086-orphan-entity-cleanup";
-import * as m087 from "./migrations/087-cleanup-empty-relationships-and-review";
+import * as m086 from "./migrations/086-local-claude-session-origin-runtime";
+import * as m087 from "./migrations/087-rename-openrouter-provider";
+import * as m088 from "./migrations/088-agent-run-aux-cost";
+import * as m089 from "./migrations/089-mcp-oauth";
+import * as m090 from "./migrations/090-orphan-entity-cleanup";
+import * as m091 from "./migrations/091-cleanup-empty-relationships-and-review";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -176,8 +180,12 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "083-local-claude-sessions": m083,
           "084-entity-contact-points": m084,
           "085-crm-activity-rollups": m085,
-          "086-orphan-entity-cleanup": m086,
-          "087-cleanup-empty-relationships-and-review": m087,
+          "086-local-claude-session-origin-runtime": m086,
+          "087-rename-openrouter-provider": m087,
+          "088-agent-run-aux-cost": m088,
+          "089-mcp-oauth": m089,
+          "090-orphan-entity-cleanup": m090,
+          "091-cleanup-empty-relationships-and-review": m091,
         };
       },
     },

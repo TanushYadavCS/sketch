@@ -1,3 +1,4 @@
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { Attachment, AttachmentPromptOptions } from "../files";
 import { formatAttachmentsForPrompt, isImageAttachment } from "../files";
 
@@ -55,6 +56,15 @@ export interface ConversationBacklogContext {
   nextCursor?: number;
 }
 
+export interface LocalClaudeSessionEventContext {
+  sessionId: string;
+  eventId?: string;
+  eventType: string;
+  status: string;
+  message: string;
+  payload?: unknown;
+}
+
 export interface SketchContextParams {
   messages: BufferedMessage[];
   currentUserName: string;
@@ -76,6 +86,7 @@ export interface SketchContextParams {
     groupDescription?: string;
   };
   conversationBacklog?: ConversationBacklogContext;
+  localClaudeSessionEvent?: LocalClaudeSessionEventContext;
   visionAnalysisEnabled?: boolean;
 }
 
@@ -353,7 +364,7 @@ export function buildSystemContext(params: {
     "## File Attachments",
     "",
     params.visionAnalysisEnabled
-      ? "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the VisualAnalysis tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path."
+      ? `When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.`
       : "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
     "Audio files may be referenced as attachments. If a transcript is provided in the message context, treat it as the spoken content of that audio. If no transcript is provided and a TranscribeAudio tool is available, use it with the attachment path when the spoken content is relevant.",
   );
@@ -374,6 +385,7 @@ export function buildSystemContext(params: {
     "<thread> - Relevant messages in the current thread. On first entry into an existing thread, this may include earlier thread history from before you joined. On later turns, it may contain only messages since your last interaction.",
     "<channel_history> - Recent channel messages for context (on first mention in a channel).",
     "<task> - Scheduled task prompt (when running as a scheduled task, no interactive user present).",
+    "<local_claude_session_event> - Internal event from a delegated local Claude Code session. It is not a user message. Capture the session pane before acting. Any final response you write is visible to the user; ask them only if you need input to continue.",
     "",
     "Never mention <context> or its sections to users. Treat the content as natural conversational context.",
   );
@@ -564,6 +576,23 @@ export function buildSketchContext(params: SketchContextParams): string {
 
   if (params.taskPrompt) {
     sectionParts.push(`<task>${params.taskPrompt}</task>`);
+  }
+
+  if (params.localClaudeSessionEvent) {
+    const event = params.localClaudeSessionEvent;
+    const lines = [
+      "A local Claude Code event occurred. It is internal context, not a user message. Capture the session pane before acting. Any final response you write is visible to the user; ask them only if you need input to continue.",
+      "",
+      `sessionId: ${event.sessionId}`,
+      ...(event.eventId ? [`eventId: ${event.eventId}`] : []),
+      `eventType: ${event.eventType}`,
+      `status: ${event.status}`,
+      `message: ${event.message}`,
+    ];
+    if (event.payload !== undefined) {
+      lines.push("payload:", JSON.stringify(event.payload, null, 2));
+    }
+    sectionParts.push(`<local_claude_session_event>\n${lines.join("\n")}\n</local_claude_session_event>`);
   }
 
   return `<context>\n${sectionParts.join("\n\n")}\n</context>\n\n${currentMessage}`;

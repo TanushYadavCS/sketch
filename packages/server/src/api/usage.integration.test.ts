@@ -168,6 +168,42 @@ describe("Usage API", () => {
       expect(body.skills.by_skill).toContainEqual({ name: "send-email", count: 1 });
     });
 
+    it("spend total includes aux_cost_usd alongside agent cost_usd", async () => {
+      const users = createUserRepository(db);
+      const member = await users.create({ name: "AuxMe", email: "aux-me@test.com" });
+      const repo = createAgentRunsRepo(db);
+
+      await repo.insertRun({
+        trace_id: "aux-me-1",
+        user_id: member.id,
+        platform: "slack",
+        context_type: "dm",
+        cost_usd: 1.0,
+        aux_cost_usd: 0.05,
+        created_at: "2026-03-10T10:00:00.000Z",
+      });
+      await repo.insertRun({
+        trace_id: "aux-me-2",
+        user_id: member.id,
+        platform: "slack",
+        context_type: "dm",
+        cost_usd: 0.5,
+        aux_cost_usd: 0,
+        created_at: "2026-03-11T10:00:00.000Z",
+      });
+
+      const app = createApp(db, config, { logger });
+      const cookie = await getMemberCookie(db, member.id);
+
+      const res = await app.request("/api/usage/me?period=monthly&date=2026-03-15", {
+        headers: { Cookie: cookie },
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.spend.total_cost_usd).toBe(1.55);
+    });
+
     it("includes daily_breakdown with per-day message and skill counts", async () => {
       const users = createUserRepository(db);
       const member = await users.create({ name: "ChartUser", email: "chart@test.com" });
@@ -437,6 +473,36 @@ describe("Usage API", () => {
       const agentUser = body.by_user.find((u: { userType: string }) => u.userType === "agent");
       expect(agentUser).toBeDefined();
       expect(agentUser.messageCount).toBe(1);
+    });
+
+    it("by_user cost and org spend include aux_cost_usd", async () => {
+      const users = createUserRepository(db);
+      const member = await users.create({ name: "AuxUser", email: "aux-user@test.com" });
+      const repo = createAgentRunsRepo(db);
+
+      await repo.insertRun({
+        trace_id: "aux-summary-1",
+        user_id: member.id,
+        platform: "slack",
+        context_type: "dm",
+        cost_usd: 2.0,
+        aux_cost_usd: 0.1,
+        created_at: "2026-03-10T10:00:00.000Z",
+      });
+
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const res = await app.request("/api/usage/summary?period=monthly&date=2026-03-15", {
+        headers: { Cookie: adminCookie },
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.spend.total_cost_usd).toBe(2.1);
+      const user = body.by_user.find((u: { userId: string }) => u.userId === member.id);
+      expect(user).toBeDefined();
+      expect(user.costUsd).toBe(2.1);
     });
 
     it("returns zeros for empty period", async () => {
@@ -840,5 +906,49 @@ describe("Usage API on Postgres", () => {
     expect(summaryBody.messages.total).toBe(2);
     expect(summaryBody.spend.total_cost_usd).toBe(1.33);
     expect(summaryBody.by_user[0].costUsd).toBe(1.33);
+  });
+
+  it("sums aux_cost_usd into member and org spend on Postgres", async () => {
+    const users = createUserRepository(db);
+    const member = await users.create({ name: "PgAux", email: "pg-aux@test.com" });
+    const repo = createAgentRunsRepo(db);
+
+    await repo.insertRun({
+      trace_id: "pg-aux-1",
+      user_id: member.id,
+      platform: "slack",
+      context_type: "dm",
+      cost_usd: 1.11,
+      aux_cost_usd: 0.04,
+      created_at: "2026-03-10T10:00:00.000Z",
+    });
+    await repo.insertRun({
+      trace_id: "pg-aux-2",
+      user_id: member.id,
+      platform: "whatsapp",
+      context_type: "dm",
+      cost_usd: 0.22,
+      aux_cost_usd: 0.03,
+      created_at: "2026-03-11T10:00:00.000Z",
+    });
+
+    const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), { logger });
+    const memberCookie = await getMemberCookie(db, member.id);
+    const adminCookie = await loginAdmin(app);
+
+    const memberRes = await app.request("/api/usage/me?period=monthly&date=2026-03-15", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(memberRes.status).toBe(200);
+    const memberBody = await memberRes.json();
+    expect(memberBody.spend.total_cost_usd).toBe(1.4);
+
+    const summaryRes = await app.request("/api/usage/summary?period=monthly&date=2026-03-15", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryBody = await summaryRes.json();
+    expect(summaryBody.spend.total_cost_usd).toBe(1.4);
+    expect(summaryBody.by_user[0].costUsd).toBe(1.4);
   });
 });

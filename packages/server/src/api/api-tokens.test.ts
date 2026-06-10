@@ -45,7 +45,9 @@ async function setupSession(email: string) {
 describe("API token routes", () => {
   it("creates and lists only the caller's own tokens", async () => {
     const { cookie } = await setupSession("alice@example.com");
-    const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
+    const app = createApp(db, createTestConfig({ BASE_URL: "https://sketch.test", EXPERIMENTAL_FLAG: false }), {
+      logger: createTestLogger(),
+    });
 
     const createRes = await app.request("/api/api-tokens", {
       method: "POST",
@@ -54,15 +56,17 @@ describe("API token routes", () => {
     });
 
     expect(createRes.status).toBe(200);
-    const created = (await createRes.json()) as { plaintext: string; token: { prefix: string } };
+    const created = (await createRes.json()) as { plaintext: string; token: { prefix: string }; mcpUrl: string };
     expect(created.plaintext).toMatch(/^skp_/);
     expect(created.token.prefix).toBe(getApiTokenDisplayPrefix(created.plaintext));
+    expect(created.mcpUrl).toBe("https://sketch.test/mcp");
 
     const listRes = await app.request("/api/api-tokens", { headers: { Cookie: cookie } });
     expect(listRes.status).toBe(200);
-    const listed = (await listRes.json()) as { tokens: Array<{ name: string }> };
+    const listed = (await listRes.json()) as { tokens: Array<{ name: string }>; mcpUrl: string };
     expect(listed.tokens).toHaveLength(1);
     expect(listed.tokens[0]?.name).toBe("Alice Laptop");
+    expect(listed.mcpUrl).toBe("https://sketch.test/mcp");
   });
 
   it("does not let one user revoke another user's token", async () => {

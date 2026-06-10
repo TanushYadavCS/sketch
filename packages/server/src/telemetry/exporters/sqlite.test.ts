@@ -101,6 +101,30 @@ describe("SqliteSpanExporter", () => {
     expect(parsed["sketch.user_id"]).toBe("user-1");
   });
 
+  it("persists aux_cost_usd from the span attribute", async () => {
+    const repo = makeMockRepo();
+    const exporter = new SqliteSpanExporter(repo, makeLogger());
+
+    const span = makeAgentRunSpan({ attrs: { "sketch.aux_cost_usd": 0.012 } });
+
+    await new Promise<void>((resolve) => {
+      exporter.export([span], () => resolve());
+    });
+
+    expect(repo.insertRun).toHaveBeenCalledWith(expect.objectContaining({ aux_cost_usd: 0.012 }));
+  });
+
+  it("defaults aux_cost_usd to 0 when the attribute is absent", async () => {
+    const repo = makeMockRepo();
+    const exporter = new SqliteSpanExporter(repo, makeLogger());
+
+    await new Promise<void>((resolve) => {
+      exporter.export([makeAgentRunSpan()], () => resolve());
+    });
+
+    expect(repo.insertRun).toHaveBeenCalledWith(expect.objectContaining({ aux_cost_usd: 0 }));
+  });
+
   it("reads tool calls from span events and calls insertToolCalls", async () => {
     const repo = makeMockRepo();
     const exporter = new SqliteSpanExporter(repo, makeLogger());

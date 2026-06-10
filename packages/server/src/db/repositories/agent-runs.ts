@@ -50,9 +50,19 @@ export interface DailyBucket {
   skills: number;
 }
 
-function roundedCostSum(db: Kysely<DB>, column: "cost_usd" | "r.cost_usd") {
-  const sum = sql`COALESCE(SUM(${sql.ref(column)}), 0)`;
-  return isPg(db) ? sql<number>`ROUND(${sum}::numeric, 6)` : sql<number>`ROUND(${sum}, 6)`;
+/**
+ * Total spend = agent-model cost (`cost_usd`) + auxiliary LLM cost
+ * (`aux_cost_usd`, transcription/vision). Both are indexed columns, so the sum
+ * stays a plain SQL aggregation (no JSON extraction). `prefix` is "" for an
+ * unaliased table or "r." when joined as `agent_runs as r`.
+ *
+ * The Postgres branch wraps the whole sum in parentheses before `::numeric`
+ * because the cast binds tighter than `+`; without them only the second term
+ * casts and `ROUND(double precision, integer)` (which Postgres lacks) is called.
+ */
+function roundedCostSum(db: Kysely<DB>, prefix: "" | "r.") {
+  const sum = sql`COALESCE(SUM(${sql.ref(`${prefix}cost_usd`)}), 0) + COALESCE(SUM(${sql.ref(`${prefix}aux_cost_usd`)}), 0)`;
+  return isPg(db) ? sql<number>`ROUND((${sum})::numeric, 6)` : sql<number>`ROUND(${sum}, 6)`;
 }
 
 /**
@@ -87,7 +97,7 @@ export function createAgentRunsRepo(db: Kysely<DB>) {
     async getMemberSummary(userId: string, from: string, to: string): Promise<MemberSummary> {
       const byPlatform = await db
         .selectFrom("agent_runs")
-        .select(["platform", sql<number>`COUNT(id)`.as("count"), roundedCostSum(db, "cost_usd").as("cost")])
+        .select(["platform", sql<number>`COUNT(id)`.as("count"), roundedCostSum(db, "").as("cost")])
         .where("user_id", "=", userId)
         .where("created_at", ">=", from)
         .where("created_at", "<", to)
@@ -143,7 +153,7 @@ export function createAgentRunsRepo(db: Kysely<DB>) {
     async getOrgSummary(from: string, to: string): Promise<OrgSummary> {
       const byPlatform = await db
         .selectFrom("agent_runs")
-        .select(["platform", sql<number>`COUNT(id)`.as("count"), roundedCostSum(db, "cost_usd").as("cost")])
+        .select(["platform", sql<number>`COUNT(id)`.as("count"), roundedCostSum(db, "").as("cost")])
         .where("created_at", ">=", from)
         .where("created_at", "<", to)
         .groupBy("platform")
@@ -199,7 +209,7 @@ export function createAgentRunsRepo(db: Kysely<DB>) {
           "u.name as userName",
           "u.type as userType",
           sql<number>`COUNT(r.id)`.as("messageCount"),
-          roundedCostSum(db, "r.cost_usd").as("costUsd"),
+          roundedCostSum(db, "r.").as("costUsd"),
           sql<string>`MAX(r.created_at)`.as("lastRunAt"),
         ])
         .where("r.created_at", ">=", from)

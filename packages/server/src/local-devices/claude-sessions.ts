@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
+  LocalClaudeSessionEventRow,
   LocalClaudeSessionOrigin,
   LocalClaudeSessionRow,
   LocalClaudeSessionStatus,
@@ -32,6 +33,7 @@ export interface LocalClaudeSessionEventInput {
 
 export interface LocalClaudeEventDelivery {
   session: LocalClaudeSessionRow;
+  event: LocalClaudeSessionEventRow;
   status: LocalClaudeSessionStatus;
   message: string;
 }
@@ -361,7 +363,7 @@ export class LocalClaudeSessionService {
     }
     const status = statusForEvent(input.eventType, input.payload);
     const message = eventMessage(input.eventType, status, input.payload);
-    await this.repo.recordEvent({
+    const event = await this.repo.recordEvent({
       sessionId: session.id,
       eventType: input.eventType,
       status,
@@ -369,7 +371,7 @@ export class LocalClaudeSessionService {
       payload: input.payload,
     });
     const updated = await this.repo.findByEventTokenHash(tokenHash(input.token));
-    return { session: updated ?? session, status, message };
+    return { session: updated ?? session, event, status, message };
   }
 
   private async requireSession(userId: string, sessionId: string): Promise<LocalClaudeSessionRow> {

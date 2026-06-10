@@ -15,6 +15,14 @@ const baseSession: LocalClaudeSessionRow = {
   origin_context_type: "channel",
   origin_delivery_target: "C123",
   origin_thread_ts: "111.222",
+  origin_workspace_key: "channel-C123",
+  origin_workspace_dir: "/data/workspaces/channel-C123",
+  origin_active_queue_key: "C123:111.222",
+  origin_conversation_id: 42,
+  origin_provider_thread_id: "111.222",
+  origin_agent_instructions: null,
+  origin_agent_allowed_tools: null,
+  origin_org_context_enabled: 1,
   last_event_type: null,
   last_event_at: null,
   created_at: "2026-01-01T00:00:00.000Z",
@@ -39,7 +47,21 @@ function createRepo() {
         origin_context_type: input.origin?.contextType ?? null,
         origin_delivery_target: input.origin?.deliveryTarget ?? null,
         origin_thread_ts: input.origin?.threadTs ?? null,
+        origin_workspace_key: input.origin?.workspaceKey ?? null,
+        origin_workspace_dir: input.origin?.workspaceDir ?? null,
+        origin_active_queue_key: input.origin?.activeQueueKey ?? null,
+        origin_conversation_id: input.origin?.conversationId ?? null,
+        origin_provider_thread_id: input.origin?.providerThreadId ?? null,
+        origin_agent_instructions: input.origin?.agentInstructions ?? null,
+        origin_agent_allowed_tools: null,
+        origin_org_context_enabled: 1,
       };
+      if (input.origin?.agentAllowedTools) {
+        session.origin_agent_allowed_tools = JSON.stringify(input.origin.agentAllowedTools);
+      }
+      if (input.origin?.orgContextEnabled === false) {
+        session.origin_org_context_enabled = 0;
+      }
       return session;
     }),
     findForUser: vi.fn(async () => session),
@@ -158,5 +180,6 @@ describe("LocalClaudeSessionService", () => {
         eventType: "Notification",
       }),
     );
+    expect(result.event.id).toBe("event-1");
   });
 });

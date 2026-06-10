@@ -268,10 +268,38 @@ export interface ApiTokensTable {
   name: string;
   token_hash: string;
   prefix: string;
+  kind: Generated<string>;
+  client_id: string | null;
+  scopes: string | null;
+  refresh_token_hash: string | null;
   created_at: Generated<string>;
   last_used_at: string | null;
   expires_at: string | null;
   revoked_at: string | null;
+}
+
+export interface OAuthClientsTable {
+  client_id: string;
+  client_secret_hash: string | null;
+  client_name: string | null;
+  redirect_uris: string;
+  grant_types: string;
+  scopes: string;
+  token_endpoint_auth_method: string;
+  created_at: Generated<string>;
+}
+
+export interface OAuthAuthorizationCodesTable {
+  code_hash: string;
+  client_id: string;
+  user_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scopes: string;
+  resource: string | null;
+  expires_at: string;
+  consumed_at: string | null;
+  created_at: Generated<string>;
 }
 
 export interface ExternalMcpToolCallsTable {
@@ -330,6 +358,14 @@ export interface LocalClaudeSessionsTable {
   origin_context_type: string | null;
   origin_delivery_target: string | null;
   origin_thread_ts: string | null;
+  origin_workspace_key: string | null;
+  origin_workspace_dir: string | null;
+  origin_active_queue_key: string | null;
+  origin_conversation_id: number | null;
+  origin_provider_thread_id: string | null;
+  origin_agent_instructions: string | null;
+  origin_agent_allowed_tools: string | null;
+  origin_org_context_enabled: number | null;
   last_event_type: string | null;
   last_event_at: string | null;
   created_at: Generated<string>;
@@ -570,6 +606,7 @@ export interface AgentRunsTable {
   platform: string;
   context_type: string;
   cost_usd: number;
+  aux_cost_usd: Generated<number>;
   is_error: Generated<number>;
   duration_ms: number | null;
   created_at: Generated<string>;
@@ -743,6 +780,8 @@ export interface DB {
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
   api_tokens: ApiTokensTable;
+  oauth_clients: OAuthClientsTable;
+  oauth_authorization_codes: OAuthAuthorizationCodesTable;
   external_mcp_tool_calls: ExternalMcpToolCallsTable;
   local_devices: LocalDevicesTable;
   local_device_tool_calls: LocalDeviceToolCallsTable;

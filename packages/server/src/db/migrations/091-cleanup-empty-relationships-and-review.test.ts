@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { up } from "./087-cleanup-empty-relationships-and-review";
+import { up } from "./091-cleanup-empty-relationships-and-review";
 
 async function seedConnectorAndFile(db: Kysely<DB>): Promise<void> {
   await db
@@ -88,7 +88,7 @@ async function seedReview(
   }
 }
 
-describe("087-cleanup-empty-relationships-and-review migration", () => {
+describe("091-cleanup-empty-relationships-and-review migration", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {

@@ -3,9 +3,11 @@
  *
  * - "anthropic": direct Anthropic API
  * - "bedrock": direct AWS Bedrock
- * - "openrouter_bedrock": OpenRouter to Bedrock via the strict-routing preset (managed tier)
+ * - "openrouter": OpenRouter via its Anthropic-compatible endpoint. Any routing
+ *   preset is carried inside `model_id` (the `<model>@preset/<alias>` composite),
+ *   not the provider name. (Formerly named "openrouter_bedrock".)
  */
-export const LLM_PROVIDERS = ["anthropic", "bedrock", "openrouter_bedrock"] as const;
+export const LLM_PROVIDERS = ["anthropic", "bedrock", "openrouter"] as const;
 
 export type LlmProvider = (typeof LLM_PROVIDERS)[number];
 

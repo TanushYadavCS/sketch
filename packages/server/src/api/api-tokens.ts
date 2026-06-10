@@ -27,6 +27,13 @@ function toResponseToken(row: {
   };
 }
 
+function getMcpUrl(c: import("hono").Context, baseUrl?: string): string {
+  if (baseUrl) return `${baseUrl.replace(/\/$/, "")}/mcp`;
+  const proto = c.req.header("x-forwarded-proto") ?? new URL(c.req.url).protocol.replace(/:$/, "");
+  const host = c.req.header("x-forwarded-host") ?? c.req.header("host") ?? new URL(c.req.url).host;
+  return `${proto}://${host}/mcp`;
+}
+
 export function apiTokenRoutes(db: Kysely<DB>, opts: { baseUrl?: string }) {
   const routes = new Hono();
   const apiTokens = createApiTokenRepository(db);
@@ -35,7 +42,7 @@ export function apiTokenRoutes(db: Kysely<DB>, opts: { baseUrl?: string }) {
     const rows = await apiTokens.listForUser(c.get("sub"));
     return c.json({
       tokens: rows.map(toResponseToken),
-      mcpUrl: opts.baseUrl ? `${opts.baseUrl.replace(/\/$/, "")}/mcp` : null,
+      mcpUrl: getMcpUrl(c, opts.baseUrl),
     });
   });
 
@@ -58,7 +65,7 @@ export function apiTokenRoutes(db: Kysely<DB>, opts: { baseUrl?: string }) {
     return c.json({
       token: toResponseToken(row),
       plaintext: token,
-      mcpUrl: opts.baseUrl ? `${opts.baseUrl.replace(/\/$/, "")}/mcp` : null,
+      mcpUrl: getMcpUrl(c, opts.baseUrl),
     });
   });
 

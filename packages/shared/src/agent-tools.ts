@@ -18,6 +18,8 @@ export interface AgentToolCatalogEntry {
   category: AgentToolCategory;
 }
 
+export const VISUAL_ANALYSIS_AGENT_TOOL_NAME = "mcp__sketch__VisualAnalysis";
+
 export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
   {
     name: "Read",
@@ -92,7 +94,7 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
-    name: "mcp__sketch__VisualAnalysis",
+    name: VISUAL_ANALYSIS_AGENT_TOOL_NAME,
     label: "Visual analysis",
     description:
       "Inspect visual attachments in the workspace for tasks such as OCR, screenshots, diagrams, or animations using the configured vision model.",
