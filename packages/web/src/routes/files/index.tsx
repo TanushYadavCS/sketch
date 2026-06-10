@@ -27,6 +27,7 @@ import { ConnectorPicker } from "./connector-picker";
 import { EntityExplorer } from "./entity-explorer";
 import { FileDetailSheet } from "./file-detail-sheet";
 import { FileList } from "./file-list";
+import { KnowledgeGraphView } from "./knowledge-graph";
 import { ManageConnectorDialog } from "./manage-connector-dialog";
 import { SearchBar } from "./search-bar";
 
@@ -38,7 +39,7 @@ export const filesRoute = createRoute({
 
 const PAGE_SIZE = 50;
 
-type FilesTab = "files" | "entities";
+type FilesTab = "files" | "entities" | "graph";
 
 function FilesPage() {
   const queryClient = useQueryClient();
@@ -291,10 +292,23 @@ function FilesPage() {
         >
           Entity Explorer
         </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("graph")}
+          className={`px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === "graph"
+              ? "border-b-2 border-foreground text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Graph
+        </button>
       </div>
 
       <TabContentContainer>
-        {activeTab === "entities" ? (
+        {activeTab === "graph" ? (
+          <KnowledgeGraphView />
+        ) : activeTab === "entities" ? (
           <EntityExplorer />
         ) : (
           <>
