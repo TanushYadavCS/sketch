@@ -4,7 +4,7 @@ import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
-import type { AgentResult, McpServerConfig, RunAgentParams } from "../agent/runner";
+import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
@@ -38,7 +38,7 @@ interface WebChatRouteDeps {
   users: UserRepo;
   settings: SettingsRepo;
   inboxMessagesRepo: InboxMessagesRepo;
-  runAgent: (params: RunAgentParams) => Promise<AgentResult>;
+  runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;

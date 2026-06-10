@@ -456,6 +456,13 @@ describe("buildSystemContext", () => {
       expect(contextProtocolIdx).toBeLessThan(workspaceIdx);
     });
 
+    it("documents local Claude session event context", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("<local_claude_session_event>");
+      expect(result).toContain("Capture the session pane before acting");
+      expect(result).toContain("Any final response you write is visible to the user");
+    });
+
     it("workspace rules appear before platform formatting", () => {
       const result = buildSystemContext({ platform: "slack" });
       const workspaceIdx = result.indexOf("NEVER access files outside");
@@ -533,6 +540,34 @@ describe("buildSketchContext", () => {
       expect(result).toContain("/data/workspaces/u123");
       expect(result).toContain("/data/.claude");
       expect(result).toContain("</workspace>");
+    });
+  });
+
+  describe("<local_claude_session_event> tag", () => {
+    it("renders local Claude Code hook events as internal context", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "Handle the local Claude Code event.",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        localClaudeSessionEvent: {
+          sessionId: "session-1",
+          eventId: "event-1",
+          eventType: "Stop",
+          status: "completed_turn",
+          message: "Claude Code completed a turn.",
+          payload: { last_assistant_message: "Done" },
+        },
+      });
+
+      expect(result).toContain("<local_claude_session_event>");
+      expect(result).toContain("It is internal context, not a user message");
+      expect(result).toContain("sessionId: session-1");
+      expect(result).toContain("eventId: event-1");
+      expect(result).toContain("eventType: Stop");
+      expect(result).toContain('"last_assistant_message": "Done"');
+      expect(result).toContain("</local_claude_session_event>");
     });
   });
 
@@ -798,7 +833,7 @@ describe("buildSketchContext", () => {
 
       const result = buildSketchContext(sketchContext);
 
-      expect(result).toContain('hint="Use VisualAnalysis with this path to understand the image."');
+      expect(result).toContain('hint="Use mcp__sketch__VisualAnalysis with this path to understand the image."');
       expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/photo.jpg"]);
     });
 

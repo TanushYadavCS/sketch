@@ -34,8 +34,10 @@ import {
 } from "../connectors/search";
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
-import type { createConnectorRepository } from "../db/repositories/connectors";
+import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -1264,7 +1266,7 @@ export function connectorRoutes(
     const denied = denyIfCannotRead(c, config, meta.perUserAuth);
     if (denied) return denied;
 
-    const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
+    const fileIds = await connectorRepo.getOwnedFileIdsForConnector(config.id);
     const entityRepo = createEntityRepository(db);
     const count = await entityRepo.countEntitiesForFiles(fileIds);
     return c.json({ count });
@@ -1530,11 +1532,21 @@ export function connectorRoutes(
     const denied = denyIfCannotEdit(c, config);
     if (denied) return denied;
 
-    const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
-    const entityRepo = createEntityRepository(db);
-    await entityRepo.deleteEntitiesForFiles(fileIds);
-
-    await connectorRepo.deleteConfig(config.id);
+    await db.transaction().execute(async (trx) => {
+      const txConnectorRepo = createConnectorRepository(trx);
+      const txEntityRepo = createEntityRepository(trx);
+      const txEntityDomainsRepo = createEntityDomainsRepository(trx);
+      const txEntityReviewRepo = createEntityReviewRepo(trx);
+      const fileIds = await txConnectorRepo.getOwnedFileIdsForConnector(config.id);
+      const relationshipIds = await txEntityDomainsRepo.relationshipIdsWithEvidenceInFiles(fileIds);
+      const reviewIds = await txEntityReviewRepo.pendingReviewIdsWithEvidenceInFiles(fileIds);
+      await txEntityRepo.deleteEntitiesForFiles(fileIds);
+      await txConnectorRepo.deleteConfig(config.id);
+      await txEntityDomainsRepo.deleteRelationshipEvidenceForFiles(fileIds);
+      await txEntityReviewRepo.deleteReviewEvidenceForFiles(fileIds);
+      await txEntityDomainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
+      await txEntityReviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
+    });
     return c.json({ success: true });
   });
 

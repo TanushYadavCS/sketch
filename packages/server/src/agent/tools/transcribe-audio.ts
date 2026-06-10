@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 import type { Logger } from "../../logger";
 import type { TranscriptionSettings } from "../../transcription/service";
 import { transcribeAudioFile, validateWorkspaceAudioPath } from "../../transcription/service";
+import type { AuxLlmCall } from "../aux-cost";
 
 const fallbackLogger = {
   info: () => {},
@@ -15,6 +16,7 @@ export interface TranscribeAudioToolDeps {
   absWorkspace: string;
   loadSettings?: () => Promise<TranscriptionSettings | null>;
   logger?: Logger;
+  onUsage?: (call: AuxLlmCall) => void;
 }
 
 export function createTranscribeAudioTool(deps: TranscribeAudioToolDeps) {
@@ -37,6 +39,7 @@ export function createTranscribeAudioTool(deps: TranscribeAudioToolDeps) {
         const result = await transcribeAudioFile(absPath, {
           loadSettings: deps.loadSettings,
           logger: deps.logger ?? fallbackLogger,
+          onUsage: deps.onUsage,
         });
         if (result.kind === "file") {
           return {

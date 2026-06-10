@@ -366,7 +366,56 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
     async cleanupEmptyRelationships(): Promise<number> {
       const result = await db
         .deleteFrom("entity_relationships")
-        .where("id", "not in", db.selectFrom("entity_relationship_evidence").select("relationship_id").distinct())
+        .where((eb) => eb.not(eb.and([eb("relationship_type", "=", "works_at"), eb("source", "=", "email_domain")])))
+        .where((eb) =>
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom("entity_relationship_evidence")
+                .select(sql`1`.as("x"))
+                .whereRef("entity_relationship_evidence.relationship_id", "=", "entity_relationships.id"),
+            ),
+          ),
+        )
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async deleteRelationshipEvidenceForFiles(fileIds: string[]): Promise<number> {
+      if (fileIds.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_relationship_evidence")
+        .where("indexed_file_id", "in", fileIds)
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async relationshipIdsWithEvidenceInFiles(fileIds: string[]): Promise<string[]> {
+      if (fileIds.length === 0) return [];
+      const rows = await db
+        .selectFrom("entity_relationship_evidence")
+        .select("relationship_id")
+        .distinct()
+        .where("indexed_file_id", "in", fileIds)
+        .execute();
+      return rows.map((row) => row.relationship_id);
+    },
+
+    async deleteEmptyRelationshipsByIds(ids: string[]): Promise<number> {
+      if (ids.length === 0) return 0;
+      const result = await db
+        .deleteFrom("entity_relationships")
+        .where("id", "in", ids)
+        .where((eb) =>
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom("entity_relationship_evidence")
+                .select(sql`1`.as("x"))
+                .whereRef("entity_relationship_evidence.relationship_id", "=", "entity_relationships.id"),
+            ),
+          ),
+        )
         .executeTakeFirst();
       return Number(result.numDeletedRows ?? 0);
     },

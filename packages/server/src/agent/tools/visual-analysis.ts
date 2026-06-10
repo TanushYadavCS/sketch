@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 import type { Logger } from "../../logger";
 import type { VisionConfig } from "../../vision/service";
 import { analyzeImageFile, validateWorkspaceVisualPath } from "../../vision/service";
+import type { AuxLlmCall } from "../aux-cost";
 
 const fallbackLogger = {
   info: () => {},
@@ -15,6 +16,7 @@ export interface VisualAnalysisToolDeps {
   absWorkspace: string;
   config?: VisionConfig | null;
   logger?: Logger;
+  onUsage?: (call: AuxLlmCall) => void;
 }
 
 export function createVisualAnalysisTool(deps: VisualAnalysisToolDeps) {
@@ -40,6 +42,7 @@ export function createVisualAnalysisTool(deps: VisualAnalysisToolDeps) {
         const text = await analyzeImageFile(absPath, question, {
           config: deps.config,
           logger: deps.logger ?? fallbackLogger,
+          onUsage: deps.onUsage,
         });
         return { content: [{ type: "text" as const, text }] };
       } catch (err) {

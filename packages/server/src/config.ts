@@ -33,6 +33,7 @@ export const configSchema = z.object({
     .transform((v) => v === "true" || v === "1"),
   VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  OPENROUTER_PRICE_TTL_HOURS: z.coerce.number().min(1).default(12),
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
@@ -72,6 +73,21 @@ export const configSchema = z.object({
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   ZOHO_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
+  // Microsoft OAuth fallback (Files UI stores client credentials in settings)
+  MICROSOFT_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MICROSOFT_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MICROSOFT_TENANT: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("common")),
+  OUTLOOK_INITIAL_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+  OUTLOOK_MAX_INFLIGHT: z.coerce.number().int().min(1).max(16).default(4),
+  TEAMS_INITIAL_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+  TEAMS_MAX_INFLIGHT: z.coerce.number().int().min(1).max(16).default(4),
+  TEAMS_PROCESSING_LAG_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(7 * 24 * 60 * 60 * 1000)
+    .default(2 * 60 * 60 * 1000),
+
   // PostHog (optional, enables LLM Analytics via OpenTelemetry)
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
@@ -90,6 +106,13 @@ export const configSchema = z.object({
 
 export type Config = z.infer<typeof configSchema>;
 
+/**
+ * Parses and validates env into a typed Config, failing fast with all errors.
+ * Relative path settings (DATA_DIR, SQLITE_PATH, the config dirs) resolve
+ * against the project root (the .env file's directory, via DOTENV_CONFIG_PATH)
+ * rather than cwd, so they hold regardless of where the process is launched
+ * (e.g. when `concurrently` runs it from packages/server/).
+ */
 export function loadConfig(): Config {
   const result = configSchema.safeParse(process.env);
   if (!result.success) {
@@ -101,8 +124,6 @@ export function loadConfig(): Config {
   }
   const config = result.data;
 
-  // Resolve relative paths against the project root (dirname of .env file)
-  // so they work regardless of cwd (e.g. when concurrently runs from packages/server/).
   const projectRoot = process.env.DOTENV_CONFIG_PATH ? dirname(process.env.DOTENV_CONFIG_PATH) : process.cwd();
   if (!isAbsolute(config.DATA_DIR)) {
     config.DATA_DIR = resolve(projectRoot, config.DATA_DIR);

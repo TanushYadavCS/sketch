@@ -44,10 +44,11 @@ function mcpHeaders(token: string) {
 }
 
 describe("public MCP server", () => {
-  it("is invisible when EXPERIMENTAL_FLAG is off", async () => {
+  it("is available without EXPERIMENTAL_FLAG and advertises OAuth discovery", async () => {
     const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: false }), { logger: createTestLogger() });
     const res = await app.request("/mcp", { method: "POST" });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toContain("/.well-known/oauth-protected-resource");
   });
 
   it("rejects non-Sketch PAT bearer tokens", async () => {
@@ -84,8 +85,7 @@ describe("public MCP server", () => {
     const token = await createPat();
     const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
     const statuses: number[] = [];
-    const fixedNow = Date.now();
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
 
     try {
       for (let i = 0; i < 61; i += 1) {

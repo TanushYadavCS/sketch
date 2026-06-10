@@ -8,7 +8,16 @@
  * Today: 4 connectors. Tomorrow: 50+. This registry scales to both.
  */
 
-export type IntegrationType = "google_drive" | "gmail" | "clickup" | "notion" | "linear" | "fireflies" | "zoho_crm";
+export type IntegrationType =
+  | "google_drive"
+  | "gmail"
+  | "outlook"
+  | "teams"
+  | "clickup"
+  | "notion"
+  | "linear"
+  | "fireflies"
+  | "zoho_crm";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -174,6 +183,97 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Enable the Gmail API for your project",
       "Add the redirect URI shown below to your OAuth client",
       "Paste the Client ID and Client Secret, then connect with Google",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
+  },
+  {
+    type: "outlook",
+    name: "Outlook",
+    description: "Microsoft 365 email messages and threads",
+    category: "Communication",
+    color: "#0078D4",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [
+      {
+        key: "client_id",
+        label: "Application (client) ID",
+        type: "text",
+        placeholder: "00000000-0000-0000-0000-000000000000",
+        helpText: "From App registrations > Overview. Use Application (client) ID, not Object ID.",
+      },
+      {
+        key: "tenant",
+        label: "Directory (tenant) ID",
+        type: "text",
+        placeholder: "00000000-0000-0000-0000-000000000000",
+        helpText: "From the same app overview. Use the tenant where users will sign in.",
+      },
+      {
+        key: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        placeholder: "...",
+        helpText: "From Certificates & secrets. Paste the secret Value, not the Secret ID.",
+      },
+    ],
+    scopeLabel: "mailbox",
+    scopeType: "none",
+    itemNoun: "emails",
+    credentialUrl: "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    connectSteps: [
+      "Create or open a Microsoft Entra app registration for the tenant you want Outlook users to sign in with",
+      "In Authentication, add the Web redirect URI shown below exactly",
+      "In API permissions, add delegated Microsoft Graph permissions: Mail.Read, User.Read, and offline_access",
+      "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+      "Paste the Application (client) ID, Directory (tenant) ID, and Client Secret Value here, then connect with Microsoft",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
+  },
+  {
+    type: "teams",
+    name: "Microsoft Teams",
+    description: "Meeting transcripts and recording links",
+    category: "Meetings",
+    color: "#6264A7",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [
+      {
+        key: "client_id",
+        label: "Application (client) ID",
+        type: "text",
+        placeholder: "00000000-0000-0000-0000-000000000000",
+        helpText: "From App registrations > Overview. Use Application (client) ID, not Object ID.",
+      },
+      {
+        key: "tenant",
+        label: "Directory (tenant) ID",
+        type: "text",
+        placeholder: "00000000-0000-0000-0000-000000000000",
+        helpText: "From the same app overview. Use the tenant where users will sign in.",
+      },
+      {
+        key: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        placeholder: "...",
+        helpText: "From Certificates & secrets. Paste the secret Value, not the Secret ID.",
+      },
+    ],
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    connectSteps: [
+      "Create or open a Microsoft Entra app registration for the tenant you want Teams users to sign in with",
+      "In Authentication, add the Web redirect URI shown below exactly",
+      "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, OnlineMeetings.Read, OnlineMeetingTranscript.Read.All, OnlineMeetingRecording.Read.All, User.Read, and offline_access",
+      "Have a tenant admin grant admin consent for the transcript and recording permissions if your tenant requires it",
+      "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+      "Paste the Application (client) ID, Directory (tenant) ID, and Client Secret Value here, then connect with Microsoft",
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: true,

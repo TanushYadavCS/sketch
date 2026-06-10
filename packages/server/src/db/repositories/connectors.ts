@@ -286,6 +286,15 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       return rows.map((r) => r.indexed_file_id);
     },
 
+    async getOwnedFileIdsForConnector(connectorId: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where("connector_config_id", "=", connectorId)
+        .execute();
+      return rows.map((r) => r.id);
+    },
+
     /**
      * Delete a connector config and all associated data.
      * Files discovered only by this connector are archived (not deleted).
@@ -375,13 +384,22 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .where("connector_config_id", "=", data.connectorConfigId)
             .where("provider_message_id", "=", data.providerMessageId)
             .executeTakeFirst()
-        : await db
-            .selectFrom("indexed_files")
-            .selectAll()
-            .where("source", "=", data.source)
-            .where("provider_file_id", "=", data.providerFileId)
-            .where("provider_message_id", "is", null)
-            .executeTakeFirst();
+        : data.source === "teams"
+          ? await db
+              .selectFrom("indexed_files")
+              .selectAll()
+              .where("connector_config_id", "=", data.connectorConfigId)
+              .where("source", "=", data.source)
+              .where("provider_file_id", "=", data.providerFileId)
+              .where("provider_message_id", "is", null)
+              .executeTakeFirst()
+          : await db
+              .selectFrom("indexed_files")
+              .selectAll()
+              .where("source", "=", data.source)
+              .where("provider_file_id", "=", data.providerFileId)
+              .where("provider_message_id", "is", null)
+              .executeTakeFirst();
 
       if (existing) {
         const contentChanged = data.contentHash !== existing.content_hash;

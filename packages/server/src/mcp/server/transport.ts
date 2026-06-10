@@ -15,10 +15,16 @@ export function mountPublicMcpServer(params: {
   userRepo: ReturnType<typeof createUserRepository>;
   workspaceDir: string;
   logger: Logger;
+  baseUrl?: string;
 }) {
   const apiTokens = createApiTokenRepository(params.db);
   const auditRepo = createExternalMcpToolCallRepository(params.db);
-  const auth = createMcpAuthMiddleware({ apiTokens, users: params.userRepo, logger: params.logger });
+  const auth = createMcpAuthMiddleware({
+    apiTokens,
+    users: params.userRepo,
+    logger: params.logger,
+    baseUrl: params.baseUrl,
+  });
 
   params.app.use("/mcp", auth);
   params.app.on(["GET", "DELETE"], "/mcp", (c) =>

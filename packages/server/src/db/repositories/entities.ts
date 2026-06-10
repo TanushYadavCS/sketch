@@ -7,6 +7,7 @@ import type { DB, EntitiesTable, EntityContactPointsTable } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
+const PROTECTED_ENTITY_SOURCES = ["team", "team_directory"];
 
 /**
  * Predicate matching entities visible to `viewer`. Composed into queries via `.where(...)`.
@@ -1117,65 +1118,83 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    /**
-     * Count entities associated with a connector's files.
-     * Includes entities sourced from those files (source_ref_id) and entities
-     * only mentioned in those files (entity_mentions).
-     */
     async countEntitiesForFiles(fileIds: string[]): Promise<number> {
       if (fileIds.length === 0) return 0;
-
-      // Entities whose source_ref_id points to one of these files
-      const bySourceRef = db.selectFrom("entities").select("id").where("source_ref_id", "in", fileIds);
-
-      // Entities that are only mentioned in these files (no mentions in other files)
-      const byMentionOnly = db
-        .selectFrom("entity_mentions")
-        .select("entity_id as id")
-        .where("indexed_file_id", "in", fileIds)
-        .where(
-          "entity_id",
-          "not in",
-          db.selectFrom("entity_mentions").select("entity_id").where("indexed_file_id", "not in", fileIds),
-        );
-
-      const result = await db
-        .selectFrom(bySourceRef.union(byMentionOnly).as("combined"))
-        .select(db.fn.count<number>("id").as("count"))
-        .executeTakeFirst();
-
-      return Number(result?.count ?? 0);
+      return (await getEntityIdsSupportedOnlyByFiles(db, fileIds)).length;
     },
 
     /**
-     * Delete entities associated with a connector's files.
-     * Removes entities sourced from those files and entities only mentioned in those files.
-     * Cascade deletes handle entity_source_refs and entity_mentions.
+     * Delete entities whose complete file support is contained in `fileIds`.
+     *
+     * File support includes direct mentions, relationship evidence endpoints,
+     * and source_ref_id values that point to real indexed files. Directory seeds
+     * are retained even if a deleted connector is their only file support.
      */
     async deleteEntitiesForFiles(fileIds: string[]): Promise<number> {
       if (fileIds.length === 0) return 0;
 
-      // Entities whose source_ref_id points to one of these files
-      const bySourceRef = db.selectFrom("entities").select("id").where("source_ref_id", "in", fileIds);
-
-      // Entities that are only mentioned in these files
-      const byMentionOnly = db
-        .selectFrom("entity_mentions")
-        .select("entity_id as id")
-        .where("indexed_file_id", "in", fileIds)
-        .where(
-          "entity_id",
-          "not in",
-          db.selectFrom("entity_mentions").select("entity_id").where("indexed_file_id", "not in", fileIds),
-        );
-
-      const toDelete = await bySourceRef.union(byMentionOnly).execute();
-      const ids = [...new Set(toDelete.map((r) => r.id))];
-
+      const ids = await getEntityIdsSupportedOnlyByFiles(db, fileIds);
       if (ids.length === 0) return 0;
 
       await db.deleteFrom("entities").where("id", "in", ids).execute();
       return ids.length;
     },
   };
+}
+
+async function getEntityIdsSupportedOnlyByFiles(db: Kysely<DB>, fileIds: string[]): Promise<string[]> {
+  const fileIdSql = sql.join(
+    fileIds.map((id) => sql`${id}`),
+    sql`,`,
+  );
+  const protectedSourceSql = sql.join(
+    PROTECTED_ENTITY_SOURCES.map((source) => sql`${source}`),
+    sql`,`,
+  );
+
+  const rows = await sql<{ id: string }>`
+    WITH file_support(entity_id, indexed_file_id) AS (
+      SELECT entity_id, indexed_file_id
+      FROM entity_mentions
+      UNION
+      SELECT r.source_entity_id AS entity_id, ev.indexed_file_id
+      FROM entity_relationship_evidence ev
+      INNER JOIN entity_relationships r ON r.id = ev.relationship_id
+      UNION
+      SELECT r.target_entity_id AS entity_id, ev.indexed_file_id
+      FROM entity_relationship_evidence ev
+      INNER JOIN entity_relationships r ON r.id = ev.relationship_id
+      UNION
+      SELECT e.id AS entity_id, e.source_ref_id AS indexed_file_id
+      FROM entities e
+      INNER JOIN indexed_files f ON f.id = e.source_ref_id
+    ),
+    candidates AS (
+      SELECT DISTINCT entity_id
+      FROM file_support
+      WHERE indexed_file_id IN (${fileIdSql})
+    ),
+    survivors AS (
+      SELECT DISTINCT entity_id
+      FROM file_support
+      WHERE indexed_file_id NOT IN (${fileIdSql})
+      UNION
+      SELECT id AS entity_id
+      FROM entities
+      WHERE source_type IN (${protectedSourceSql})
+      UNION
+      SELECT entity_id
+      FROM entity_source_refs
+      WHERE source IN (${protectedSourceSql})
+    ),
+    to_delete AS (
+      SELECT entity_id FROM candidates
+      EXCEPT
+      SELECT entity_id FROM survivors
+    )
+    SELECT entity_id AS id
+    FROM to_delete
+  `.execute(db);
+
+  return rows.rows.map((row) => row.id);
 }

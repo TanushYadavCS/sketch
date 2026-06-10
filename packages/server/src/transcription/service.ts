@@ -1,11 +1,16 @@
 import { stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import type { AuxLlmCall } from "../agent/aux-cost";
 import type { SettingsTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { isAudioAttachment } from "../files";
 import type { Logger } from "../logger";
 import { hasTranscribableAudioExtension } from "./audio-types";
-import { OPENROUTER_TRANSCRIPTION_MODEL, transcribeWithOpenRouter } from "./openrouter";
+import {
+  OPENROUTER_TRANSCRIPTION_MODEL,
+  type OpenRouterTranscriptionResult,
+  transcribeWithOpenRouter,
+} from "./openrouter";
 
 const INLINE_TRANSCRIPT_LIMIT = 8_000;
 
@@ -15,7 +20,7 @@ export interface TranscriptionConfig {
   apiKey: string;
   model: string;
   source: "db" | "env";
-  providerMode: "openrouter" | "openrouter_bedrock" | "env";
+  providerMode: "openrouter" | "env";
 }
 
 export interface TranscriptionServiceDeps {
@@ -23,6 +28,29 @@ export interface TranscriptionServiceDeps {
   logger: Logger;
   env?: NodeJS.ProcessEnv;
   mimeType?: string | null;
+  onUsage?: (call: AuxLlmCall) => void;
+}
+
+/**
+ * Reports a transcription call's cost via the sink. Cost is OpenRouter's own
+ * `usage.cost` (Whisper is priced per second of audio, so the token-based price
+ * map cannot reprice it); a missing figure contributes 0 and is flagged.
+ */
+function reportTranscriptionUsage(
+  deps: Pick<TranscriptionServiceDeps, "onUsage">,
+  model: string,
+  usage: OpenRouterTranscriptionResult["usage"],
+): void {
+  if (!deps.onUsage) return;
+  deps.onUsage({
+    op: "transcription",
+    model,
+    costUsd: usage?.cost ?? 0,
+    inputTokens: usage?.input_tokens,
+    outputTokens: usage?.output_tokens,
+    seconds: usage?.seconds,
+    source: usage?.cost != null ? "openrouter" : "unknown",
+  });
 }
 
 export type TranscribeAudioFileResult =
@@ -41,7 +69,7 @@ export function resolveTranscriptionConfig(
 ): TranscriptionConfig | null {
   const provider = settings?.llm_provider;
   const dbKey = settings?.anthropic_api_key?.trim();
-  if ((provider === "openrouter" || provider === "openrouter_bedrock") && dbKey) {
+  if (provider === "openrouter" && dbKey) {
     return {
       apiKey: dbKey,
       model: OPENROUTER_TRANSCRIPTION_MODEL,
@@ -104,6 +132,7 @@ export async function transcribeAudioFile(
   }
 
   const result = await transcribeWithOpenRouter(audioPath, config, { mimeType: deps.mimeType });
+  reportTranscriptionUsage(deps, config.model, result.usage);
   deps.logger.info(
     {
       model: config.model,
@@ -151,6 +180,7 @@ export async function transcribeEagerAttachments(
         "Starting eager audio transcription",
       );
       const result = await transcribeWithOpenRouter(attachment.localPath, config, { mimeType: attachment.mimeType });
+      reportTranscriptionUsage(deps, config.model, result.usage);
       if (result.text.length <= INLINE_TRANSCRIPT_LIMIT) {
         enriched.push({
           ...attachment,

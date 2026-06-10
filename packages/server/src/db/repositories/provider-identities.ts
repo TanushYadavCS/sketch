@@ -7,7 +7,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
-import type { ConnectorType } from "../../connectors/types";
 import type { DB } from "../schema";
 
 function decodeProviderIdentityRow<T extends { access_token: string | null; refresh_token: string | null }>(
@@ -30,7 +29,7 @@ function decodeProviderIdentityRow<T extends { access_token: string | null; refr
 export function createProviderIdentityRepository(db: Kysely<DB>, encryptionKey?: string) {
   return {
     /** Find a user's identity for a specific provider. */
-    async findByUserAndProvider(userId: string, provider: ConnectorType) {
+    async findByUserAndProvider(userId: string, provider: string) {
       const row = await db
         .selectFrom("user_provider_identities")
         .selectAll()
@@ -65,7 +64,7 @@ export function createProviderIdentityRepository(db: Kysely<DB>, encryptionKey?:
     /** Create or update a provider identity (upsert by user_id + provider). */
     async upsert(data: {
       userId: string;
-      provider: ConnectorType;
+      provider: string;
       providerUserId: string;
       providerEmail?: string | null;
       accessToken?: string | null;
@@ -128,7 +127,7 @@ export function createProviderIdentityRepository(db: Kysely<DB>, encryptionKey?:
     },
 
     /** Remove a provider identity (disconnect). */
-    async remove(userId: string, provider: ConnectorType) {
+    async remove(userId: string, provider: string) {
       await db
         .deleteFrom("user_provider_identities")
         .where("user_id", "=", userId)
@@ -137,7 +136,7 @@ export function createProviderIdentityRepository(db: Kysely<DB>, encryptionKey?:
     },
 
     /** List all identities for a provider (admin view). */
-    async findByProvider(provider: ConnectorType) {
+    async findByProvider(provider: string) {
       const rows = await db
         .selectFrom("user_provider_identities")
         .selectAll()

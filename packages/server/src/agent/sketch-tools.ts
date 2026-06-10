@@ -52,6 +52,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
             absWorkspace,
             loadSettings: deps.loadTranscriptionSettings,
             logger: deps.logger,
+            onUsage: deps.auxCostCollector ? (call) => deps.auxCostCollector?.collect(call) : undefined,
           }),
         ]
       : []),
@@ -61,6 +62,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
             absWorkspace,
             config: deps.visionConfig,
             logger: deps.logger,
+            onUsage: deps.auxCostCollector ? (call) => deps.auxCostCollector?.collect(call) : undefined,
           }),
         ]
       : []),

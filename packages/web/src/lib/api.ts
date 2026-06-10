@@ -418,6 +418,24 @@ export interface EntityRelationsResponse {
   totalCount: number;
 }
 
+export interface EntityGraphNode {
+  id: string;
+  name: string;
+  sourceType: string;
+  hotness: number;
+}
+
+export interface EntityGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+}
+
+export interface EntityGraphResponse {
+  nodes: EntityGraphNode[];
+  edges: EntityGraphEdge[];
+}
+
 export interface EntityRelationEvidenceRow {
   fileId: string;
   fileName: string;
@@ -1362,6 +1380,24 @@ export const api = {
       return `/api/oauth/zoho/authorize?region=${encodeURIComponent(region)}`;
     },
   },
+  microsoftOAuth: {
+    status() {
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; tenant: string | null }>(
+        "/api/oauth/microsoft/status",
+      );
+    },
+    configure(clientId: string, clientSecret: string, tenant: string) {
+      return request<{ success: boolean }>("/api/oauth/microsoft/config", {
+        method: "PUT",
+        body: JSON.stringify({ clientId, clientSecret, tenant }),
+      });
+    },
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/microsoft/authorize";
+    },
+  },
   identities: {
     listForUser(userId: string) {
       return request<{ identities: ProviderIdentity[] }>(`/api/identities/user/${userId}`);
@@ -1645,6 +1681,13 @@ export const api = {
     },
     relations(id: string) {
       return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);
+    },
+    graph(opts?: { limit?: number; includeSystem?: boolean }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.includeSystem) params.set("includeSystem", "true");
+      const qs = params.toString();
+      return request<EntityGraphResponse>(`/api/entities/graph${qs ? `?${qs}` : ""}`);
     },
     relationEvidence(id: string, relationId: string) {
       return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);

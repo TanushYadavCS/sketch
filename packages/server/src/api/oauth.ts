@@ -1,9 +1,8 @@
 /**
- * OAuth redirect flow for per-user Google Drive connections.
+ * OAuth redirect flows for file connectors.
  *
- * Two endpoints:
- * - GET /google/authorize — redirects user to Google's consent screen
- * - GET /google/callback — Google redirects here with auth code, exchanges for tokens
+ * Each provider exposes an authorize endpoint that redirects the user to the
+ * provider consent screen and a callback endpoint that exchanges the auth code.
  *
  * The authorize endpoint encodes userId + nonce in the state param.
  * The callback verifies the nonce, exchanges the code, saves tokens,
@@ -18,7 +17,15 @@ import { z } from "zod";
 import { verifyJwt } from "../auth/jwt";
 import type { Config } from "../config";
 import { ensureValidToken } from "../connectors/google-drive";
+import {
+  createMicrosoftGraphClient,
+  microsoftAuthorizeEndpoint,
+  microsoftTokenEndpoint,
+} from "../connectors/microsoft-graph";
+import { OUTLOOK_MICROSOFT_SCOPE } from "../connectors/outlook";
+import { getConnector } from "../connectors/registry";
 import { runConnectorSync } from "../connectors/sync";
+import { TEAMS_MICROSOFT_SCOPE } from "../connectors/teams";
 import type { ConnectorType, OAuthCredentials } from "../connectors/types";
 import { validateZohoCrmCredentials } from "../connectors/zoho-crm";
 import type { createConnectorRepository } from "../db/repositories/connectors";
@@ -34,9 +41,20 @@ type IdentityRepo = ReturnType<typeof createProviderIdentityRepository>;
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
-const googleConfigSchema = z.object({
+const oauthClientConfigSchema = z.object({
   clientId: z.string().min(1, "clientId is required"),
   clientSecret: z.string().min(1, "clientSecret is required"),
+});
+
+const microsoftOAuthClientConfigSchema = oauthClientConfigSchema.extend({
+  tenant: z.preprocess(
+    (value) => (typeof value === "string" ? value : ""),
+    z
+      .string()
+      .trim()
+      .min(1, "tenant is required")
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/, "tenant must be a directory ID, verified domain, or tenant alias"),
+  ),
 });
 
 const ZOHO_REGIONS = ["com", "eu", "in", "com.au", "jp", "ca", "sa"] as const;
@@ -48,6 +66,7 @@ const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "gmail"]);
+const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
 
 /** In-memory nonce store. Entries expire after 10 minutes. */
@@ -76,6 +95,43 @@ function googleConnectorName(connectorType: ConnectorType): string {
   return connectorType === "gmail" ? "Gmail" : "Google Drive";
 }
 
+function microsoftConnectorFromQuery(value: string | undefined): ConnectorType {
+  return value === "teams" ? "teams" : "outlook";
+}
+
+function microsoftScopesFor(connectorType: ConnectorType): string {
+  return connectorType === "teams" ? TEAMS_MICROSOFT_SCOPE : OUTLOOK_MICROSOFT_SCOPE;
+}
+
+function microsoftConnectorName(connectorType: ConnectorType): string {
+  return connectorType === "teams" ? "Microsoft Teams" : "Outlook";
+}
+
+function getMicrosoftOAuthConfig(
+  config: {
+    microsoft_oauth_client_id?: string | null;
+    microsoft_oauth_client_secret?: string | null;
+    microsoft_oauth_tenant?: string | null;
+  } | null,
+  fallback: { clientId?: string; clientSecret?: string; tenant: string },
+) {
+  const configuredClientId = config?.microsoft_oauth_client_id?.trim();
+  const configuredClientSecret = config?.microsoft_oauth_client_secret?.trim();
+  if (configuredClientId || configuredClientSecret) {
+    return {
+      clientId: configuredClientId,
+      clientSecret: configuredClientSecret,
+      tenant: config?.microsoft_oauth_tenant?.trim(),
+    };
+  }
+
+  return {
+    clientId: fallback.clientId?.trim(),
+    clientSecret: fallback.clientSecret?.trim(),
+    tenant: fallback.tenant.trim(),
+  };
+}
+
 function parseGoogleState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
   const parts = state.split(":");
   if (parts.length === 2) {
@@ -84,6 +140,17 @@ function parseGoogleState(state: string): { userId: string; connectorType: Conne
   if (parts.length !== 3) return null;
   const connectorType = parts[1] as ConnectorType;
   if (!GOOGLE_OAUTH_CONNECTORS.has(connectorType)) return null;
+  return { userId: parts[0], connectorType, nonce: parts[2] };
+}
+
+function parseMicrosoftState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
+  const parts = state.split(":");
+  if (parts.length === 2) {
+    return { userId: parts[0], connectorType: "outlook", nonce: parts[1] };
+  }
+  if (parts.length !== 3) return null;
+  const connectorType = parts[1] as ConnectorType;
+  if (!MICROSOFT_OAUTH_CONNECTORS.has(connectorType)) return null;
   return { userId: parts[0], connectorType, nonce: parts[2] };
 }
 
@@ -102,6 +169,9 @@ export function oauthRoutes(
         experimentalFlag?: boolean;
         zohoClientId?: string;
         zohoClientSecret?: string;
+        microsoftClientId?: string;
+        microsoftClientSecret?: string;
+        microsoftTenant?: string;
       } = {},
 ) {
   const routes = new Hono();
@@ -110,6 +180,9 @@ export function oauthRoutes(
   const experimentalFlag = typeof opts === "string" ? false : (opts.experimentalFlag ?? false);
   const zohoClientId = typeof opts === "string" ? undefined : opts.zohoClientId;
   const zohoClientSecret = typeof opts === "string" ? undefined : opts.zohoClientSecret;
+  const microsoftClientId = typeof opts === "string" ? undefined : opts.microsoftClientId;
+  const microsoftClientSecret = typeof opts === "string" ? undefined : opts.microsoftClientSecret;
+  const microsoftTenant = typeof opts === "string" ? "common" : (opts.microsoftTenant ?? "common");
 
   /**
    * GET /google/authorize
@@ -326,6 +399,219 @@ export function oauthRoutes(
     });
   });
 
+  routes.get("/microsoft/authorize", async (c) => {
+    const connectorType = microsoftConnectorFromQuery(c.req.query("connector"));
+    const connectorName = microsoftConnectorName(connectorType);
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
+      tenant: microsoftTenant,
+    });
+
+    if (!clientId || !clientSecret || !tenant) {
+      return c.json(
+        {
+          error: {
+            code: "OAUTH_CLIENT_NOT_CONFIGURED",
+            message: `Ask your admin to configure ${connectorName} first`,
+            connector: connectorType,
+          },
+        },
+        412,
+      );
+    }
+
+    const userId = c.get("sub");
+    if (!userId || typeof userId !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } }, 401);
+    }
+
+    const existingConnector = await connectors.findByTypeAndOwner(connectorType, userId);
+    if (existingConnector) {
+      return c.json(
+        {
+          error: {
+            code: "ALREADY_CONNECTED",
+            message: `${connectorName} is already connected for this user.`,
+            connector: connectorType,
+          },
+        },
+        409,
+      );
+    }
+
+    cleanupExpiredStates();
+
+    const nonce = randomBytes(16).toString("hex");
+    const state = `${userId}:${connectorType}:${nonce}`;
+    pendingStates.set(nonce, { userId, connectorType, expiresAt: Date.now() + 10 * 60 * 1000 });
+
+    const origin = baseUrl ?? new URL(c.req.url).origin;
+    const redirectUri = `${origin}/api/oauth/microsoft/callback`;
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      response_mode: "query",
+      scope: microsoftScopesFor(connectorType),
+      state,
+    });
+
+    return c.redirect(`${microsoftAuthorizeEndpoint(tenant)}?${params.toString()}`);
+  });
+
+  routes.get("/microsoft/callback", async (c) => {
+    const code = c.req.query("code");
+    const state = c.req.query("state");
+    const error = c.req.query("error");
+
+    if (error) {
+      const connectorType = state ? (parseMicrosoftState(state)?.connectorType ?? "outlook") : "outlook";
+      logger.warn({ error }, "Microsoft OAuth denied");
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=denied`);
+    }
+
+    if (!code || !state) {
+      return c.redirect("/files?oauth=error&connector=outlook&reason=missing_params");
+    }
+
+    const parsedState = parseMicrosoftState(state);
+    if (!parsedState) {
+      return c.redirect("/files?oauth=error&connector=outlook&reason=invalid_state");
+    }
+
+    const { userId, connectorType, nonce } = parsedState;
+
+    cleanupExpiredStates();
+    const pending = pendingStates.get(nonce);
+    if (!pending || pending.userId !== userId || pending.connectorType !== connectorType) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=invalid_state`);
+    }
+    pendingStates.delete(nonce);
+
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
+      tenant: microsoftTenant,
+    });
+
+    if (!clientId || !clientSecret || !tenant) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=not_configured`);
+    }
+
+    const origin = baseUrl ?? new URL(c.req.url).origin;
+    const redirectUri = `${origin}/api/oauth/microsoft/callback`;
+    const scope = microsoftScopesFor(connectorType);
+
+    try {
+      const existingConnector = await connectors.findByTypeAndOwner(connectorType, userId);
+      if (existingConnector) {
+        return c.redirect(
+          `/files?oauth=error&connector=${connectorType}&reason=already_connected&connectorId=${existingConnector.id}`,
+        );
+      }
+
+      const tokenRes = await fetch(microsoftTokenEndpoint(tenant), {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+          scope,
+        }),
+      });
+
+      if (!tokenRes.ok) {
+        const errBody = await tokenRes.text();
+        logger.error({ status: tokenRes.status, body: errBody }, "Microsoft token exchange failed");
+        return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=token_exchange`);
+      }
+
+      const tokenData = (await tokenRes.json()) as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in: number;
+        token_type?: string;
+      };
+
+      if (!tokenData.refresh_token) {
+        logger.error("No Microsoft refresh_token in response");
+        return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=no_refresh_token`);
+      }
+
+      const expiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+      const oauthCreds: OAuthCredentials = {
+        type: "oauth",
+        access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
+        token_type: tokenData.token_type,
+        expires_at: expiresAt,
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope,
+        tenant,
+      };
+
+      await getConnector(connectorType).validateCredentials(oauthCreds);
+      const profile = await fetchMicrosoftCurrentUser(oauthCreds, logger);
+      const providerEmail = profile.mail ?? profile.userPrincipalName ?? null;
+      const providerUserId = profile.id ?? providerEmail ?? userId;
+
+      await identities.upsert({
+        userId,
+        provider: "microsoft",
+        providerUserId,
+        providerEmail,
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        tokenExpiresAt: expiresAt,
+      });
+
+      const connectorConfig = await connectors.createConfig({
+        connectorType,
+        authType: "oauth",
+        credentials: JSON.stringify(oauthCreds),
+        scopeConfig: JSON.stringify({}),
+        createdBy: userId,
+        credentialHint: providerEmail,
+      });
+
+      logger.info(
+        { userId, connectorId: connectorConfig.id, connectorType, providerEmail },
+        "Microsoft OAuth tokens saved",
+      );
+
+      runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
+        logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Microsoft first sync failed");
+      });
+
+      return c.redirect(`/files?oauth=success&connector=${connectorType}&connectorId=${connectorConfig.id}`);
+    } catch (err) {
+      logger.error({ err, userId }, "Microsoft OAuth callback failed");
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=internal`);
+    }
+  });
+
+  routes.get("/microsoft/status", async (c) => {
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
+      tenant: microsoftTenant,
+    });
+    return c.json({
+      configured: !!(clientId && clientSecret && tenant),
+      clientId: clientId ?? null,
+      baseUrl: baseUrl ?? null,
+      tenant: tenant ?? null,
+    });
+  });
+
   if (experimentalFlag) {
     routes.get("/zoho/authorize", async (c) => {
       const denied = denyIfNotAdmin(c);
@@ -535,7 +821,7 @@ export function oauthRoutes(
     if (denied) return denied;
 
     const body = await c.req.json().catch(() => ({}));
-    const parsed = googleConfigSchema.safeParse(body);
+    const parsed = oauthClientConfigSchema.safeParse(body);
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
@@ -544,6 +830,27 @@ export function oauthRoutes(
     await settings.update({
       googleOauthClientId: parsed.data.clientId.trim(),
       googleOauthClientSecret: parsed.data.clientSecret.trim(),
+    });
+
+    return c.json({ success: true });
+  });
+
+  /** PUT /microsoft/config — save Microsoft OAuth client_id, tenant, and client_secret. Admin-only. */
+  routes.put("/microsoft/config", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = microsoftOAuthClientConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    await settings.update({
+      microsoftOauthClientId: parsed.data.clientId.trim(),
+      microsoftOauthClientSecret: parsed.data.clientSecret.trim(),
+      microsoftOauthTenant: parsed.data.tenant,
     });
 
     return c.json({ success: true });
@@ -570,5 +877,23 @@ async function fetchZohoCurrentUserHint(credentials: OAuthCredentials, logger: L
   } catch (err) {
     logger.warn({ err }, "Failed to fetch Zoho CRM current user hint");
     return null;
+  }
+}
+
+async function fetchMicrosoftCurrentUser(
+  credentials: OAuthCredentials,
+  logger: Logger,
+): Promise<{ id?: string; mail?: string | null; userPrincipalName?: string | null }> {
+  try {
+    const graph = createMicrosoftGraphClient(credentials, {
+      scope: credentials.scope,
+      tenant: credentials.tenant,
+    });
+    return graph.request<{ id?: string; mail?: string | null; userPrincipalName?: string | null }>("/me", {
+      params: { $select: "id,mail,userPrincipalName" },
+    });
+  } catch (err) {
+    logger.warn({ err }, "Failed to fetch Microsoft current user hint");
+    return {};
   }
 }

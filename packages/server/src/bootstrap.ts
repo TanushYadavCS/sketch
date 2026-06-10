@@ -3,16 +3,16 @@
  * running server. Extracted from index.ts so the full stack can be instantiated
  * from tests with a custom Config and { connect: false }.
  */
-import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Kysely } from "kysely";
-import { removeReservedAgentEnv } from "./agent/environment";
+import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
-import { type AgentResult, runAgent } from "./agent/runner";
+import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import type { Config } from "./config";
 import { startSyncScheduler } from "./connectors/sync";
+import { createPricingService } from "./cost/cost-pricing";
+import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
 import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
@@ -45,7 +45,7 @@ import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
 import { createSlackStartupManager } from "./slack/startup";
 import { UserCache } from "./slack/user-cache";
-import { createToolCallSpans, setAgentResultAttributes, setAgentRunAttributes } from "./telemetry/instrument";
+import { type ProviderContext, createWorkflowStepRecorder, instrumentAgentRun } from "./telemetry/agent-run-telemetry";
 import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
@@ -60,8 +60,12 @@ export interface ServerHandle {
   shutdown: () => Promise<void>;
 }
 
+/**
+ * Options for createServer. When `connect` is false (default true), the stack
+ * is built without starting WhatsApp or Slack, which lets tests instantiate the
+ * full server without live platform connections.
+ */
 export interface CreateServerOptions {
-  /** When false, skips whatsapp.start() and Slack startup. Defaults to true. */
   connect?: boolean;
 }
 
@@ -70,6 +74,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 1. Logger
   const logger = createLogger(config);
+
+  disableSdkAttributionHeader();
 
   // 2. Database
   const db = await createDatabase(config);
@@ -127,11 +133,20 @@ export async function createServer(config: Config, options?: CreateServerOptions
   });
   const agentRunsRepo = createAgentRunsRepo(db);
   const telemetry = initTelemetry(agentRunsRepo, logger, config);
-  const tracer = trace.getTracer("sketch");
+  const tracer = telemetry.tracer;
+  const priceMap = new OpenRouterPriceMap({ ttlMs: config.OPENROUTER_PRICE_TTL_HOURS * 60 * 60 * 1000, logger });
+  const pricing = createPricingService(priceMap, logger);
 
-  const trackedRunAgent = async (params: RunAgentParams): Promise<AgentResult> => {
-    const runId = randomUUID();
-    const span = tracer.startSpan("chat sketch");
+  /**
+   * Current LLM provider context, refreshed at startup and on settings change
+   * via applyLlmEnvFromDb. Drives provider-aware cost recomputation without an
+   * extra per-run settings query.
+   */
+  let providerCtx: ProviderContext = { provider: null, modelId: null };
+
+  const recordWorkflowStep = createWorkflowStepRecorder(tracer, pricing, () => providerCtx);
+
+  const trackedRunAgent = async (params: RunAgentParams): Promise<RunAgentResult> => {
     const resolvedAgentEnv = removeReservedAgentEnv(
       await agentEnvironmentVariables.listForRuntimeContext({
         ...params,
@@ -162,34 +177,26 @@ export async function createServer(config: Config, options?: CreateServerOptions
           }
         : {}),
     };
-    setAgentRunAttributes(span, enrichedParams, runId);
-
-    try {
-      const result = await runAgent(enrichedParams);
-      setAgentResultAttributes(span, result);
-      createToolCallSpans(tracer, span, runId, result.toolCalls);
-      span.end();
-      return result;
-    } catch (err) {
-      span.setStatus({ code: SpanStatusCode.ERROR });
-      span.end();
-      throw err;
-    }
+    return instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams));
   };
 
   // 4. LLM env from DB
   async function applyLlmEnvFromDb() {
     const settingsRow = await settingsRepo.get();
     applyLlmEnvFromSettings(settingsRow, logger);
+    providerCtx = { provider: settingsRow?.llm_provider ?? null, modelId: settingsRow?.model_id ?? null };
   }
   await applyLlmEnvFromDb();
 
   // 5. Shared helpers
+  /**
+   * Builds the MCP server config map for a user. Skill-mode integration rows are
+   * skipped: those agents use the skill's own CLI rather than an MCP server.
+   */
   async function buildMcpServers(userEmail: string | null): Promise<Record<string, McpServerConfig>> {
     const allServers = await mcpServersRepo.listAll();
     const servers: Record<string, McpServerConfig> = {};
     for (const s of allServers) {
-      // Skip integration providers in skill mode (agent uses the skill's CLI instead)
       if (s.type != null && s.mode === "skill") continue;
       try {
         servers[s.slug] = buildMcpConfig(s.url, s.credentials, userEmail, s.type);
@@ -312,6 +319,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     userRepo: users,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    recordWorkflowStep,
   });
   await scheduler.start();
 

@@ -18,11 +18,15 @@ import { createGmailConnector } from "./gmail";
 import { createGoogleDriveConnector } from "./google-drive";
 import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
+import { createOutlookConnector } from "./outlook";
+import { createTeamsConnector } from "./teams";
 import { createZohoCrmConnector } from "./zoho-crm";
 
 export const connectorFactories: Record<ConnectorType, () => Connector> = {
   google_drive: createGoogleDriveConnector,
   gmail: createGmailConnector,
+  outlook: createOutlookConnector,
+  teams: createTeamsConnector,
   clickup: createClickUpConnector,
   notion: createNotionConnector,
   linear: createLinearConnector,
