@@ -108,3 +108,15 @@ export function createEnrichmentEmbeddingProvider(config: EnrichmentProviderConf
       : undefined,
   };
 }
+
+export function createEnrichmentQueryEmbedder(
+  config: EnrichmentProviderConfig,
+): ((query: string) => Promise<number[]>) | null {
+  const provider = createEnrichmentEmbeddingProvider(config);
+  if (!provider) return null;
+  return async (query) => {
+    const [embedding] = await provider.embedTexts([query]);
+    if (!embedding) throw new Error("Embedding provider did not return a query embedding");
+    return embedding;
+  };
+}

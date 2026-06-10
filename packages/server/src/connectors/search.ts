@@ -20,10 +20,11 @@ import { sql } from "kysely";
 import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-metadata";
 import type { EmailAddr } from "./email/normalized-email";
-import { createQueryEmbedder } from "./embeddings";
+import { createEnrichmentQueryEmbedder, resolveOpenRouterEnrichmentConfig } from "./enrichment-providers";
 
 export interface SearchResult {
   id: string;
@@ -1464,6 +1465,8 @@ export async function search(
     skipAutoEntityBoost?: boolean;
     geminiMaxRpm?: number;
     geminiMaxRetries?: number;
+    openRouterApiKey?: string;
+    settingsEncryptionKey?: string;
   },
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
@@ -1504,19 +1507,16 @@ export async function search(
 
   let queryEmbedding: number[] | undefined;
   try {
-    const settings = await db
-      .selectFrom("settings")
-      .select(["gemini_api_key", "enrichment_enabled"])
-      .where("id", "=", "default")
-      .executeTakeFirst();
-    if (settings?.gemini_api_key && settings.enrichment_enabled !== 0) {
-      const embedQuery = createQueryEmbedder({
-        provider: "gemini",
-        apiKey: settings.gemini_api_key,
-        maxRpm: opts?.geminiMaxRpm,
-        maxRetries: opts?.geminiMaxRetries,
+    const settings = await createSettingsRepository(db, opts?.settingsEncryptionKey).get();
+    if (settings?.enrichment_enabled !== 0) {
+      const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, opts?.openRouterApiKey);
+      const embedQuery = createEnrichmentQueryEmbedder({
+        geminiApiKey: settings?.gemini_api_key,
+        geminiMaxRpm: opts?.geminiMaxRpm,
+        geminiMaxRetries: opts?.geminiMaxRetries,
+        ...openRouterConfig,
       });
-      queryEmbedding = await embedQuery(trimmedQuery);
+      if (embedQuery) queryEmbedding = await embedQuery(trimmedQuery);
     }
   } catch {
     // Vector search is best-effort — fall back to FTS5 only

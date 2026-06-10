@@ -234,6 +234,8 @@ export async function handleSearch(
     skipAutoEntityBoost,
     geminiMaxRpm: deps.geminiConfig?.maxRpm,
     geminiMaxRetries: deps.geminiConfig?.maxRetries,
+    openRouterApiKey: deps.openRouterApiKey,
+    settingsEncryptionKey: deps.settingsEncryptionKey,
   });
 
   const effectiveSortBy = sortBy ?? "relevance";

@@ -492,6 +492,8 @@ export function connectorRoutes(
       userEmails,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+      openRouterApiKey: appConfig?.OPENROUTER_API_KEY,
+      settingsEncryptionKey: appConfig?.ENCRYPTION_KEY,
     });
     return c.json({ results });
   });
