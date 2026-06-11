@@ -68,6 +68,7 @@ interface LinearTeam {
   id: string;
   name: string;
   key: string;
+  members: { nodes: Array<{ id: string; name: string; email: string | null }> };
 }
 
 interface GraphQLResponse<T> {
@@ -269,6 +270,43 @@ function projectToSyncedItem(project: LinearProject): SyncedItem {
   };
 }
 
+/**
+ * Builds the team's indexed document and carries membership facts. The team
+ * entity is still emitted through the structural seed callback because Linear
+ * team files are not promotable, while member people and relationships can use
+ * the yielded document's fact pipeline.
+ */
+function teamToSyncedItem(team: LinearTeam): SyncedItem {
+  const memberNames = team.members.nodes.map((member) => member.name).join(", ");
+  const content = `${team.name}\n\nMembers: ${memberNames}`;
+
+  return {
+    providerFileId: `team-${team.id}`,
+    providerUrl: null,
+    fileName: team.name,
+    fileType: "team",
+    contentCategory: "structured",
+    content,
+    sourcePath: null,
+    contentHash: contentHash(content),
+    sourceCreatedAt: null,
+    sourceUpdatedAt: null,
+    personSeeds: team.members.nodes.map((member) => ({
+      name: member.name,
+      email: member.email ?? undefined,
+      subtype: "internal",
+      source: "linear",
+      sourceId: member.id,
+    })),
+    relationships: team.members.nodes.map((member) => ({
+      relationType: "member_of",
+      source: { source: "linear", sourceId: member.id, name: member.name, type: "person" },
+      target: { source: "linear", sourceId: team.id, name: team.name, type: "team" },
+      contextSnippet: `Member of ${team.name}`,
+    })),
+  };
+}
+
 async function refreshLinearToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
   const response = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
@@ -369,6 +407,7 @@ query Teams($first: Int!, $after: String) {
 			id
 			name
 			key
+			members(first: 250) { nodes { id name email } }
 		}
 	}
 }`;
@@ -422,9 +461,7 @@ export function createLinearConnector(): Connector {
       const sinceDate = cursor ?? null;
 
       yield* syncIssues(token, sinceDate, allowedTeams, logger, linearRequest);
-      if (onEntitySeed) {
-        await syncTeams(token, logger, linearRequest, onEntitySeed);
-      }
+      yield* syncTeams(token, logger, linearRequest, onEntitySeed);
       yield* syncProjects(token, sinceDate, logger, linearRequest, onEntitySeed);
     },
 
@@ -525,12 +562,12 @@ async function* syncProjects(
   logger.info({ totalProjects }, "Projects sync complete");
 }
 
-async function syncTeams(
+async function* syncTeams(
   token: string,
   logger: Logger,
   linearRequest: LinearRequestFn,
-  onEntitySeed: EntitySeedCallback,
-): Promise<void> {
+  onEntitySeed?: EntitySeedCallback,
+): AsyncGenerator<SyncedItem> {
   let afterCursor: string | null = null;
   let totalTeams = 0;
 
@@ -545,13 +582,16 @@ async function syncTeams(
     }>(TEAMS_QUERY, variables, token, logger);
 
     for (const team of data.teams.nodes) {
-      await onEntitySeed({
-        name: team.name,
-        sourceType: "team",
-        source: "linear",
-        sourceId: team.id,
-        metadata: { key: team.key },
-      });
+      if (onEntitySeed) {
+        await onEntitySeed({
+          name: team.name,
+          sourceType: "team",
+          source: "linear",
+          sourceId: team.id,
+          metadata: { key: team.key },
+        });
+      }
+      yield teamToSyncedItem(team);
       totalTeams++;
     }
 

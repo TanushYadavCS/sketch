@@ -67,7 +67,7 @@ const RECORDED_LINEAR_TEAMS_PAGE = {
   data: {
     teams: {
       pageInfo: { hasNextPage: false, endCursor: null },
-      nodes: [{ id: "lin-team-1", name: "Platform", key: "PLAT" }],
+      nodes: [{ id: "lin-team-1", name: "Platform", key: "PLAT", members: { nodes: [] } }],
     },
   },
 };
@@ -187,7 +187,7 @@ async function syncRecordedLinearPayload(db: Kysely<DB>, syncRunId: string): Pro
     });
   }
 
-  expect(items).toHaveLength(3);
+  expect(items).toHaveLength(4);
   expect(items.find((item) => item.providerFileId === "project-lin-proj-1")).toMatchObject({
     providerFileId: "project-lin-proj-1",
     fileType: "project",
