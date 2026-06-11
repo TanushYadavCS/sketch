@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.34.1] -- 2026-06-11
+
+- Fix(OAuth): derive redirect origins from forwarded proxy headers for multi-tenant hosts, keeping Google, Microsoft, and Zoho callback URLs on the public `https://<tenant>.getsketch.ai` origin when `BASE_URL` is unset.
+
 ## [0.34.0] -- 2026-06-10
 
 - Microsoft connectors: add Outlook and Teams connector support with Microsoft Graph sync, tenant-aware OAuth setup, Files UI configuration, and cursor-gap hardening.
