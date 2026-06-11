@@ -1,12 +1,15 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { up as migrateLinearProjectEntitySeedingCleanup } from "../db/migrations/096-linear-project-entity-seeding-cleanup";
+import { createConnectorRepository } from "../db/repositories/connectors";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { resetDerivedEntityData } from "../entities/recreate";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { createLinearConnector } from "./linear";
+import { emitFactsForSyncedItem } from "./sync-facts";
+import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import type { EntitySeed } from "./types";
 
 const USER_ID = "linear-seeding-user";
@@ -111,6 +114,11 @@ async function syncRecordedLinearPayload(db: Kysely<DB>, syncRunId: string): Pro
   const connector = createLinearConnector();
   expect(connector.promotableFileTypes).not.toContain("project");
 
+  const factRepo = createIndexedFileFactRepository(db);
+  const repo = createConnectorRepository(db);
+  const existingHashes = await loadExistingContentHashes(db, "linear", CONNECTOR_ID);
+  const factContext = { connectorConfigId: CONNECTOR_ID, createdByUserId: USER_ID, lastSeenSyncRunId: syncRunId };
+
   const items = [];
   for await (const item of connector.sync({
     connectorConfigId: CONNECTOR_ID,
@@ -121,6 +129,23 @@ async function syncRecordedLinearPayload(db: Kysely<DB>, syncRunId: string): Pro
     onEntitySeed: async (seed) => recordSeedFact(db, seed, syncRunId),
   })) {
     items.push(item);
+    const itemResult = await processSyncedItem({
+      db,
+      repo,
+      connectorConfigId: CONNECTOR_ID,
+      connectorType: "linear",
+      item,
+      existingHashes,
+    });
+    if (itemResult.kind === "skipped_empty") continue;
+    await emitFactsForSyncedItem({
+      factRepo,
+      connector,
+      connectorType: "linear",
+      factContext,
+      item,
+      indexedFileId: itemResult.indexedFileId,
+    });
   }
 
   expect(items).toHaveLength(1);
@@ -172,6 +197,31 @@ describe("Linear project entity seeding", () => {
       .where("id", "=", teamRef.entity_id)
       .executeTakeFirstOrThrow();
     expect(team.source_type).toBe("team");
+  });
+
+  it("links the seeded Linear project entity to its own project document", async () => {
+    await syncRecordedLinearPayload(db, "sync-run-1");
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    const project = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("source_type", "=", "project")
+      .executeTakeFirstOrThrow();
+    const projectFile = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("source", "=", "linear")
+      .where("provider_file_id", "=", "project-lin-proj-1")
+      .executeTakeFirstOrThrow();
+    const mention = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("entity_id", "=", project.id)
+      .where("indexed_file_id", "=", projectFile.id)
+      .where("source", "=", "linear_parent_entity")
+      .executeTakeFirstOrThrow();
+    expect(mention.context_snippet).toBe("Linear project: Atlas Launch");
   });
 
   it("re-syncs the same Linear project without duplicate entities or entity churn", async () => {

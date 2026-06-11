@@ -210,6 +210,13 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
   };
 }
 
+/**
+ * Builds the project's indexed document. The `parentEntities` self-reference
+ * links this doc to the seeded `project` entity (sourceId is the bare project
+ * id, matching `emitLinearProjectSeed`), so the entity carries its own document
+ * as evidence. The `parent_entity` fact materializes after the project seed,
+ * which creates the entity first (`FACT_REPLAY_ORDER`).
+ */
 function projectToSyncedItem(project: LinearProject): SyncedItem {
   const hasDescription = project.description && project.description.trim().length > 0;
 
@@ -238,6 +245,7 @@ function projectToSyncedItem(project: LinearProject): SyncedItem {
     contentHash: contentHash(content),
     sourceCreatedAt: project.createdAt,
     sourceUpdatedAt: project.updatedAt,
+    parentEntities: [{ source: "linear", sourceId: project.id, contextSnippet: `Linear project: ${project.name}` }],
     // TODO: populate access scope from team membership + privacy
   };
 }
