@@ -9,7 +9,7 @@
  * creates a connector_config, and redirects to a frontend success page.
  */
 import { randomBytes } from "node:crypto";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
@@ -74,6 +74,27 @@ const pendingStates = new Map<
   string,
   { userId: string; expiresAt: number; connectorType?: ConnectorType; region?: (typeof ZOHO_REGIONS)[number] }
 >();
+
+/**
+ * Resolves the public origin (`scheme://host`) used to build OAuth redirect URIs.
+ *
+ * Multi-tenant deployments serve each tenant on its own host (e.g.
+ * `capmobfinance.getsketch.ai`), so a single configured origin cannot be used.
+ * We derive it from the request instead. Behind a TLS-terminating proxy the
+ * internal hop to Node is plain HTTP, so `c.req.url` reports `http://`; the
+ * proxy's `X-Forwarded-Proto`/`X-Forwarded-Host` headers carry the real public
+ * scheme and host and take precedence. An explicit `baseUrl` override (BASE_URL)
+ * wins when set, which is handy for local development.
+ */
+export function resolveOrigin(c: Context, baseUrl: string | undefined): string {
+  if (baseUrl) return baseUrl;
+  const requestUrl = new URL(c.req.url);
+  const forwardedProto = c.req.header("x-forwarded-proto")?.split(",")[0]?.trim();
+  const forwardedHost = c.req.header("x-forwarded-host")?.split(",")[0]?.trim();
+  const proto = forwardedProto || requestUrl.protocol.replace(/:$/, "");
+  const host = forwardedHost || requestUrl.host;
+  return `${proto}://${host}`;
+}
 
 function cleanupExpiredStates() {
   const now = Date.now();
@@ -226,7 +247,7 @@ export function oauthRoutes(
     pendingStates.set(nonce, { userId, connectorType, expiresAt: Date.now() + 10 * 60 * 1000 });
 
     // Build the callback URL from BASE_URL or the request's origin
-    const origin = baseUrl ?? new URL(c.req.url).origin;
+    const origin = resolveOrigin(c, baseUrl);
     const redirectUri = `${origin}/api/oauth/google/callback`;
 
     const params = new URLSearchParams({
@@ -289,7 +310,7 @@ export function oauthRoutes(
     }
 
     // Build redirect URI from BASE_URL or request origin (must match authorize step)
-    const origin = baseUrl ?? new URL(c.req.url).origin;
+    const origin = resolveOrigin(c, baseUrl);
     const redirectUri = `${origin}/api/oauth/google/callback`;
 
     try {
@@ -447,7 +468,7 @@ export function oauthRoutes(
     const state = `${userId}:${connectorType}:${nonce}`;
     pendingStates.set(nonce, { userId, connectorType, expiresAt: Date.now() + 10 * 60 * 1000 });
 
-    const origin = baseUrl ?? new URL(c.req.url).origin;
+    const origin = resolveOrigin(c, baseUrl);
     const redirectUri = `${origin}/api/oauth/microsoft/callback`;
     const params = new URLSearchParams({
       client_id: clientId,
@@ -501,7 +522,7 @@ export function oauthRoutes(
       return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=not_configured`);
     }
 
-    const origin = baseUrl ?? new URL(c.req.url).origin;
+    const origin = resolveOrigin(c, baseUrl);
     const redirectUri = `${origin}/api/oauth/microsoft/callback`;
     const scope = microsoftScopesFor(connectorType);
 
@@ -671,7 +692,7 @@ export function oauthRoutes(
       const state = `${userId}:${nonce}`;
       pendingStates.set(nonce, { userId, region: parsedRegion.data, expiresAt: Date.now() + 10 * 60 * 1000 });
 
-      const origin = baseUrl ?? new URL(c.req.url).origin;
+      const origin = resolveOrigin(c, baseUrl);
       const redirectUri = `${origin}/api/oauth/zoho/callback`;
 
       const params = new URLSearchParams({
@@ -722,7 +743,7 @@ export function oauthRoutes(
 
       const accountsServer =
         c.req.query("accounts-server") ?? c.req.query("accounts_server") ?? zohoAccountsServer(pending.region);
-      const origin = baseUrl ?? new URL(c.req.url).origin;
+      const origin = resolveOrigin(c, baseUrl);
       const redirectUri = `${origin}/api/oauth/zoho/callback`;
 
       try {
