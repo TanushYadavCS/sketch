@@ -41,8 +41,8 @@ interface LinearIssue {
   priorityLabel: string;
   assignee: { name: string; displayName: string } | null;
   labels: { nodes: Array<{ name: string }> };
-  team: { name: string; key: string } | null;
-  project: { name: string } | null;
+  team: { id: string; name: string; key: string } | null;
+  project: { id: string; name: string } | null;
   estimate: number | null;
   dueDate: string | null;
   createdAt: string;
@@ -164,6 +164,11 @@ const PRIORITY_LABELS: Record<number, string> = {
   4: "Low",
 };
 
+/**
+ * Builds the issue's indexed document. The `parentEntities` references link
+ * issues to their seeded Linear team and, when present, project entities using
+ * the bare Linear object ids emitted by the seed pass.
+ */
 function issueToSyncedItem(issue: LinearIssue): SyncedItem {
   const hasDescription = issue.description && issue.description.trim().length > 0;
 
@@ -206,6 +211,20 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
     sourceCreatedAt: issue.createdAt,
     sourceUpdatedAt: issue.updatedAt,
     assignees: issue.assignee ? [{ name: issue.assignee.displayName }] : [],
+    parentEntities: [
+      ...(issue.team
+        ? [{ source: "linear", sourceId: issue.team.id, contextSnippet: `Linear issue in team: ${issue.team.name}` }]
+        : []),
+      ...(issue.project
+        ? [
+            {
+              source: "linear",
+              sourceId: issue.project.id,
+              contextSnippet: `Linear issue in project: ${issue.project.name}`,
+            },
+          ]
+        : []),
+    ],
     // TODO: populate access scope from team membership + privacy
   };
 }
@@ -299,8 +318,8 @@ query Issues($first: Int!, $after: String, $filter: IssueFilter) {
 			priorityLabel
 			assignee { name displayName }
 			labels { nodes { name } }
-			team { name key }
-			project { name }
+			team { id name key }
+			project { id name }
 			estimate
 			dueDate
 			createdAt

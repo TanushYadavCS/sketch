@@ -19,7 +19,46 @@ const RECORDED_LINEAR_ISSUES_PAGE = {
   data: {
     issues: {
       pageInfo: { hasNextPage: false, endCursor: null },
-      nodes: [],
+      nodes: [
+        {
+          id: "lin-issue-untagged-1",
+          identifier: "PLAT-101",
+          title: "Audit workspace isolation",
+          description: null,
+          url: "https://linear.example/issue/PLAT-101/audit-workspace-isolation",
+          state: { name: "Todo", type: "unstarted" },
+          priority: 3,
+          priorityLabel: "Medium",
+          assignee: null,
+          labels: { nodes: [] },
+          team: { id: "lin-team-1", name: "Platform", key: "PLAT" },
+          project: null,
+          estimate: null,
+          dueDate: null,
+          createdAt: "2026-06-08T00:00:00.000Z",
+          updatedAt: "2026-06-10T00:00:00.000Z",
+          comments: { nodes: [] },
+        },
+        {
+          id: "lin-issue-tagged-1",
+          identifier: "PLAT-102",
+          title: "Ship Atlas launch checklist",
+          description: null,
+          url: "https://linear.example/issue/PLAT-102/ship-atlas-launch-checklist",
+          state: { name: "In Progress", type: "started" },
+          priority: 2,
+          priorityLabel: "High",
+          assignee: null,
+          labels: { nodes: [] },
+          team: { id: "lin-team-1", name: "Platform", key: "PLAT" },
+          project: { id: "lin-proj-1", name: "Atlas Launch" },
+          estimate: null,
+          dueDate: null,
+          createdAt: "2026-06-09T00:00:00.000Z",
+          updatedAt: "2026-06-10T00:00:00.000Z",
+          comments: { nodes: [] },
+        },
+      ],
     },
   },
 };
@@ -148,8 +187,8 @@ async function syncRecordedLinearPayload(db: Kysely<DB>, syncRunId: string): Pro
     });
   }
 
-  expect(items).toHaveLength(1);
-  expect(items[0]).toMatchObject({
+  expect(items).toHaveLength(3);
+  expect(items.find((item) => item.providerFileId === "project-lin-proj-1")).toMatchObject({
     providerFileId: "project-lin-proj-1",
     fileType: "project",
     fileName: "Atlas Launch",
@@ -222,6 +261,82 @@ describe("Linear project entity seeding", () => {
       .where("source", "=", "linear_parent_entity")
       .executeTakeFirstOrThrow();
     expect(mention.context_snippet).toBe("Linear project: Atlas Launch");
+  });
+
+  it("anchors an untagged issue to its team only", async () => {
+    await syncRecordedLinearPayload(db, "sync-run-1");
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    const teamRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "linear")
+      .where("source_id", "=", "lin-team-1")
+      .executeTakeFirstOrThrow();
+    const issueFile = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("source", "=", "linear")
+      .where("provider_file_id", "=", "lin-issue-untagged-1")
+      .executeTakeFirstOrThrow();
+    const teamMention = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("entity_id", "=", teamRef.entity_id)
+      .where("indexed_file_id", "=", issueFile.id)
+      .where("source", "=", "linear_parent_entity")
+      .executeTakeFirstOrThrow();
+    expect(teamMention.context_snippet).toBe("Linear issue in team: Platform");
+
+    const projectMentions = await db
+      .selectFrom("entity_mentions")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .selectAll("entity_mentions")
+      .where("entity_mentions.indexed_file_id", "=", issueFile.id)
+      .where("entity_mentions.source", "=", "linear_parent_entity")
+      .where("entities.source_type", "=", "project")
+      .execute();
+    expect(projectMentions).toHaveLength(0);
+  });
+
+  it("anchors a project-tagged issue to both team and project", async () => {
+    await syncRecordedLinearPayload(db, "sync-run-1");
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    const teamRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "linear")
+      .where("source_id", "=", "lin-team-1")
+      .executeTakeFirstOrThrow();
+    const projectRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "linear")
+      .where("source_id", "=", "lin-proj-1")
+      .executeTakeFirstOrThrow();
+    const issueFile = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("source", "=", "linear")
+      .where("provider_file_id", "=", "lin-issue-tagged-1")
+      .executeTakeFirstOrThrow();
+    const teamMention = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("entity_id", "=", teamRef.entity_id)
+      .where("indexed_file_id", "=", issueFile.id)
+      .where("source", "=", "linear_parent_entity")
+      .executeTakeFirstOrThrow();
+    const projectMention = await db
+      .selectFrom("entity_mentions")
+      .selectAll()
+      .where("entity_id", "=", projectRef.entity_id)
+      .where("indexed_file_id", "=", issueFile.id)
+      .where("source", "=", "linear_parent_entity")
+      .executeTakeFirstOrThrow();
+    expect(teamMention.context_snippet).toBe("Linear issue in team: Platform");
+    expect(projectMention.context_snippet).toBe("Linear issue in project: Atlas Launch");
   });
 
   it("re-syncs the same Linear project without duplicate entities or entity churn", async () => {
