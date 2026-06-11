@@ -96,6 +96,7 @@ import * as m093 from "./migrations/093-microsoft-oauth-settings";
 import * as m094 from "./migrations/094-microsoft-oauth-tenant";
 import * as m095 from "./migrations/095-entity-review-connector-identity";
 import * as m096 from "./migrations/096-linear-project-entity-seeding-cleanup";
+import * as m097 from "./migrations/097-clickup-project-entity-seeding-cleanup";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -196,6 +197,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "094-microsoft-oauth-tenant": m094,
           "095-entity-review-connector-identity": m095,
           "096-linear-project-entity-seeding-cleanup": m096,
+          "097-clickup-project-entity-seeding-cleanup": m097,
         };
       },
     },
