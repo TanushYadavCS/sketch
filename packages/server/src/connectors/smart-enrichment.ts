@@ -77,7 +77,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v7";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v8";
 const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -268,10 +268,13 @@ Valid relationship types:
 - "leads": person -> project | product | team
 - "contributes_to": person | team -> project | product
 - "builds": company -> product
-- "part_of": project -> project, product -> product, team -> company
+- "part_of": project -> project, project -> product, product -> product, team -> company
+- "engagement_for": project -> company (the project is a client engagement delivered for that company)
 - "partner_of": company -> company
 
 Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
+Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON or TEAM working with a company.
+Do not extract "member_of", "deal_for", or "primary_contact" from prose; those are connector-sourced relationships.
 
 When a "Meeting participants" block is present above and lists attendees from multiple companies, the cross-company link is itself relationship evidence even when the prose never names the external company. Emit \`engaged_with\` edges from home-company participants who are marked \`[action-item owner]\` to each external company present in the participants block. Treat silent external attendees (no action items) with caution — only emit when the prose corroborates it. Use the participant name and the external company name exactly as they appear in the block as the relation endpoints.
 

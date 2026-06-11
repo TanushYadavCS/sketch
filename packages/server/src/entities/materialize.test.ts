@@ -96,7 +96,7 @@ async function upsertLlmRelationFact(
   db: Kysely<DB>,
   input: {
     fileId: string;
-    relationType: "works_at" | "leads" | "contributes_to" | "builds" | "part_of" | "partner_of";
+    relationType: "works_at" | "leads" | "contributes_to" | "builds" | "part_of" | "engagement_for" | "partner_of";
     source: { name: string; type: string; variations?: string[] };
     target: { name: string; type: string; variations?: string[] };
     confidence?: number;
@@ -602,6 +602,58 @@ describe("materializeFromFact — llm_relation typed edges", () => {
     expect(relationships).toEqual([
       { source_name: "Acme", target_name: "Globex", relationship_type: "partner_of" },
       { source_name: "Globex", target_name: "Acme", relationship_type: "partner_of" },
+    ]);
+  });
+
+  it("materializes project part_of product relations", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "part_of",
+      source: { name: "Files Project", type: "project" },
+      target: { name: "Sketch", type: "product" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as source_name", "target.name as target_name"])
+      .execute();
+    expect(relationships).toEqual([
+      {
+        relationship_type: "part_of",
+        source_name: "Files Project",
+        target_name: "Sketch",
+      },
+    ]);
+  });
+
+  it("materializes project engagement_for company relations", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "engagement_for",
+      source: { name: "Project Atlas", type: "project" },
+      target: { name: "Oliver Wyman", type: "company" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 99 });
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["entity_relationships.relationship_type", "source.name as source_name", "target.name as target_name"])
+      .execute();
+    expect(relationships).toEqual([
+      {
+        relationship_type: "engagement_for",
+        source_name: "Project Atlas",
+        target_name: "Oliver Wyman",
+      },
     ]);
   });
 

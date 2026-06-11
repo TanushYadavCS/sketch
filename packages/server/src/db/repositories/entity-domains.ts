@@ -15,6 +15,7 @@ export type EntityRelationshipType =
   | "builds"
   | "part_of"
   | "member_of"
+  | "engagement_for"
   | "partner_of"
   | "deal_for"
   | "primary_contact";
