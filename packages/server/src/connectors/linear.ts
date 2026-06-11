@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SyncedItem } from "./types";
+import type { Connector, ConnectorCredentials, EntitySeedCallback, OAuthCredentials, SyncedItem } from "./types";
 
 const LINEAR_API = "https://api.linear.app/graphql";
 const TOKEN_ENDPOINT = "https://api.linear.app/oauth/token";
@@ -62,6 +62,12 @@ interface LinearProject {
   teams: { nodes: Array<{ name: string; key: string }> };
   createdAt: string;
   updatedAt: string;
+}
+
+interface LinearTeam {
+  id: string;
+  name: string;
+  key: string;
 }
 
 interface GraphQLResponse<T> {
@@ -325,6 +331,42 @@ query Projects($first: Int!, $after: String, $filter: ProjectFilter) {
 	}
 }`;
 
+const TEAMS_QUERY = `
+query Teams($first: Int!, $after: String) {
+	teams(first: $first, after: $after) {
+		pageInfo {
+			hasNextPage
+			endCursor
+		}
+		nodes {
+			id
+			name
+			key
+		}
+	}
+}`;
+
+/**
+ * Linear does not currently emit accessScope/accessEmails, so seeded Linear
+ * entities inherit org-wide visibility until Linear connector hardening lands.
+ */
+async function emitLinearProjectSeed(project: LinearProject, onEntitySeed: EntitySeedCallback): Promise<void> {
+  await onEntitySeed({
+    name: project.name,
+    sourceType: "project",
+    source: "linear",
+    sourceId: project.id,
+    sourceUrl: project.url,
+    metadata: {
+      state: project.state,
+      lead: project.lead?.displayName ?? null,
+      teams: project.teams.nodes.map((team) => team.name),
+      startDate: project.startDate,
+      targetDate: project.targetDate,
+    },
+  });
+}
+
 export function createLinearConnector(): Connector {
   // Per-connector instance rate limiter state — not shared across concurrent syncs
   let lastRequestTime = 0;
@@ -339,7 +381,7 @@ export function createLinearConnector(): Connector {
     type: "linear",
     perUserAuth: false,
     requiresOAuthClientSetup: false,
-    promotableFileTypes: ["project"],
+    promotableFileTypes: [],
 
     async validateCredentials(credentials) {
       const token = getAccessToken(credentials);
@@ -347,13 +389,16 @@ export function createLinearConnector(): Connector {
       await linearRequest(query, {}, token, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, scopeConfig, cursor, logger }) {
+    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed }) {
       const token = getAccessToken(credentials);
       const allowedTeams = (scopeConfig.teams as string[] | undefined) ?? [];
       const sinceDate = cursor ?? null;
 
       yield* syncIssues(token, sinceDate, allowedTeams, logger, linearRequest);
-      yield* syncProjects(token, sinceDate, logger, linearRequest);
+      if (onEntitySeed) {
+        await syncTeams(token, logger, linearRequest, onEntitySeed);
+      }
+      yield* syncProjects(token, sinceDate, logger, linearRequest, onEntitySeed);
     },
 
     async getCursor({ currentCursor }) {
@@ -417,6 +462,7 @@ async function* syncProjects(
   since: string | null,
   logger: Logger,
   linearRequest: LinearRequestFn,
+  onEntitySeed?: EntitySeedCallback,
 ): AsyncGenerator<SyncedItem> {
   let afterCursor: string | null = null;
   let totalProjects = 0;
@@ -439,6 +485,9 @@ async function* syncProjects(
 
     for (const project of data.projects.nodes) {
       yield projectToSyncedItem(project);
+      if (onEntitySeed) {
+        await emitLinearProjectSeed(project, onEntitySeed);
+      }
       totalProjects++;
     }
 
@@ -447,4 +496,41 @@ async function* syncProjects(
   } while (afterCursor);
 
   logger.info({ totalProjects }, "Projects sync complete");
+}
+
+async function syncTeams(
+  token: string,
+  logger: Logger,
+  linearRequest: LinearRequestFn,
+  onEntitySeed: EntitySeedCallback,
+): Promise<void> {
+  let afterCursor: string | null = null;
+  let totalTeams = 0;
+
+  do {
+    const variables: Record<string, unknown> = {
+      first: PAGE_SIZE,
+      after: afterCursor,
+    };
+
+    const data = await linearRequest<{
+      teams: { pageInfo: PageInfo; nodes: LinearTeam[] };
+    }>(TEAMS_QUERY, variables, token, logger);
+
+    for (const team of data.teams.nodes) {
+      await onEntitySeed({
+        name: team.name,
+        sourceType: "team",
+        source: "linear",
+        sourceId: team.id,
+        metadata: { key: team.key },
+      });
+      totalTeams++;
+    }
+
+    afterCursor = data.teams.pageInfo.hasNextPage ? data.teams.pageInfo.endCursor : null;
+    logger.debug({ teamsProcessed: totalTeams, hasMore: !!afterCursor }, "Teams page complete");
+  } while (afterCursor);
+
+  logger.info({ totalTeams }, "Teams sync complete");
 }
