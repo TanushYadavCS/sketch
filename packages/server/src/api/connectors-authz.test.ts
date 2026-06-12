@@ -87,6 +87,7 @@ async function insertConfig(
       | "linear"
       | "zoho_crm";
     createdBy: string;
+    credentialHint?: string | null;
   },
 ) {
   const repo = createConnectorRepository(db);
@@ -102,6 +103,7 @@ async function insertConfig(
         : "api_key",
     credentials: JSON.stringify({ type: "api_key", api_key: "stub" }),
     createdBy: opts.createdBy,
+    credentialHint: opts.credentialHint,
   });
 }
 
@@ -155,8 +157,8 @@ describe("Connectors API — authorization", () => {
     } catch {}
   });
 
-  describe("PATCH /:id/scope, POST /:id/syncs, POST /:id/enrichments — admin OR owner", () => {
-    it("non-owner non-admin → 403 on PATCH /:id/scope", async () => {
+  describe("PATCH /:id/scope, POST /:id/syncs, POST /:id/enrichments — connector canManage", () => {
+    it("member → 403 on PATCH /:id/scope for org-wide connector", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
       const res = await app.request(`/api/connectors/${cfg.id}/scope`, {
         method: "PATCH",
@@ -167,7 +169,7 @@ describe("Connectors API — authorization", () => {
     });
 
     it("owner → 200 on PATCH /:id/scope own connector", async () => {
-      const cfg = await insertConfig(db, { connectorType: "notion", createdBy: memberId });
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}/scope`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
@@ -176,7 +178,7 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(200);
     });
 
-    it("admin → 200 on PATCH /:id/scope any connector", async () => {
+    it("admin → 200 on PATCH /:id/scope org-wide connector", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}/scope`, {
         method: "PATCH",
@@ -186,7 +188,17 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(200);
     });
 
-    it("non-owner non-admin → 403 on POST /:id/syncs", async () => {
+    it("admin → 403 on PATCH /:id/scope another user's per-user connector", async () => {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const res = await app.request(`/api/connectors/${cfg.id}/scope`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ scopeConfig: {} }),
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("member → 403 on POST /:id/syncs for org-wide connector", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
       const res = await app.request(`/api/connectors/${cfg.id}/syncs`, {
         method: "POST",
@@ -204,7 +216,7 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(201);
     });
 
-    it("admin → 201 on POST /:id/syncs any connector", async () => {
+    it("admin → 201 on POST /:id/syncs org-wide connector", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}/syncs`, {
         method: "POST",
@@ -213,7 +225,16 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(201);
     });
 
-    it("non-owner non-admin → 403 on POST /:id/enrichments", async () => {
+    it("admin → 403 on POST /:id/syncs another user's per-user connector", async () => {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const res = await app.request(`/api/connectors/${cfg.id}/syncs`, {
+        method: "POST",
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("member → 403 on POST /:id/enrichments for org-wide connector", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
       const res = await app.request(`/api/connectors/${cfg.id}/enrichments`, {
         method: "POST",
@@ -231,6 +252,16 @@ describe("Connectors API — authorization", () => {
         body: JSON.stringify({ fileIds: ["file-1"], instruction: "summarize" }),
       });
       expect(res.status).toBe(201);
+    });
+
+    it("admin → 403 on POST /:id/enrichments another user's per-user connector", async () => {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const res = await app.request(`/api/connectors/${cfg.id}/enrichments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ fileIds: ["file-1"], instruction: "test" }),
+      });
+      expect(res.status).toBe(403);
     });
   });
 
@@ -255,6 +286,16 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(200);
     });
 
+    it("admin → 403 on another user's per-user connector file", async () => {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const fileId = await insertFile(db, { connectorConfigId: cfg.id });
+      const res = await app.request(`/api/connectors/files/${fileId}/enrichments`, {
+        method: "POST",
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(403);
+    });
+
     it("unknown fileId → 404", async () => {
       const res = await app.request("/api/connectors/files/does-not-exist/enrichments", {
         method: "POST",
@@ -264,7 +305,7 @@ describe("Connectors API — authorization", () => {
     });
   });
 
-  describe("DELETE /:id — admin OR owner", () => {
+  describe("DELETE /:id — connector canDisconnect", () => {
     it("non-owner non-admin → 403", async () => {
       const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}`, {
@@ -283,8 +324,17 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(200);
     });
 
-    it("admin → 200 on member's per-user row (offboarding)", async () => {
+    it("admin → 403 on member's per-user row", async () => {
       const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const res = await app.request(`/api/connectors/${cfg.id}`, {
+        method: "DELETE",
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("admin → 200 on org-wide row", async () => {
+      const cfg = await insertConfig(db, { connectorType: "notion", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}`, {
         method: "DELETE",
         headers: { Cookie: adminCookie },
@@ -293,7 +343,7 @@ describe("Connectors API — authorization", () => {
     });
   });
 
-  describe("POST /:id/rotate-key — owner only (no admin override)", () => {
+  describe("POST /:id/rotate-key — connector canUpdateCredentials", () => {
     it("admin → 403 on a member's per-user row (no key to rotate to)", async () => {
       const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}/rotate-key`, {
@@ -312,6 +362,23 @@ describe("Connectors API — authorization", () => {
         body: JSON.stringify({ api_key: "new-key" }),
       });
       expect(res.status).toBe(403);
+    });
+
+    it("admin → 200 on org-wide api-key connector created by another admin", async () => {
+      const cfg = await insertConfig(db, { connectorType: "clickup", createdBy: memberId });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ user: { id: 1 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      const res = await app.request(`/api/connectors/${cfg.id}/rotate-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ api_key: "new-key" }),
+      });
+      expect(res.status).toBe(200);
     });
   });
 
@@ -378,6 +445,22 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(200);
     });
 
+    it("admin → 200 on member's per-user row files metadata", async () => {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const res = await app.request(`/api/connectors/${cfg.id}/files`, {
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("admin → 200 on member's per-user row entity count", async () => {
+      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      const res = await app.request(`/api/connectors/${cfg.id}/entity-count`, {
+        headers: { Cookie: adminCookie },
+      });
+      expect(res.status).toBe(200);
+    });
+
     it("any member → 200 on org-wide row", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
       const res = await app.request(`/api/connectors/${cfg.id}`, {
@@ -395,14 +478,6 @@ describe("Connectors API — authorization", () => {
     });
   });
 
-  /*
-   * Per-connector browse-by-id routes for org-wide types (notion, clickup) can't
-   * return 403 via denyIfCannotRead — org-wide rows are visible to all by design.
-   * Their authz gating is exercised by the enumeration block below, which hits the
-   * Drive routes (per-user) and the generic /:id/browse + /:id/browse-children
-   * routes.
-   */
-
   describe("GET / — list visibility", () => {
     it("member sees org-wide rows + own per-user rows but not others'", async () => {
       const orgCfg = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
@@ -416,6 +491,8 @@ describe("Connectors API — authorization", () => {
       expect(ids).toContain(orgCfg.id);
       expect(ids).toContain(ownCfg.id);
       expect(ids).not.toContain(otherCfg.id);
+      expect(body.teamMemberCount).toBe(3);
+      expect(body.connectorMemberCounts).toMatchObject({ fireflies: 2 });
     });
 
     it("admin sees all rows", async () => {
@@ -432,17 +509,112 @@ describe("Connectors API — authorization", () => {
       expect(ids).toContain(otherCfg.id);
     });
 
-    it("each row carries perUserAuth + requiresOAuthClientSetup", async () => {
-      await insertConfig(db, { connectorType: "google_drive", createdBy: adminId });
-      await insertConfig(db, { connectorType: "teams", createdBy: memberId });
+    it("each row carries metadata and connector permission fields", async () => {
+      await insertConfig(db, {
+        connectorType: "google_drive",
+        createdBy: adminId,
+        credentialHint: "admin@google.test",
+      });
+      await insertConfig(db, { connectorType: "teams", createdBy: memberId, credentialHint: "member@microsoft.test" });
       const res = await app.request("/api/connectors", { headers: { Cookie: adminCookie } });
       const body = await res.json();
       const drive = body.connectors.find((c: { connectorType: string }) => c.connectorType === "google_drive");
       const teams = body.connectors.find((c: { connectorType: string }) => c.connectorType === "teams");
       expect(drive.perUserAuth).toBe(true);
       expect(drive.requiresOAuthClientSetup).toBe(true);
+      expect(drive).toMatchObject({
+        isOwner: true,
+        canManage: true,
+        canDisconnect: true,
+        canSync: true,
+        canChangeScope: true,
+        canUpdateCredentials: true,
+        canBrowseScope: true,
+        canEnrich: true,
+        credentialHint: "admin@google.test",
+        createdByName: "admin",
+        createdByEmail: ADMIN_EMAIL,
+      });
       expect(teams.perUserAuth).toBe(true);
-      expect(teams.requiresOAuthClientSetup).toBe(true);
+      expect(teams.requiresOAuthClientSetup).toBe(false);
+      expect(teams).toMatchObject({
+        isOwner: false,
+        canManage: false,
+        canDisconnect: false,
+        canSync: false,
+        canChangeScope: false,
+        canUpdateCredentials: false,
+        canBrowseScope: false,
+        canEnrich: false,
+        credentialHint: "member@microsoft.test",
+        createdByName: "member",
+        createdByEmail: MEMBER_EMAIL,
+      });
+    });
+
+    it("GET /:id and /mine carry connector permission fields", async () => {
+      const ownCfg = await insertConfig(db, {
+        connectorType: "fireflies",
+        createdBy: memberId,
+        credentialHint: "member@fireflies.test",
+      });
+
+      const read = await app.request(`/api/connectors/${ownCfg.id}`, { headers: { Cookie: memberCookie } });
+      expect(read.status).toBe(200);
+      const readBody = await read.json();
+      expect(readBody.connector).toMatchObject({
+        isOwner: true,
+        canManage: true,
+        canDisconnect: true,
+        canSync: true,
+        canChangeScope: true,
+        canUpdateCredentials: true,
+        canBrowseScope: true,
+        canEnrich: true,
+        credentialHint: "member@fireflies.test",
+        createdByName: "member",
+        createdByEmail: MEMBER_EMAIL,
+      });
+
+      const mine = await app.request("/api/connectors/mine", { headers: { Cookie: memberCookie } });
+      expect(mine.status).toBe(200);
+      const mineBody = await mine.json();
+      expect(mineBody.connectors[0]).toMatchObject({
+        id: ownCfg.id,
+        isOwner: true,
+        canManage: true,
+        canDisconnect: true,
+        canSync: true,
+        canChangeScope: true,
+        canUpdateCredentials: true,
+        canBrowseScope: true,
+        canEnrich: true,
+        credentialHint: "member@fireflies.test",
+        createdByName: "member",
+        createdByEmail: MEMBER_EMAIL,
+      });
+    });
+
+    it("disabled connectors surface inert sync/scope/enrich capabilities while mutation routes 404", async () => {
+      const disabledCfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+      await createConnectorRepository(db).updateConfig(disabledCfg.id, { syncStatus: "disabled" });
+
+      const list = await app.request("/api/connectors", { headers: { Cookie: memberCookie } });
+      expect(list.status).toBe(200);
+      const listBody = await list.json();
+      const row = listBody.connectors.find((c: { id: string }) => c.id === disabledCfg.id);
+      expect(row).toMatchObject({
+        canManage: true,
+        canSync: false,
+        canChangeScope: false,
+        canEnrich: false,
+      });
+
+      const sync = await app.request(`/api/connectors/${disabledCfg.id}/syncs`, {
+        method: "POST",
+        headers: { Cookie: memberCookie },
+      });
+      expect(sync.status).toBe(404);
     });
   });
 
@@ -552,6 +724,29 @@ describe("Connectors API — authorization", () => {
       const body = await res.json();
       expect(body.error.code).toBe("OAUTH_CLIENT_NOT_CONFIGURED");
       expect(body.error.connector).toBe("teams");
+    });
+
+    it("Teams OAuth can use Microsoft client credentials from env config", async () => {
+      const envApp = createApp(
+        db,
+        createTestConfig({
+          MICROSOFT_CLIENT_ID: "env-cid",
+          MICROSOFT_CLIENT_SECRET: "env-csec",
+          MICROSOFT_TENANT: "env-tenant",
+        }),
+        { logger },
+      );
+
+      const res = await envApp.request("/api/oauth/microsoft/authorize?connector=teams", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = decodeURIComponent(res.headers.get("location") ?? "");
+      expect(location).toContain("login.microsoftonline.com/env-tenant/oauth2/v2.0/authorize");
+      expect(location).toContain("client_id=env-cid");
+      expect(location).toContain(`${memberId}:teams:`);
     });
 
     it("Microsoft OAuth callback accepts provider redirects without an active session", async () => {
@@ -831,11 +1026,15 @@ describe("Connectors API — authorization", () => {
   });
 
   describe("file shares — POST / PUT share-everyone authz", () => {
-    async function insertSharableFile(): Promise<string> {
-      const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
+    async function insertSharableFile(opts?: {
+      connectorType?: "fireflies" | "notion";
+      createdBy?: string;
+    }): Promise<string> {
+      const connectorType = opts?.connectorType ?? "fireflies";
+      const cfg = await insertConfig(db, { connectorType, createdBy: opts?.createdBy ?? memberId });
       const repo = createConnectorRepository(db);
       const result = await repo.upsertFile({
-        source: "fireflies",
+        source: connectorType,
         providerFileId: `pf-share-${Math.random().toString(36).slice(2)}`,
         providerUrl: null,
         fileName: "sharable.txt",
@@ -852,10 +1051,9 @@ describe("Connectors API — authorization", () => {
       return result.id;
     }
 
-    it("only admin or connector owner can POST a share; share-everyone is admin-only", async () => {
+    it("connector owner can manage per-user file shares; admin cannot manage another user's per-user file shares", async () => {
       const fileId = await insertSharableFile();
 
-      // memberCookie is the connector owner → 200; otherMemberCookie is not → 403.
       const ownerRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
         method: "POST",
         headers: { Cookie: memberCookie, "Content-Type": "application/json" },
@@ -870,13 +1068,28 @@ describe("Connectors API — authorization", () => {
       });
       expect(strangerRes.status).toBe(403);
 
-      // Admin can also share.
       const adminRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
         method: "POST",
         headers: { Cookie: adminCookie, "Content-Type": "application/json" },
         body: JSON.stringify({ email: "carol@example.com" }),
       });
-      expect(adminRes.status).toBe(200);
+      expect(adminRes.status).toBe(403);
+
+      const adminBatchRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "PUT",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ emails: ["carol@example.com"] }),
+      });
+      expect(adminBatchRes.status).toBe(403);
+
+      const adminDeleteRes = await app.request(
+        `/api/connectors/files/${fileId}/shares/${encodeURIComponent("alice@example.com")}`,
+        {
+          method: "DELETE",
+          headers: { Cookie: adminCookie },
+        },
+      );
+      expect(adminDeleteRes.status).toBe(403);
 
       // share-everyone is admin-only: the connector owner (member) is denied.
       const ownerEveryone = await app.request(`/api/connectors/files/${fileId}/share-everyone`, {
@@ -893,28 +1106,47 @@ describe("Connectors API — authorization", () => {
       });
       expect(adminEveryone.status).toBe(200);
     });
+
+    it("admin can manage org-wide file shares; member cannot", async () => {
+      const fileId = await insertSharableFile({ connectorType: "notion", createdBy: adminId });
+
+      const memberRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "POST",
+        headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "alice@example.com" }),
+      });
+      expect(memberRes.status).toBe(403);
+
+      const adminRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "POST",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "alice@example.com" }),
+      });
+      expect(adminRes.status).toBe(200);
+
+      const adminBatchRes = await app.request(`/api/connectors/files/${fileId}/shares`, {
+        method: "PUT",
+        headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ emails: ["bob@example.com"], shareWithEveryone: true }),
+      });
+      expect(adminBatchRes.status).toBe(200);
+    });
   });
 
-  /**
-   * Defense-in-depth: enumerate every gated `/:id/*` route and assert each returns 403
-   * for an unauthorized caller. This catches the failure mode where a future route
-   * author forgets `if (denied) return denied;` — the helper would return a Response
-   * but it'd never reach the client.
-   */
-  describe("enumeration regression — all gated /:id/* routes 403 for unauthorized member", () => {
+  describe("enumeration regression — scoped connector routes reject unauthorized callers", () => {
     let cfgId: string;
     beforeEach(async () => {
       const cfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
       cfgId = cfg.id;
     });
 
-    // Reads: deny → 403. Each entry uses the per-user fireflies row from beforeEach,
-    // except the per-connector browse-by-id routes which are gated against a
-    // matching per-user row of that type.
-    const reads = [
+    const metadataReads = [
       ["GET", "/api/connectors/{id}", "fireflies"],
       ["GET", "/api/connectors/{id}/files", "fireflies"],
       ["GET", "/api/connectors/{id}/entity-count", "fireflies"],
+    ] as const;
+
+    const browseRoutes = [
       ["GET", "/api/connectors/{id}/browse", "fireflies"],
       ["GET", "/api/connectors/{id}/browse-children/x", "google_drive"],
       ["GET", "/api/connectors/google-drive/browse/{id}", "google_drive"],
@@ -929,18 +1161,31 @@ describe("Connectors API — authorization", () => {
       ["POST", "/api/connectors/{id}/rotate-key", "fireflies", JSON.stringify({ api_key: "new-key" })],
     ] as const;
 
-    /**
-     * Resolve a fixture row matching the route's expected connector_type. Routes
-     * that hardcode a type (e.g. `/google-drive/browse/:id`) 400 if given the wrong
-     * type before authz runs, so we need a row of the matching type.
-     */
     async function rowFor(connectorType: "fireflies" | "google_drive"): Promise<string> {
       if (connectorType === "fireflies") return cfgId;
       const cfg = await insertConfig(db, { connectorType, createdBy: memberId });
       return cfg.id;
     }
 
-    for (const [method, path, type] of reads) {
+    for (const [method, path, type] of metadataReads) {
+      it(`${method} ${path} as non-owner non-admin → 403`, async () => {
+        const id = await rowFor(type);
+        const url = path.replace("{id}", id);
+        const res = await app.request(url, { method, headers: { Cookie: otherMemberCookie } });
+        expect(res.status).toBe(403);
+      });
+    }
+
+    for (const [method, path, type] of browseRoutes) {
+      it(`${method} ${path} as non-owner admin → 403`, async () => {
+        const id = await rowFor(type);
+        const url = path.replace("{id}", id);
+        const res = await app.request(url, { method, headers: { Cookie: adminCookie } });
+        expect(res.status).toBe(403);
+      });
+    }
+
+    for (const [method, path, type] of browseRoutes) {
       it(`${method} ${path} as non-owner non-admin → 403`, async () => {
         const id = await rowFor(type);
         const url = path.replace("{id}", id);
@@ -962,5 +1207,35 @@ describe("Connectors API — authorization", () => {
         expect(res.status).toBe(403);
       });
     }
+
+    for (const [method, path, type, body] of writes) {
+      it(`${method} ${path} as non-owner admin → 403`, async () => {
+        const id = await rowFor(type);
+        const url = path.replace("{id}", id);
+        const init: RequestInit = {
+          method,
+          headers: { "Content-Type": "application/json", Cookie: adminCookie },
+          body,
+        };
+        const res = await app.request(url, init);
+        expect(res.status).toBe(403);
+      });
+    }
+
+    it("member → 403 browsing an org-wide ClickUp connector with stored credentials", async () => {
+      const cfg = await insertConfig(db, { connectorType: "clickup", createdBy: adminId });
+      const res = await app.request(`/api/connectors/clickup/browse/${cfg.id}`, {
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("member → 403 browsing an org-wide Notion connector with stored credentials", async () => {
+      const cfg = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
+      const res = await app.request(`/api/connectors/notion/browse/${cfg.id}`, {
+        headers: { Cookie: memberCookie },
+      });
+      expect(res.status).toBe(403);
+    });
   });
 });

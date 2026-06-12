@@ -507,7 +507,7 @@ export function createOutlookConnector(): Connector {
   return {
     type: "outlook",
     perUserAuth: true,
-    requiresOAuthClientSetup: true,
+    requiresOAuthClientSetup: false,
     promotableFileTypes: [],
     emitsCorrespondentFacts: true,
 

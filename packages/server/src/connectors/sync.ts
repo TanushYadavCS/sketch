@@ -28,6 +28,7 @@ import {
   resolveOpenRouterEnrichmentConfig,
 } from "./enrichment-providers";
 import { createGeminiGenerator } from "./gemini-generate";
+import { applyMicrosoftOAuthConfig, resolveMicrosoftOAuthConfig } from "./microsoft-graph";
 import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
@@ -42,7 +43,7 @@ import {
   serializeCredentials,
   truncateErrorMessage,
 } from "./sync-utils";
-import type { ConnectorType, SyncResult } from "./types";
+import type { ConnectorCredentials, ConnectorType, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
 export interface SyncProgress {
@@ -121,6 +122,9 @@ export async function runConnectorSync(
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "MICROSOFT_CLIENT_ID"
+      | "MICROSOFT_CLIENT_SECRET"
+      | "MICROSOFT_TENANT"
     >
   >,
 ): Promise<SyncResult> {
@@ -147,7 +151,12 @@ export async function runConnectorSync(
   }
 
   const connector = getConnector(config.connector_type as ConnectorType);
-  let credentials = parseCredentials(config.credentials);
+  let credentials = await resolveConnectorCredentialsForSync({
+    db,
+    connectorType: config.connector_type as ConnectorType,
+    credentials: parseCredentials(config.credentials),
+    appConfig,
+  });
   const storedScopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
   const scopeConfig =
     config.connector_type === "outlook"
@@ -479,6 +488,9 @@ export interface SyncSchedulerDeps {
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "MICROSOFT_CLIENT_ID"
+      | "MICROSOFT_CLIENT_SECRET"
+      | "MICROSOFT_TENANT"
       | "ENCRYPTION_KEY"
       | "OPENROUTER_API_KEY"
     >
@@ -490,6 +502,27 @@ const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
 const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const FEATURE_ARCHIVE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let lastFeatureArchiveSweepAt = 0;
+
+async function resolveConnectorCredentialsForSync(params: {
+  db: Kysely<DB>;
+  connectorType: ConnectorType;
+  credentials: ConnectorCredentials;
+  appConfig?: Partial<
+    Pick<Config, "ENCRYPTION_KEY" | "MICROSOFT_CLIENT_ID" | "MICROSOFT_CLIENT_SECRET" | "MICROSOFT_TENANT">
+  >;
+}): Promise<ConnectorCredentials> {
+  if (params.credentials.type !== "oauth" || (params.connectorType !== "outlook" && params.connectorType !== "teams")) {
+    return params.credentials;
+  }
+
+  const settings = await createSettingsRepository(params.db, params.appConfig?.ENCRYPTION_KEY).get();
+  const microsoftConfig = resolveMicrosoftOAuthConfig(settings, {
+    clientId: params.appConfig?.MICROSOFT_CLIENT_ID,
+    clientSecret: params.appConfig?.MICROSOFT_CLIENT_SECRET,
+    tenant: params.appConfig?.MICROSOFT_TENANT,
+  });
+  return applyMicrosoftOAuthConfig(params.credentials, microsoftConfig);
+}
 
 async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Promise<number> {
   try {

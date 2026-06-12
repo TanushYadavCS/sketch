@@ -87,6 +87,58 @@ describe("Teams connector", () => {
     expect(result.data).toEqual({ id: "me" });
   });
 
+  it("refreshes Microsoft tokens with env client credentials during sync", async () => {
+    db = await createTestDb();
+    await seedUser(db);
+    const repo = createConnectorRepository(db);
+    const config = await repo.createConfig({
+      connectorType: "teams",
+      authType: "oauth",
+      credentials: JSON.stringify({
+        ...validCredentials(),
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        client_id: "old-client",
+        client_secret: "old-secret",
+      }),
+      scopeConfig: JSON.stringify({ initialDays: 7 }),
+      createdBy: "owner",
+    });
+    const tokenRequests: URLSearchParams[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      if (url.hostname === "login.microsoftonline.com") {
+        tokenRequests.push(init?.body as URLSearchParams);
+        return jsonResponse({
+          access_token: "env-access",
+          refresh_token: "env-refresh",
+          expires_in: 3600,
+          token_type: "Bearer",
+        });
+      }
+      if (url.pathname === "/v1.0/me/calendarView") {
+        return jsonResponse({ value: [] });
+      }
+      return jsonResponse({ value: [] });
+    });
+
+    await runConnectorSync(db, config.id, logger, {
+      MICROSOFT_CLIENT_ID: "env-client",
+      MICROSOFT_CLIENT_SECRET: "env-secret",
+      MICROSOFT_TENANT: "env-tenant",
+    });
+
+    expect(tokenRequests).toHaveLength(1);
+    expect(tokenRequests[0]?.get("client_id")).toBe("env-client");
+    expect(tokenRequests[0]?.get("client_secret")).toBe("env-secret");
+    const stored = await repo.findConfigById(config.id);
+    const storedCredentials = JSON.parse(stored?.credentials ?? "{}") as OAuthCredentials;
+    expect(storedCredentials.client_id).toBe("env-client");
+    expect(storedCredentials.client_secret).toBe("env-secret");
+    expect(storedCredentials.tenant).toBe("env-tenant");
+    expect(storedCredentials.access_token).toBe("env-access");
+  });
+
   it("caps Teams meeting discovery concurrency", async () => {
     const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
     let activeResolutions = 0;
