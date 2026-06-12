@@ -1,6 +1,7 @@
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -26,6 +27,7 @@ function settingsHandlers(
     envConfigured?: boolean;
     settingsConfigured?: boolean;
     onMicrosoftStatus?: () => void;
+    onMicrosoftConfig?: (body: unknown) => void;
   } = {},
 ) {
   const envConfigured = options.envConfigured ?? false;
@@ -50,6 +52,10 @@ function settingsHandlers(
         tenant: "common",
       });
     }),
+    http.put("/api/oauth/microsoft/config", async ({ request }) => {
+      options.onMicrosoftConfig?.(await request.json());
+      return HttpResponse.json({ success: true });
+    }),
   );
 }
 
@@ -73,20 +79,36 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText("Shared Outlook and Teams client")).toBeInTheDocument();
     expect(screen.getByDisplayValue("client-id")).toBeInTheDocument();
-    expect(screen.getByText("Configured")).toBeInTheDocument();
+    expect(screen.getByText("Workspace override")).toBeInTheDocument();
   });
 
-  it("hides Microsoft OAuth settings when the client is configured from env", async () => {
+  it("allows Microsoft OAuth settings to be saved when the client is configured from env", async () => {
+    const user = userEvent.setup();
     const onMicrosoftStatus = vi.fn();
-    settingsHandlers({ microsoftConfigured: true, envConfigured: true, onMicrosoftStatus });
+    const onMicrosoftConfig = vi.fn();
+    settingsHandlers({ microsoftConfigured: true, envConfigured: true, onMicrosoftStatus, onMicrosoftConfig });
 
     renderWithProviders(<SettingsPage />);
 
     await waitFor(() => {
       expect(onMicrosoftStatus).toHaveBeenCalled();
     });
-    expect(screen.queryByText("Shared Outlook and Teams client")).not.toBeInTheDocument();
-    expect(screen.queryByText("Microsoft OAuth")).not.toBeInTheDocument();
+    expect(await screen.findByText("Shared Outlook and Teams client")).toBeInTheDocument();
+    expect(screen.getByText("Environment fallback")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("client-id")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Client secret"), "client-secret");
+    const microsoftSection = screen.getByLabelText("Client secret").closest("section");
+    if (!microsoftSection) throw new Error("Microsoft OAuth section not found");
+    await user.click(within(microsoftSection).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onMicrosoftConfig).toHaveBeenCalledWith({
+        clientId: "client-id",
+        clientSecret: "client-secret",
+        tenant: "common",
+      });
+    });
   });
 
   it("shows Microsoft OAuth settings when env exists but a saved workspace config is still active", async () => {
@@ -96,6 +118,6 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText("Shared Outlook and Teams client")).toBeInTheDocument();
     expect(screen.getByDisplayValue("client-id")).toBeInTheDocument();
-    expect(screen.getByText("Configured")).toBeInTheDocument();
+    expect(screen.getByText("Workspace override")).toBeInTheDocument();
   });
 });

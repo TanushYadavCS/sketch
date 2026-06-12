@@ -440,8 +440,9 @@ function MicrosoftOAuthSection() {
 
   const canSave = clientId.trim().length > 0 && tenant.trim().length > 0 && clientSecret.trim().length > 0;
   const hasSavedConfig = statusQuery.data?.settingsConfigured === true;
+  const usesEnvFallback = statusQuery.data?.envConfigured === true && !hasSavedConfig;
 
-  if (statusQuery.isLoading || !statusQuery.data || (statusQuery.data.envConfigured && !hasSavedConfig)) {
+  if (statusQuery.isLoading || !statusQuery.data) {
     return null;
   }
 
@@ -457,7 +458,7 @@ function MicrosoftOAuthSection() {
             </p>
           </div>
           <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground">
-            {statusQuery.data.configured ? "Configured" : "Not configured"}
+            {hasSavedConfig ? "Workspace override" : usesEnvFallback ? "Environment fallback" : "Not configured"}
           </span>
         </div>
 
@@ -496,7 +497,7 @@ function MicrosoftOAuthSection() {
               className="mt-1.5 h-9 font-mono text-xs"
               value={clientSecret}
               onChange={(event) => setClientSecret(event.target.value)}
-              placeholder={statusQuery.data.configured ? "Enter a new secret to update" : ""}
+              placeholder={statusQuery.data.configured ? "Enter a client secret to save workspace values" : ""}
             />
           </div>
         </div>
