@@ -595,7 +595,7 @@ describe("Connectors API — authorization", () => {
       });
     });
 
-    it("disabled connectors surface inert sync/scope/enrich capabilities while mutation routes 404", async () => {
+    it("disabled connectors surface inert mutation capabilities while mutation routes 404", async () => {
       const disabledCfg = await insertConfig(db, { connectorType: "fireflies", createdBy: memberId });
       await createConnectorRepository(db).updateConfig(disabledCfg.id, { syncStatus: "disabled" });
 
@@ -605,10 +605,25 @@ describe("Connectors API — authorization", () => {
       const row = listBody.connectors.find((c: { id: string }) => c.id === disabledCfg.id);
       expect(row).toMatchObject({
         canManage: true,
+        canDisconnect: false,
         canSync: false,
         canChangeScope: false,
+        canUpdateCredentials: false,
         canEnrich: false,
       });
+
+      const disconnect = await app.request(`/api/connectors/${disabledCfg.id}`, {
+        method: "DELETE",
+        headers: { Cookie: memberCookie },
+      });
+      expect(disconnect.status).toBe(404);
+
+      const rotateKey = await app.request(`/api/connectors/${disabledCfg.id}/rotate-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ api_key: "new-key" }),
+      });
+      expect(rotateKey.status).toBe(404);
 
       const sync = await app.request(`/api/connectors/${disabledCfg.id}/syncs`, {
         method: "POST",
@@ -659,6 +674,7 @@ describe("Connectors API — authorization", () => {
       const status = await app.request("/api/oauth/microsoft/status", { headers: { Cookie: adminCookie } });
       const body = await status.json();
       expect(body.configured).toBe(true);
+      expect(body.settingsConfigured).toBe(true);
       expect(body.clientId).toBe("cid");
       expect(body.tenant).toBe("tenant-id");
     });
@@ -748,6 +764,44 @@ describe("Connectors API — authorization", () => {
       expect(location).toContain("client_id=env-cid");
       expect(new URL(location).searchParams.get("prompt")).toBe("select_account");
       expect(location).toContain(`${memberId}:teams:`);
+    });
+
+    it("saved Microsoft client settings keep precedence when env config is added later", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({
+        microsoftOauthClientId: "saved-cid",
+        microsoftOauthClientSecret: "saved-csec",
+        microsoftOauthTenant: "saved-tenant",
+      });
+      const envApp = createApp(
+        db,
+        createTestConfig({
+          MICROSOFT_CLIENT_ID: "env-cid",
+          MICROSOFT_CLIENT_SECRET: "env-csec",
+          MICROSOFT_TENANT: "env-tenant",
+        }),
+        { logger },
+      );
+
+      const status = await envApp.request("/api/oauth/microsoft/status", { headers: { Cookie: adminCookie } });
+      const body = await status.json();
+      expect(body.configured).toBe(true);
+      expect(body.envConfigured).toBe(true);
+      expect(body.settingsConfigured).toBe(true);
+      expect(body.clientId).toBe("saved-cid");
+      expect(body.tenant).toBe("saved-tenant");
+
+      const res = await envApp.request("/api/oauth/microsoft/authorize?connector=teams", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = decodeURIComponent(res.headers.get("location") ?? "");
+      expect(location).toContain("login.microsoftonline.com/saved-tenant/oauth2/v2.0/authorize");
+      expect(location).toContain("client_id=saved-cid");
+      expect(location).not.toContain("client_id=env-cid");
+      expect(location).not.toContain("login.microsoftonline.com/env-tenant/oauth2/v2.0/authorize");
     });
 
     it("Microsoft OAuth callback accepts provider redirects without an active session", async () => {

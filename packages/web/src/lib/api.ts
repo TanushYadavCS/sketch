@@ -1411,9 +1411,14 @@ export const api = {
   },
   microsoftOAuth: {
     status() {
-      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; tenant: string | null }>(
-        "/api/oauth/microsoft/status",
-      );
+      return request<{
+        configured: boolean;
+        envConfigured?: boolean;
+        settingsConfigured?: boolean;
+        clientId: string | null;
+        baseUrl: string | null;
+        tenant: string | null;
+      }>("/api/oauth/microsoft/status");
     },
     configure(clientId: string, clientSecret: string, tenant: string) {
       return request<{ success: boolean }>("/api/oauth/microsoft/config", {

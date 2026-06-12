@@ -151,9 +151,13 @@ export function ConnectIntegrationDialog({
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
-  // Only providers that require admin client-id/secret entry use the oauth-config step.
-  // Zoho and Microsoft clients live in settings/env, so they land on the connect step.
-  const needsClientSetup = integration?.requiresOAuthClientSetup === true;
+  const microsoftUsesEnvClient =
+    isMicrosoft &&
+    oauthStatus.data !== undefined &&
+    "envConfigured" in oauthStatus.data &&
+    oauthStatus.data.envConfigured === true &&
+    (!("settingsConfigured" in oauthStatus.data) || oauthStatus.data.settingsConfigured !== true);
+  const needsClientSetup = integration?.requiresOAuthClientSetup === true || (isMicrosoft && !microsoftUsesEnvClient);
 
   // For OAuth redirect: start with oauth-config step if client setup is required and missing.
   useEffect(() => {
@@ -395,6 +399,8 @@ export function ConnectIntegrationDialog({
 
   const isMyDriveMode = sharedDrives.length === 0;
   const oauthRedirectUri = `${oauthStatus.data?.baseUrl || window.location.origin}${oauthCallbackPath}`;
+  const oauthClientSetupSteps = integration.oauthClientSetupSteps ?? integration.connectSteps;
+  const oauthClientCredentialUrl = integration.oauthClientCredentialUrl ?? integration.credentialUrl;
 
   return (
     <Dialog
@@ -439,14 +445,14 @@ export function ConnectIntegrationDialog({
             </DialogHeader>
 
             <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
-              {integration.connectSteps.map((s) => (
+              {oauthClientSetupSteps.map((s) => (
                 <li key={s}>{s}</li>
               ))}
             </ol>
 
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" asChild>
-                <a href={integration.credentialUrl} target="_blank" rel="noopener noreferrer">
+                <a href={oauthClientCredentialUrl} target="_blank" rel="noopener noreferrer">
                   {oauthCredentialConsoleLabel}
                   <ArrowSquareOutIcon className="size-3.5" />
                 </a>

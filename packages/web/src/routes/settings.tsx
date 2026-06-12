@@ -38,13 +38,8 @@ export const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
-function SettingsPage() {
+export function SettingsPage() {
   const auth = useDashboardAuth();
-  const setupStatusQuery = useQuery({
-    queryKey: ["setup-status"],
-    queryFn: () => api.setup.status(),
-  });
-  const showMicrosoftOAuth = setupStatusQuery.data?.experimentalFlag === true;
 
   if (auth.role !== "admin") {
     return (
@@ -68,7 +63,7 @@ function SettingsPage() {
         <OrgContextSection />
         <LocalDevicesSection />
         <AccessSection />
-        {showMicrosoftOAuth ? <MicrosoftOAuthSection /> : null}
+        <MicrosoftOAuthSection />
         <ApiKeySection />
         <ApiTokensSection />
       </div>
@@ -444,74 +439,75 @@ function MicrosoftOAuthSection() {
   });
 
   const canSave = clientId.trim().length > 0 && tenant.trim().length > 0 && clientSecret.trim().length > 0;
+  const hasSavedConfig = statusQuery.data?.settingsConfigured === true;
+
+  if (statusQuery.isLoading || !statusQuery.data || (statusQuery.data.envConfigured && !hasSavedConfig)) {
+    return null;
+  }
 
   return (
     <section>
       <p className="mb-3 text-sm font-medium text-muted-foreground">Microsoft OAuth</p>
-      {statusQuery.isLoading ? (
-        <Skeleton className="h-52 rounded-lg" />
-      ) : (
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-sm font-medium">Shared Outlook and Teams client</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Used for Microsoft sign-in. Environment values are used when no workspace values are saved.
-              </p>
-            </div>
-            <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground">
-              {statusQuery.data?.configured ? "Configured" : "Not configured"}
-            </span>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">Shared Outlook and Teams client</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Used for Microsoft sign-in. Environment values are used when no workspace values are saved.
+            </p>
           </div>
+          <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground">
+            {statusQuery.data.configured ? "Configured" : "Not configured"}
+          </span>
+        </div>
 
-          <div className="mt-4 grid gap-3">
-            <div>
-              <label htmlFor="microsoft-client-id" className="text-xs font-medium">
-                Application client ID
-              </label>
-              <Input
-                id="microsoft-client-id"
-                className="mt-1.5 h-9 font-mono text-xs"
-                value={clientId}
-                onChange={(event) => setClientId(event.target.value)}
-                placeholder="00000000-0000-0000-0000-000000000000"
-              />
-            </div>
-            <div>
-              <label htmlFor="microsoft-tenant" className="text-xs font-medium">
-                Tenant
-              </label>
-              <Input
-                id="microsoft-tenant"
-                className="mt-1.5 h-9 font-mono text-xs"
-                value={tenant}
-                onChange={(event) => setTenant(event.target.value)}
-                placeholder="common"
-              />
-            </div>
-            <div>
-              <label htmlFor="microsoft-client-secret" className="text-xs font-medium">
-                Client secret
-              </label>
-              <Input
-                id="microsoft-client-secret"
-                type="password"
-                className="mt-1.5 h-9 font-mono text-xs"
-                value={clientSecret}
-                onChange={(event) => setClientSecret(event.target.value)}
-                placeholder={statusQuery.data?.configured ? "Enter a new secret to update" : ""}
-              />
-            </div>
+        <div className="mt-4 grid gap-3">
+          <div>
+            <label htmlFor="microsoft-client-id" className="text-xs font-medium">
+              Application client ID
+            </label>
+            <Input
+              id="microsoft-client-id"
+              className="mt-1.5 h-9 font-mono text-xs"
+              value={clientId}
+              onChange={(event) => setClientId(event.target.value)}
+              placeholder="00000000-0000-0000-0000-000000000000"
+            />
           </div>
-
-          <div className="mt-4 flex justify-end">
-            <Button size="sm" onClick={() => saveMutation.mutate()} disabled={!canSave || saveMutation.isPending}>
-              {saveMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
-              Save
-            </Button>
+          <div>
+            <label htmlFor="microsoft-tenant" className="text-xs font-medium">
+              Tenant
+            </label>
+            <Input
+              id="microsoft-tenant"
+              className="mt-1.5 h-9 font-mono text-xs"
+              value={tenant}
+              onChange={(event) => setTenant(event.target.value)}
+              placeholder="common"
+            />
+          </div>
+          <div>
+            <label htmlFor="microsoft-client-secret" className="text-xs font-medium">
+              Client secret
+            </label>
+            <Input
+              id="microsoft-client-secret"
+              type="password"
+              className="mt-1.5 h-9 font-mono text-xs"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+              placeholder={statusQuery.data.configured ? "Enter a new secret to update" : ""}
+            />
           </div>
         </div>
-      )}
+
+        <div className="mt-4 flex justify-end">
+          <Button size="sm" onClick={() => saveMutation.mutate()} disabled={!canSave || saveMutation.isPending}>
+            {saveMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+            Save
+          </Button>
+        </div>
+      </div>
     </section>
   );
 }

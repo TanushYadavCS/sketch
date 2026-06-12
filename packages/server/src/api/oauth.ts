@@ -597,13 +597,16 @@ export function oauthRoutes(
 
   routes.get("/microsoft/status", async (c) => {
     const config = await settings.get();
-    const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
+    const { clientId, clientSecret, tenant, source } = resolveMicrosoftOAuthConfig(config, {
       clientId: microsoftClientId,
       clientSecret: microsoftClientSecret,
       tenant: microsoftTenant,
     });
+    const envConfigured = !!(microsoftClientId && microsoftClientSecret);
     return c.json({
       configured: !!(clientId && clientSecret && tenant),
+      envConfigured,
+      settingsConfigured: source === "settings",
       clientId: clientId ?? null,
       baseUrl: baseUrl ?? null,
       tenant: tenant ?? null,

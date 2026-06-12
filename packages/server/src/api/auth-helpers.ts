@@ -44,10 +44,10 @@ export function connectorPermissions(
     isOwner,
     canView: orgWide || isOwner || isAdmin(c),
     canManage,
-    canDisconnect: canManage,
+    canDisconnect: canManage && enabled,
     canSync: canManage && enabled,
     canChangeScope: canManage && enabled,
-    canUpdateCredentials: canManage,
+    canUpdateCredentials: canManage && enabled,
     canBrowseScope: canManage,
     canEnrich: canManage && enabled,
   };
