@@ -452,6 +452,7 @@ export function oauthRoutes(
       response_type: "code",
       response_mode: "query",
       scope: microsoftScopesFor(connectorType),
+      prompt: "select_account",
       state,
     });
 

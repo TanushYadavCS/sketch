@@ -746,6 +746,7 @@ describe("Connectors API — authorization", () => {
       const location = decodeURIComponent(res.headers.get("location") ?? "");
       expect(location).toContain("login.microsoftonline.com/env-tenant/oauth2/v2.0/authorize");
       expect(location).toContain("client_id=env-cid");
+      expect(new URL(location).searchParams.get("prompt")).toBe("select_account");
       expect(location).toContain(`${memberId}:teams:`);
     });
 
@@ -774,8 +775,30 @@ describe("Connectors API — authorization", () => {
       expect(location).toContain("OnlineMeetingTranscript.Read.All");
       expect(location).toContain("OnlineMeetingRecording.Read.All");
       expect(location).toContain("Calendars.Read");
+      expect(new URL(location).searchParams.get("prompt")).toBe("select_account");
       expect(location).toContain(`${memberId}:teams:`);
       expect(location).not.toContain("Mail.Read");
+    });
+
+    it("Outlook OAuth forces Microsoft account selection before redirecting back", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({
+        microsoftOauthClientId: "cid",
+        microsoftOauthClientSecret: "csec",
+        microsoftOauthTenant: "tenant-id",
+      });
+
+      const res = await app.request("/api/oauth/microsoft/authorize?connector=outlook", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = decodeURIComponent(res.headers.get("location") ?? "");
+      const authorizeUrl = new URL(location);
+      expect(authorizeUrl.searchParams.get("prompt")).toBe("select_account");
+      expect(location).toContain("Mail.Read");
+      expect(location).toContain(`${memberId}:outlook:`);
     });
   });
 
