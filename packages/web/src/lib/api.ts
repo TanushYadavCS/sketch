@@ -621,12 +621,29 @@ export interface ConnectorConfig {
   authType: string;
   scopeConfig: Record<string, unknown>;
 
-  syncStatus: "active" | "syncing" | "error" | "paused" | "pending";
+  syncStatus: "active" | "syncing" | "error" | "paused" | "pending" | "disabled";
   lastSyncedAt: string | null;
   errorMessage: string | null;
   createdBy: string;
+  createdByName?: string | null;
+  createdByEmail?: string | null;
+  credentialHint?: string | null;
   createdAt: string;
   fileCount?: number;
+  isOwner?: boolean;
+  canManage?: boolean;
+  canDisconnect?: boolean;
+  canSync?: boolean;
+  canChangeScope?: boolean;
+  canUpdateCredentials?: boolean;
+  canBrowseScope?: boolean;
+  canEnrich?: boolean;
+}
+
+export interface ConnectorListResponse {
+  connectors: ConnectorConfig[];
+  teamMemberCount: number;
+  connectorMemberCounts: Record<string, number>;
 }
 
 export interface ConnectorFile {
@@ -653,6 +670,7 @@ export interface ConnectorFile {
 
 export interface FileContent {
   id: string;
+  connectorConfigId: string;
   fileName: string;
   fileType: string | null;
   content: string | null;
@@ -1079,7 +1097,7 @@ export const api = {
   },
   integrations: {
     list() {
-      return request<{ connectors: ConnectorConfig[] }>("/api/connectors");
+      return request<ConnectorListResponse>("/api/connectors");
     },
     get(id: string) {
       return request<{ connector: ConnectorConfig }>(`/api/connectors/${id}`);
@@ -1147,8 +1165,19 @@ export const api = {
           syncStatus: string;
           lastSyncedAt: string | null;
           errorMessage: string | null;
+          createdBy: string;
+          createdByName?: string | null;
+          createdByEmail?: string | null;
           createdAt: string;
           fileCount: number;
+          isOwner?: boolean;
+          canManage?: boolean;
+          canDisconnect?: boolean;
+          canSync?: boolean;
+          canChangeScope?: boolean;
+          canUpdateCredentials?: boolean;
+          canBrowseScope?: boolean;
+          canEnrich?: boolean;
         }>;
       }>("/api/connectors/mine");
     },

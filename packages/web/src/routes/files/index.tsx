@@ -82,6 +82,8 @@ function FilesPage() {
   });
 
   const connectors = connectorsData?.connectors ?? [];
+  const teamMemberCount = connectorsData?.teamMemberCount ?? 0;
+  const connectorMemberCounts = connectorsData?.connectorMemberCounts ?? {};
 
   // Viewer-aware file count per source. Connector-row counts under-count for
   // members who have file-access via meetings someone else's connector synced;
@@ -216,10 +218,25 @@ function FilesPage() {
     sourceFilter === "local"
   );
 
-  const handleConnected = () => {
+  const refreshFilesData = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
     queryClient.invalidateQueries({ queryKey: ["all-files"] });
-  };
+    queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
+    queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+  }, [queryClient]);
+
+  const handleConnected = useCallback(() => {
+    refreshFilesData();
+  }, [refreshFilesData]);
+
+  const handleDisconnected = useCallback(
+    (connector: ConnectorConfig) => {
+      if (sourceFilter === connector.connectorType) setSourceFilter(null);
+      refreshFilesData();
+    },
+    [refreshFilesData, setSourceFilter, sourceFilter],
+  );
 
   const isLoading = isLoadingConnectors || isLoadingFiles;
 
@@ -314,6 +331,8 @@ function FilesPage() {
           <>
             <ConnectorPicker
               connectors={connectors}
+              teamMemberCount={teamMemberCount}
+              connectorMemberCounts={connectorMemberCounts}
               sourceCounts={sourceCounts}
               totalFiles={totalFiles}
               localFileCount={localFileCount}
@@ -393,15 +412,18 @@ function FilesPage() {
         connector={managingConnector?.connector ?? null}
         open={!!managingConnector}
         onOpenChange={(open) => !open && setManagingConnector(null)}
-        onDisconnected={handleConnected}
+        onDisconnected={handleDisconnected}
         onReconnect={(def) => {
+          if (managingConnector?.connector && sourceFilter === managingConnector.connector.connectorType) {
+            setSourceFilter(null);
+          }
           setManagingConnector(null);
-          queryClient.invalidateQueries({ queryKey: ["integrations"] });
+          refreshFilesData();
           setReconnectTarget(def);
         }}
       />
 
-      <FileDetailSheet fileId={viewingFile} onClose={() => setViewingFile(null)} />
+      <FileDetailSheet fileId={viewingFile} connectors={connectors} onClose={() => setViewingFile(null)} />
     </div>
   );
 }

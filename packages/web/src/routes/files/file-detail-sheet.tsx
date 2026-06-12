@@ -5,7 +5,7 @@
  */
 import { ConnectorLogo } from "@/components/connector-logos";
 import { FileShareDialog } from "@/components/file-share-dialog";
-import type { EmailAddr, EmailThreadMessage, FileAccess, FileContent, LinkedEntity } from "@/lib/api";
+import type { ConnectorConfig, EmailAddr, EmailThreadMessage, FileAccess, FileContent, LinkedEntity } from "@/lib/api";
 import { ApiRequestError, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
@@ -26,7 +26,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
-export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; onClose: () => void }) {
+export function FileDetailSheet({
+  fileId,
+  connectors = [],
+  onClose,
+}: {
+  fileId: string | null;
+  connectors?: ConnectorConfig[];
+  onClose: () => void;
+}) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["file-content", fileId],
     queryFn: () => api.integrations.fileContent(fileId as string),
@@ -46,6 +54,7 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
     ? ((error as ApiRequestError).details as { file?: GatedFileMeta; access?: FileAccess } | undefined)
     : undefined;
   const titleFile = file?.fileName ?? gatedMeta?.file?.fileName;
+  const connector = file ? connectors.find((c) => c.id === file.connectorConfigId) : undefined;
 
   return (
     <Sheet open={!!fileId} onOpenChange={(open) => !open && onClose()}>
@@ -84,7 +93,7 @@ export function FileDetailSheet({ fileId, onClose }: { fileId: string | null; on
           )}
         </div>
 
-        {file && <FileDetailFooter fileId={file.id} fileName={file.fileName} />}
+        {file && <FileDetailFooter fileId={file.id} fileName={file.fileName} connector={connector} />}
       </SheetContent>
     </Sheet>
   );
@@ -423,10 +432,20 @@ function ContentPreview({ content }: { content: string }) {
   );
 }
 
-function FileDetailFooter({ fileId, fileName }: { fileId: string; fileName: string }) {
+function FileDetailFooter({
+  fileId,
+  fileName,
+  connector,
+}: {
+  fileId: string;
+  fileName: string;
+  connector?: ConnectorConfig;
+}) {
   const queryClient = useQueryClient();
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
+  const canManageShares = connector?.canManage === true;
+  const canEnrich = connector?.canEnrich === true;
   const [shareOpen, setShareOpen] = useState(false);
 
   const enrichMutation = useMutation({
@@ -438,34 +457,47 @@ function FileDetailFooter({ fileId, fileName }: { fileId: string; fileName: stri
     onError: (err: Error) => toast.error(err.message),
   });
 
+  if (!canManageShares && !canEnrich) return null;
+
   return (
     <div className="border-t border-border px-4 py-3 flex gap-2">
-      {isAdmin && (
+      {canManageShares && (
         <Button size="sm" variant="outline" className="flex-1 gap-1.5 text-xs" onClick={() => setShareOpen(true)}>
           <ShareNetworkIcon size={12} />
           Share
         </Button>
       )}
-      <Button
-        size="sm"
-        variant="outline"
-        className="flex-1 gap-1.5 text-xs"
-        onClick={() => enrichMutation.mutate()}
-        disabled={enrichMutation.isPending}
-      >
-        {enrichMutation.isPending ? (
-          <>
-            <SpinnerGapIcon size={12} className="animate-spin" />
-            Enriching...
-          </>
-        ) : (
-          <>
-            <SparkleIcon size={12} />
-            Enrich
-          </>
-        )}
-      </Button>
-      {isAdmin && <FileShareDialog fileId={fileId} fileName={fileName} open={shareOpen} onOpenChange={setShareOpen} />}
+      {canEnrich && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="flex-1 gap-1.5 text-xs"
+          onClick={() => enrichMutation.mutate()}
+          disabled={enrichMutation.isPending}
+        >
+          {enrichMutation.isPending ? (
+            <>
+              <SpinnerGapIcon size={12} className="animate-spin" />
+              Enriching...
+            </>
+          ) : (
+            <>
+              <SparkleIcon size={12} />
+              Enrich
+            </>
+          )}
+        </Button>
+      )}
+      {canManageShares && (
+        <FileShareDialog
+          fileId={fileId}
+          fileName={fileName}
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          canManage={canManageShares}
+          canShareWithEveryone={isAdmin && canManageShares}
+        />
+      )}
     </div>
   );
 }
