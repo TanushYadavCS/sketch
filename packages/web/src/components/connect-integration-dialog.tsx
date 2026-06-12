@@ -152,7 +152,7 @@ export function ConnectIntegrationDialog({
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
   // Only providers that require admin client-id/secret entry use the oauth-config step.
-  // Zoho's client lives in server env, so it always lands on the connect step.
+  // Zoho and Microsoft clients live in settings/env, so they land on the connect step.
   const needsClientSetup = integration?.requiresOAuthClientSetup === true;
 
   // For OAuth redirect: start with oauth-config step if client setup is required and missing.
@@ -575,11 +575,13 @@ export function ConnectIntegrationDialog({
               </Button>
             ) : (
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
-                Ask your admin to configure Microsoft OAuth credentials first.
+                Microsoft OAuth isn't configured on the server yet. Set <code>MICROSOFT_CLIENT_ID</code> and{" "}
+                <code>MICROSOFT_CLIENT_SECRET</code> in the environment or configure the Microsoft OAuth client in
+                settings.
               </div>
             )}
 
-            {isAdmin && (
+            {isAdmin && needsClientSetup && (
               <div className="flex justify-end">
                 <button
                   type="button"
