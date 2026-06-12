@@ -212,7 +212,12 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .selectFrom("indexed_files")
         .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
         .where("indexed_files.id", "=", fileId)
-        .select(["connector_configs.id", "connector_configs.connector_type", "connector_configs.created_by"])
+        .select([
+          "connector_configs.id",
+          "connector_configs.connector_type",
+          "connector_configs.created_by",
+          "connector_configs.sync_status",
+        ])
         .executeTakeFirst();
     },
 

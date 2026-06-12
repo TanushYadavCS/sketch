@@ -21,6 +21,7 @@ import {
   createMicrosoftGraphClient,
   microsoftAuthorizeEndpoint,
   microsoftTokenEndpoint,
+  resolveMicrosoftOAuthConfig,
 } from "../connectors/microsoft-graph";
 import { OUTLOOK_MICROSOFT_SCOPE } from "../connectors/outlook";
 import { getConnector } from "../connectors/registry";
@@ -126,31 +127,6 @@ function microsoftScopesFor(connectorType: ConnectorType): string {
 
 function microsoftConnectorName(connectorType: ConnectorType): string {
   return connectorType === "teams" ? "Microsoft Teams" : "Outlook";
-}
-
-function getMicrosoftOAuthConfig(
-  config: {
-    microsoft_oauth_client_id?: string | null;
-    microsoft_oauth_client_secret?: string | null;
-    microsoft_oauth_tenant?: string | null;
-  } | null,
-  fallback: { clientId?: string; clientSecret?: string; tenant: string },
-) {
-  const configuredClientId = config?.microsoft_oauth_client_id?.trim();
-  const configuredClientSecret = config?.microsoft_oauth_client_secret?.trim();
-  if (configuredClientId || configuredClientSecret) {
-    return {
-      clientId: configuredClientId,
-      clientSecret: configuredClientSecret,
-      tenant: config?.microsoft_oauth_tenant?.trim(),
-    };
-  }
-
-  return {
-    clientId: fallback.clientId?.trim(),
-    clientSecret: fallback.clientSecret?.trim(),
-    tenant: fallback.tenant.trim(),
-  };
 }
 
 function parseGoogleState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
@@ -424,7 +400,7 @@ export function oauthRoutes(
     const connectorType = microsoftConnectorFromQuery(c.req.query("connector"));
     const connectorName = microsoftConnectorName(connectorType);
     const config = await settings.get();
-    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+    const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
       clientId: microsoftClientId,
       clientSecret: microsoftClientSecret,
       tenant: microsoftTenant,
@@ -435,7 +411,7 @@ export function oauthRoutes(
         {
           error: {
             code: "OAUTH_CLIENT_NOT_CONFIGURED",
-            message: `Ask your admin to configure ${connectorName} first`,
+            message: `Set Microsoft OAuth credentials in settings or the server environment before connecting ${connectorName}`,
             connector: connectorType,
           },
         },
@@ -476,6 +452,7 @@ export function oauthRoutes(
       response_type: "code",
       response_mode: "query",
       scope: microsoftScopesFor(connectorType),
+      prompt: "select_account",
       state,
     });
 
@@ -512,7 +489,7 @@ export function oauthRoutes(
     pendingStates.delete(nonce);
 
     const config = await settings.get();
-    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+    const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
       clientId: microsoftClientId,
       clientSecret: microsoftClientSecret,
       tenant: microsoftTenant,
@@ -620,13 +597,16 @@ export function oauthRoutes(
 
   routes.get("/microsoft/status", async (c) => {
     const config = await settings.get();
-    const { clientId, clientSecret, tenant } = getMicrosoftOAuthConfig(config, {
+    const { clientId, clientSecret, tenant, source } = resolveMicrosoftOAuthConfig(config, {
       clientId: microsoftClientId,
       clientSecret: microsoftClientSecret,
       tenant: microsoftTenant,
     });
+    const envConfigured = !!(microsoftClientId && microsoftClientSecret);
     return c.json({
       configured: !!(clientId && clientSecret && tenant),
+      envConfigured,
+      settingsConfigured: source === "settings",
       clientId: clientId ?? null,
       baseUrl: baseUrl ?? null,
       tenant: tenant ?? null,

@@ -28,6 +28,25 @@ export interface MicrosoftGraphRequestResult<T> {
   credentials: OAuthCredentials;
 }
 
+export interface MicrosoftOAuthSettingsConfig {
+  microsoft_oauth_client_id?: string | null;
+  microsoft_oauth_client_secret?: string | null;
+  microsoft_oauth_tenant?: string | null;
+}
+
+export interface MicrosoftOAuthFallbackConfig {
+  clientId?: string | null;
+  clientSecret?: string | null;
+  tenant?: string | null;
+}
+
+export interface ResolvedMicrosoftOAuthConfig {
+  clientId?: string;
+  clientSecret?: string;
+  tenant: string;
+  source: "settings" | "env";
+}
+
 export class MicrosoftGraphError extends Error {
   readonly status: number;
   readonly path: string;
@@ -48,6 +67,43 @@ export function microsoftTokenEndpoint(tenant = DEFAULT_TENANT): string {
 
 export function microsoftAuthorizeEndpoint(tenant = DEFAULT_TENANT): string {
   return `${MICROSOFT_AUTHORITY_BASE}/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize`;
+}
+
+export function resolveMicrosoftOAuthConfig(
+  config: MicrosoftOAuthSettingsConfig | null,
+  fallback: MicrosoftOAuthFallbackConfig,
+): ResolvedMicrosoftOAuthConfig {
+  const settingsClientId = trimOptional(config?.microsoft_oauth_client_id);
+  const settingsClientSecret = trimOptional(config?.microsoft_oauth_client_secret);
+  const settingsTenant = trimOptional(config?.microsoft_oauth_tenant);
+  if (settingsClientId || settingsClientSecret) {
+    return {
+      clientId: settingsClientId,
+      clientSecret: settingsClientSecret,
+      tenant: settingsTenant ?? trimOptional(fallback.tenant) ?? DEFAULT_TENANT,
+      source: "settings",
+    };
+  }
+
+  return {
+    clientId: trimOptional(fallback.clientId),
+    clientSecret: trimOptional(fallback.clientSecret),
+    tenant: settingsTenant ?? trimOptional(fallback.tenant) ?? DEFAULT_TENANT,
+    source: "env",
+  };
+}
+
+export function applyMicrosoftOAuthConfig(
+  credentials: OAuthCredentials,
+  config: Pick<ResolvedMicrosoftOAuthConfig, "clientId" | "clientSecret" | "tenant">,
+): OAuthCredentials {
+  if (!config.clientId || !config.clientSecret) return credentials;
+  return {
+    ...credentials,
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+    tenant: config.tenant,
+  };
 }
 
 export function isMicrosoftTokenExpired(credentials: OAuthCredentials): boolean {
@@ -308,4 +364,9 @@ function decodeVttEntities(value: string): string {
 
 function normalizeSpeakerKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function trimOptional(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }

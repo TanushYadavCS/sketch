@@ -8,13 +8,11 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
 import { ConnectorLogo } from "@/components/connector-logos";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
-import { INTEGRATIONS, type IntegrationDefinition, getIntegration } from "@/lib/integrations";
+import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
 
-// Per-user integrations (e.g. Fireflies) are managed from Settings → My Connections,
-// not the workspace-level Files connector picker. They still appear as filter chips on
-// the Files page (so admins and members get an identical view of indexed sources), but
-// they're excluded from the "+ Connect" buttons and the BrowseAll catalog.
+// These are single org-wide credential rows. Per-user connectors are handled in
+// Browse all with one account row per visible user-owned connector.
 const ORG_LEVEL_INTEGRATIONS = INTEGRATIONS.filter((def) => !def.perUserAuth);
 
 const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
@@ -27,6 +25,47 @@ const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
 };
 function mergeStatus(a: string, b: string): string {
   return (SYNC_STATUS_PRECEDENCE[a] ?? 0) >= (SYNC_STATUS_PRECEDENCE[b] ?? 0) ? a : b;
+}
+
+function preferredConnectorForDefinition(
+  def: IntegrationDefinition,
+  connectors: ConnectorConfig[],
+): ConnectorConfig | null {
+  const matches = connectors.filter((connector) => connector.connectorType === def.type);
+  if (matches.length === 0) return null;
+  return matches.find((connector) => connector.canManage === true) ?? matches[0] ?? null;
+}
+
+function connectorsForDefinition(def: IntegrationDefinition, connectors: ConnectorConfig[]): ConnectorConfig[] {
+  return connectors.filter((connector) => connector.connectorType === def.type);
+}
+
+function connectorOwnerLabel(connector: ConnectorConfig): string {
+  if (connector.isOwner === true) return "You";
+  return connector.createdByName?.trim() || connector.createdByEmail?.trim() || "Team member";
+}
+
+function connectorAccountHint(connector: ConnectorConfig): string | null {
+  const hint = connector.credentialHint?.trim();
+  const email = connector.createdByEmail?.trim();
+  const label = connectorOwnerLabel(connector);
+  if (hint && hint !== label) return hint;
+  if (email && email !== label) return email;
+  return null;
+}
+
+function sortConnectorsForDisplay(connectors: ConnectorConfig[]): ConnectorConfig[] {
+  return [...connectors].sort((a, b) => {
+    if (a.canManage === true && b.canManage !== true) return -1;
+    if (a.canManage !== true && b.canManage === true) return 1;
+    return connectorOwnerLabel(a).localeCompare(connectorOwnerLabel(b));
+  });
+}
+
+function connectorAdoptionRatio(connectedMemberCount: number, teamMemberCount: number): string {
+  const denominator = Math.max(teamMemberCount, connectedMemberCount);
+  if (denominator <= 0) return "0/0";
+  return `${connectedMemberCount.toLocaleString()}/${denominator.toLocaleString()}`;
 }
 import {
   ArrowSquareOutIcon,
@@ -66,6 +105,8 @@ const SYNC_INTERVAL_OPTIONS = [
 
 export function ConnectorPicker({
   connectors,
+  teamMemberCount,
+  connectorMemberCounts,
   sourceCounts,
   totalFiles,
   localFileCount,
@@ -77,6 +118,8 @@ export function ConnectorPicker({
   onForcedConnectDone,
 }: {
   connectors: ConnectorConfig[];
+  teamMemberCount: number;
+  connectorMemberCounts: Record<string, number>;
   /** Viewer-aware file count by source. Source of truth for chip counts. */
   sourceCounts: Map<string, number>;
   totalFiles: number;
@@ -109,7 +152,8 @@ export function ConnectorPicker({
   // count that matches the file list.
   const aggregatedByType = new Map<string, { syncStatus: string }>();
   for (const c of connectors) {
-    connectedByType.set(c.connectorType, c);
+    const def = getIntegration(c.connectorType as IntegrationType);
+    if (!def || preferredConnectorForDefinition(def, connectors) === c) connectedByType.set(c.connectorType, c);
     const cur = aggregatedByType.get(c.connectorType);
     aggregatedByType.set(c.connectorType, {
       syncStatus: cur ? mergeStatus(cur.syncStatus, c.syncStatus) : c.syncStatus,
@@ -204,6 +248,8 @@ export function ConnectorPicker({
         open={showBrowseAll}
         onOpenChange={setShowBrowseAll}
         connectors={connectors}
+        teamMemberCount={teamMemberCount}
+        connectorMemberCounts={connectorMemberCounts}
         isAdmin={isAdmin}
         experimentalEnabled={experimentalEnabled}
         onConnect={(def) => {
@@ -302,6 +348,8 @@ function BrowseConnectorsDialog({
   open,
   onOpenChange,
   connectors,
+  teamMemberCount,
+  connectorMemberCounts,
   isAdmin,
   experimentalEnabled,
   onConnect,
@@ -310,17 +358,14 @@ function BrowseConnectorsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   connectors: ConnectorConfig[];
+  teamMemberCount: number;
+  connectorMemberCounts: Record<string, number>;
   isAdmin: boolean;
   experimentalEnabled: boolean;
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
 }) {
   const [tab, setTab] = useState<BrowseTab>("connectors");
-
-  const connectedByType = new Map<string, ConnectorConfig>();
-  for (const c of connectors) {
-    connectedByType.set(c.connectorType, c);
-  }
 
   return (
     <Dialog
@@ -330,7 +375,7 @@ function BrowseConnectorsDialog({
         onOpenChange(v);
       }}
     >
-      <DialogContent>
+      <DialogContent className="max-h-[calc(100vh-2rem)] grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>All connectors</DialogTitle>
           <DialogDescription>Connect external sources to sync files into your knowledge base.</DialogDescription>
@@ -362,31 +407,34 @@ function BrowseConnectorsDialog({
         </div>
 
         {tab === "connectors" ? (
-          <>
-            <div className="mt-2 space-y-2">
+          <div className="-mr-1 min-h-0 overflow-y-auto pr-1">
+            <div className="space-y-2">
               {INTEGRATIONS.filter((def) => !def.experimentalOnly || experimentalEnabled).map((def) => {
-                // For per-user connectors, the row visible to the caller in
-                // /api/connectors is their own (server filters); for org-wide, it's
-                // the shared row. Either way, show Manage when present, Connect when not.
-                const connector = connectedByType.get(def.type) ?? null;
+                const matchingConnectors = connectorsForDefinition(def, connectors);
+                const connector = preferredConnectorForDefinition(def, matchingConnectors);
                 return (
                   <ConnectorRow
                     key={def.type}
                     definition={def}
                     connector={connector}
+                    visibleConnectors={matchingConnectors}
+                    teamMemberCount={teamMemberCount}
+                    connectedMemberCount={connectorMemberCounts[def.type] ?? matchingConnectors.length}
                     isAdmin={isAdmin}
                     onConnect={() => onConnect(def)}
-                    onManage={() => {
-                      if (connector) onManage(def, connector);
+                    onManage={(selectedConnector) => {
+                      onManage(def, selectedConnector);
                     }}
                   />
                 );
               })}
             </div>
             <p className="mt-4 text-center text-xs text-muted-foreground">More connectors coming soon</p>
-          </>
+          </div>
         ) : (
-          <ConnectorSettings />
+          <div className="-mr-1 min-h-0 overflow-y-auto pr-1">
+            <ConnectorSettings />
+          </div>
         )}
       </DialogContent>
     </Dialog>
@@ -549,22 +597,34 @@ function ConnectorSettings() {
 function ConnectorRow({
   definition,
   connector,
+  visibleConnectors,
+  teamMemberCount,
+  connectedMemberCount,
   isAdmin,
   onConnect,
   onManage,
 }: {
   definition: IntegrationDefinition;
   connector: ConnectorConfig | null;
+  visibleConnectors: ConnectorConfig[];
+  teamMemberCount: number;
+  connectedMemberCount: number;
   isAdmin: boolean;
   onConnect: () => void;
-  onManage: () => void;
+  onManage: (connector: ConnectorConfig) => void;
 }) {
   const queryClient = useQueryClient();
+  const [accountsExpanded, setAccountsExpanded] = useState(false);
   const isConnected = !!connector;
   const isSyncing = connector?.syncStatus === "syncing";
-  // Org-wide connectors are admin-only to configure. Per-user (Fireflies, Drive) are
-  // always reachable — clicking Connect routes to /integrations or kicks off OAuth.
-  const canConfigure = definition.perUserAuth || isAdmin;
+  const canManage = connector?.canManage === true;
+  const canSync = connector?.canSync === true;
+  const canConnect = definition.perUserAuth || isAdmin;
+  const onlyOtherPerUserConnectors = definition.perUserAuth && isConnected && !canManage;
+  const connectedAccounts = definition.perUserAuth ? sortConnectorsForDisplay(visibleConnectors) : [];
+  const showConnectedAccounts = accountsExpanded && connectedAccounts.length > 0;
+  const adoptionRatio = definition.perUserAuth ? connectorAdoptionRatio(connectedMemberCount, teamMemberCount) : null;
+  const accountListId = `${definition.type}-connected-accounts`;
 
   const syncMutation = useMutation({
     mutationFn: () => api.integrations.sync(connector?.id ?? ""),
@@ -586,54 +646,137 @@ function ConnectorRow({
   const myProgress = progressData?.active.find((p) => p.connectorId === connector?.id);
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-border p-3">
-      <IntegrationIcon color={definition.color} name={definition.name} type={definition.type} size="sm" />
+    <div className="rounded-lg border border-border p-3">
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <IntegrationIcon color={definition.color} name={definition.name} type={definition.type} size="sm" />
 
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium">{definition.name}</p>
-        <p className="text-xs text-muted-foreground">
-          {isSyncing && myProgress ? (
-            <>
-              Syncing — {myProgress.itemsProcessed} items processed
-              {myProgress.itemsCreated > 0 && `, ${myProgress.itemsCreated} new`}
-              {myProgress.itemsSkipped > 0 && `, ${myProgress.itemsSkipped} unchanged`}
-            </>
-          ) : isConnected ? (
-            <>
-              {connector.fileCount != null && `${connector.fileCount.toLocaleString()} ${definition.itemNoun}`}
-              {connector.lastSyncedAt && ` · Synced ${formatRelativeTime(connector.lastSyncedAt)}`}
-            </>
-          ) : (
-            definition.description
-          )}
-        </p>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium">{definition.name}</p>
+            <p className="text-xs text-muted-foreground">
+              {definition.perUserAuth ? (
+                definition.description
+              ) : isSyncing && myProgress ? (
+                <>
+                  Syncing — {myProgress.itemsProcessed} items processed
+                  {myProgress.itemsCreated > 0 && `, ${myProgress.itemsCreated} new`}
+                  {myProgress.itemsSkipped > 0 && `, ${myProgress.itemsSkipped} unchanged`}
+                </>
+              ) : isConnected ? (
+                <>
+                  {connector.fileCount != null && `${connector.fileCount.toLocaleString()} ${definition.itemNoun}`}
+                  {connector.lastSyncedAt && ` · Synced ${formatRelativeTime(connector.lastSyncedAt)}`}
+                </>
+              ) : (
+                definition.description
+              )}
+            </p>
+          </div>
+        </div>
+
+        {isConnected ? (
+          <div className="flex flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
+            <SyncStatusDot status={connector.syncStatus} />
+            {adoptionRatio && (
+              <span
+                className="shrink-0 text-xs text-muted-foreground"
+                aria-label={`${adoptionRatio} members connected`}
+              >
+                {adoptionRatio}
+              </span>
+            )}
+            {canSync && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7"
+                onClick={() => syncMutation.mutate()}
+                disabled={isSyncing || syncMutation.isPending}
+              >
+                <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
+              </Button>
+            )}
+            {onlyOtherPerUserConnectors && (
+              <Button variant="outline" size="sm" className="h-7 gap-1.5 whitespace-nowrap text-xs" onClick={onConnect}>
+                <PlusIcon size={12} />
+                Connect mine
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 whitespace-nowrap text-xs"
+              aria-controls={definition.perUserAuth ? accountListId : undefined}
+              aria-expanded={definition.perUserAuth ? accountsExpanded : undefined}
+              onClick={() => {
+                if (definition.perUserAuth) {
+                  setAccountsExpanded((expanded) => !expanded);
+                  return;
+                }
+                onManage(connector);
+              }}
+            >
+              {definition.perUserAuth ? "Manage" : canManage ? "Manage" : "View"}
+            </Button>
+          </div>
+        ) : canConnect ? (
+          <div className="flex items-center justify-end gap-2 self-end sm:self-auto sm:shrink-0">
+            {adoptionRatio && (
+              <span
+                className="shrink-0 text-xs text-muted-foreground"
+                aria-label={`${adoptionRatio} members connected`}
+              >
+                {adoptionRatio}
+              </span>
+            )}
+            <Button variant="outline" size="sm" className="h-7 whitespace-nowrap text-xs" onClick={onConnect}>
+              <PlusIcon size={12} />
+              Connect
+            </Button>
+          </div>
+        ) : (
+          <span className="self-end whitespace-nowrap text-xs text-muted-foreground sm:self-auto sm:shrink-0">
+            Managed by admin
+          </span>
+        )}
       </div>
 
-      {isConnected ? (
-        <div className="flex items-center gap-1.5">
-          <SyncStatusDot status={connector.syncStatus} />
-          {canConfigure && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              onClick={() => syncMutation.mutate()}
-              disabled={isSyncing || syncMutation.isPending}
-            >
-              <ArrowsClockwiseIcon size={14} className={isSyncing ? "animate-spin" : ""} />
-            </Button>
-          )}
-          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onManage}>
-            {canConfigure ? "Manage" : "View"}
-          </Button>
+      {showConnectedAccounts && (
+        <div id={accountListId} className="mt-3 space-y-1 border-t border-border pt-2">
+          {connectedAccounts.map((account) => {
+            const label = connectorOwnerLabel(account);
+            const hint = connectorAccountHint(account);
+            const actionLabel = account.canManage === true ? "Manage" : "View";
+            return (
+              <div
+                key={account.id}
+                className="flex min-w-0 flex-col gap-1.5 rounded-md px-2 py-1.5 text-xs hover:bg-muted/30 sm:min-h-8 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+              >
+                <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                  <SyncStatusDot status={account.syncStatus} />
+                  <span className="min-w-0 max-w-[8rem] shrink-0 truncate font-medium sm:max-w-[10rem]">{label}</span>
+                  {hint && <span className="min-w-0 flex-1 truncate text-muted-foreground">{hint}</span>}
+                </div>
+                <div className="flex min-w-0 items-center justify-between gap-2 sm:shrink-0 sm:justify-end">
+                  {account.fileCount != null && (
+                    <span className="min-w-0 truncate text-muted-foreground sm:whitespace-nowrap">
+                      {account.fileCount.toLocaleString()} {definition.itemNoun}
+                    </span>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 shrink-0 px-2 text-xs"
+                    aria-label={`${actionLabel} ${label}`}
+                    onClick={() => onManage(account)}
+                  >
+                    {actionLabel}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      ) : canConfigure ? (
-        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onConnect}>
-          <PlusIcon size={12} />
-          Connect
-        </Button>
-      ) : (
-        <span className="text-xs text-muted-foreground">Managed by admin</span>
       )}
     </div>
   );

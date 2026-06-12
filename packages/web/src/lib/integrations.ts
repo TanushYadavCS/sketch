@@ -88,8 +88,10 @@ export interface IntegrationDefinition {
   itemNoun: string;
   /** External URL for getting credentials. */
   credentialUrl: string;
+  oauthClientCredentialUrl?: string;
   /** Step-by-step instructions for connecting. */
   connectSteps: string[];
+  oauthClientSetupSteps?: string[];
   /** Scope picker type for the connect/manage dialog. */
   scopeType: "none" | "flat" | "nested" | "tree";
   /** Noun for scope items in the picker (pages, spaces, folders). */
@@ -107,10 +109,50 @@ export interface IntegrationDefinition {
   regionOptions?: { value: string; label: string }[];
 }
 
-/**
- * Registry of all available integrations.
- * To add a new integration, add an entry here.
- */
+const MICROSOFT_OAUTH_AUTH_FIELDS: AuthField[] = [
+  {
+    key: "client_id",
+    label: "Application (client) ID",
+    type: "text",
+    placeholder: "00000000-0000-0000-0000-000000000000",
+    helpText: "From App registrations > Overview. Use Application (client) ID, not Object ID.",
+  },
+  {
+    key: "tenant",
+    label: "Tenant",
+    type: "text",
+    placeholder: "common",
+    helpText: "Use a directory ID, verified domain, or tenant alias such as common.",
+  },
+  {
+    key: "client_secret",
+    label: "Client secret",
+    type: "password",
+    placeholder: "...",
+    helpText: "From Certificates & secrets. Paste the secret Value, not the Secret ID.",
+  },
+];
+
+const OUTLOOK_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
+  "Create or open a Microsoft Entra app registration for the tenant you want Outlook users to sign in with",
+  "In Authentication, add the Web redirect URI shown below exactly",
+  "In API permissions, add delegated Microsoft Graph permissions: Mail.Read, User.Read, and offline_access",
+  "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+  "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
+];
+
+const TEAMS_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
+  "Create or open a Microsoft Entra app registration for the tenant you want Teams users to sign in with",
+  "In Authentication, add the Web redirect URI shown below exactly",
+  "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, OnlineMeetings.Read, OnlineMeetingTranscript.Read.All, OnlineMeetingRecording.Read.All, User.Read, and offline_access",
+  "Have a tenant admin grant admin consent for transcript and recording permissions if your tenant requires it",
+  "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+  "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
+];
+
+const MICROSOFT_ENTRA_APP_REGISTRATIONS_URL =
+  "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade";
+
 export const INTEGRATIONS: IntegrationDefinition[] = [
   {
     type: "google_drive",
@@ -195,42 +237,20 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     color: "#0078D4",
     authType: "oauth",
     oauthRedirect: true,
-    authFields: [
-      {
-        key: "client_id",
-        label: "Application (client) ID",
-        type: "text",
-        placeholder: "00000000-0000-0000-0000-000000000000",
-        helpText: "From App registrations > Overview. Use Application (client) ID, not Object ID.",
-      },
-      {
-        key: "tenant",
-        label: "Directory (tenant) ID",
-        type: "text",
-        placeholder: "00000000-0000-0000-0000-000000000000",
-        helpText: "From the same app overview. Use the tenant where users will sign in.",
-      },
-      {
-        key: "client_secret",
-        label: "Client Secret",
-        type: "password",
-        placeholder: "...",
-        helpText: "From Certificates & secrets. Paste the secret Value, not the Secret ID.",
-      },
-    ],
+    authFields: MICROSOFT_OAUTH_AUTH_FIELDS,
     scopeLabel: "mailbox",
     scopeType: "none",
     itemNoun: "emails",
-    credentialUrl: "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    credentialUrl: "https://learn.microsoft.com/en-us/graph/permissions-reference",
+    oauthClientCredentialUrl: MICROSOFT_ENTRA_APP_REGISTRATIONS_URL,
     connectSteps: [
-      "Create or open a Microsoft Entra app registration for the tenant you want Outlook users to sign in with",
-      "In Authentication, add the Web redirect URI shown below exactly",
-      "In API permissions, add delegated Microsoft Graph permissions: Mail.Read, User.Read, and offline_access",
-      "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
-      "Paste the Application (client) ID, Directory (tenant) ID, and Client Secret Value here, then connect with Microsoft",
+      "Sign in with your Microsoft account",
+      "Authorize read-only access to your Outlook mailbox",
+      "Inbox and sent messages sync automatically after authorization",
     ],
+    oauthClientSetupSteps: OUTLOOK_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS,
     perUserAuth: true,
-    requiresOAuthClientSetup: true,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "teams",
@@ -240,43 +260,20 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     color: "#6264A7",
     authType: "oauth",
     oauthRedirect: true,
-    authFields: [
-      {
-        key: "client_id",
-        label: "Application (client) ID",
-        type: "text",
-        placeholder: "00000000-0000-0000-0000-000000000000",
-        helpText: "From App registrations > Overview. Use Application (client) ID, not Object ID.",
-      },
-      {
-        key: "tenant",
-        label: "Directory (tenant) ID",
-        type: "text",
-        placeholder: "00000000-0000-0000-0000-000000000000",
-        helpText: "From the same app overview. Use the tenant where users will sign in.",
-      },
-      {
-        key: "client_secret",
-        label: "Client Secret",
-        type: "password",
-        placeholder: "...",
-        helpText: "From Certificates & secrets. Paste the secret Value, not the Secret ID.",
-      },
-    ],
+    authFields: MICROSOFT_OAUTH_AUTH_FIELDS,
     scopeLabel: "meetings",
     scopeType: "none",
     itemNoun: "transcripts",
-    credentialUrl: "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    credentialUrl: "https://learn.microsoft.com/en-us/graph/permissions-reference",
+    oauthClientCredentialUrl: MICROSOFT_ENTRA_APP_REGISTRATIONS_URL,
     connectSteps: [
-      "Create or open a Microsoft Entra app registration for the tenant you want Teams users to sign in with",
-      "In Authentication, add the Web redirect URI shown below exactly",
-      "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, OnlineMeetings.Read, OnlineMeetingTranscript.Read.All, OnlineMeetingRecording.Read.All, User.Read, and offline_access",
-      "Have a tenant admin grant admin consent for the transcript and recording permissions if your tenant requires it",
-      "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
-      "Paste the Application (client) ID, Directory (tenant) ID, and Client Secret Value here, then connect with Microsoft",
+      "Sign in with your Microsoft account",
+      "Authorize read-only calendar and Teams meeting access",
+      "A tenant admin may need to grant consent for transcript and recording permissions",
     ],
+    oauthClientSetupSteps: TEAMS_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS,
     perUserAuth: true,
-    requiresOAuthClientSetup: true,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "clickup",

@@ -73,7 +73,7 @@ export const configSchema = z.object({
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   ZOHO_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
-  // Microsoft OAuth fallback (Files UI stores client credentials in settings)
+  // Microsoft OAuth fallback (workspace settings can override these)
   MICROSOFT_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   MICROSOFT_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   MICROSOFT_TENANT: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("common")),

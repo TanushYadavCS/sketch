@@ -186,6 +186,7 @@ export async function getFileContent(
   userEmails?: string[],
 ): Promise<{
   id: string;
+  connectorConfigId: string;
   fileName: string;
   fileType: string | null;
   source: string;
@@ -200,6 +201,7 @@ export async function getFileContent(
     .selectFrom("indexed_files")
     .select([
       "id",
+      "connector_config_id",
       "file_name",
       "file_type",
       "source",
@@ -298,6 +300,7 @@ export async function getFileContent(
 
   return {
     id: file.id,
+    connectorConfigId: file.connector_config_id,
     fileName: file.file_name,
     fileType: file.file_type,
     source: file.source,
