@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [0.36.0] -- 2026-06-13
+
+- Zoho CRM: make the connector generally available by removing the experimental flag from the OAuth routes, connector APIs, and Files connector picker.
+- Docs: trim stale "currently gated" references from contributor guidance now that Zoho CRM is no longer hidden behind `EXPERIMENTAL_FLAG`.
+
 ## [0.35.0] -- 2026-06-13
 
 - Connectors: enforce connector-scoped authorization across server routes so owner, admin, and member access is explicit, with disabled connectors exposing inert mutation capabilities.
