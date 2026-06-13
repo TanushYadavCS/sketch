@@ -103,8 +103,6 @@ export interface IntegrationDefinition {
   perUserAuth: boolean;
   /** true = admin must populate provider Client ID/Secret in settings before any user can authorize. */
   requiresOAuthClientSetup: boolean;
-  /** true = only shown when the experimental feature flag is enabled. */
-  experimentalOnly?: boolean;
   /** OAuth-redirect connectors that pick a data center / region before authorizing. */
   regionOptions?: { value: string; label: string }[];
 }
@@ -406,7 +404,6 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     ],
     perUserAuth: false,
     requiresOAuthClientSetup: false,
-    experimentalOnly: true,
     regionOptions: [
       { value: "com", label: "United States (.com)" },
       { value: "eu", label: "Europe (.eu)" },

@@ -121,8 +121,6 @@ New features that aren't ready for general availability are gated behind `config
 
 The flag flows: `config` → `bootstrap.ts` (injected in `trackedRunAgent`) → `RunAgentParams` → both `SketchMcpDeps` (tools) and `buildSystemContext` (prompt).
 
-Currently gated: the Zoho CRM connector (connector registration via the connectors API, and the `/api/oauth/zoho/*` routes). The Files/knowledge feature (connectors, entity explorer, entity drawer Timeline/Relationships, entity-review) is GA and no longer gated. The `EXPERIMENTAL_FLAG` mechanism remains available for future features — config flag, the `experimentalFlag` field on `/api/setup/status`, and the `experimentalOnly` nav-item field in `app-sidebar.tsx`.
-
 ## Related Repos
 
 - **sketch-platform** (`~/Projects/sketch-platform/`, `canvasxai/sketch-platform`, private): Management plane for the managed offering. Separate pnpm monorepo with `packages/api/` (backend), `packages/web/` (frontend), `packages/infra/` (CDK, planned). Planning docs for both repos live here in `.planning/`.

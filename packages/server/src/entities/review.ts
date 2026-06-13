@@ -1,7 +1,7 @@
 /**
  * HTTP routes for the entity-review queue.
  *
- * Endpoints (gated by config.EXPERIMENTAL_FLAG at mount time in http.ts):
+ * Endpoints:
  *   GET    /                  list pending rows (owner-scoped)
  *   GET    /:id               row detail; sets review_started_at atomically
  *                             AFTER the owner-scope check passes

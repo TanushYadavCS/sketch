@@ -89,11 +89,6 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
-/**
- * Dependencies for the setup routes. `experimentalFlag` mirrors
- * config.EXPERIMENTAL_FLAG and is surfaced on /status so the web UI can gate
- * experimental surfaces (see CLAUDE.md "Feature Gating").
- */
 interface SetupDeps {
   managedUrl?: string;
   experimentalFlag?: boolean;

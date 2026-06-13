@@ -393,7 +393,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       oauthRoutes(settings, identities, connectors, users, db, deps.logger, {
         baseUrl: config.BASE_URL,
         appConfig: config,
-        experimentalFlag: config.EXPERIMENTAL_FLAG,
         zohoClientId: config.ZOHO_CLIENT_ID,
         zohoClientSecret: config.ZOHO_CLIENT_SECRET,
         microsoftClientId: config.MICROSOFT_CLIENT_ID,

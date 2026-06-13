@@ -121,8 +121,6 @@ New features that aren't ready for general availability are gated behind `config
 
 The flag flows: `config` → `bootstrap.ts` (injected in `trackedRunAgent`) → `RunAgentParams` → both `SketchMcpDeps` (tools) and `buildSystemContext` (prompt).
 
-Currently gated: Files UI, Connections UI, entity/connector/identity/OAuth APIs, agent search tools (Search, SearchEntities, GetEntityContext), and Information Discovery system prompt section.
-
 ## Related Repos
 
 - **sketch-platform** (`~/Projects/sketch-platform/`, `canvasxai/sketch-platform`, private): Management plane for the managed offering. Separate pnpm monorepo with `packages/api/` (backend), `packages/web/` (frontend), `packages/infra/` (CDK, planned). Planning docs for both repos live here in `.planning/`.
