@@ -16,7 +16,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { yieldToEventLoop } from "../lib/event-loop";
@@ -115,6 +115,7 @@ export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEn
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
     .execute();
   return entities.map((entity) => ({
     id: entity.id,
@@ -917,6 +918,7 @@ async function deleteStaleLegacyDeterministicMentions(db: Kysely<DB>, fileId: st
     .where("entity_mentions.indexed_file_id", "=", fileId)
     .where("entity_mentions.source", "=", "llm_extraction")
     .where("entity_mentions.confidence", "!=", "EXTRACTED")
+    .where(whereLiveEntity())
     .execute();
   const staleIds = legacyMentions
     .filter((mention) => entityNames(mention).every((name) => !activeLlmNames.has(normalizeDeterministicName(name))))

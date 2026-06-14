@@ -543,6 +543,20 @@ export interface EntitiesTable {
   updated_at: string;
   ai_brief: string | null;
   share_with_everyone: Generated<number>;
+  deleted_at: string | null;
+  merged_into_entity_id: string | null;
+}
+
+export interface EntityMergesTable {
+  id: string;
+  survivor_entity_id: string;
+  merged_entity_id: string;
+  entity_type: string;
+  moves: string;
+  merged_by_user_id: string;
+  merged_at: Generated<string>;
+  unmerged_at: string | null;
+  unmerged_by_user_id: string | null;
 }
 
 export interface EntityShareEmailsTable {
@@ -804,6 +818,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_merges: EntityMergesTable;
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_contact_points: EntityContactPointsTable;

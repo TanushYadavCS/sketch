@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { whereLiveEntity } from "../db/repositories/entities";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 
@@ -83,6 +84,7 @@ async function loadMissingSourceFileContexts(
     .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
     .select(["entity_mentions.indexed_file_id", "entity_mentions.entity_id", "entities.source_type"])
     .where("entity_mentions.indexed_file_id", "in", missing)
+    .where(whereLiveEntity())
     .execute();
   for (const row of mentionRows) {
     const ctx = cache.bySourceFileId.get(row.indexed_file_id);

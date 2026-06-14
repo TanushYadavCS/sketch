@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
+import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 
 export interface FeatureArchiveSweepOptions {
@@ -86,6 +87,7 @@ export async function runFeatureArchiveSweep(
     .select(["id", "created_at"])
     .where("source_type", "=", "feature")
     .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
     .where(
       sql<boolean>`EXISTS (
         SELECT 1 FROM entity_source_refs

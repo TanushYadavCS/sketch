@@ -1,3 +1,4 @@
+import { whereLiveEntity } from "../db/repositories/entities";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
@@ -61,6 +62,7 @@ async function buildPersonRankerContext(
     .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
     .select(["entity_mentions.entity_id", "entity_mentions.confidence", "entities.source_type"])
     .where("entity_mentions.indexed_file_id", "=", indexedFileId)
+    .where(whereLiveEntity())
     .execute();
 
   const extractedPersons = mentions

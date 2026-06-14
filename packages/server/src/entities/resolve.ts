@@ -27,6 +27,7 @@ import {
   type EntityMentionConfidence,
   type EntityMentionRelation,
   createEntityRepository,
+  whereLiveEntity,
 } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -200,7 +201,12 @@ async function fetchRow(ctx: ResolveTxnCtx, reviewId: string): Promise<QueueRow>
 }
 
 async function fetchEntity(ctx: ResolveTxnCtx, entityId: string): Promise<Entity | undefined> {
-  return ctx.db.selectFrom("entities").selectAll().where("id", "=", entityId).executeTakeFirst();
+  return ctx.db
+    .selectFrom("entities")
+    .selectAll()
+    .where("id", "=", entityId)
+    .where(whereLiveEntity())
+    .executeTakeFirst();
 }
 
 /**
@@ -419,6 +425,7 @@ async function findStaleCandidates(ctx: ResolveTxnCtx, target: Entity, proposedN
     .selectAll()
     .where("source_type", "=", target.source_type)
     .where("id", "!=", target.id)
+    .where(whereLiveEntity())
     .execute();
   return candidates.filter((e) => {
     if (normalizeName(e.name) !== normalized) return false;
@@ -792,6 +799,7 @@ async function findReResolveMatches(ctx: ResolveTxnCtx, row: QueueRow, excludeEn
     .selectFrom("entities")
     .selectAll()
     .where("source_type", "=", row.entity_type)
+    .where(whereLiveEntity())
     .execute();
   const excluded = new Set(excludeEntityIds.filter((id) => id != null));
   const out: Entity[] = [];

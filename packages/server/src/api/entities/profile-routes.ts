@@ -3,7 +3,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod";
 import { type FileViewer, fileVisibilityPredicate } from "../../db/repositories/connectors";
-import { createEntityRepository, entityVisibilityPredicate } from "../../db/repositories/entities";
+import { createEntityRepository, entityVisibilityPredicate, whereLiveEntity } from "../../db/repositories/entities";
 import {
   type RelationListEntry,
   createEntityRelationshipsRepository,
@@ -337,7 +337,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       .selectFrom("entities")
       .selectAll("entities")
       .select(mentionCountSql.as("mention_count"))
-      .select(lastMentionSql.as("last_mention_at"));
+      .select(lastMentionSql.as("last_mention_at"))
+      .where(whereLiveEntity());
 
     if (typeFilter && typeFilter.length > 0) {
       query = query.where("entities.source_type", "in", typeFilter);
@@ -382,7 +383,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
 
     const entities = await query.execute();
 
-    let countQuery = db.selectFrom("entities").select(db.fn.count("entities.id").as("total"));
+    let countQuery = db.selectFrom("entities").select(db.fn.count("entities.id").as("total")).where(whereLiveEntity());
     if (typeFilter && typeFilter.length > 0) {
       countQuery = countQuery.where("entities.source_type", "in", typeFilter);
     }
@@ -439,7 +440,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     let nodeQuery = db
       .selectFrom("entities")
       .select(["id", "name", "source_type", "hotness"])
-      .where("status", "!=", "archived");
+      .where("status", "!=", "archived")
+      .where(whereLiveEntity());
     if (!includeSystem && systemTypes.length > 0) {
       nodeQuery = nodeQuery.where("source_type", "not in", systemTypes);
     }
@@ -484,7 +486,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     if (denied) return denied;
     const typeFilter = c.req.query("type")?.split(",").filter(Boolean);
 
-    let query = db.selectFrom("entities").select("id").where("status", "=", "tentative");
+    let query = db.selectFrom("entities").select("id").where("status", "=", "tentative").where(whereLiveEntity());
     if (typeFilter && typeFilter.length > 0) {
       query = query.where("source_type", "in", typeFilter);
     }
@@ -847,7 +849,12 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   });
 
   async function entityExists(entityId: string): Promise<boolean> {
-    const row = await db.selectFrom("entities").select("id").where("id", "=", entityId).executeTakeFirst();
+    const row = await db
+      .selectFrom("entities")
+      .select("id")
+      .where("id", "=", entityId)
+      .where(whereLiveEntity())
+      .executeTakeFirst();
     return !!row;
   }
 

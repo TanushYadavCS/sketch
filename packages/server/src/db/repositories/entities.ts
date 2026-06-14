@@ -55,6 +55,14 @@ export function entityVisibilityPredicate(viewer: FileViewer, alias = "entities"
   )`;
 }
 
+export function whereLiveEntity(alias = "entities") {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(alias)) {
+    throw new Error(`whereLiveEntity: invalid table alias "${alias}"`);
+  }
+  const t = sql.raw(alias);
+  return sql<boolean>`(${t}.deleted_at IS NULL AND ${t}.merged_into_entity_id IS NULL)`;
+}
+
 export interface UpsertEntityData {
   name: string;
   sourceType: string;
@@ -206,6 +214,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectAll()
         .where("name", "=", data.name)
         .where("source_type", "=", data.sourceType)
+        .where(whereLiveEntity())
         .executeTakeFirst();
 
       if (existing) {
@@ -243,7 +252,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         })
         .execute();
 
-      return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
     },
 
     /**
@@ -253,7 +267,7 @@ export function createEntityRepository(db: Kysely<DB>) {
      * callers without access get null (which maps to 404).
      */
     async getEntity(id: string, viewer?: FileViewer) {
-      let query = db.selectFrom("entities").selectAll().where("id", "=", id);
+      let query = db.selectFrom("entities").selectAll().where("id", "=", id).where(whereLiveEntity());
       if (viewer) {
         query = query.where(entityVisibilityPredicate(viewer));
       }
@@ -262,15 +276,20 @@ export function createEntityRepository(db: Kysely<DB>) {
 
     async getEntities(ids: string[]) {
       if (ids.length === 0) return [];
-      return db.selectFrom("entities").selectAll().where("id", "in", ids).execute();
+      return db.selectFrom("entities").selectAll().where("id", "in", ids).where(whereLiveEntity()).execute();
     },
 
     async getEntitiesBySourceType(sourceType: string) {
-      return db.selectFrom("entities").selectAll().where("source_type", "=", sourceType).execute();
+      return db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", sourceType)
+        .where(whereLiveEntity())
+        .execute();
     },
 
     async getEntitiesByStatus(status: string) {
-      return db.selectFrom("entities").selectAll().where("status", "=", status).execute();
+      return db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity()).execute();
     },
 
     async updateEntity(
@@ -302,7 +321,12 @@ export function createEntityRepository(db: Kysely<DB>) {
     async appendAlias(entityId: string, aliasName: string) {
       const trimmed = aliasName.trim();
       if (!trimmed) return;
-      const row = await db.selectFrom("entities").select(["aliases"]).where("id", "=", entityId).executeTakeFirst();
+      const row = await db
+        .selectFrom("entities")
+        .select(["aliases"])
+        .where("id", "=", entityId)
+        .where(whereLiveEntity())
+        .executeTakeFirst();
       if (!row) return;
       const aliases: string[] = row.aliases ? JSON.parse(row.aliases) : [];
       if (aliases.some((a) => a.toLowerCase() === trimmed.toLowerCase())) return;
@@ -327,7 +351,12 @@ export function createEntityRepository(db: Kysely<DB>) {
     async attachEmailIfAbsent(entityId: string, email: string) {
       const trimmed = email.trim();
       if (!trimmed) return;
-      const row = await db.selectFrom("entities").select(["metadata"]).where("id", "=", entityId).executeTakeFirst();
+      const row = await db
+        .selectFrom("entities")
+        .select(["metadata"])
+        .where("id", "=", entityId)
+        .where(whereLiveEntity())
+        .executeTakeFirst();
       if (!row) return;
       const meta: Record<string, unknown> = row.metadata ? JSON.parse(row.metadata) : {};
       if (typeof meta.email === "string" && meta.email.length > 0) return;
@@ -384,7 +413,14 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirst();
 
       if (!ref) return null;
-      return db.selectFrom("entities").selectAll().where("id", "=", ref.entity_id).executeTakeFirst() ?? null;
+      return (
+        (await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", ref.entity_id)
+          .where(whereLiveEntity())
+          .executeTakeFirst()) ?? null
+      );
     },
 
     // ── Mentions ──
@@ -566,6 +602,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectAll("entities")
         .where("entity_contact_points.kind", "=", kind)
         .where("entity_contact_points.value", "=", value)
+        .where(whereLiveEntity())
         .limit(2)
         .execute();
       return rows.length === 1 ? rows[0] : null;
@@ -582,6 +619,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectAll("entities")
         .where("entity_contact_points.kind", "=", kind)
         .where("entity_contact_points.value", "=", value)
+        .where(whereLiveEntity())
         .orderBy("entities.id", "asc")
         .execute();
     },
@@ -595,11 +633,13 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where("entity_contact_points.kind", "=", "email")
         .where("entity_contact_points.value", "=", email)
         .where("entities.source_type", "=", "person")
+        .where(whereLiveEntity())
         .execute();
       const byMetadata = await db
         .selectFrom("entities")
         .selectAll()
         .where("source_type", "=", "person")
+        .where(whereLiveEntity())
         .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "=", email)
         .execute();
 
@@ -618,6 +658,7 @@ export function createEntityRepository(db: Kysely<DB>) {
       let q = db
         .selectFrom("entities")
         .selectAll()
+        .where(whereLiveEntity())
         .where((eb) => eb.or([eb("name", "like", pattern), eb("aliases", "like", pattern)]));
 
       if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
@@ -661,6 +702,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectFrom("entities")
         .selectAll()
         .where("status", "!=", "archived")
+        .where(whereLiveEntity())
         .orderBy("hotness", "desc")
         .limit(limit)
         .execute();
@@ -699,7 +741,12 @@ export function createEntityRepository(db: Kysely<DB>) {
     },
 
     async recomputeAllHotness() {
-      const entities = await db.selectFrom("entities").select("id").where("status", "!=", "archived").execute();
+      const entities = await db
+        .selectFrom("entities")
+        .select("id")
+        .where("status", "!=", "archived")
+        .where(whereLiveEntity())
+        .execute();
       for (const entity of entities) {
         await this.updateHotness(entity.id);
       }
@@ -809,6 +856,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectAll("entities")
         .where("entity_source_refs.source", "=", data.source)
         .where("entity_source_refs.source_id", "=", data.sourceId)
+        .where(whereLiveEntity())
         .executeTakeFirst();
 
       if (existing) {
@@ -874,7 +922,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         })
         .execute();
 
-      return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
     },
 
     /**
@@ -892,6 +945,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectFrom("entities")
         .selectAll()
         .where("source_type", "=", data.sourceType)
+        .where(whereLiveEntity())
         .execute();
       const match = candidates.find((c) => normalizeName(c.name) === targetKey);
 
@@ -907,7 +961,12 @@ export function createEntityRepository(db: Kysely<DB>) {
           })
           .where("id", "=", match.id)
           .execute();
-        const fresh = await db.selectFrom("entities").selectAll().where("id", "=", match.id).executeTakeFirstOrThrow();
+        const fresh = await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", match.id)
+          .where(whereLiveEntity())
+          .executeTakeFirstOrThrow();
         return { entity: fresh, created: false };
       }
 
@@ -930,7 +989,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         })
         .execute();
 
-      const entity = await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const entity = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
       return { entity, created: true };
     },
 
@@ -946,6 +1010,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             "=",
             data.email,
           )
+          .where(whereLiveEntity())
           .executeTakeFirst();
 
         if (byEmail) {
@@ -1015,6 +1080,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .selectAll()
         .where("source_type", "=", "person")
         .where("name", "=", data.name)
+        .where(whereLiveEntity())
         .executeTakeFirst();
 
       if (byName) {
@@ -1103,7 +1169,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         })
         .execute();
 
-      return await db.selectFrom("entities").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
     },
 
     // ── Archive / Cleanup ──

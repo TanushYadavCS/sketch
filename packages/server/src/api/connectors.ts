@@ -39,7 +39,7 @@ import {
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import { createConnectorRepository } from "../db/repositories/connectors";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
@@ -624,6 +624,7 @@ export function connectorRoutes(
         "entity_mentions.context_snippet",
       ])
       .where("entity_mentions.indexed_file_id", "=", fileId)
+      .where(whereLiveEntity())
       .execute();
 
     // Dedupe entities (a file may mention same entity in multiple chunks)
