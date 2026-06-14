@@ -99,6 +99,7 @@ import * as m096 from "./migrations/096-linear-project-entity-seeding-cleanup";
 import * as m097 from "./migrations/097-clickup-project-entity-seeding-cleanup";
 import * as m098 from "./migrations/098-entity-merge-ledger";
 import * as m099 from "./migrations/099-review-queue-seed-handle";
+import * as m100 from "./migrations/100-entity-project-bindings";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -202,6 +203,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "097-clickup-project-entity-seeding-cleanup": m097,
           "098-entity-merge-ledger": m098,
           "099-review-queue-seed-handle": m099,
+          "100-entity-project-bindings": m100,
         };
       },
     },

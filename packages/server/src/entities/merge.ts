@@ -8,6 +8,7 @@ import type {
   EntityContactPointsTable,
   EntityDomainsTable,
   EntityMentionsTable,
+  EntityProjectBindingsTable,
   EntityRelationshipsTable,
   EntityReviewQueueTable,
   EntityShareEmailsTable,
@@ -22,6 +23,7 @@ type EntityCandidate = Selectable<EntityCandidatesTable>;
 type ReviewQueueRow = Selectable<EntityReviewQueueTable>;
 type ShareEmail = Selectable<EntityShareEmailsTable>;
 type Domain = Selectable<EntityDomainsTable>;
+type ProjectBinding = Selectable<EntityProjectBindingsTable>;
 
 export type EntityMergeMove =
   | { table: string; rowId: string; repoint: Record<string, { from: string | null; to: string | null }> }
@@ -252,7 +254,7 @@ async function repointSourceRefs(
 async function repointEntityScopedRows<Row extends { id: string; entity_id: string }>(
   db: Kysely<DB>,
   opts: {
-    table: "entity_mentions" | "entity_contact_points" | "entity_alias_rejections";
+    table: "entity_mentions" | "entity_contact_points" | "entity_alias_rejections" | "entity_project_bindings";
     loserId: string;
     survivorId: string;
     rows: Row[];
@@ -409,6 +411,37 @@ async function repointDomains(
       repoint: { entity_id: { from: loserId, to: survivorId } },
     });
   }
+}
+
+async function findProjectBindingCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: { source: string; container_id: string },
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_project_bindings")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("source", "=", row.source)
+    .where("container_id", "=", row.container_id)
+    .executeTakeFirst();
+}
+
+async function repointProjectBindings(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db.selectFrom("entity_project_bindings").selectAll().where("entity_id", "=", loserId).execute();
+  await repointEntityScopedRows<ProjectBinding>(db, {
+    table: "entity_project_bindings",
+    loserId,
+    survivorId,
+    rows,
+    moves,
+    findCollision: (row) => findProjectBindingCollision(db, survivorId, row),
+  });
 }
 
 async function moveRelationshipEvidence(
@@ -596,6 +629,7 @@ async function applyMergeMoves(
   await repointShareEmails(db, loserId, survivorId, moves);
   await repointAliasRejections(db, loserId, survivorId, moves);
   await repointDomains(db, loserId, survivorId, moves);
+  await repointProjectBindings(db, loserId, survivorId, moves);
   await repointCandidates(db, loserId, survivorId, moves);
   await repointReviewQueue(db, loserId, survivorId, moves);
 }
@@ -798,6 +832,14 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
   if (move.table === "entity_alias_rejections" && updates.entity_id) {
     await db
       .updateTable("entity_alias_rejections")
+      .set({ entity_id: updates.entity_id })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "entity_project_bindings" && updates.entity_id) {
+    await db
+      .updateTable("entity_project_bindings")
       .set({ entity_id: updates.entity_id })
       .where("id", "=", move.rowId)
       .execute();

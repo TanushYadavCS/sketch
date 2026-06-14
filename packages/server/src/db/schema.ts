@@ -676,6 +676,18 @@ export interface EntityDomainsTable {
   created_at: Generated<string>;
 }
 
+export interface EntityProjectBindingsTable {
+  id: string;
+  entity_id: string;
+  source: string;
+  container_id: string;
+  container_kind: string;
+  label: string | null;
+  connector_config_id: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityRelationshipsTable {
   id: string;
   source_entity_id: string;
@@ -834,6 +846,7 @@ export interface DB {
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
   entity_domains: EntityDomainsTable;
+  entity_project_bindings: EntityProjectBindingsTable;
   entity_relationships: EntityRelationshipsTable;
   entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }
