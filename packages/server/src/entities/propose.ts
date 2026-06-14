@@ -27,7 +27,7 @@ import type { EntitiesTable } from "../db/schema";
 export type Entity = Selectable<EntitiesTable>;
 
 export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal";
-export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous";
+export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous" | "birth-gated";
 
 export interface ProposeInput {
   name: string;
@@ -51,6 +51,14 @@ export interface ProposeInput {
   evidenceDomain?: string | null;
   precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
   skipFuzzy?: boolean;
+  /**
+   * Birth gate: when set, a proposal that would otherwise CREATE a brand-new
+   * entity (no exact/fuzzy match) is instead routed to the review queue. Used
+   * for `project` relation endpoints so a single extracted relation can no
+   * longer mint a project — it must be human-confirmed. Linking to an existing
+   * entity and queuing an ambiguous match are unaffected.
+   */
+  queueInsteadOfCreate?: boolean;
 }
 
 export type ProposeResult =
@@ -472,6 +480,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.skipFuzzy) {
+    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
   }
@@ -492,6 +501,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 6) Decide.
   if (ranked.length === 0) {
+    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
   }

@@ -234,6 +234,7 @@ async function materializeRelationEndpoint(
       aliases: endpoint.variations,
       metadata: { origin: "ai", relationEndpoint: true },
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+      queueInsteadOfCreate: endpoint.type === "project",
     },
   );
   if (result.kind === "queued") {

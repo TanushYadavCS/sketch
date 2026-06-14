@@ -222,7 +222,7 @@ Extract entities that a business team would want to track and reference across d
 - **People**: named individuals (employees, clients, contacts)
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
-- **Projects**: named umbrella engagements or programs with a clear scope (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration")
+- **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
 - **Teams**: named organizational teams (e.g., "QC team", "Content Team")
 
 DO NOT extract:
@@ -238,6 +238,9 @@ DO NOT extract:
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
 - Meeting titles or calendar event names — anything containing "<>", "Standup", "Sync", "Weekly", "Daily", or "1:1". These are calendar event names, not projects. Extract the companies and people referenced by the meeting instead.
 - Document, note, or artifact titles as projects (e.g. names ending in "note", "chart", "doc", "spec", "deck"). These are filenames, not engagements.
+- Issue or ticket identifiers and keys — "SKE-123", "ECR-01", "ABC-1234", or a bare "#192". These are individual work items, not projects; extract the project or product they belong to instead, never the ticket key (even when the key is followed by a title, e.g. "SKE-120: Provenance columns").
+- Pull requests, commits, or branches — "PR #192", "Sketch PR #45", commit SHAs, branch names. These are code artifacts, not engagements.
+- A single feature, tab, screen, or module of a product as a project — "Files", "Workflows", "Analytics", "Push Notifications", "Outlook Integration". These are parts of a product, not umbrella engagements with their own scope.
 - Generic feature descriptions or internal component names as products (e.g. "responder functionality", "conversational model", "X service", "X module", "X pipeline"). Products must be a branded, proper-noun name your org or a client publicly markets — not the internal name of a component you are building.
 - Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns
 - Task fragments or implementation notes with no stable named project/product parent, such as "Vedant's Project Progress", "67 SQL queries on the new database", "limitation note", "UI development", "backend work", or "new database"

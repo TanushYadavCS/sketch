@@ -651,8 +651,8 @@ describe("recreateEntityGraph", () => {
       relation: "leads",
       subjectName: "Sarah Chen",
       subjectSource: "llm_extraction",
-      subjectSourceId: "file-1:hash-1:llm-extraction-v2:leads:Sarah Chen:Project Atlas",
-      contextSnippet: "Sarah Chen leads Project Atlas.",
+      subjectSourceId: "file-1:hash-1:llm-extraction-v2:leads:Sarah Chen:Atlas",
+      contextSnippet: "Sarah Chen leads Atlas.",
       raw: {
         contentHash: "hash-1",
         promptVersion: "llm-extraction-v2",
@@ -661,9 +661,9 @@ describe("recreateEntityGraph", () => {
         confidence: 0.92,
         sourceConfidence: 0.9,
         targetConfidence: 0.9,
-        context: "Sarah Chen leads Project Atlas.",
+        context: "Sarah Chen leads Atlas.",
         source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
-        target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },
+        target: { name: "Atlas", type: "product", variations: [] },
       },
     });
 
@@ -691,7 +691,7 @@ describe("recreateEntityGraph", () => {
     expect(relationships).toContainEqual({
       relationship_type: "leads",
       source_name: "Sarah Chen",
-      target_name: "Project Atlas",
+      target_name: "Atlas",
     });
   });
 
