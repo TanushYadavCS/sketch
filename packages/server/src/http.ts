@@ -23,6 +23,7 @@ import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
+import { createProjectRoutes } from "./api/projects";
 import { providerIdentityRoutes } from "./api/provider-identities";
 import { scheduledTaskRoutes } from "./api/scheduled-tasks";
 import { settingsRoutes } from "./api/settings";
@@ -370,6 +371,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
+  app.route("/api/projects", createProjectRoutes(db));
   app.route("/api/entity-review", entityReviewRoutes(db));
   app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
   mountPublicMcpServer({

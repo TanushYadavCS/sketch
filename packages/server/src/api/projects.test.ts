@@ -1,0 +1,270 @@
+import type { Kysely } from "kysely";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { hashPassword } from "../auth/password";
+import { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
+import type { DB } from "../db/schema";
+import { createApp } from "../http";
+import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+
+const PASSWORD = "testpassword123";
+const ADMIN_EMAIL = "admin@test.com";
+const MEMBER_EMAIL = "member@test.com";
+const NOW = "2026-06-14T00:00:00.000Z";
+
+type ProjectPayload = {
+  project: {
+    id: string;
+    name: string;
+    origin: "derived" | "defined";
+    status: string;
+    sourceCount: number;
+    subProjectCount: number;
+  };
+};
+
+async function seedUsers(db: Kysely<DB>) {
+  const settings = createSettingsRepository(db);
+  const users = createUserRepository(db);
+  const passwordHash = await hashPassword(PASSWORD);
+  await settings.create();
+  await users.create({
+    name: "admin",
+    email: ADMIN_EMAIL,
+    emailVerified: true,
+    passwordHash,
+    authRole: "admin",
+  });
+  await users.create({
+    name: "member",
+    email: MEMBER_EMAIL,
+    emailVerified: true,
+    passwordHash,
+    authRole: "member",
+  });
+  await settings.update({ onboardingCompletedAt: new Date().toISOString() });
+}
+
+async function login(app: ReturnType<typeof createApp>, email: string): Promise<string> {
+  const res = await app.request("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password: PASSWORD }),
+  });
+  return res.headers.get("set-cookie") ?? "";
+}
+
+async function userIdByEmail(db: Kysely<DB>, email: string): Promise<string> {
+  const user = await db.selectFrom("users").select("id").where("email", "=", email).executeTakeFirstOrThrow();
+  return user.id;
+}
+
+async function seedEntity(db: Kysely<DB>, id: string, name: string, sourceType = "project") {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: sourceType,
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: NOW,
+      updated_at: NOW,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+}
+
+async function seedOrigin(db: Kysely<DB>, entityId: string, source: string, sourceId: string) {
+  await db
+    .insertInto("entity_source_refs")
+    .values({
+      id: `ref-${entityId}-${sourceId}`,
+      entity_id: entityId,
+      source,
+      source_id: sourceId,
+      source_url: null,
+      last_seen_at: NOW,
+    })
+    .execute();
+}
+
+async function seedBinding(db: Kysely<DB>, entityId: string, createdBy: string) {
+  await db
+    .insertInto("entity_project_bindings")
+    .values({
+      id: `binding-${entityId}`,
+      entity_id: entityId,
+      source: "linear",
+      container_id: "team-1",
+      container_kind: "team",
+      label: "Team 1",
+      connector_config_id: null,
+      created_by: createdBy,
+    })
+    .execute();
+}
+
+async function seedConnector(db: Kysely<DB>, userId: string) {
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: "connector-1",
+      connector_type: "linear",
+      auth_type: "api_key",
+      credentials: "{}",
+      scope_config: "{}",
+      created_by: userId,
+    })
+    .execute();
+}
+
+async function seedFileWithParentFact(db: Kysely<DB>, fileId: string, containerId: string) {
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: fileId,
+      connector_config_id: "connector-1",
+      provider_file_id: `provider-${fileId}`,
+      file_name: `${fileId}.md`,
+      file_type: "document",
+      content_category: "document",
+      source: "linear",
+      provider_url: `https://example.com/${fileId}`,
+      synced_at: NOW,
+      is_archived: 0,
+    })
+    .execute();
+  await db
+    .insertInto("indexed_file_facts")
+    .values({
+      id: `fact-${fileId}`,
+      indexed_file_id: fileId,
+      connector_config_id: "connector-1",
+      source: "linear",
+      fact_type: "parent_entity",
+      relation: "mentioned",
+      subject_source: "linear",
+      subject_source_id: containerId,
+      fact_key: `parent-${fileId}-${containerId}`,
+    })
+    .execute();
+}
+
+async function seedPartOf(db: Kysely<DB>, childId: string, parentId: string) {
+  await db
+    .insertInto("entity_relationships")
+    .values({
+      id: `rel-${childId}-${parentId}`,
+      source_entity_id: childId,
+      target_entity_id: parentId,
+      relationship_type: "part_of",
+      confidence: "CONFIRMED",
+      confidence_score: 1,
+      source: "user_grouping",
+      valid_from: "",
+      valid_to: null,
+      created_at: NOW,
+      updated_at: NOW,
+    })
+    .execute();
+}
+
+describe("project routes", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+  let memberCookie: string;
+  let adminId: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    app = createApp(db, createTestConfig(), { logger: createTestLogger() });
+    adminCookie = await login(app, ADMIN_EMAIL);
+    memberCookie = await login(app, MEMBER_EMAIL);
+    adminId = await userIdByEmail(db, ADMIN_EMAIL);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("lists confirmed projects with counts and origin", async () => {
+    await seedEntity(db, "derived-project", "Alpha Project");
+    await seedOrigin(db, "derived-project", "linear", "LP1");
+    await seedBinding(db, "derived-project", adminId);
+    await seedEntity(db, "defined-project", "Beta Project");
+    await seedEntity(db, "company", "Company", "company");
+
+    const res = await app.request("/api/projects", { headers: { Cookie: adminCookie } });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { projects: ProjectPayload["project"][] };
+    expect(body.projects).toEqual([
+      expect.objectContaining({
+        id: "derived-project",
+        name: "Alpha Project",
+        origin: "derived",
+        sourceCount: expect.any(Number),
+        subProjectCount: 0,
+      }),
+      expect.objectContaining({
+        id: "defined-project",
+        name: "Beta Project",
+        origin: "defined",
+        sourceCount: 0,
+        subProjectCount: 0,
+      }),
+    ]);
+    expect(body.projects.find((p) => p.id === "derived-project")?.sourceCount).toBeGreaterThanOrEqual(1);
+    expect(body.projects.map((p) => p.id)).not.toContain("company");
+  });
+
+  it("returns project detail with sources, members, and sub-projects", async () => {
+    await seedConnector(db, adminId);
+    await seedEntity(db, "parent-project", "Parent Project");
+    await seedEntity(db, "child-project", "Child Project");
+    await seedOrigin(db, "parent-project", "linear", "LP1");
+    await seedFileWithParentFact(db, "file-a", "LP1");
+    await seedPartOf(db, "child-project", "parent-project");
+
+    const res = await app.request("/api/projects/parent-project", { headers: { Cookie: adminCookie } });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProjectPayload & {
+      sources: { source: string; containerId: string }[];
+      members: { indexedFileId: string; fileName: string }[];
+      truncated: boolean;
+      subProjects: { id: string; name: string }[];
+    };
+    expect(body.project).toEqual(
+      expect.objectContaining({
+        id: "parent-project",
+        origin: "derived",
+        sourceCount: 1,
+        subProjectCount: 1,
+      }),
+    );
+    expect(body.sources).toEqual(
+      expect.arrayContaining([expect.objectContaining({ source: "linear", containerId: "LP1" })]),
+    );
+    expect(body.members).toEqual(expect.arrayContaining([expect.objectContaining({ indexedFileId: "file-a" })]));
+    expect(body.subProjects).toEqual([expect.objectContaining({ id: "child-project", name: "Child Project" })]);
+
+    const missingRes = await app.request("/api/projects/unknown-project", { headers: { Cookie: adminCookie } });
+    expect(missingRes.status).toBe(404);
+    expect(((await missingRes.json()) as { error: { code: string } }).error.code).toBe("PROJECT_NOT_FOUND");
+  });
+
+  it("denies members", async () => {
+    const res = await app.request("/api/projects", { headers: { Cookie: memberCookie } });
+
+    expect(res.status).toBe(403);
+  });
+});
