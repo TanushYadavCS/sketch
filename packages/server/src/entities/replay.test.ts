@@ -76,6 +76,8 @@ async function seedRawCorpus(db: Kysely<DB>) {
 
   // Structural seed without a file (onEntitySeed payload — e.g. a ClickUp space).
   await factRepo.upsertFact({
+    connectorConfigId: CONNECTOR_ID,
+    createdByUserId: TEST_USER_ID,
     source: "clickup",
     factType: "structural_seed",
     relation: "seeded",
@@ -316,7 +318,16 @@ describe("replaySourceFacts", () => {
     const names = entities.map((e) => e.name).sort();
     expect(names).toContain("Saurabh CanvasX");
     expect(names).toContain("Hari Kalra");
-    expect(names).toContain("Engineering Space");
+    expect(names).not.toContain("Engineering Space");
+
+    const review = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(review).toMatchObject({
+      proposed_name: "Engineering Space",
+      entity_type: "project",
+      seed_source: "clickup",
+      seed_source_id: "space-eng",
+      status: "pending",
+    });
 
     const mentions = await db.selectFrom("entity_mentions").selectAll().execute();
     const attendedMention = mentions.find((m) => m.relation === "attended");
@@ -328,11 +339,11 @@ describe("replaySourceFacts", () => {
     expect(assignedMention?.confidence).toBe("EXTRACTED");
 
     const mentionedMention = mentions.find((m) => m.relation === "mentioned");
-    expect(mentionedMention?.source).toBe("clickup_parent_entity");
+    expect(mentionedMention).toBeUndefined();
 
     const sourceRefs = await db.selectFrom("entity_source_refs").selectAll().execute();
     const refKeys = sourceRefs.map((r) => `${r.source}:${r.source_id}`);
-    expect(refKeys).toContain("clickup:space-eng");
+    expect(refKeys).not.toContain("clickup:space-eng");
     expect(refKeys).toContain("fireflies:meeting-1:saurabh@canvasx.ai");
   });
 
