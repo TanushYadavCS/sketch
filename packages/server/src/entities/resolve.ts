@@ -41,6 +41,7 @@ import {
   materializeFromFact,
   shouldMarkMaterialized,
 } from "./materialize";
+import { mergeEntitiesInTransaction } from "./merge";
 
 type Entity = Selectable<EntitiesTable>;
 
@@ -735,7 +736,11 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         );
       }
       if (stales.length === 1) {
-        await mergeStaleEntityPortable(trxCtx, stales[0], target);
+        await mergeEntitiesInTransaction(trxCtx.db, {
+          survivorId: target.id,
+          loserId: stales[0].id,
+          userId: trxCtx.userId,
+        });
         mergedStaleEntityId = stales[0].id;
       }
     }

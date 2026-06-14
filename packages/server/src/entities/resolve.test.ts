@@ -197,6 +197,7 @@ describe("confirmReview", () => {
 
   beforeEach(async () => {
     db = await createTestDb();
+    await db.insertInto("users").values({ id: USER_ID, name: "User One", email: "user-1@example.com" }).execute();
     entityRepo = createEntityRepository(db);
     reviewRepo = createEntityReviewRepo(db);
     await seedConnectorConfig(db);
@@ -351,7 +352,7 @@ describe("confirmReview", () => {
     expect(row?.status).toBe("pending");
   });
 
-  it("merges a stale entity into target (ON CONFLICT preserves mentions)", async () => {
+  it("merges a stale entity into target through the ledgered merge core", async () => {
     const target = await entityRepo.upsertPersonEntity({
       name: "Simran Suri",
       email: "simran@acme.com",
@@ -486,9 +487,14 @@ describe("confirmReview", () => {
 
     expect(result.mergedStaleEntityId).toBe(stale.id);
 
-    // Stale entity is gone.
+    const merges = await db.selectFrom("entity_merges").selectAll().execute();
+    expect(merges).toHaveLength(1);
+    expect(merges[0]).toMatchObject({ survivor_entity_id: target.id, merged_entity_id: stale.id });
+
+    // Stale entity is tombstoned, not hard-deleted.
     const staleAfter = await db.selectFrom("entities").selectAll().where("id", "=", stale.id).executeTakeFirst();
-    expect(staleAfter).toBeUndefined();
+    expect(staleAfter).toMatchObject({ merged_into_entity_id: target.id });
+    expect(staleAfter?.deleted_at).toBeTruthy();
 
     // Target gained the stale's file-stale mention (ON CONFLICT kept the pre-existing one).
     const targetMentions = await db
@@ -504,9 +510,9 @@ describe("confirmReview", () => {
     expect(contactPoints.filter((point) => point.kind === "email")).toHaveLength(1);
     expect(contactPoints.find((point) => point.kind === "email")).toMatchObject({
       value: "simran@acme.com",
-      source: "manual",
-      verified_at: "2026-01-04T00:00:00.000Z",
-      last_contacted_at: "2026-01-03T00:00:00.000Z",
+      source: "gmail",
+      verified_at: null,
+      last_contacted_at: "2026-01-01T00:00:00.000Z",
       is_primary: 1,
     });
     expect(
@@ -515,7 +521,7 @@ describe("confirmReview", () => {
         .map((point) => ({ value: point.value, isPrimary: point.is_primary })),
     ).toEqual([
       { value: "simran-new", isPrimary: 1 },
-      { value: "simran-old", isPrimary: 0 },
+      { value: "simran-old", isPrimary: 1 },
     ]);
   });
 

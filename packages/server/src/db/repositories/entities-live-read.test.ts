@@ -165,7 +165,7 @@ describe("entity live read paths", () => {
     );
     await expect(repo.getEntityBySourceRef("test", "live-person")).resolves.toMatchObject({ id: "live-person" });
     await expect(repo.getEntityBySourceRef("test", "deleted-person")).resolves.toBeNull();
-    await expect(repo.getEntityBySourceRef("test", "merged-person")).resolves.toBeNull();
+    await expect(repo.getEntityBySourceRef("test", "merged-person")).resolves.toMatchObject({ id: "live-person" });
     await expect(repo.getEntityByContactPoint("email", "shared@example.com")).resolves.toMatchObject({
       id: "live-person",
     });

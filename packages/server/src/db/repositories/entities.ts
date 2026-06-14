@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
@@ -303,10 +304,11 @@ export function createEntityRepository(db: Kysely<DB>) {
         hotness: number;
       }>,
     ) {
+      const entityId = await resolveLiveEntityId(db, id);
       await db
         .updateTable("entities")
         .set({ ...updates, updated_at: new Date().toISOString() })
-        .where("id", "=", id)
+        .where("id", "=", entityId)
         .execute();
     },
 
@@ -319,12 +321,13 @@ export function createEntityRepository(db: Kysely<DB>) {
      * mutate, stringify, write. Touches `updated_at`.
      */
     async appendAlias(entityId: string, aliasName: string) {
+      const targetEntityId = await resolveLiveEntityId(db, entityId);
       const trimmed = aliasName.trim();
       if (!trimmed) return;
       const row = await db
         .selectFrom("entities")
         .select(["aliases"])
-        .where("id", "=", entityId)
+        .where("id", "=", targetEntityId)
         .where(whereLiveEntity())
         .executeTakeFirst();
       if (!row) return;
@@ -334,7 +337,7 @@ export function createEntityRepository(db: Kysely<DB>) {
       await db
         .updateTable("entities")
         .set({ aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
-        .where("id", "=", entityId)
+        .where("id", "=", targetEntityId)
         .execute();
     },
 
@@ -349,12 +352,13 @@ export function createEntityRepository(db: Kysely<DB>) {
      * Postgres.
      */
     async attachEmailIfAbsent(entityId: string, email: string) {
+      const targetEntityId = await resolveLiveEntityId(db, entityId);
       const trimmed = email.trim();
       if (!trimmed) return;
       const row = await db
         .selectFrom("entities")
         .select(["metadata"])
-        .where("id", "=", entityId)
+        .where("id", "=", targetEntityId)
         .where(whereLiveEntity())
         .executeTakeFirst();
       if (!row) return;
@@ -364,13 +368,14 @@ export function createEntityRepository(db: Kysely<DB>) {
       await db
         .updateTable("entities")
         .set({ metadata: JSON.stringify(meta), updated_at: new Date().toISOString() })
-        .where("id", "=", entityId)
+        .where("id", "=", targetEntityId)
         .execute();
     },
 
     // ── Source Refs ──
 
     async upsertSourceRef(data: { entityId: string; source: string; sourceId: string; sourceUrl?: string }) {
+      const entityId = await resolveLiveEntityId(db, data.entityId);
       const existing = await db
         .selectFrom("entity_source_refs")
         .selectAll()
@@ -382,7 +387,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         await db
           .updateTable("entity_source_refs")
           .set({
-            entity_id: data.entityId,
+            entity_id: entityId,
             source_url: data.sourceUrl ?? existing.source_url,
             last_seen_at: new Date().toISOString(),
           })
@@ -395,7 +400,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         .insertInto("entity_source_refs")
         .values({
           id: randomUUID(),
-          entity_id: data.entityId,
+          entity_id: entityId,
           source: data.source,
           source_id: data.sourceId,
           source_url: data.sourceUrl ?? null,
@@ -405,30 +410,18 @@ export function createEntityRepository(db: Kysely<DB>) {
     },
 
     async getEntityBySourceRef(source: string, sourceId: string) {
-      const ref = await db
-        .selectFrom("entity_source_refs")
-        .select("entity_id")
-        .where("source", "=", source)
-        .where("source_id", "=", sourceId)
-        .executeTakeFirst();
-
-      if (!ref) return null;
-      return (
-        (await db
-          .selectFrom("entities")
-          .selectAll()
-          .where("id", "=", ref.entity_id)
-          .where(whereLiveEntity())
-          .executeTakeFirst()) ?? null
-      );
+      const entityId = await resolveSourceRefToLiveEntityId(db, source, sourceId);
+      if (!entityId) return null;
+      return resolveLiveEntity(db, entityId);
     },
 
     // ── Mentions ──
 
     async createMention(data: CreateMentionData) {
+      const entityId = await resolveLiveEntityId(db, data.entityId);
       let insert = db.insertInto("entity_mentions").values({
         id: randomUUID(),
-        entity_id: data.entityId,
+        entity_id: entityId,
         indexed_file_id: data.indexedFileId,
         chunk_index: data.chunkIndex ?? null,
         context_snippet: data.contextSnippet ?? null,
@@ -516,6 +509,7 @@ export function createEntityRepository(db: Kysely<DB>) {
      * normalization errors; only E.164-style values are accepted.
      */
     async upsertContactPoint(data: UpsertContactPointData): Promise<Selectable<EntityContactPointsTable>> {
+      const entityId = await resolveLiveEntityId(db, data.entityId);
       const value = normalizeContactPointValue(data.kind, data.value);
       const now = new Date().toISOString();
 
@@ -524,7 +518,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           await trx
             .updateTable("entity_contact_points")
             .set({ is_primary: 0, updated_at: now })
-            .where("entity_id", "=", data.entityId)
+            .where("entity_id", "=", entityId)
             .where("kind", "=", data.kind)
             .execute();
         }
@@ -533,7 +527,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           .insertInto("entity_contact_points")
           .values({
             id: randomUUID(),
-            entity_id: data.entityId,
+            entity_id: entityId,
             kind: data.kind,
             value,
             display_value: data.displayValue ?? null,
@@ -576,7 +570,7 @@ export function createEntityRepository(db: Kysely<DB>) {
       return db
         .selectFrom("entity_contact_points")
         .selectAll()
-        .where("entity_id", "=", data.entityId)
+        .where("entity_id", "=", entityId)
         .where("kind", "=", data.kind)
         .where("value", "=", value)
         .executeTakeFirstOrThrow();
@@ -850,14 +844,15 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Seeding Helpers ──
 
     async upsertEntityFromTool(data: UpsertEntityFromToolData) {
-      const existing = await db
-        .selectFrom("entity_source_refs")
-        .innerJoin("entities", "entities.id", "entity_source_refs.entity_id")
-        .selectAll("entities")
-        .where("entity_source_refs.source", "=", data.source)
-        .where("entity_source_refs.source_id", "=", data.sourceId)
-        .where(whereLiveEntity())
-        .executeTakeFirst();
+      const existingRefEntityId = await resolveSourceRefToLiveEntityId(db, data.source, data.sourceId);
+      const existing = existingRefEntityId
+        ? await db
+            .selectFrom("entities")
+            .selectAll()
+            .where("id", "=", existingRefEntityId)
+            .where(whereLiveEntity())
+            .executeTakeFirst()
+        : undefined;
 
       if (existing) {
         // If name changed, add old name as alias
@@ -881,6 +876,7 @@ export function createEntityRepository(db: Kysely<DB>) {
         await db
           .updateTable("entity_source_refs")
           .set({
+            entity_id: existing.id,
             source_url: data.sourceUrl ?? null,
             last_seen_at: new Date().toISOString(),
           })
@@ -999,6 +995,26 @@ export function createEntityRepository(db: Kysely<DB>) {
     },
 
     async upsertPersonEntity(data: UpsertPersonEntityData) {
+      const sourceRefEntityId = await resolveSourceRefToLiveEntityId(db, data.source, data.sourceId);
+      if (sourceRefEntityId) {
+        const bySourceRef = await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", sourceRefEntityId)
+          .where("source_type", "=", "person")
+          .where(whereLiveEntity())
+          .executeTakeFirst();
+        if (bySourceRef) {
+          await db
+            .updateTable("entity_source_refs")
+            .set({ entity_id: bySourceRef.id, last_seen_at: new Date().toISOString() })
+            .where("source", "=", data.source)
+            .where("source_id", "=", data.sourceId)
+            .execute();
+          return bySourceRef;
+        }
+      }
+
       // Match by email first (most reliable dedup for people)
       if (data.email) {
         const byEmail = await db
@@ -1049,12 +1065,25 @@ export function createEntityRepository(db: Kysely<DB>) {
           }
 
           // Ensure source ref exists
-          const existingRef = await db
-            .selectFrom("entity_source_refs")
-            .select("id")
-            .where("source", "=", data.source)
-            .where("source_id", "=", data.sourceId)
-            .executeTakeFirst();
+          const existingRefEntityId = await resolveSourceRefToLiveEntityId(db, data.source, data.sourceId);
+
+          if (existingRefEntityId) {
+            await db
+              .updateTable("entity_source_refs")
+              .set({ entity_id: byEmail.id, last_seen_at: new Date().toISOString() })
+              .where("source", "=", data.source)
+              .where("source_id", "=", data.sourceId)
+              .execute();
+          }
+
+          const existingRef = existingRefEntityId
+            ? { id: existingRefEntityId }
+            : await db
+                .selectFrom("entity_source_refs")
+                .select("id")
+                .where("source", "=", data.source)
+                .where("source_id", "=", data.sourceId)
+                .executeTakeFirst();
 
           if (!existingRef) {
             await db
@@ -1110,12 +1139,25 @@ export function createEntityRepository(db: Kysely<DB>) {
           }
         }
 
-        const existingRef = await db
-          .selectFrom("entity_source_refs")
-          .select("id")
-          .where("source", "=", data.source)
-          .where("source_id", "=", data.sourceId)
-          .executeTakeFirst();
+        const existingRefEntityId = await resolveSourceRefToLiveEntityId(db, data.source, data.sourceId);
+
+        if (existingRefEntityId) {
+          await db
+            .updateTable("entity_source_refs")
+            .set({ entity_id: byName.id, last_seen_at: new Date().toISOString() })
+            .where("source", "=", data.source)
+            .where("source_id", "=", data.sourceId)
+            .execute();
+        }
+
+        const existingRef = existingRefEntityId
+          ? { id: existingRefEntityId }
+          : await db
+              .selectFrom("entity_source_refs")
+              .select("id")
+              .where("source", "=", data.source)
+              .where("source_id", "=", data.sourceId)
+              .executeTakeFirst();
 
         if (!existingRef) {
           await db
