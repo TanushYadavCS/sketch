@@ -561,6 +561,21 @@ export interface EntityMember {
   manual: boolean;
 }
 
+/**
+ * A confirmed project entity for the Projects index. `origin` distinguishes a
+ * project born from a connector container (`derived`) from one a human defined
+ * (`defined`). `sourceCount` is the effective bindings resolved up the spine;
+ * `subProjectCount` is the grouped children.
+ */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  origin: "derived" | "defined";
+  status: string;
+  sourceCount: number;
+  subProjectCount: number;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1994,6 +2009,11 @@ export const api = {
         entities: EntityListItem[];
         total: number;
       }>(`/api/entities${qs ? `?${qs}` : ""}`);
+    },
+  },
+  projects: {
+    list() {
+      return request<{ projects: ProjectSummary[] }>("/api/projects");
     },
   },
   entityReview: {

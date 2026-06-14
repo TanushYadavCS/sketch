@@ -294,6 +294,10 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/projects", () => {
+    return HttpResponse.json({ projects: [] });
+  }),
+
   http.get("/api/settings/identity", () => {
     return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
   }),

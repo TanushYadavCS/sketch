@@ -8,6 +8,7 @@ import { homeRoute } from "./routes/home";
 import { indexRoute } from "./routes/index";
 import { loginRoute } from "./routes/login";
 import { onboardingRoute } from "./routes/onboarding";
+import { projectsRoute } from "./routes/projects";
 import { reviewEntitiesRoute } from "./routes/review-entities";
 import { rootRoute } from "./routes/root";
 import { scheduledTasksRoute } from "./routes/scheduled-tasks";
@@ -29,6 +30,7 @@ const routeTree = rootRoute.addChildren([
     scheduledTasksRoute,
     skillsRoute,
     filesRoute,
+    projectsRoute,
     reviewEntitiesRoute,
     connectionsRoute.addChildren([connectionsCallbackRoute]),
     usageRoute,
