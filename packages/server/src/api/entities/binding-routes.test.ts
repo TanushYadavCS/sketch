@@ -362,3 +362,88 @@ describe("entity member routes", () => {
     expect((await res.json()).error.code).toBe("NOT_A_PROJECT");
   });
 });
+
+describe("entity member routes", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+  let memberCookie: string;
+  let adminId: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    app = createApp(db, createTestConfig(), { logger: createTestLogger() });
+    adminCookie = await login(app, ADMIN_EMAIL);
+    memberCookie = await login(app, MEMBER_EMAIL);
+    adminId = await userIdByEmail(db, ADMIN_EMAIL);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("denies non-admins", async () => {
+    await seedEntity(db, "project", "Project");
+    await seedProjectMemberNomination(db, { projectId: "project", fileId: "file-a", userId: adminId });
+
+    const res = await app.request("/api/entities/project/members/file-a", {
+      method: "PUT",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "exclude" }),
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("hides an excluded nominated member and restores it when cleared", async () => {
+    await seedEntity(db, "project", "Project");
+    await seedProjectMemberNomination(db, { projectId: "project", fileId: "file-a", userId: adminId });
+
+    const beforeRes = await app.request("/api/entities/project/members", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(beforeRes.status).toBe(200);
+    expect((await beforeRes.json()).members).toEqual([expect.objectContaining({ indexedFileId: "file-a" })]);
+
+    const excludeRes = await app.request("/api/entities/project/members/file-a", {
+      method: "PUT",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "exclude" }),
+    });
+    expect(excludeRes.status).toBe(200);
+
+    const excludedRes = await app.request("/api/entities/project/members", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(excludedRes.status).toBe(200);
+    expect((await excludedRes.json()).members).toEqual([]);
+
+    const clearRes = await app.request("/api/entities/project/members/file-a", {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(clearRes.status).toBe(200);
+
+    const restoredRes = await app.request("/api/entities/project/members", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(restoredRes.status).toBe(200);
+    expect((await restoredRes.json()).members).toEqual([expect.objectContaining({ indexedFileId: "file-a" })]);
+  });
+
+  it("rejects setting a member on a non-project", async () => {
+    await seedEntity(db, "project", "Project");
+    await seedEntity(db, "company", "Company", "company");
+    await seedProjectMemberNomination(db, { projectId: "project", fileId: "file-a", userId: adminId });
+
+    const res = await app.request("/api/entities/company/members/file-a", {
+      method: "PUT",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "include" }),
+    });
+
+    expect(res.status).toBe(422);
+    expect((await res.json()).error.code).toBe("NOT_A_PROJECT");
+  });
+});
