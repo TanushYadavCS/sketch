@@ -89,20 +89,54 @@ export function createProjectBindingsService(db: Kysely<DB>) {
     return [...origin, ...explicit];
   }
 
-  return {
-    async resolveEffectiveBindings(projectId: string): Promise<EffectiveBinding[]> {
-      const nodes = await subtreeIds(db, projectId);
-      const out: EffectiveBinding[] = [];
-      const seenKey = new Set<string>();
-      for (const node of nodes) {
-        for (const b of await ownBindings(node)) {
-          const key = `${b.source}:${b.containerId}`;
-          if (seenKey.has(key)) continue;
-          seenKey.add(key);
-          out.push({ ...b, viaProjectId: node, origin: b.id.startsWith("origin:") });
-        }
+  async function resolveEffectiveBindings(projectId: string): Promise<EffectiveBinding[]> {
+    const nodes = await subtreeIds(db, projectId);
+    const out: EffectiveBinding[] = [];
+    const seenKey = new Set<string>();
+    for (const node of nodes) {
+      for (const b of await ownBindings(node)) {
+        const key = `${b.source}:${b.containerId}`;
+        if (seenKey.has(key)) continue;
+        seenKey.add(key);
+        out.push({ ...b, viaProjectId: node, origin: b.id.startsWith("origin:") });
       }
-      return out;
+    }
+    return out;
+  }
+
+  return {
+    resolveEffectiveBindings,
+
+    async listBindings(projectId: string, effective: boolean): Promise<EffectiveBinding[] | EntityProjectBindingRow[]> {
+      if (effective) return resolveEffectiveBindings(projectId);
+      return ownBindings(projectId);
+    },
+
+    async addBinding(
+      projectId: string,
+      input: {
+        source: string;
+        containerId: string;
+        containerKind: string;
+        label?: string | null;
+        connectorConfigId?: string | null;
+      },
+      userId: string,
+    ): Promise<EntityProjectBindingRow> {
+      if (!(await isLiveProject(db, projectId))) throw new ProjectBindingError("NOT_A_PROJECT");
+      return bindings.create({
+        entityId: projectId,
+        source: input.source,
+        containerId: input.containerId,
+        containerKind: input.containerKind,
+        label: input.label ?? null,
+        connectorConfigId: input.connectorConfigId ?? null,
+        createdBy: userId,
+      });
+    },
+
+    async removeBinding(projectId: string, bindingId: string): Promise<boolean> {
+      return bindings.deleteById(bindingId, projectId);
     },
 
     async groupProject(parentId: string, childId: string): Promise<void> {
