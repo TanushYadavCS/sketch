@@ -688,6 +688,15 @@ export interface EntityProjectBindingsTable {
   created_at: Generated<string>;
 }
 
+export interface EntityProjectMemberOverridesTable {
+  id: string;
+  entity_id: string;
+  indexed_file_id: string;
+  mode: string;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityRelationshipsTable {
   id: string;
   source_entity_id: string;
@@ -847,6 +856,7 @@ export interface DB {
   indexed_file_facts: IndexedFileFactsTable;
   entity_domains: EntityDomainsTable;
   entity_project_bindings: EntityProjectBindingsTable;
+  entity_project_member_overrides: EntityProjectMemberOverridesTable;
   entity_relationships: EntityRelationshipsTable;
   entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }

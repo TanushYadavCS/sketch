@@ -19,7 +19,7 @@ export class ProjectBindingError extends Error {
   }
 }
 
-async function isLiveProject(db: Kysely<DB>, entityId: string): Promise<boolean> {
+export async function isLiveProject(db: Kysely<DB>, entityId: string): Promise<boolean> {
   const row = await db
     .selectFrom("entities")
     .select(["source_type", "status", "deleted_at"])

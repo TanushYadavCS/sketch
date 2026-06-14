@@ -9,6 +9,7 @@ import type {
   EntityDomainsTable,
   EntityMentionsTable,
   EntityProjectBindingsTable,
+  EntityProjectMemberOverridesTable,
   EntityRelationshipsTable,
   EntityReviewQueueTable,
   EntityShareEmailsTable,
@@ -24,6 +25,7 @@ type ReviewQueueRow = Selectable<EntityReviewQueueTable>;
 type ShareEmail = Selectable<EntityShareEmailsTable>;
 type Domain = Selectable<EntityDomainsTable>;
 type ProjectBinding = Selectable<EntityProjectBindingsTable>;
+type MemberOverride = Selectable<EntityProjectMemberOverridesTable>;
 
 export type EntityMergeMove =
   | { table: string; rowId: string; repoint: Record<string, { from: string | null; to: string | null }> }
@@ -254,7 +256,12 @@ async function repointSourceRefs(
 async function repointEntityScopedRows<Row extends { id: string; entity_id: string }>(
   db: Kysely<DB>,
   opts: {
-    table: "entity_mentions" | "entity_contact_points" | "entity_alias_rejections" | "entity_project_bindings";
+    table:
+      | "entity_mentions"
+      | "entity_contact_points"
+      | "entity_alias_rejections"
+      | "entity_project_bindings"
+      | "entity_project_member_overrides";
     loserId: string;
     survivorId: string;
     rows: Row[];
@@ -444,6 +451,40 @@ async function repointProjectBindings(
   });
 }
 
+async function findMemberOverrideCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: { indexed_file_id: string },
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_project_member_overrides")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("indexed_file_id", "=", row.indexed_file_id)
+    .executeTakeFirst();
+}
+
+async function repointMemberOverrides(
+  db: Kysely<DB>,
+  loserId: string,
+  survivorId: string,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const rows = await db
+    .selectFrom("entity_project_member_overrides")
+    .selectAll()
+    .where("entity_id", "=", loserId)
+    .execute();
+  await repointEntityScopedRows<MemberOverride>(db, {
+    table: "entity_project_member_overrides",
+    loserId,
+    survivorId,
+    rows,
+    moves,
+    findCollision: (row) => findMemberOverrideCollision(db, survivorId, row),
+  });
+}
+
 async function moveRelationshipEvidence(
   db: Kysely<DB>,
   oldRelationshipId: string,
@@ -630,6 +671,7 @@ async function applyMergeMoves(
   await repointAliasRejections(db, loserId, survivorId, moves);
   await repointDomains(db, loserId, survivorId, moves);
   await repointProjectBindings(db, loserId, survivorId, moves);
+  await repointMemberOverrides(db, loserId, survivorId, moves);
   await repointCandidates(db, loserId, survivorId, moves);
   await repointReviewQueue(db, loserId, survivorId, moves);
 }
@@ -840,6 +882,14 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
   if (move.table === "entity_project_bindings" && updates.entity_id) {
     await db
       .updateTable("entity_project_bindings")
+      .set({ entity_id: updates.entity_id })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
+  if (move.table === "entity_project_member_overrides" && updates.entity_id) {
+    await db
+      .updateTable("entity_project_member_overrides")
       .set({ entity_id: updates.entity_id })
       .where("id", "=", move.rowId)
       .execute();
