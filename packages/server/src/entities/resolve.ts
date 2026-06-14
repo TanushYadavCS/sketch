@@ -683,28 +683,43 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
 
     // Target selection.
     const targetId: string | null = opts.mergeIntoEntityId ?? row.candidate_entity_id;
-    if (!targetId) {
-      throw new ResolveError("CANDIDATE_MISSING", "row has no candidate_entity_id and no mergeIntoEntityId provided", {
-        currentRow: row,
-      });
-    }
     const pickedDifferent =
       opts.mergeIntoEntityId !== undefined &&
       row.candidate_entity_id !== null &&
       opts.mergeIntoEntityId !== row.candidate_entity_id;
 
     // 2. Existence check + type check.
-    let target = await fetchEntity(trxCtx, targetId);
-    if (!target) {
-      throw new ResolveError("TARGET_DELETED", "target entity deleted between candidate-gen and confirm", {
-        currentRow: row,
+    let target: Entity;
+    if (!targetId) {
+      if (!row.seed_source || !row.seed_source_id) {
+        throw new ResolveError(
+          "CANDIDATE_MISSING",
+          "row has no candidate_entity_id and no mergeIntoEntityId provided",
+          {
+            currentRow: row,
+          },
+        );
+      }
+      target = await trxCtx.entityRepo.upsertEntityFromTool({
+        name: row.proposed_name,
+        sourceType: row.entity_type,
+        source: row.seed_source,
+        sourceId: row.seed_source_id,
       });
-    }
-    if (target.source_type !== row.entity_type) {
-      throw new ResolveError("TYPE_MISMATCH", "mergeIntoEntityId entity_type does not match queue row", {
-        target: target.source_type,
-        row: row.entity_type,
-      });
+    } else {
+      const fetchedTarget = await fetchEntity(trxCtx, targetId);
+      if (!fetchedTarget) {
+        throw new ResolveError("TARGET_DELETED", "target entity deleted between candidate-gen and confirm", {
+          currentRow: row,
+        });
+      }
+      if (fetchedTarget.source_type !== row.entity_type) {
+        throw new ResolveError("TYPE_MISMATCH", "mergeIntoEntityId entity_type does not match queue row", {
+          target: fetchedTarget.source_type,
+          row: row.entity_type,
+        });
+      }
+      target = fetchedTarget;
     }
 
     // Evidence cap (chunking deferred).

@@ -724,6 +724,8 @@ export interface EntityReviewQueueTable {
   resolved_by: string | null;
   resolved_at: string | null;
   resolved_entity_id: string | null;
+  seed_source: string | null;
+  seed_source_id: string | null;
 }
 
 export interface EntityReviewEvidenceTable {

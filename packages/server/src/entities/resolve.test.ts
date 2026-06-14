@@ -260,6 +260,65 @@ describe("confirmReview", () => {
     expect(finalRow?.resolved_by).toBe(USER_ID);
   });
 
+  it("creates and source-binds a seed project on confirm", async () => {
+    await seedIndexedFile(db, "file-seed", { source: "clickup" });
+    const reviewId = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id: reviewId,
+        proposed_name: "Launch Plan",
+        normalized_name: "launch plan",
+        entity_type: "project",
+        candidate_entity_id: null,
+        candidate_score: null,
+        candidate_reason: null,
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: USER_ID,
+        seed_source: "clickup",
+        seed_source_id: "S1",
+      })
+      .execute();
+    await db
+      .insertInto("entity_review_evidence")
+      .values({
+        id: randomUUID(),
+        review_id: reviewId,
+        indexed_file_id: "file-seed",
+        source: "clickup",
+        note: JSON.stringify({ path: "Workspace / Space" }),
+        seen_at: now,
+      })
+      .execute();
+
+    const result = await confirmReview({ db, userId: USER_ID }, reviewId, { candidateGeneratedAt: now });
+
+    const entity = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", result.targetEntityId)
+      .executeTakeFirstOrThrow();
+    expect(entity).toMatchObject({ name: "Launch Plan", source_type: "project", status: "confirmed" });
+
+    const sourceRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "clickup")
+      .where("source_id", "=", "S1")
+      .executeTakeFirstOrThrow();
+    expect(sourceRef.entity_id).toBe(entity.id);
+
+    expect(result.row.status).toBe("confirmed");
+    expect(result.row.resolved_entity_id).toBe(entity.id);
+    expect(result.shortCircuited).toBe(false);
+    expect(result.mergedStaleEntityId).toBeNull();
+  });
+
   it("rematerializes held LLM non-person facts after confirm", async () => {
     const target = await entityRepo.upsertEntity({
       name: "Canvas Labs",
