@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { DB } from "../db/schema";
 import { createEntityMaintenanceRoutes } from "./entities/maintenance-routes";
+import { createEntityMergeRoutes } from "./entities/merge-routes";
 import { createEntityProfileRoutes } from "./entities/profile-routes";
 import type { EntityRoutesDeps } from "./entities/types";
 
@@ -11,6 +12,7 @@ export type { EntityRoutesDeps } from "./entities/types";
 export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   const routes = new Hono();
   routes.route("/", createEntityMaintenanceRoutes(db, deps));
+  routes.route("/", createEntityMergeRoutes(db));
   routes.route("/", createEntityProfileRoutes(db, deps));
   return routes;
 }

@@ -6,9 +6,11 @@ import type {
   EntityAliasRejectionsTable,
   EntityCandidatesTable,
   EntityContactPointsTable,
+  EntityDomainsTable,
   EntityMentionsTable,
   EntityRelationshipsTable,
   EntityReviewQueueTable,
+  EntityShareEmailsTable,
 } from "../db/schema";
 
 type Entity = Selectable<EntitiesTable>;
@@ -18,6 +20,8 @@ type ContactPoint = Selectable<EntityContactPointsTable>;
 type AliasRejection = Selectable<EntityAliasRejectionsTable>;
 type EntityCandidate = Selectable<EntityCandidatesTable>;
 type ReviewQueueRow = Selectable<EntityReviewQueueTable>;
+type ShareEmail = Selectable<EntityShareEmailsTable>;
+type Domain = Selectable<EntityDomainsTable>;
 
 export type EntityMergeMove =
   | { table: string; rowId: string; repoint: Record<string, { from: string | null; to: string | null }> }
@@ -65,6 +69,32 @@ export interface MergeEntitiesResult {
   moves: EntityMergeMove[];
 }
 
+export interface MergePreview {
+  survivorId: string;
+  loserId: string;
+  blocked?: EntityMergeErrorCode;
+  counts: {
+    sourceRefs: number;
+    mentions: number;
+    relationships: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    candidates: number;
+    reviewQueue: number;
+  };
+  collisions: {
+    mentions: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    relationships: number;
+  };
+  selfLoopsDropped: number;
+}
+
 function rowPayload(row: Record<string, unknown>): Record<string, unknown> {
   return { ...row };
 }
@@ -77,28 +107,129 @@ async function fetchRawEntity(db: Kysely<DB>, entityId: string): Promise<Entity 
   return db.selectFrom("entities").selectAll().where("id", "=", entityId).executeTakeFirst();
 }
 
-function assertMergeable(survivor: Entity | undefined, loser: Entity | undefined, input: MergeEntitiesInput): void {
+function mergeBlocker(
+  survivor: Entity | undefined,
+  loser: Entity | undefined,
+  input: { survivorId: string; loserId: string },
+): EntityMergeError | null {
   if (!survivor || !loser) {
-    throw new EntityMergeError("ENTITY_NOT_FOUND", "survivor or loser entity was not found", {
+    return new EntityMergeError("ENTITY_NOT_FOUND", "survivor or loser entity was not found", {
       survivorId: input.survivorId,
       loserId: input.loserId,
     });
   }
   if (survivor.id === loser.id) {
-    throw new EntityMergeError("SELF_MERGE", "cannot merge an entity into itself", { entityId: survivor.id });
+    return new EntityMergeError("SELF_MERGE", "cannot merge an entity into itself", { entityId: survivor.id });
   }
   if (survivor.source_type !== loser.source_type) {
-    throw new EntityMergeError("TYPE_MISMATCH", "entities must have the same source_type to merge", {
+    return new EntityMergeError("TYPE_MISMATCH", "entities must have the same source_type to merge", {
       survivorType: survivor.source_type,
       loserType: loser.source_type,
     });
   }
   if (survivor.deleted_at || survivor.merged_into_entity_id) {
-    throw new EntityMergeError("ALREADY_MERGED", "survivor must be live", { survivorId: survivor.id });
+    return new EntityMergeError("ALREADY_MERGED", "survivor must be live", { survivorId: survivor.id });
   }
   if (loser.deleted_at || loser.merged_into_entity_id) {
-    throw new EntityMergeError("ALREADY_MERGED", "loser is already merged", { loserId: loser.id });
+    return new EntityMergeError("ALREADY_MERGED", "loser is already merged", { loserId: loser.id });
   }
+  return null;
+}
+
+function assertMergeable(survivor: Entity | undefined, loser: Entity | undefined, input: MergeEntitiesInput): void {
+  const blocker = mergeBlocker(survivor, loser, input);
+  if (blocker) throw blocker;
+}
+
+async function findMentionCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: Mention,
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_mentions")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("indexed_file_id", "=", row.indexed_file_id)
+    .where("relation", "=", row.relation)
+    .executeTakeFirst();
+}
+
+async function findContactPointCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: ContactPoint,
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_contact_points")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("kind", "=", row.kind)
+    .where("value", "=", row.value)
+    .executeTakeFirst();
+}
+
+async function findAliasRejectionCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: AliasRejection,
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_alias_rejections")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("normalized_rejected_name", "=", row.normalized_rejected_name)
+    .executeTakeFirst();
+}
+
+async function findShareEmailCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: ShareEmail,
+): Promise<{ entity_id: string } | undefined> {
+  return db
+    .selectFrom("entity_share_emails")
+    .select("entity_id")
+    .where("entity_id", "=", survivorId)
+    .where("email", "=", row.email)
+    .executeTakeFirst();
+}
+
+async function findDomainCollision(
+  db: Kysely<DB>,
+  survivorId: string,
+  row: Domain,
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_domains")
+    .select("id")
+    .where("entity_id", "=", survivorId)
+    .where("domain", "=", row.domain)
+    .executeTakeFirst();
+}
+
+function repointedRelationship(row: Relationship, loserId: string, survivorId: string) {
+  return {
+    source: row.source_entity_id === loserId ? survivorId : row.source_entity_id,
+    target: row.target_entity_id === loserId ? survivorId : row.target_entity_id,
+  };
+}
+
+async function findRelationshipCollision(
+  db: Kysely<DB>,
+  row: Relationship,
+  sourceEntityId: string,
+  targetEntityId: string,
+): Promise<{ id: string } | undefined> {
+  return db
+    .selectFrom("entity_relationships")
+    .select("id")
+    .where("source_entity_id", "=", sourceEntityId)
+    .where("target_entity_id", "=", targetEntityId)
+    .where("relationship_type", "=", row.relationship_type)
+    .where("valid_from", "=", row.valid_from)
+    .where("id", "!=", row.id)
+    .executeTakeFirst();
 }
 
 async function repointSourceRefs(
@@ -158,14 +289,7 @@ async function repointMentions(
     survivorId,
     rows,
     moves,
-    findCollision: (row) =>
-      db
-        .selectFrom("entity_mentions")
-        .select("id")
-        .where("entity_id", "=", survivorId)
-        .where("indexed_file_id", "=", row.indexed_file_id)
-        .where("relation", "=", row.relation)
-        .executeTakeFirst(),
+    findCollision: (row) => findMentionCollision(db, survivorId, row),
   });
 }
 
@@ -183,14 +307,7 @@ async function repointContactPoints(
     survivorId,
     rows,
     moves,
-    findCollision: (row) =>
-      db
-        .selectFrom("entity_contact_points")
-        .select("id")
-        .where("entity_id", "=", survivorId)
-        .where("kind", "=", row.kind)
-        .where("value", "=", row.value)
-        .executeTakeFirst(),
+    findCollision: (row) => findContactPointCollision(db, survivorId, row),
   });
   await rebalancePrimaryContactPoints(db, survivorId, movedIds);
 }
@@ -235,13 +352,7 @@ async function repointAliasRejections(
     survivorId,
     rows,
     moves,
-    findCollision: (row) =>
-      db
-        .selectFrom("entity_alias_rejections")
-        .select("id")
-        .where("entity_id", "=", survivorId)
-        .where("normalized_rejected_name", "=", row.normalized_rejected_name)
-        .executeTakeFirst(),
+    findCollision: (row) => findAliasRejectionCollision(db, survivorId, row),
   });
 }
 
@@ -253,12 +364,7 @@ async function repointShareEmails(
 ): Promise<void> {
   const rows = await db.selectFrom("entity_share_emails").selectAll().where("entity_id", "=", loserId).execute();
   for (const row of rows) {
-    const collision = await db
-      .selectFrom("entity_share_emails")
-      .select("entity_id")
-      .where("entity_id", "=", survivorId)
-      .where("email", "=", row.email)
-      .executeTakeFirst();
+    const collision = await findShareEmailCollision(db, survivorId, row);
     if (collision) {
       moves.push({ table: "entity_share_emails", collided: true, payload: rowPayload(row) });
       await db
@@ -290,12 +396,7 @@ async function repointDomains(
 ): Promise<void> {
   const rows = await db.selectFrom("entity_domains").selectAll().where("entity_id", "=", loserId).execute();
   for (const row of rows) {
-    const collision = await db
-      .selectFrom("entity_domains")
-      .select("id")
-      .where("entity_id", "=", survivorId)
-      .where("domain", "=", row.domain)
-      .executeTakeFirst();
+    const collision = await findDomainCollision(db, survivorId, row);
     if (collision) {
       moves.push({ table: "entity_domains", collided: true, payload: rowPayload(row) });
       await db.deleteFrom("entity_domains").where("id", "=", row.id).execute();
@@ -381,23 +482,14 @@ async function repointRelationships(
     .execute();
 
   for (const row of rows) {
-    const nextSource = row.source_entity_id === loserId ? survivorId : row.source_entity_id;
-    const nextTarget = row.target_entity_id === loserId ? survivorId : row.target_entity_id;
+    const { source: nextSource, target: nextTarget } = repointedRelationship(row, loserId, survivorId);
 
     if (nextSource === nextTarget) {
       await dropRelationshipWithEvidence(db, row, moves);
       continue;
     }
 
-    const collision = await db
-      .selectFrom("entity_relationships")
-      .select("id")
-      .where("source_entity_id", "=", nextSource)
-      .where("target_entity_id", "=", nextTarget)
-      .where("relationship_type", "=", row.relationship_type)
-      .where("valid_from", "=", row.valid_from)
-      .where("id", "!=", row.id)
-      .executeTakeFirst();
+    const collision = await findRelationshipCollision(db, row, nextSource, nextTarget);
 
     if (collision) {
       await moveRelationshipEvidence(db, row.id, collision.id, moves);
@@ -506,6 +598,134 @@ async function applyMergeMoves(
   await repointDomains(db, loserId, survivorId, moves);
   await repointCandidates(db, loserId, survivorId, moves);
   await repointReviewQueue(db, loserId, survivorId, moves);
+}
+
+function emptyMergePreview(
+  input: { survivorId: string; loserId: string },
+  blocked?: EntityMergeErrorCode,
+): MergePreview {
+  return {
+    survivorId: input.survivorId,
+    loserId: input.loserId,
+    ...(blocked ? { blocked } : {}),
+    counts: {
+      sourceRefs: 0,
+      mentions: 0,
+      relationships: 0,
+      contactPoints: 0,
+      shareEmails: 0,
+      aliasRejections: 0,
+      domains: 0,
+      candidates: 0,
+      reviewQueue: 0,
+    },
+    collisions: {
+      mentions: 0,
+      contactPoints: 0,
+      shareEmails: 0,
+      aliasRejections: 0,
+      domains: 0,
+      relationships: 0,
+    },
+    selfLoopsDropped: 0,
+  };
+}
+
+async function countCollisions<Row>(
+  rows: Row[],
+  findCollision: (row: Row) => Promise<unknown | undefined>,
+): Promise<number> {
+  let count = 0;
+  for (const row of rows) {
+    if (await findCollision(row)) count += 1;
+  }
+  return count;
+}
+
+export async function previewMerge(
+  db: Kysely<DB>,
+  input: { survivorId: string; loserId: string },
+): Promise<MergePreview> {
+  const survivor = await fetchRawEntity(db, input.survivorId);
+  const loser = await fetchRawEntity(db, input.loserId);
+  const blocker = mergeBlocker(survivor, loser, input);
+  if (blocker) return emptyMergePreview(input, blocker.code);
+
+  const preview = emptyMergePreview(input);
+  const sourceRefs = await db
+    .selectFrom("entity_source_refs")
+    .select("id")
+    .where("entity_id", "=", input.loserId)
+    .execute();
+  const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", input.loserId).execute();
+  const relationships = await db
+    .selectFrom("entity_relationships")
+    .selectAll()
+    .where((eb) => eb.or([eb("source_entity_id", "=", input.loserId), eb("target_entity_id", "=", input.loserId)]))
+    .execute();
+  const contactPoints = await db
+    .selectFrom("entity_contact_points")
+    .selectAll()
+    .where("entity_id", "=", input.loserId)
+    .execute();
+  const shareEmails = await db
+    .selectFrom("entity_share_emails")
+    .selectAll()
+    .where("entity_id", "=", input.loserId)
+    .execute();
+  const aliasRejections = await db
+    .selectFrom("entity_alias_rejections")
+    .selectAll()
+    .where("entity_id", "=", input.loserId)
+    .execute();
+  const domains = await db.selectFrom("entity_domains").selectAll().where("entity_id", "=", input.loserId).execute();
+  const candidates = await db.selectFrom("entity_candidates").selectAll().execute();
+  const reviewQueue = await db
+    .selectFrom("entity_review_queue")
+    .select("id")
+    .where((eb) => eb.or([eb("candidate_entity_id", "=", input.loserId), eb("resolved_entity_id", "=", input.loserId)]))
+    .execute();
+
+  preview.counts.sourceRefs = sourceRefs.length;
+  preview.counts.mentions = mentions.length;
+  preview.counts.relationships = relationships.length;
+  preview.counts.contactPoints = contactPoints.length;
+  preview.counts.shareEmails = shareEmails.length;
+  preview.counts.aliasRejections = aliasRejections.length;
+  preview.counts.domains = domains.length;
+  preview.counts.candidates = candidates.filter((row) => {
+    if (row.promoted_entity_id === input.loserId) return true;
+    return (
+      rewriteObservedPeople(row.observed_person_entity_ids, input.loserId, input.survivorId) !==
+      row.observed_person_entity_ids
+    );
+  }).length;
+  preview.counts.reviewQueue = reviewQueue.length;
+
+  preview.collisions.mentions = await countCollisions(mentions, (row) =>
+    findMentionCollision(db, input.survivorId, row),
+  );
+  preview.collisions.contactPoints = await countCollisions(contactPoints, (row) =>
+    findContactPointCollision(db, input.survivorId, row),
+  );
+  preview.collisions.shareEmails = await countCollisions(shareEmails, (row) =>
+    findShareEmailCollision(db, input.survivorId, row),
+  );
+  preview.collisions.aliasRejections = await countCollisions(aliasRejections, (row) =>
+    findAliasRejectionCollision(db, input.survivorId, row),
+  );
+  preview.collisions.domains = await countCollisions(domains, (row) => findDomainCollision(db, input.survivorId, row));
+
+  for (const row of relationships) {
+    const { source, target } = repointedRelationship(row, input.loserId, input.survivorId);
+    if (source === target) {
+      preview.selfLoopsDropped += 1;
+      continue;
+    }
+    if (await findRelationshipCollision(db, row, source, target)) preview.collisions.relationships += 1;
+  }
+
+  return preview;
 }
 
 async function insertPayload(db: Kysely<DB>, table: string, payload: Record<string, unknown>): Promise<void> {
