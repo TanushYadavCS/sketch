@@ -7,6 +7,54 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLinearConnector } from "./linear";
+import type { EntitySeed, SyncedItem } from "./types";
+
+function jsonResponse(data: unknown): Response {
+  return new Response(JSON.stringify({ data }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function emptyPage(field: string): Response {
+  return jsonResponse({ [field]: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } });
+}
+
+/**
+ * Routes a Linear GraphQL request to a canned response based on the operation
+ * name embedded in the query string. Tests drive the connector's `sync`
+ * generator (issues → teams → projects) without hitting the network.
+ */
+function routeLinearRequest(
+  body: string,
+  handlers: { teams?: () => Response; teamMembers?: () => Response },
+): Response {
+  if (body.includes("query Issues(")) return emptyPage("issues");
+  if (body.includes("query Projects(")) return emptyPage("projects");
+  if (body.includes("query TeamMembers(")) return handlers.teamMembers?.() ?? emptyPage("team");
+  if (body.includes("query Teams(")) return handlers.teams?.() ?? emptyPage("teams");
+  return jsonResponse({});
+}
+
+async function drainSync(
+  connector: ReturnType<typeof createLinearConnector>,
+  opts: {
+    scopeConfig?: Record<string, unknown>;
+    onEntitySeed?: (seed: EntitySeed) => Promise<void>;
+  } = {},
+): Promise<SyncedItem[]> {
+  const items: SyncedItem[] = [];
+  for await (const item of connector.sync({
+    credentials: { type: "api_key", api_key: "test-key" },
+    scopeConfig: opts.scopeConfig ?? {},
+    cursor: null,
+    logger: (await import("pino")).default({ level: "silent" }),
+    onEntitySeed: opts.onEntitySeed,
+  })) {
+    items.push(item);
+  }
+  return items;
+}
 
 describe("Linear 429 retry bounded", () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -152,5 +200,144 @@ describe("Linear refreshTokens expiry check", () => {
 
     expect(result).not.toBeNull();
     expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Linear team sync honors configured team scope", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("skips team/person_seed/member_of facts for teams outside the configured scope", async () => {
+    const teamsPage = () =>
+      jsonResponse({
+        teams: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            {
+              id: "team-eng",
+              name: "Engineering",
+              key: "ENG",
+              members: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{ id: "u-eng", name: "Eng Person", email: "eng@example.com" }],
+              },
+            },
+            {
+              id: "team-mkt",
+              name: "Marketing",
+              key: "MKT",
+              members: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{ id: "u-mkt", name: "Mkt Person", email: "mkt@example.com" }],
+              },
+            },
+          ],
+        },
+      });
+
+    fetchSpy.mockImplementation((async (_url: unknown, init?: RequestInit) => {
+      const body = String(init?.body ?? "");
+      return routeLinearRequest(body, { teams: teamsPage });
+    }) as typeof globalThis.fetch);
+
+    const seeds: EntitySeed[] = [];
+    const connector = createLinearConnector();
+    const items = await drainSync(connector, {
+      scopeConfig: { teams: ["ENG"] },
+      onEntitySeed: async (seed) => {
+        seeds.push(seed);
+      },
+    });
+
+    const teamSeeds = seeds.filter((s) => s.sourceType === "team");
+    expect(teamSeeds.map((s) => s.metadata?.key)).toEqual(["ENG"]);
+
+    const teamItems = items.filter((i) => i.fileType === "team");
+    expect(teamItems).toHaveLength(1);
+    expect(teamItems[0]?.fileName).toBe("Engineering");
+
+    const personSeedNames = teamItems.flatMap((i) => i.personSeeds?.map((p) => p.name) ?? []);
+    expect(personSeedNames).toEqual(["Eng Person"]);
+
+    const memberEdgeTargets = teamItems.flatMap((i) => i.relationships?.map((r) => r.target.sourceId) ?? []);
+    expect(memberEdgeTargets).toEqual(["team-eng"]);
+  });
+});
+
+describe("Linear team sync paginates nested team members", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("issues follow-up requests for teams with more than one member page", async () => {
+    const firstMembers = Array.from({ length: 250 }, (_, i) => ({
+      id: `u-${i}`,
+      name: `Member ${i}`,
+      email: `member${i}@example.com`,
+    }));
+    const remainingMembers = Array.from({ length: 50 }, (_, i) => ({
+      id: `u-${250 + i}`,
+      name: `Member ${250 + i}`,
+      email: `member${250 + i}@example.com`,
+    }));
+
+    const teamsPage = () =>
+      jsonResponse({
+        teams: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            {
+              id: "team-big",
+              name: "Big Team",
+              key: "BIG",
+              members: {
+                pageInfo: { hasNextPage: true, endCursor: "members-cursor-1" },
+                nodes: firstMembers,
+              },
+            },
+          ],
+        },
+      });
+
+    const teamMembersPage = () =>
+      jsonResponse({
+        team: {
+          members: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: remainingMembers,
+          },
+        },
+      });
+
+    let teamMembersCalls = 0;
+    fetchSpy.mockImplementation((async (_url: unknown, init?: RequestInit) => {
+      const body = String(init?.body ?? "");
+      if (body.includes("query TeamMembers(")) teamMembersCalls++;
+      return routeLinearRequest(body, { teams: teamsPage, teamMembers: teamMembersPage });
+    }) as typeof globalThis.fetch);
+
+    const connector = createLinearConnector();
+    const items = await drainSync(connector);
+
+    expect(teamMembersCalls).toBe(1);
+
+    const teamItems = items.filter((i) => i.fileType === "team");
+    expect(teamItems).toHaveLength(1);
+    expect(teamItems[0]?.personSeeds).toHaveLength(300);
+    expect(teamItems[0]?.relationships).toHaveLength(300);
+    expect(teamItems[0]?.personSeeds?.at(-1)?.name).toBe("Member 299");
   });
 });

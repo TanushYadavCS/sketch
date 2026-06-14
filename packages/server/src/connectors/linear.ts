@@ -64,11 +64,17 @@ interface LinearProject {
   updatedAt: string;
 }
 
+interface LinearMember {
+  id: string;
+  name: string;
+  email: string | null;
+}
+
 interface LinearTeam {
   id: string;
   name: string;
   key: string;
-  members: { nodes: Array<{ id: string; name: string; email: string | null }> };
+  members: { pageInfo?: PageInfo; nodes: LinearMember[] };
 }
 
 interface GraphQLResponse<T> {
@@ -407,7 +413,26 @@ query Teams($first: Int!, $after: String) {
 			id
 			name
 			key
-			members(first: 250) { nodes { id name email } }
+			members(first: 250) {
+				pageInfo {
+					hasNextPage
+					endCursor
+				}
+				nodes { id name email }
+			}
+		}
+	}
+}`;
+
+const TEAM_MEMBERS_QUERY = `
+query TeamMembers($teamId: String!, $first: Int!, $after: String) {
+	team(id: $teamId) {
+		members(first: $first, after: $after) {
+			pageInfo {
+				hasNextPage
+				endCursor
+			}
+			nodes { id name email }
 		}
 	}
 }`;
@@ -461,7 +486,7 @@ export function createLinearConnector(): Connector {
       const sinceDate = cursor ?? null;
 
       yield* syncIssues(token, sinceDate, allowedTeams, logger, linearRequest);
-      yield* syncTeams(token, logger, linearRequest, onEntitySeed);
+      yield* syncTeams(token, allowedTeams, logger, linearRequest, onEntitySeed);
       yield* syncProjects(token, sinceDate, logger, linearRequest, onEntitySeed);
     },
 
@@ -562,14 +587,48 @@ async function* syncProjects(
   logger.info({ totalProjects }, "Projects sync complete");
 }
 
+/**
+ * Fetches any team members beyond the first nested page. The top-level teams
+ * query embeds the first {@link PAGE_SIZE}-capped page of members; large teams
+ * are completed here so every member gets a `person_seed` fact and `member_of`
+ * edge, mirroring the cursor loop used for the teams connection itself.
+ */
+async function fetchRemainingTeamMembers(
+  token: string,
+  teamId: string,
+  initialPageInfo: PageInfo,
+  logger: Logger,
+  linearRequest: LinearRequestFn,
+): Promise<LinearMember[]> {
+  const members: LinearMember[] = [];
+  let afterCursor: string | null = initialPageInfo.hasNextPage ? initialPageInfo.endCursor : null;
+
+  while (afterCursor) {
+    const data = await linearRequest<{
+      team: { members: { pageInfo: PageInfo; nodes: LinearMember[] } } | null;
+    }>(TEAM_MEMBERS_QUERY, { teamId, first: 250, after: afterCursor }, token, logger);
+
+    const page = data.team?.members;
+    if (!page) break;
+
+    members.push(...page.nodes);
+    afterCursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+  }
+
+  return members;
+}
+
 async function* syncTeams(
   token: string,
+  allowedTeams: string[],
   logger: Logger,
   linearRequest: LinearRequestFn,
   onEntitySeed?: EntitySeedCallback,
 ): AsyncGenerator<SyncedItem> {
   let afterCursor: string | null = null;
   let totalTeams = 0;
+
+  const allowedTeamKeys = allowedTeams.length > 0 ? new Set(allowedTeams) : null;
 
   do {
     const variables: Record<string, unknown> = {
@@ -582,6 +641,15 @@ async function* syncTeams(
     }>(TEAMS_QUERY, variables, token, logger);
 
     for (const team of data.teams.nodes) {
+      if (allowedTeamKeys && !allowedTeamKeys.has(team.key)) {
+        continue;
+      }
+
+      if (team.members.pageInfo?.hasNextPage) {
+        const remaining = await fetchRemainingTeamMembers(token, team.id, team.members.pageInfo, logger, linearRequest);
+        team.members.nodes.push(...remaining);
+      }
+
       if (onEntitySeed) {
         await onEntitySeed({
           name: team.name,
