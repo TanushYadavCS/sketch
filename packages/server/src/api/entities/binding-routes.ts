@@ -16,12 +16,25 @@ function handleBindingError(c: Context, err: unknown): Response {
   throw err;
 }
 
+/** True when the entity exists but is tombstoned (soft-deleted) or merged away. */
+async function isTombstoned(db: Kysely<DB>, id: string): Promise<boolean> {
+  const row = await db
+    .selectFrom("entities")
+    .select(["deleted_at", "merged_into_entity_id"])
+    .where("id", "=", id)
+    .executeTakeFirst();
+  return Boolean(row && (row.deleted_at !== null || row.merged_into_entity_id !== null));
+}
+
 export function createEntityBindingRoutes(db: Kysely<DB>) {
   const routes = new Hono();
   const service = createProjectBindingsService(db);
   const members = createProjectMembersService(db);
 
   routes.get("/:id/bindings", async (c) => {
+    if (await isTombstoned(db, c.req.param("id"))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
     const effective = c.req.query("effective") === "true";
     const bindings = await service.listBindings(c.req.param("id"), effective);
     const children = await service.listGroupedChildren(c.req.param("id"));
@@ -93,6 +106,9 @@ export function createEntityBindingRoutes(db: Kysely<DB>) {
   routes.get("/:id/members", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
+    if (await isTombstoned(db, c.req.param("id"))) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
+    }
     const limitRaw = Number(c.req.query("limit"));
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : undefined;
     const result = await members.resolveProjectMembers(c.req.param("id"), { limit });
@@ -121,38 +137,5 @@ export function createEntityBindingRoutes(db: Kysely<DB>) {
     if (!cleared) return c.json({ error: { code: "OVERRIDE_NOT_FOUND", message: "no override to clear" } }, 404);
     return c.json({ ok: true });
   });
-
-  routes.get("/:id/members", async (c) => {
-    const denied = denyIfNotAdmin(c);
-    if (denied) return denied;
-    const limitRaw = Number(c.req.query("limit"));
-    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : undefined;
-    const result = await members.resolveProjectMembers(c.req.param("id"), { limit });
-    return c.json(result);
-  });
-
-  routes.put("/:id/members/:fileId", async (c) => {
-    const denied = denyIfNotAdmin(c);
-    if (denied) return denied;
-    const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
-    if (body.mode !== "include" && body.mode !== "exclude") {
-      return c.json({ error: { code: "BAD_REQUEST", message: "mode must be 'include' or 'exclude'" } }, 400);
-    }
-    try {
-      await members.setMembership(c.req.param("id"), c.req.param("fileId"), body.mode, c.get("sub"));
-      return c.json({ ok: true });
-    } catch (err) {
-      return handleBindingError(c, err);
-    }
-  });
-
-  routes.delete("/:id/members/:fileId", async (c) => {
-    const denied = denyIfNotAdmin(c);
-    if (denied) return denied;
-    const cleared = await members.clearMembership(c.req.param("id"), c.req.param("fileId"));
-    if (!cleared) return c.json({ error: { code: "OVERRIDE_NOT_FOUND", message: "no override to clear" } }, 404);
-    return c.json({ ok: true });
-  });
-
   return routes;
 }

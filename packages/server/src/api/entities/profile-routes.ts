@@ -9,8 +9,10 @@ import {
   createEntityRelationshipsRepository,
 } from "../../db/repositories/entity-relationships";
 import { createEntitySharesRepository } from "../../db/repositories/entity-shares";
+import { createEntitySuppressionRepository } from "../../db/repositories/entity-suppressions";
 import { createEntityTimelineRepository } from "../../db/repositories/entity-timeline";
 import type { DB } from "../../db/schema";
+import { normalizeEntityMatchName } from "../../entities/materialize-deps";
 import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, mapSourceTypeToEntityType } from "../../entities/profile-facts";
 import { denyIfNotAdmin, getContentViewer, getFileViewer } from "../auth-helpers";
 import type { EntityRoutesDeps } from "./types";
@@ -99,6 +101,7 @@ async function loadActivityStats(db: Kysely<DB>, entityId: string, viewer: FileV
     .select(["e2.id as id", "e2.name as name", sql<number>`COUNT(DISTINCT em1.indexed_file_id)`.as("files")])
     .where("em1.entity_id", "=", entityId)
     .where("e2.source_type", "=", "person")
+    .where(whereLiveEntity("e2"))
     .groupBy(["e2.id", "e2.name"])
     .orderBy("files", "desc")
     .limit(3);
@@ -715,7 +718,10 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
 
   /**
    * DELETE /api/entities/:id
-   * Delete an entity and its mentions/source refs (cascade).
+   * Soft-delete an entity: tombstone it (deleted_at) so it disappears from every
+   * `whereLiveEntity()` read, leaving its mentions/relationships/bindings intact
+   * but hidden (reversible, like a merge tombstone). Also writes a durable
+   * suppression so the loose LLM creation paths don't re-mint it.
    */
   routes.delete("/:id", async (c) => {
     const denied = denyIfNotAdmin(c);
@@ -725,7 +731,23 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
-    await db.deleteFrom("entities").where("id", "=", entity.id).execute();
+    const now = new Date().toISOString();
+    await db
+      .updateTable("entities")
+      .set({ deleted_at: now, updated_at: now })
+      .where("id", "=", entity.id)
+      .where("deleted_at", "is", null)
+      .where("merged_into_entity_id", "is", null)
+      .execute();
+
+    await createEntitySuppressionRepository(db).suppress({
+      normalizedName: normalizeEntityMatchName(entity.source_type, entity.name),
+      entityType: entity.source_type,
+      originalEntityId: entity.id,
+      reason: "soft_deleted",
+      createdBy: c.get("sub") as string,
+    });
+
     return c.json({ success: true });
   });
 

@@ -697,6 +697,16 @@ export interface EntityProjectMemberOverridesTable {
   created_at: Generated<string>;
 }
 
+export interface EntityCreationSuppressionsTable {
+  id: string;
+  normalized_name: string;
+  entity_type: string;
+  original_entity_id: string | null;
+  reason: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityRelationshipsTable {
   id: string;
   source_entity_id: string;
@@ -857,6 +867,7 @@ export interface DB {
   entity_domains: EntityDomainsTable;
   entity_project_bindings: EntityProjectBindingsTable;
   entity_project_member_overrides: EntityProjectMemberOverridesTable;
+  entity_creation_suppressions: EntityCreationSuppressionsTable;
   entity_relationships: EntityRelationshipsTable;
   entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }

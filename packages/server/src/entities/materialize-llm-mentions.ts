@@ -70,6 +70,11 @@ export async function materializeNonPersonLlmEntity(
     return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
   }
 
+  const normalizedName = normalizeEntityMatchName(sourceType, fact.subject_name as string);
+  if (await deps.suppressionRepo.isSuppressed(normalizedName, sourceType)) {
+    return { kind: "skipped", reason: "creation_suppressed" };
+  }
+
   const result = await proposeEntity(
     {
       entityRepo: deps.entityRepo,

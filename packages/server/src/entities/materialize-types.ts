@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { createEntityReviewRepo } from "../db/repositories/entity-review";
+import type { EntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
@@ -39,6 +40,7 @@ export interface MaterializeDeps {
   logger?: Logger;
   entityRepo: ReturnType<typeof createEntityRepository>;
   reviewRepo: ReturnType<typeof createEntityReviewRepo>;
+  suppressionRepo: EntitySuppressionRepository;
   domainsRepo: EntityDomainsRepository;
   lookup: EntityLookup;
   index: LookupIndex;

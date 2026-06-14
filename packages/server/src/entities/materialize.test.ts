@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
@@ -12,6 +13,7 @@ import {
   materializeFromFact,
   materializeUnmaterializedFacts,
 } from "./materialize";
+import { normalizeEntityMatchName } from "./materialize-deps";
 
 const ADMIN_ID = "admin-1";
 const CONNECTOR_ID = "cfg";
@@ -330,6 +332,30 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(queue[0].occurrence_count).toBeGreaterThanOrEqual(2);
     const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();
     expect(projects).toHaveLength(0);
+  });
+
+  it("suppresses re-creation of a deleted project name across mention and relation paths", async () => {
+    await seedFiles(db, 3);
+    await createEntitySuppressionRepository(db).suppress({
+      normalizedName: normalizeEntityMatchName("project", "Zephyr"),
+      entityType: "project",
+      createdBy: ADMIN_ID,
+    });
+    await upsertLlmFact(db, "file-1", "Zephyr", "project");
+    await upsertLlmFact(db, "file-2", "Zephyr", "project");
+    await upsertLlmRelationFact(db, {
+      fileId: "file-3",
+      relationType: "part_of",
+      source: { name: "Zephyr", type: "project" },
+      target: { name: "Atlas", type: "project" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 2 });
+
+    const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();
+    expect(projects).toHaveLength(0);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().where("entity_type", "=", "project").execute();
+    expect(queue).toHaveLength(0);
   });
 
   it("materializes contact point facts onto the referenced person", async () => {

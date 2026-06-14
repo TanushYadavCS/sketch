@@ -26,6 +26,7 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
+import { whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -156,6 +157,7 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     .where("em1.confidence", "=", "EXTRACTED")
     .where("em2.confidence", "=", "EXTRACTED")
     .where("e.source_type", "not in", systemTypes.length > 0 ? systemTypes : [""])
+    .where(whereLiveEntity("e"))
     .execute();
 
   const now = deps.now ? deps.now() : Date.now();

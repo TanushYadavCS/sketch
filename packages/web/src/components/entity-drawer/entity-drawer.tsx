@@ -24,15 +24,28 @@ import {
   CaretRightIcon,
   GlobeIcon,
   ShareNetworkIcon,
+  SpinnerGapIcon,
+  TrashIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { toast } from "sonner";
 import { ScopePanel } from "./scope-panel";
 import { TimelineStrip } from "./timeline-strip";
 
@@ -177,6 +190,7 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
   const isAdmin = sessionQuery.data?.role === "admin";
   const [shareOpen, setShareOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   return (
     <div
@@ -230,6 +244,15 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
                     <ShareNetworkIcon size={12} />
                     Share
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 text-[11px] text-destructive hover:text-destructive"
+                    onClick={() => setDeleteOpen(true)}
+                  >
+                    <TrashIcon size={12} />
+                    Delete
+                  </Button>
                 </>
               ) : null}
             </div>
@@ -270,9 +293,84 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
               if (survivorId !== entity.id) ui.openEntity(survivorId);
             }}
           />
+          <DeleteEntityDialog
+            entityId={entity.id}
+            entityName={entity.name}
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+          />
         </>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Admin-only soft delete. The entity is tombstoned server-side (hidden from the
+ * graph, recoverable by an admin) and its name is suppressed so the LLM
+ * enrichment paths don't re-mint it. On success the drawer closes and every
+ * surface that could still show the entity is invalidated.
+ */
+function DeleteEntityDialog({
+  entityId,
+  entityName,
+  open,
+  onOpenChange,
+}: {
+  entityId: string;
+  entityName: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const ui = useEntityUi();
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => api.entities.remove(entityId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer"] });
+      queryClient.invalidateQueries({ queryKey: ["entities"] });
+      queryClient.invalidateQueries({ queryKey: ["entity-graph"] });
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      toast.success(`${entityName} deleted`);
+      onOpenChange(false);
+      ui.closeAll();
+    },
+    onError: (err: Error) => {
+      toast.error(err.message);
+    },
+  });
+
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete {entityName}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            It will be hidden from the graph and won't be recreated automatically. An admin can restore it later.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            onClick={(e) => {
+              e.preventDefault();
+              deleteMutation.mutate();
+            }}
+            disabled={deleteMutation.isPending}
+          >
+            {deleteMutation.isPending ? (
+              <>
+                <SpinnerGapIcon size={14} className="animate-spin" />
+                Deleting...
+              </>
+            ) : (
+              "Delete"
+            )}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

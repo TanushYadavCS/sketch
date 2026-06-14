@@ -267,4 +267,68 @@ describe("project routes", () => {
 
     expect(res.status).toBe(403);
   });
+
+  it("soft-deletes an entity, hides it from the list, writes a suppression memo, and is idempotent", async () => {
+    await seedEntity(db, "junk-project", "Sketch PR #192");
+
+    const res = await app.request("/api/entities/junk-project", {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(res.status).toBe(200);
+
+    const row = await db
+      .selectFrom("entities")
+      .select(["deleted_at", "merged_into_entity_id"])
+      .where("id", "=", "junk-project")
+      .executeTakeFirstOrThrow();
+    expect(row.deleted_at).not.toBeNull();
+    expect(row.merged_into_entity_id).toBeNull();
+
+    const list = (await (await app.request("/api/projects", { headers: { Cookie: adminCookie } })).json()) as {
+      projects: { id: string }[];
+    };
+    expect(list.projects.map((p) => p.id)).not.toContain("junk-project");
+
+    const memo = await db
+      .selectFrom("entity_creation_suppressions")
+      .selectAll()
+      .where("entity_type", "=", "project")
+      .execute();
+    expect(memo).toHaveLength(1);
+    expect(memo[0].original_entity_id).toBe("junk-project");
+
+    const again = await app.request("/api/entities/junk-project", {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(again.status).toBe(404);
+  });
+
+  it("excludes a soft-deleted child project from parent rollup counts", async () => {
+    await seedConnector(db, adminId);
+    await seedEntity(db, "parent-project", "Parent Project");
+    await seedEntity(db, "child-project", "Child Project");
+    await seedOrigin(db, "child-project", "linear", "LC1");
+    await seedBinding(db, "child-project", adminId);
+    await seedPartOf(db, "child-project", "parent-project");
+
+    const before = (await (
+      await app.request("/api/projects/parent-project", { headers: { Cookie: adminCookie } })
+    ).json()) as ProjectPayload;
+    expect(before.project.subProjectCount).toBe(1);
+    expect(before.project.sourceCount).toBeGreaterThanOrEqual(1);
+
+    const del = await app.request("/api/entities/child-project", {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(del.status).toBe(200);
+
+    const after = (await (
+      await app.request("/api/projects/parent-project", { headers: { Cookie: adminCookie } })
+    ).json()) as ProjectPayload;
+    expect(after.project.subProjectCount).toBe(0);
+    expect(after.project.sourceCount).toBe(0);
+  });
 });

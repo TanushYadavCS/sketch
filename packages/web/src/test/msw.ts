@@ -274,6 +274,10 @@ export const handlers = [
     return HttpResponse.json({ ok: true });
   }),
 
+  http.delete("/api/entities/:id", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
   http.get("/api/entities/:id/merge-preview", () => {
     return HttpResponse.json({
       survivorId: "s",

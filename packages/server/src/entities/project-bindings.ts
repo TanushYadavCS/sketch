@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
+import { whereLiveEntity } from "../db/repositories/entities";
 import {
   type EntityProjectBindingRow,
   createEntityProjectBindingsRepository,
@@ -22,18 +23,26 @@ export class ProjectBindingError extends Error {
 export async function isLiveProject(db: Kysely<DB>, entityId: string): Promise<boolean> {
   const row = await db
     .selectFrom("entities")
-    .select(["source_type", "status", "deleted_at"])
+    .select(["source_type", "status", "deleted_at", "merged_into_entity_id"])
     .where("id", "=", entityId)
     .executeTakeFirst();
-  return Boolean(row && row.source_type === "project" && row.status === "confirmed" && row.deleted_at === null);
+  return Boolean(
+    row &&
+      row.source_type === "project" &&
+      row.status === "confirmed" &&
+      row.deleted_at === null &&
+      row.merged_into_entity_id === null,
+  );
 }
 
 async function childrenOf(db: Kysely<DB>, parentId: string): Promise<string[]> {
   const rows = await db
-    .selectFrom("entity_relationships")
-    .select("source_entity_id")
-    .where("relationship_type", "=", PART_OF)
-    .where("target_entity_id", "=", parentId)
+    .selectFrom("entity_relationships as r")
+    .innerJoin("entities as e", "e.id", "r.source_entity_id")
+    .select("r.source_entity_id")
+    .where("r.relationship_type", "=", PART_OF)
+    .where("r.target_entity_id", "=", parentId)
+    .where(whereLiveEntity("e"))
     .execute();
   return rows.map((r) => r.source_entity_id);
 }

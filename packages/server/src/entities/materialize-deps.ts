@@ -4,6 +4,7 @@ import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
 import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
@@ -163,6 +164,7 @@ export async function buildMaterializeDeps(
 ): Promise<MaterializeDeps> {
   const entityRepo = createEntityRepository(db);
   const reviewRepo = createEntityReviewRepo(db);
+  const suppressionRepo = createEntitySuppressionRepository(db);
   const domainsRepo = createEntityDomainsRepository(db);
   const index = await buildLookupIndex(db);
   const llmPromotionThreshold =
@@ -189,6 +191,7 @@ export async function buildMaterializeDeps(
     logger: opts.logger,
     entityRepo,
     reviewRepo,
+    suppressionRepo,
     domainsRepo,
     lookup,
     index,

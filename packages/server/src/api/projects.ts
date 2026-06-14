@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
+import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { createProjectBindingsService } from "../entities/project-bindings";
 import { createProjectMembersService } from "../entities/project-members";
@@ -36,10 +37,12 @@ async function originFor(db: Kysely<DB>, projectId: string): Promise<"derived" |
 
 async function subProjectCount(db: Kysely<DB>, projectId: string): Promise<number> {
   const row = await db
-    .selectFrom("entity_relationships")
+    .selectFrom("entity_relationships as r")
+    .innerJoin("entities as e", "e.id", "r.source_entity_id")
     .select((eb) => eb.fn.countAll<number>().as("n"))
-    .where("relationship_type", "=", "part_of")
-    .where("target_entity_id", "=", projectId)
+    .where("r.relationship_type", "=", "part_of")
+    .where("r.target_entity_id", "=", projectId)
+    .where(whereLiveEntity("e"))
     .executeTakeFirstOrThrow();
   return Number(row.n);
 }

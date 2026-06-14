@@ -7,7 +7,7 @@ import {
   readRelationEndpoint,
   relationDirectionAllowed,
 } from "./graph";
-import { registerEntity } from "./materialize-deps";
+import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
@@ -43,8 +43,10 @@ export async function materializeLlmRelationFact(
   if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
   const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source");
+  if (sourceResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (sourceResult.kind === "queued_held") return sourceResult;
   const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target");
+  if (targetResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (targetResult.kind === "queued_held") return targetResult;
   if (sourceResult.entity.id === targetResult.entity.id) return { kind: "skipped", reason: "self_relation" };
 
@@ -213,8 +215,15 @@ async function materializeRelationEndpoint(
 ): Promise<
   | { kind: "resolved"; entity: EntityRow; created: boolean }
   | { kind: "queued_held"; reviewId: string; reason: "relation_endpoint" }
+  | { kind: "suppressed_endpoint" }
 > {
   const raw = readJsonObject(fact.raw);
+  if (endpoint.type === "project") {
+    const normalized = normalizeEntityMatchName("project", endpoint.name);
+    if (await deps.suppressionRepo.isSuppressed(normalized, "project")) {
+      return { kind: "suppressed_endpoint" };
+    }
+  }
   const result = await proposeEntity(
     {
       entityRepo: deps.entityRepo,
