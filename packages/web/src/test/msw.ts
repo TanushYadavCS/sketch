@@ -230,6 +230,26 @@ export const handlers = [
     return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
   }),
 
+  http.get("/api/entities/:id/bindings", () => {
+    return HttpResponse.json({ bindings: [] });
+  }),
+
+  http.post("/api/entities/:id/bindings", () => {
+    return HttpResponse.json({ binding: null });
+  }),
+
+  http.delete("/api/entities/:id/bindings/:bindingId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.post("/api/entities/:id/group", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.delete("/api/entities/:id/group/:childId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
   http.get("/api/settings/identity", () => {
     return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
   }),

@@ -483,6 +483,24 @@ export interface EntityTimelineResponse {
   totalCount: number;
 }
 
+/**
+ * A connector container (data source) bound to a project entity. The effective
+ * list (GET ?effective=true) annotates each row with `viaProjectId` (the subtree
+ * project that contributed it) and `origin` (true when derived from the
+ * project's own source ref rather than an explicit binding).
+ */
+export interface EntityBinding {
+  id: string;
+  entityId: string;
+  source: string;
+  containerId: string;
+  containerKind: string;
+  label: string | null;
+  connectorConfigId: string | null;
+  viaProjectId?: string;
+  origin?: boolean;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1728,6 +1746,32 @@ export const api = {
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    listBindings(id: string, effective = true) {
+      return request<{ bindings: EntityBinding[] }>(
+        `/api/entities/${id}/bindings${effective ? "?effective=true" : ""}`,
+      );
+    },
+    addBinding(
+      id: string,
+      data: { source: string; containerId: string; containerKind: string; label?: string | null },
+    ) {
+      return request<{ binding: EntityBinding }>(`/api/entities/${id}/bindings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    removeBinding(id: string, bindingId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/bindings/${bindingId}`, { method: "DELETE" });
+    },
+    groupProject(id: string, childId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/group`, {
+        method: "POST",
+        body: JSON.stringify({ childId }),
+      });
+    },
+    ungroupProject(id: string, childId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/group/${childId}`, { method: "DELETE" });
     },
     listShares(id: string) {
       return request<EntitySharesResponse>(`/api/entities/${id}/shares`);

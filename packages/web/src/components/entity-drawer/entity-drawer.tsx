@@ -31,6 +31,7 @@ import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { ScopePanel } from "./scope-panel";
 import { TimelineStrip } from "./timeline-strip";
 
 const CONFIDENCE_LABEL: Record<string, string> = {
@@ -143,7 +144,12 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         <SummaryBlock entity={entity} accent={accent} />
-        <DrawerTabs entityId={entity.id} relations={relationsQuery.data} relationsLoading={relationsQuery.isLoading} />
+        <DrawerTabs
+          entityId={entity.id}
+          sourceType={entity.sourceType}
+          relations={relationsQuery.data}
+          relationsLoading={relationsQuery.isLoading}
+        />
       </div>
     </>
   );
@@ -325,12 +331,14 @@ function formatShortDate(iso: string): string {
 
 interface DrawerTabsProps {
   entityId: string;
+  sourceType: string;
   relations: EntityRelationsResponse | undefined;
   relationsLoading: boolean;
 }
 
-function DrawerTabs({ entityId, relations, relationsLoading }: DrawerTabsProps) {
-  const [tab, setTab] = useState<"timeline" | "relationships">("timeline");
+function DrawerTabs({ entityId, sourceType, relations, relationsLoading }: DrawerTabsProps) {
+  const isProject = sourceType === "project";
+  const [tab, setTab] = useState<"timeline" | "relationships" | "scope">("timeline");
   const timelineQuery = useQuery({
     queryKey: ["entity-drawer", "timeline", entityId],
     queryFn: () => api.entities.timeline(entityId),
@@ -360,8 +368,13 @@ function DrawerTabs({ entityId, relations, relationsLoading }: DrawerTabsProps) 
           label="Relationships"
           hint={relationsHint}
         />
+        {isProject ? (
+          <TabButton active={tab === "scope"} onClick={() => setTab("scope")} label="Scope" hint={null} />
+        ) : null}
       </div>
-      {tab === "timeline" ? (
+      {tab === "scope" && isProject ? (
+        <ScopePanel entityId={entityId} />
+      ) : tab === "timeline" ? (
         <TimelinePanel timelineQuery={timelineQuery} />
       ) : (
         <RelationshipsPanel relations={relations} isLoading={relationsLoading} entityId={entityId} />
