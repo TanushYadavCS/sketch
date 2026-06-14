@@ -302,6 +302,10 @@ export const handlers = [
     return HttpResponse.json({ projects: [] });
   }),
 
+  http.get("/api/projects/bindable-containers", () => {
+    return HttpResponse.json({ containers: [] });
+  }),
+
   http.get("/api/settings/identity", () => {
     return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
   }),

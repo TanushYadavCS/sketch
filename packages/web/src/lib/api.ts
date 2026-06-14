@@ -576,6 +576,13 @@ export interface ProjectSummary {
   subProjectCount: number;
 }
 
+export interface BindableContainer {
+  source: string;
+  containerId: string;
+  containerKind: string;
+  label: string;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -2014,6 +2021,9 @@ export const api = {
   projects: {
     list() {
       return request<{ projects: ProjectSummary[] }>("/api/projects");
+    },
+    bindableContainers() {
+      return request<{ containers: BindableContainer[] }>("/api/projects/bindable-containers");
     },
   },
   entityReview: {

@@ -8,12 +8,12 @@ import { EntityPicker } from "@/components/entity-picker";
  * Admins can attach/detach data sources and group/ungroup sub-projects; the
  * underlying routes are admin-only, so non-admins see a read-only view.
  */
-import { type EntityBinding, type EntityMember, api } from "@/lib/api";
+import { type BindableContainer, type EntityBinding, type EntityMember, api } from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
-import { Input } from "@sketch/ui/components/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -30,6 +30,24 @@ function invalidateScopeQueries(queryClient: ReturnType<typeof useQueryClient>, 
   queryClient.invalidateQueries({ queryKey: bindingsKey(entityId) });
   queryClient.invalidateQueries({ queryKey: membersKey(entityId) });
   queryClient.invalidateQueries({ queryKey: ["projects"] });
+}
+
+function bindableContainersKey(): unknown[] {
+  return ["projects", "bindable-containers"];
+}
+
+function containerValue(c: BindableContainer): string {
+  return `${c.source}:${c.containerId}`;
+}
+
+const CONTAINER_KIND_LABEL: Record<string, string> = {
+  linear_project: "Linear project",
+  clickup_space: "ClickUp space",
+  clickup_folder: "ClickUp folder",
+};
+
+function containerKindLabel(kind: string): string {
+  return CONTAINER_KIND_LABEL[kind] ?? kind;
 }
 
 export function ScopePanel({ entityId }: { entityId: string }) {
@@ -254,70 +272,79 @@ function BindingRow({
   );
 }
 
+/**
+ * Wire a project to the connectors that feed it. The Tracking board picker lists
+ * the structural containers the graph already knows (Linear projects, ClickUp
+ * spaces/folders) that aren't bound yet, so an admin attaches one without
+ * hand-typing connector ids. Repo and Folders are placeholders for the
+ * cofounders' GitHub / local-workdir tracks — shown disabled so the shape of the
+ * surface is visible.
+ */
 function AddBindingForm({ entityId }: { entityId: string }) {
   const queryClient = useQueryClient();
-  const [source, setSource] = useState("");
-  const [containerKind, setContainerKind] = useState("");
-  const [containerId, setContainerId] = useState("");
-  const [label, setLabel] = useState("");
+  const [selected, setSelected] = useState("");
+
+  const containersQuery = useQuery({
+    queryKey: bindableContainersKey(),
+    queryFn: () => api.projects.bindableContainers(),
+  });
+  const containers = containersQuery.data?.containers ?? [];
+  const chosen = containers.find((c) => containerValue(c) === selected) ?? null;
 
   const addMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (container: BindableContainer) =>
       api.entities.addBinding(entityId, {
-        source: source.trim(),
-        containerKind: containerKind.trim(),
-        containerId: containerId.trim(),
-        label: label.trim() || null,
+        source: container.source,
+        containerKind: container.containerKind,
+        containerId: container.containerId,
+        label: container.label,
       }),
     onSuccess: () => {
-      setSource("");
-      setContainerKind("");
-      setContainerId("");
-      setLabel("");
+      setSelected("");
       invalidateScopeQueries(queryClient, entityId);
+      queryClient.invalidateQueries({ queryKey: bindableContainersKey() });
     },
   });
 
-  const canSubmit = source.trim() && containerKind.trim() && containerId.trim() && !addMutation.isPending;
+  const canSubmit = Boolean(chosen) && !addMutation.isPending;
 
   return (
     <form
       className="rounded-lg border bg-card p-3"
       onSubmit={(e) => {
         e.preventDefault();
-        if (canSubmit) addMutation.mutate();
+        if (chosen && !addMutation.isPending) addMutation.mutate(chosen);
       }}
     >
       <SectionLabel>Add data source</SectionLabel>
-      <div className="grid grid-cols-2 gap-2">
-        <Input
-          aria-label="Source connector"
-          placeholder="Connector (e.g. clickup)"
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
-          className="h-8 text-xs"
-        />
-        <Input
-          aria-label="Container kind"
-          placeholder="Kind (e.g. clickup_space)"
-          value={containerKind}
-          onChange={(e) => setContainerKind(e.target.value)}
-          className="h-8 text-xs"
-        />
-        <Input
-          aria-label="Container id"
-          placeholder="Container id"
-          value={containerId}
-          onChange={(e) => setContainerId(e.target.value)}
-          className="h-8 text-xs"
-        />
-        <Input
-          aria-label="Label"
-          placeholder="Label (optional)"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          className="h-8 text-xs"
-        />
+      <div className="space-y-2">
+        <WireField label="Tracking board">
+          <Select value={selected} onValueChange={setSelected} disabled={containers.length === 0}>
+            <SelectTrigger aria-label="Tracking board" className="h-8 text-xs">
+              <SelectValue
+                placeholder={containers.length === 0 ? "No connector boards detected yet" : "Choose a board…"}
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {containers.map((c) => (
+                <SelectItem key={containerValue(c)} value={containerValue(c)} className="text-xs">
+                  {c.label}
+                  <span className="ml-1.5 text-muted-foreground">· {containerKindLabel(c.containerKind)}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </WireField>
+        <WireField label="Repo" comingSoon>
+          <div className="flex h-8 items-center rounded-md border border-dashed border-border px-3 text-xs text-muted-foreground">
+            GitHub repository
+          </div>
+        </WireField>
+        <WireField label="Folders" comingSoon>
+          <div className="flex h-8 items-center rounded-md border border-dashed border-border px-3 text-xs text-muted-foreground">
+            Local folders
+          </div>
+        </WireField>
       </div>
       {addMutation.isError ? (
         <p className="mt-2 text-[11px] text-destructive">{errorMessage(addMutation.error)}</p>
@@ -329,6 +356,30 @@ function AddBindingForm({ entityId }: { entityId: string }) {
         </Button>
       </div>
     </form>
+  );
+}
+
+function WireField({
+  label,
+  comingSoon,
+  children,
+}: {
+  label: string;
+  comingSoon?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-[5.5rem_1fr] items-center gap-2">
+      <div className="flex items-center gap-1.5">
+        <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">{label}</span>
+        {comingSoon ? (
+          <Badge variant="outline" className="text-[8px] uppercase tracking-wider text-muted-foreground/70">
+            Soon
+          </Badge>
+        ) : null}
+      </div>
+      {children}
+    </div>
   );
 }
 

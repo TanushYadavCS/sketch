@@ -79,9 +79,18 @@ describe("ScopePanel", () => {
     expect(await screen.findByText("Child Project")).toBeInTheDocument();
   });
 
-  it("lets an admin attach a data source", async () => {
+  it("lets an admin attach a data source from the Tracking board picker", async () => {
     asAdmin();
     bindings([]);
+    server.use(
+      http.get("/api/projects/bindable-containers", () =>
+        HttpResponse.json({
+          containers: [
+            { source: "clickup", containerId: "C9", containerKind: "clickup_space", label: "Roadmap Space" },
+          ],
+        }),
+      ),
+    );
     let posted: Record<string, unknown> | null = null;
     server.use(
       http.post("/api/entities/:id/bindings", async ({ request }) => {
@@ -93,14 +102,21 @@ describe("ScopePanel", () => {
     const user = userEvent.setup();
     renderWithProviders(<ScopePanel entityId={ENTITY_ID} />);
 
-    await user.type(await screen.findByLabelText("Source connector"), "clickup");
-    await user.type(screen.getByLabelText("Container kind"), "clickup_space");
-    await user.type(screen.getByLabelText("Container id"), "C9");
+    const board = await screen.findByRole("combobox", { name: "Tracking board" });
+    await waitFor(() => expect(board).toBeEnabled());
+    await user.click(board);
+    await user.click(await screen.findByRole("option", { name: /Roadmap Space/ }));
     await user.click(screen.getByRole("button", { name: "Add" }));
 
     await waitFor(() => {
-      expect(posted).toEqual({ source: "clickup", containerKind: "clickup_space", containerId: "C9", label: null });
+      expect(posted).toEqual({
+        source: "clickup",
+        containerKind: "clickup_space",
+        containerId: "C9",
+        label: "Roadmap Space",
+      });
     });
+    expect(screen.getAllByText("Soon")).toHaveLength(2);
   });
 
   it("is read-only for non-admins", async () => {
@@ -122,7 +138,7 @@ describe("ScopePanel", () => {
     renderWithProviders(<ScopePanel entityId={ENTITY_ID} />);
 
     expect(await screen.findByText("Roadmap")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Source connector")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Tracking board" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
   });
 });

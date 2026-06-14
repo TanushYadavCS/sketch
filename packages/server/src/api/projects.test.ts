@@ -156,6 +156,28 @@ async function seedFileWithParentFact(db: Kysely<DB>, fileId: string, containerI
     .execute();
 }
 
+async function seedStructuralSeed(
+  db: Kysely<DB>,
+  args: { source: string; sourceId: string; name: string; sourceType: string },
+) {
+  await db
+    .insertInto("indexed_file_facts")
+    .values({
+      id: `seed-${args.source}-${args.sourceId}`,
+      indexed_file_id: null,
+      connector_config_id: "connector-1",
+      source: args.source,
+      fact_type: "structural_seed",
+      relation: "seeded",
+      subject_name: args.name,
+      subject_source: args.source,
+      subject_source_id: args.sourceId,
+      raw: JSON.stringify({ sourceType: args.sourceType }),
+      fact_key: `seed:${args.source}:${args.sourceId}`,
+    })
+    .execute();
+}
+
 async function seedPartOf(db: Kysely<DB>, childId: string, parentId: string) {
   await db
     .insertInto("entity_relationships")
@@ -266,6 +288,37 @@ describe("project routes", () => {
     const res = await app.request("/api/projects", { headers: { Cookie: memberCookie } });
 
     expect(res.status).toBe(403);
+  });
+
+  it("lists bindable containers, excludes already-bound and non-project seeds, and denies members", async () => {
+    await seedConnector(db, adminId);
+    await seedStructuralSeed(db, {
+      source: "linear",
+      sourceId: "team-1",
+      name: "Platform",
+      sourceType: "linear_project",
+    });
+    await seedStructuralSeed(db, {
+      source: "clickup",
+      sourceId: "space-9",
+      name: "Roadmap",
+      sourceType: "clickup_space",
+    });
+    await seedStructuralSeed(db, { source: "clickup", sourceId: "doc-7", name: "Notes", sourceType: "clickup_doc" });
+    await seedEntity(db, "bound-project", "Bound Project");
+    await seedBinding(db, "bound-project", adminId);
+
+    const memberRes = await app.request("/api/projects/bindable-containers", { headers: { Cookie: memberCookie } });
+    expect(memberRes.status).toBe(403);
+
+    const res = await app.request("/api/projects/bindable-containers", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { containers: { source: string; containerId: string; label: string }[] };
+
+    expect(body.containers.map((c) => c.containerId)).toEqual(["space-9"]);
+    expect(body.containers[0]).toEqual(
+      expect.objectContaining({ source: "clickup", containerKind: "clickup_space", label: "Roadmap" }),
+    );
   });
 
   it("soft-deletes an entity, hides it from the list, writes a suppression memo, and is idempotent", async () => {
