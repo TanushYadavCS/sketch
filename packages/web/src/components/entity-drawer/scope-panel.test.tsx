@@ -126,3 +126,78 @@ describe("ScopePanel", () => {
     expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
   });
 });
+
+function members(rows: unknown[], truncated = false) {
+  server.use(http.get("/api/entities/:id/members", () => HttpResponse.json({ members: rows, truncated })));
+}
+
+const NOMINATED = {
+  indexedFileId: "f1",
+  fileName: "Sprint board",
+  fileType: "task",
+  source: "linear",
+  providerUrl: null,
+  viaProjectId: ENTITY_ID,
+  containerId: "LP1",
+  manual: false,
+};
+const INHERITED = {
+  indexedFileId: "f2",
+  fileName: "Child doc",
+  fileType: "document",
+  source: "clickup",
+  providerUrl: null,
+  viaProjectId: "child-1",
+  containerId: "C1",
+  manual: false,
+};
+
+describe("ScopePanel members", () => {
+  it("lists members with inherited provenance", async () => {
+    asMember();
+    bindings([]);
+    members([NOMINATED, INHERITED]);
+
+    renderWithProviders(<ScopePanel entityId={ENTITY_ID} />);
+
+    expect(await screen.findByText("Sprint board")).toBeInTheDocument();
+    expect(screen.getByText("Child doc")).toBeInTheDocument();
+    expect(screen.getByText("Inherited")).toBeInTheDocument();
+  });
+
+  it("lets an admin exclude a member", async () => {
+    asAdmin();
+    bindings([]);
+    members([NOMINATED]);
+    let excludedFileId: string | null = null;
+    let excludedMode: string | null = null;
+    server.use(
+      http.put("/api/entities/:id/members/:fileId", async ({ params, request }) => {
+        excludedFileId = params.fileId as string;
+        excludedMode = ((await request.json()) as { mode?: string }).mode ?? null;
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScopePanel entityId={ENTITY_ID} />);
+
+    await user.click(await screen.findByRole("button", { name: "Exclude Sprint board" }));
+
+    await waitFor(() => {
+      expect(excludedFileId).toBe("f1");
+      expect(excludedMode).toBe("exclude");
+    });
+  });
+
+  it("hides the exclude control from non-admins", async () => {
+    asMember();
+    bindings([]);
+    members([NOMINATED]);
+
+    renderWithProviders(<ScopePanel entityId={ENTITY_ID} />);
+
+    expect(await screen.findByText("Sprint board")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /exclude/i })).not.toBeInTheDocument();
+  });
+});

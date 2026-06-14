@@ -506,6 +506,23 @@ export interface GroupedProjectChild {
   name: string;
 }
 
+/**
+ * A connector item (indexed file) that belongs to a project — nominated by one
+ * of the project's bindings (resolved up the spine) or added manually. `manual`
+ * marks a human-included file; `viaProjectId` (when set and not the project
+ * itself) marks one inherited from a grouped sub-project.
+ */
+export interface EntityMember {
+  indexedFileId: string;
+  fileName: string;
+  fileType: string | null;
+  source: string;
+  providerUrl: string | null;
+  viaProjectId: string | null;
+  containerId: string | null;
+  manual: boolean;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1777,6 +1794,19 @@ export const api = {
     },
     ungroupProject(id: string, childId: string) {
       return request<{ ok: true }>(`/api/entities/${id}/group/${childId}`, { method: "DELETE" });
+    },
+    listMembers(id: string, limit?: number) {
+      const qs = limit ? `?limit=${limit}` : "";
+      return request<{ members: EntityMember[]; truncated: boolean }>(`/api/entities/${id}/members${qs}`);
+    },
+    setMembership(id: string, fileId: string, mode: "include" | "exclude") {
+      return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, {
+        method: "PUT",
+        body: JSON.stringify({ mode }),
+      });
+    },
+    clearMembership(id: string, fileId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, { method: "DELETE" });
     },
     listShares(id: string) {
       return request<EntitySharesResponse>(`/api/entities/${id}/shares`);

@@ -250,6 +250,18 @@ export const handlers = [
     return HttpResponse.json({ ok: true });
   }),
 
+  http.get("/api/entities/:id/members", () => {
+    return HttpResponse.json({ members: [], truncated: false });
+  }),
+
+  http.put("/api/entities/:id/members/:fileId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.delete("/api/entities/:id/members/:fileId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
   http.get("/api/settings/identity", () => {
     return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
   }),

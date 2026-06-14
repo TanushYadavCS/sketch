@@ -8,7 +8,7 @@ import { EntityPicker } from "@/components/entity-picker";
  * Admins can attach/detach data sources and group/ungroup sub-projects; the
  * underlying routes are admin-only, so non-admins see a read-only view.
  */
-import { type EntityBinding, api } from "@/lib/api";
+import { type EntityBinding, type EntityMember, api } from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
@@ -20,6 +20,10 @@ import { useState } from "react";
 
 function bindingsKey(entityId: string): unknown[] {
   return ["entity-drawer", "bindings", entityId];
+}
+
+function membersKey(entityId: string): unknown[] {
+  return ["entity-drawer", "members", entityId];
 }
 
 export function ScopePanel({ entityId }: { entityId: string }) {
@@ -77,6 +81,100 @@ export function ScopePanel({ entityId }: { entityId: string }) {
         )}
         {isAdmin ? <GroupChildControl entityId={entityId} /> : null}
       </section>
+
+      <MembersSection entityId={entityId} isAdmin={isAdmin} />
+    </div>
+  );
+}
+
+function MembersSection({ entityId, isAdmin }: { entityId: string; isAdmin: boolean }) {
+  const membersQuery = useQuery({
+    queryKey: membersKey(entityId),
+    queryFn: () => api.entities.listMembers(entityId),
+  });
+
+  return (
+    <section>
+      <SectionLabel>Members</SectionLabel>
+      {membersQuery.isLoading ? (
+        <Skeleton className="h-16 w-full" />
+      ) : !membersQuery.data || membersQuery.data.members.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No items in this project's bound containers yet.</p>
+      ) : (
+        <>
+          <div className="flex flex-col">
+            {membersQuery.data.members.map((m) => (
+              <MemberRow key={m.indexedFileId} member={m} entityId={entityId} isAdmin={isAdmin} />
+            ))}
+          </div>
+          {membersQuery.data.truncated ? (
+            <p className="mt-1.5 text-[10px] text-muted-foreground">
+              Showing the first {membersQuery.data.members.length} items.
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+function memberProvenanceBadge(member: EntityMember, entityId: string) {
+  if (member.manual) {
+    return (
+      <Badge variant="secondary" className="text-[9px] uppercase tracking-wider">
+        Manual
+      </Badge>
+    );
+  }
+  if (member.viaProjectId && member.viaProjectId !== entityId) {
+    return (
+      <Badge variant="outline" className="text-[9px] uppercase tracking-wider text-muted-foreground">
+        Inherited
+      </Badge>
+    );
+  }
+  return null;
+}
+
+function MemberRow({
+  member,
+  entityId,
+  isAdmin,
+}: {
+  member: EntityMember;
+  entityId: string;
+  isAdmin: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const excludeMutation = useMutation({
+    mutationFn: () => api.entities.setMembership(entityId, member.indexedFileId, "exclude"),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: membersKey(entityId) }),
+  });
+
+  return (
+    <div className="flex items-center gap-2 border-b py-2 last:border-b-0">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-xs font-medium">{member.fileName}</span>
+          {memberProvenanceBadge(member, entityId)}
+        </div>
+        <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+          {member.source}
+          {member.fileType ? ` · ${member.fileType}` : null}
+        </div>
+      </div>
+      {isAdmin ? (
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+          aria-label={`Exclude ${member.fileName}`}
+          disabled={excludeMutation.isPending}
+          onClick={() => excludeMutation.mutate()}
+        >
+          <XIcon size={12} />
+        </Button>
+      ) : null}
     </div>
   );
 }
