@@ -12,12 +12,14 @@
  * Driven by EntityUiProvider's stack. Each level renders independently —
  * pushing a related entity pushes a new id onto the stack; Back chip pops.
  */
+import { EntityMergeDialog } from "@/components/entity-merge-dialog";
 import { EntityShareDialog } from "@/components/entity-share-dialog";
 import type { EntityDetail, EntityRelationEvidenceRow, EntityRelationView, EntityRelationsResponse } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
 import {
   ArrowLeftIcon,
+  ArrowsLeftRightIcon,
   CaretDownIcon,
   CaretRightIcon,
   GlobeIcon,
@@ -174,6 +176,7 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
   });
   const isAdmin = sessionQuery.data?.role === "admin";
   const [shareOpen, setShareOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
 
   return (
     <div
@@ -208,15 +211,26 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
                 </span>
               ) : null}
               {isAdmin ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 gap-1 text-[11px]"
-                  onClick={() => setShareOpen(true)}
-                >
-                  <ShareNetworkIcon size={12} />
-                  Share
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 text-[11px]"
+                    onClick={() => setMergeOpen(true)}
+                  >
+                    <ArrowsLeftRightIcon size={12} />
+                    Merge
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 text-[11px]"
+                    onClick={() => setShareOpen(true)}
+                  >
+                    <ShareNetworkIcon size={12} />
+                    Share
+                  </Button>
+                </>
               ) : null}
             </div>
           </div>
@@ -239,7 +253,21 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
         </div>
       </div>
       {isAdmin ? (
-        <EntityShareDialog entityId={entity.id} entityName={entity.name} open={shareOpen} onOpenChange={setShareOpen} />
+        <>
+          <EntityShareDialog
+            entityId={entity.id}
+            entityName={entity.name}
+            open={shareOpen}
+            onOpenChange={setShareOpen}
+          />
+          <EntityMergeDialog
+            entityId={entity.id}
+            entityName={entity.name}
+            sourceType={entity.sourceType}
+            open={mergeOpen}
+            onOpenChange={setMergeOpen}
+          />
+        </>
       ) : null}
     </div>
   );

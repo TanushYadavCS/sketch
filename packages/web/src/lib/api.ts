@@ -506,6 +506,44 @@ export interface GroupedProjectChild {
   name: string;
 }
 
+/** Dry-run of merging `loserId` into `survivorId`: what moves and what collides. */
+export interface EntityMergePreview {
+  survivorId: string;
+  loserId: string;
+  blocked?: string;
+  counts: {
+    sourceRefs: number;
+    mentions: number;
+    relationships: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    candidates: number;
+    reviewQueue: number;
+  };
+  collisions: {
+    mentions: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    relationships: number;
+  };
+  selfLoopsDropped: number;
+}
+
+/** A past merge in an entity's ledger (raw server shape). Re-mergeable via unmerge. */
+export interface EntityMergeRecord {
+  id: string;
+  survivor_entity_id: string;
+  merged_entity_id: string;
+  entity_type: string;
+  merged_at: string;
+  unmerged_at: string | null;
+  unmerged_by_user_id: string | null;
+}
+
 /**
  * A connector item (indexed file) that belongs to a project — nominated by one
  * of the project's bindings (resolved up the spine) or added manually. `manual`
@@ -1807,6 +1845,23 @@ export const api = {
     },
     clearMembership(id: string, fileId: string) {
       return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, { method: "DELETE" });
+    },
+    previewMerge(survivorId: string, loserId: string) {
+      return request<EntityMergePreview>(
+        `/api/entities/${survivorId}/merge-preview?against=${encodeURIComponent(loserId)}`,
+      );
+    },
+    merge(survivorId: string, loserId: string) {
+      return request<{ mergeId: string }>("/api/entities/merges", {
+        method: "POST",
+        body: JSON.stringify({ survivorId, loserId }),
+      });
+    },
+    listMerges(entityId: string) {
+      return request<{ merges: EntityMergeRecord[] }>(`/api/entities/merges?entityId=${encodeURIComponent(entityId)}`);
+    },
+    unmerge(mergeId: string) {
+      return request<{ ok: true }>(`/api/entities/merges/${mergeId}`, { method: "DELETE" });
     },
     listShares(id: string) {
       return request<EntitySharesResponse>(`/api/entities/${id}/shares`);
