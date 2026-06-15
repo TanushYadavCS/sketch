@@ -721,6 +721,13 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
       }
       target = fetchedTarget;
     }
+    if (row.seed_source && row.seed_source_id) {
+      await trxCtx.entityRepo.upsertSourceRef({
+        entityId: target.id,
+        source: row.seed_source,
+        sourceId: row.seed_source_id,
+      });
+    }
 
     // Evidence cap (chunking deferred).
     const evidence = await trxCtx.repo.listEvidenceForResolve(reviewId);

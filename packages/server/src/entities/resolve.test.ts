@@ -319,6 +319,48 @@ describe("confirmReview", () => {
     expect(result.mergedStaleEntityId).toBeNull();
   });
 
+  it("source-binds a seed row when confirming into an existing target", async () => {
+    const target = await entityRepo.upsertEntity({
+      name: "Existing Launch",
+      sourceType: "project",
+      status: "confirmed",
+    });
+    const now = new Date().toISOString();
+    const reviewId = randomUUID();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id: reviewId,
+        proposed_name: "Launch Plan",
+        normalized_name: "launch plan",
+        entity_type: "project",
+        candidate_entity_id: target.id,
+        candidate_score: 0.9,
+        candidate_reason: "seed match",
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: USER_ID,
+        seed_source: "clickup",
+        seed_source_id: "S1",
+      })
+      .execute();
+
+    const result = await confirmReview({ db, userId: USER_ID }, reviewId, { candidateGeneratedAt: now });
+
+    expect(result.targetEntityId).toBe(target.id);
+    await expect(
+      db
+        .selectFrom("entity_source_refs")
+        .select(["entity_id", "source", "source_id"])
+        .where("source", "=", "clickup")
+        .where("source_id", "=", "S1")
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ entity_id: target.id, source: "clickup", source_id: "S1" });
+  });
+
   it("rematerializes held LLM non-person facts after confirm", async () => {
     const target = await entityRepo.upsertEntity({
       name: "Canvas Labs",

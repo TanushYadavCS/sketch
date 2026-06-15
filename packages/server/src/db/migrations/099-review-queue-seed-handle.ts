@@ -8,6 +8,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .createIndex("idx_entity_review_queue_seed_handle")
     .on("entity_review_queue")
     .columns(["seed_source", "seed_source_id"])
+    .unique()
     .execute();
 }
 
