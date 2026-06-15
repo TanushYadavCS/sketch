@@ -718,6 +718,11 @@ describe("materializeFromFact — llm_relation typed edges", () => {
 
   it("materializes project part_of product relations", async () => {
     await seedFiles(db, 1);
+    await createEntityRepository(db).upsertEntity({
+      name: "Files Project",
+      sourceType: "project",
+      status: "confirmed",
+    });
     await upsertLlmRelationFact(db, {
       fileId: "file-1",
       relationType: "part_of",
@@ -744,6 +749,11 @@ describe("materializeFromFact — llm_relation typed edges", () => {
 
   it("materializes project engagement_for company relations", async () => {
     await seedFiles(db, 1);
+    await createEntityRepository(db).upsertEntity({
+      name: "Project Atlas",
+      sourceType: "project",
+      status: "confirmed",
+    });
     await upsertLlmRelationFact(db, {
       fileId: "file-1",
       relationType: "engagement_for",
