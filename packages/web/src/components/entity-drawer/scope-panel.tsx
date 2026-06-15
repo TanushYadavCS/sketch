@@ -26,6 +26,11 @@ function membersKey(entityId: string): unknown[] {
   return ["entity-drawer", "members", entityId];
 }
 
+function invalidateScopeQueries(queryClient: ReturnType<typeof useQueryClient>, entityId: string): void {
+  queryClient.invalidateQueries({ queryKey: bindingsKey(entityId) });
+  queryClient.invalidateQueries({ queryKey: membersKey(entityId) });
+}
+
 export function ScopePanel({ entityId }: { entityId: string }) {
   const sessionQuery = useQuery({
     queryKey: ["auth-session"],
@@ -218,7 +223,7 @@ function BindingRow({
   const removable = isAdmin && !binding.origin && binding.viaProjectId === entityId;
   const removeMutation = useMutation({
     mutationFn: () => api.entities.removeBinding(entityId, binding.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: bindingsKey(entityId) }),
+    onSuccess: () => invalidateScopeQueries(queryClient, entityId),
   });
 
   return (
@@ -268,7 +273,7 @@ function AddBindingForm({ entityId }: { entityId: string }) {
       setContainerKind("");
       setContainerId("");
       setLabel("");
-      queryClient.invalidateQueries({ queryKey: bindingsKey(entityId) });
+      invalidateScopeQueries(queryClient, entityId);
     },
   });
 
@@ -338,7 +343,7 @@ function ChildProjectRow({
   const queryClient = useQueryClient();
   const ungroupMutation = useMutation({
     mutationFn: () => api.entities.ungroupProject(parentId, child.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: bindingsKey(parentId) }),
+    onSuccess: () => invalidateScopeQueries(queryClient, parentId),
   });
 
   return (
@@ -363,7 +368,7 @@ function GroupChildControl({ entityId }: { entityId: string }) {
   const queryClient = useQueryClient();
   const groupMutation = useMutation({
     mutationFn: (childId: string) => api.entities.groupProject(entityId, childId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: bindingsKey(entityId) }),
+    onSuccess: () => invalidateScopeQueries(queryClient, entityId),
   });
 
   return (

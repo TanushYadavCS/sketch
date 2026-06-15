@@ -180,6 +180,38 @@ describe("project members", () => {
     });
   });
 
+  it("keeps connector-config-scoped bindings from matching overlapping containers", async () => {
+    await seedConnector(db, "clickup-a", "clickup");
+    await seedConnector(db, "clickup-b", "clickup");
+    await seedProject(db, "project", "Project");
+    await seedFile(db, { id: "file-a", source: "clickup", connectorConfigId: "clickup-a" });
+    await seedFile(db, { id: "file-b", source: "clickup", connectorConfigId: "clickup-b" });
+    await seedParentFact(db, {
+      fileId: "file-a",
+      source: "clickup",
+      containerId: "C1",
+      connectorConfigId: "clickup-a",
+    });
+    await seedParentFact(db, {
+      fileId: "file-b",
+      source: "clickup",
+      containerId: "C1",
+      connectorConfigId: "clickup-b",
+    });
+    await createEntityProjectBindingsRepository(db).create({
+      entityId: "project",
+      source: "clickup",
+      containerId: "C1",
+      containerKind: "space",
+      connectorConfigId: "clickup-a",
+      createdBy: USER_ID,
+    });
+
+    await expect(createProjectMembersService(db).resolveProjectMembers("project")).resolves.toMatchObject({
+      members: [expect.objectContaining({ indexedFileId: "file-a" })],
+    });
+  });
+
   it("re-points member overrides during merge and restores them on unmerge", async () => {
     await seedConnector(db);
     await seedProject(db, "parent", "Parent");

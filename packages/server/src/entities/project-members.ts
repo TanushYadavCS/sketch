@@ -19,6 +19,10 @@ export type MemberRow = {
 export function createProjectMembersService(db: Kysely<DB>) {
   const bindings = createProjectBindingsService(db);
 
+  function containerKey(source: string, containerId: string, connectorConfigId: string | null): string {
+    return `${source}:${containerId}:${connectorConfigId ?? ""}`;
+  }
+
   async function resolveProjectMembers(
     projectId: string,
     opts?: { limit?: number },
@@ -27,7 +31,7 @@ export function createProjectMembersService(db: Kysely<DB>) {
     const effective = await bindings.resolveEffectiveBindings(projectId);
     const containerByKey = new Map<string, { viaProjectId: string; containerId: string }>();
     for (const b of effective) {
-      const key = `${b.source}:${b.containerId}`;
+      const key = containerKey(b.source, b.containerId, b.connectorConfigId);
       if (!containerByKey.has(key)) {
         containerByKey.set(key, { viaProjectId: b.viaProjectId, containerId: b.containerId });
       }
@@ -57,6 +61,7 @@ export function createProjectMembersService(db: Kysely<DB>) {
           "i.provider_url as provider_url",
           "f.subject_source as subject_source",
           "f.subject_source_id as subject_source_id",
+          "f.connector_config_id as connector_config_id",
         ])
         .where("f.fact_type", "=", "parent_entity")
         .where("f.deleted_at", "is", null)
@@ -65,8 +70,9 @@ export function createProjectMembersService(db: Kysely<DB>) {
         .where("f.subject_source_id", "in", containerIds)
         .execute();
       for (const r of rows) {
-        const key = `${r.subject_source}:${r.subject_source_id}`;
-        const container = containerByKey.get(key);
+        const exactKey = containerKey(r.subject_source ?? "", r.subject_source_id ?? "", r.connector_config_id);
+        const wildcardKey = containerKey(r.subject_source ?? "", r.subject_source_id ?? "", null);
+        const container = containerByKey.get(exactKey) ?? containerByKey.get(wildcardKey);
         if (!container) continue;
         if (excluded.has(r.id)) continue;
         if (byFile.has(r.id)) continue;
