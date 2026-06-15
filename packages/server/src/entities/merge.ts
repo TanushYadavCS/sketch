@@ -176,6 +176,7 @@ async function repointContactPoints(
   moves: EntityMergeMove[],
 ): Promise<void> {
   const rows = await db.selectFrom("entity_contact_points").selectAll().where("entity_id", "=", loserId).execute();
+  const movedIds = new Set(rows.map((row) => row.id));
   await repointEntityScopedRows<ContactPoint>(db, {
     table: "entity_contact_points",
     loserId,
@@ -191,6 +192,34 @@ async function repointContactPoints(
         .where("value", "=", row.value)
         .executeTakeFirst(),
   });
+  await rebalancePrimaryContactPoints(db, survivorId, movedIds);
+}
+
+async function rebalancePrimaryContactPoints(db: Kysely<DB>, entityId: string, movedIds: Set<string>): Promise<void> {
+  const primaries = await db
+    .selectFrom("entity_contact_points")
+    .select(["id", "kind", "created_at"])
+    .where("entity_id", "=", entityId)
+    .where("is_primary", "=", 1)
+    .orderBy("kind")
+    .orderBy("created_at")
+    .orderBy("id")
+    .execute();
+  const byKind = new Map<string, typeof primaries>();
+  for (const row of primaries) {
+    byKind.set(row.kind, [...(byKind.get(row.kind) ?? []), row]);
+  }
+  const demoteIds: string[] = [];
+  for (const rows of byKind.values()) {
+    if (rows.length <= 1) continue;
+    const keep = rows.find((row) => !movedIds.has(row.id)) ?? rows[0];
+    for (const row of rows) {
+      if (row.id !== keep.id) demoteIds.push(row.id);
+    }
+  }
+  if (demoteIds.length > 0) {
+    await db.updateTable("entity_contact_points").set({ is_primary: 0 }).where("id", "in", demoteIds).execute();
+  }
 }
 
 async function repointAliasRejections(
@@ -516,11 +545,18 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
     return;
   }
   if (move.table === "entity_source_refs" && updates.entity_id) {
-    await db
+    const result = await db
       .updateTable("entity_source_refs")
       .set({ entity_id: updates.entity_id })
       .where("id", "=", move.rowId)
+      .where("entity_id", "=", move.repoint.entity_id.to)
       .execute();
+    if (updatedCount(result) === 0) {
+      throw new EntityMergeError("MERGE_CONFLICT", "source ref changed owner after merge", {
+        table: move.table,
+        rowId: move.rowId,
+      });
+    }
     return;
   }
   if (move.table === "entity_mentions" && updates.entity_id) {

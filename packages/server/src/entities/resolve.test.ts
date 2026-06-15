@@ -520,8 +520,8 @@ describe("confirmReview", () => {
         .filter((point) => point.kind === "linkedin")
         .map((point) => ({ value: point.value, isPrimary: point.is_primary })),
     ).toEqual([
-      { value: "simran-new", isPrimary: 1 },
       { value: "simran-old", isPrimary: 1 },
+      { value: "simran-new", isPrimary: 0 },
     ]);
   });
 

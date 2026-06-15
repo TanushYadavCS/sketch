@@ -352,6 +352,63 @@ describe("entity merge core", () => {
     ).resolves.toMatchObject({ entity_id: "survivor" });
   });
 
+  it("keeps the survivor primary contact when moving a different loser primary", async () => {
+    await seedEntity(db, "survivor", "Alex");
+    await seedEntity(db, "loser", "Alex Duplicate");
+    await db
+      .insertInto("entity_contact_points")
+      .values([
+        {
+          id: "cp-survivor",
+          entity_id: "survivor",
+          kind: "email",
+          value: "survivor@example.com",
+          is_primary: 1,
+          source: "test",
+        },
+        {
+          id: "cp-loser",
+          entity_id: "loser",
+          kind: "email",
+          value: "loser@example.com",
+          is_primary: 1,
+          source: "test",
+        },
+      ])
+      .execute();
+
+    await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entity_contact_points").select(["id", "is_primary"]).where("entity_id", "=", "survivor").execute(),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "cp-survivor", is_primary: 1 }),
+        expect.objectContaining({ id: "cp-loser", is_primary: 0 }),
+      ]),
+    );
+  });
+
+  it("does not steal source refs that moved after merge", async () => {
+    await seedEntity(db, "survivor", "Alex");
+    await seedEntity(db, "loser", "Alex Duplicate");
+    await seedEntity(db, "third", "Third");
+    await db
+      .insertInto("entity_source_refs")
+      .values({ id: "ref-loser", entity_id: "loser", source: "linear", source_id: "u1", source_url: null })
+      .execute();
+
+    const result = await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+    await db.updateTable("entity_source_refs").set({ entity_id: "third" }).where("id", "=", "ref-loser").execute();
+
+    await expect(unmergeEntities(db, { mergeId: result.mergeId, userId: USER_ID })).rejects.toMatchObject({
+      code: "MERGE_CONFLICT",
+    });
+    await expect(
+      db.selectFrom("entity_source_refs").select("entity_id").where("id", "=", "ref-loser").executeTakeFirst(),
+    ).resolves.toMatchObject({ entity_id: "third" });
+  });
+
   it("enforces LIFO unmerge and fails cleanly when a loser is merged twice", async () => {
     await seedEntity(db, "a", "A");
     await seedEntity(db, "b", "B");
