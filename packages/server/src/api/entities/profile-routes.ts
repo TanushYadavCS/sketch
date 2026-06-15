@@ -732,20 +732,22 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     }
 
     const now = new Date().toISOString();
-    await db
-      .updateTable("entities")
-      .set({ deleted_at: now, updated_at: now })
-      .where("id", "=", entity.id)
-      .where("deleted_at", "is", null)
-      .where("merged_into_entity_id", "is", null)
-      .execute();
-
-    await createEntitySuppressionRepository(db).suppress({
-      normalizedName: normalizeEntityMatchName(entity.source_type, entity.name),
-      entityType: entity.source_type,
-      originalEntityId: entity.id,
-      reason: "soft_deleted",
-      createdBy: c.get("sub") as string,
+    await db.transaction().execute(async (tx) => {
+      await tx
+        .updateTable("entities")
+        .set({ deleted_at: now, updated_at: now })
+        .where("id", "=", entity.id)
+        .where("deleted_at", "is", null)
+        .where("merged_into_entity_id", "is", null)
+        .execute();
+      await tx.deleteFrom("entity_source_refs").where("entity_id", "=", entity.id).execute();
+      await createEntitySuppressionRepository(tx).suppress({
+        normalizedName: normalizeEntityMatchName(entity.source_type, entity.name),
+        entityType: entity.source_type,
+        originalEntityId: entity.id,
+        reason: "soft_deleted",
+        createdBy: c.get("sub") as string,
+      });
     });
 
     return c.json({ success: true });

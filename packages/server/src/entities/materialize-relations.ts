@@ -218,11 +218,9 @@ async function materializeRelationEndpoint(
   | { kind: "suppressed_endpoint" }
 > {
   const raw = readJsonObject(fact.raw);
-  if (endpoint.type === "project") {
-    const normalized = normalizeEntityMatchName("project", endpoint.name);
-    if (await deps.suppressionRepo.isSuppressed(normalized, "project")) {
-      return { kind: "suppressed_endpoint" };
-    }
+  const normalized = normalizeEntityMatchName(endpoint.type, endpoint.name);
+  if (await deps.suppressionRepo.isSuppressed(normalized, endpoint.type)) {
+    return { kind: "suppressed_endpoint" };
   }
   const result = await proposeEntity(
     {

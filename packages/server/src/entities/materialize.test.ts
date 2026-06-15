@@ -358,6 +358,28 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(queue).toHaveLength(0);
   });
 
+  it("suppresses non-project relation endpoints before creating relation entities", async () => {
+    await seedFiles(db, 1);
+    await createEntitySuppressionRepository(db).suppress({
+      normalizedName: normalizeEntityMatchName("person", "Dana Lee"),
+      entityType: "person",
+      createdBy: ADMIN_ID,
+    });
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "works_at",
+      source: { name: "Dana Lee", type: "person" },
+      target: { name: "Acme", type: "company" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    expect(entities).toHaveLength(0);
+    const rels = await db.selectFrom("entity_relationships").selectAll().execute();
+    expect(rels).toHaveLength(0);
+  });
+
   it("materializes contact point facts onto the referenced person", async () => {
     const [fileId] = await seedFiles(db, 1);
     const entityRepo = createEntityRepository(db);
