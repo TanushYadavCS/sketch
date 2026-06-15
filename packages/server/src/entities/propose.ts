@@ -343,7 +343,15 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     for (const c of candidates) {
       const stored = deps.readEmail(c);
       if (stored && stored.toLowerCase() === lowered) {
-        const { entity } = await persistEntity(deps, input, c);
+        const existingSourceRef = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+        if (!existingSourceRef || existingSourceRef.id === c.id) {
+          await deps.entityRepo.upsertSourceRef({ entityId: c.id, source: input.source, sourceId: input.sourceId });
+        }
+        if (c.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+          await deps.entityRepo.appendAlias(c.id, input.name);
+        }
+        const entity = (await deps.entityRepo.getEntity(c.id)) ?? c;
+        await deps.onEntityResolved?.(entity);
         return { kind: "linked", entity };
       }
     }
