@@ -278,7 +278,13 @@ describe("ClickUp project entity seeding", () => {
       .execute();
     expect(secondProjects).toEqual(firstProjects);
     const reviews = await db.selectFrom("entity_review_queue").selectAll().execute();
-    expect(reviews).toHaveLength(0);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      proposed_name: "Delivery",
+      entity_type: "project",
+      seed_source: "clickup",
+      seed_source_id: "cu-space-1",
+    });
   });
 
   it("migrates legacy ClickUp folder rows and tombstones only folder facts before reset replay", async () => {
@@ -405,7 +411,20 @@ describe("ClickUp project entity seeding", () => {
       .selectAll()
       .where("source_type", "=", "clickup_space")
       .execute();
-    expect(persistedSpaces).toHaveLength(1);
-    expect(persistedSpaces[0].name).toBe("Delivery");
+    expect(persistedSpaces).toHaveLength(0);
+    const persistedProjects = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("source_type", "=", "project")
+      .where("name", "=", "Delivery")
+      .execute();
+    expect(persistedProjects).toHaveLength(0);
+    const queuedProjects = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("proposed_name", "=", "Delivery")
+      .where("seed_source_id", "=", "cu-space-legacy")
+      .execute();
+    expect(queuedProjects).toHaveLength(1);
   });
 });
