@@ -24,52 +24,50 @@ function asMember() {
   );
 }
 
-function bindings(rows: unknown[]) {
-  server.use(http.get("/api/entities/:id/bindings", () => HttpResponse.json({ bindings: rows })));
+function bindings(rows: unknown[], children: unknown[] = []) {
+  server.use(http.get("/api/entities/:id/bindings", () => HttpResponse.json({ bindings: rows, children })));
 }
 
 describe("ScopePanel", () => {
   it("renders effective bindings with origin / direct / inherited provenance", async () => {
     asAdmin();
-    bindings([
-      {
-        id: "b0",
-        entityId: ENTITY_ID,
-        source: "linear",
-        containerId: "L1",
-        containerKind: "linear_origin",
-        label: null,
-        connectorConfigId: null,
-        viaProjectId: ENTITY_ID,
-        origin: true,
-      },
-      {
-        id: "b1",
-        entityId: ENTITY_ID,
-        source: "clickup",
-        containerId: "C1",
-        containerKind: "clickup_space",
-        label: "Roadmap",
-        connectorConfigId: null,
-        viaProjectId: ENTITY_ID,
-        origin: false,
-      },
-      {
-        id: "b2",
-        entityId: "child-1",
-        source: "slack",
-        containerId: "S1",
-        containerKind: "slack_channel",
-        label: "#child",
-        connectorConfigId: null,
-        viaProjectId: "child-1",
-        origin: false,
-      },
-    ]);
-    server.use(
-      http.get("/api/entities/child-1", () =>
-        HttpResponse.json({ entity: { id: "child-1", name: "Child Project", sourceType: "project" }, sourceRefs: [] }),
-      ),
+    bindings(
+      [
+        {
+          id: "b0",
+          entityId: ENTITY_ID,
+          source: "linear",
+          containerId: "L1",
+          containerKind: "linear_origin",
+          label: null,
+          connectorConfigId: null,
+          viaProjectId: ENTITY_ID,
+          origin: true,
+        },
+        {
+          id: "b1",
+          entityId: ENTITY_ID,
+          source: "clickup",
+          containerId: "C1",
+          containerKind: "clickup_space",
+          label: "Roadmap",
+          connectorConfigId: null,
+          viaProjectId: ENTITY_ID,
+          origin: false,
+        },
+        {
+          id: "b2",
+          entityId: "child-1",
+          source: "slack",
+          containerId: "S1",
+          containerKind: "slack_channel",
+          label: "#child",
+          connectorConfigId: null,
+          viaProjectId: "child-1",
+          origin: false,
+        },
+      ],
+      [{ id: "child-1", name: "Child Project" }],
     );
 
     renderWithProviders(<ScopePanel entityId={ENTITY_ID} />);

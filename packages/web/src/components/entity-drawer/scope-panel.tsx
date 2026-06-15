@@ -42,7 +42,7 @@ export function ScopePanel({ entityId }: { entityId: string }) {
   const bindings = bindingsQuery.data?.bindings ?? [];
   const direct = bindings.filter((b) => b.viaProjectId === entityId);
   const inherited = bindings.filter((b) => b.viaProjectId !== entityId);
-  const childIds = [...new Set(inherited.map((b) => b.viaProjectId).filter((id): id is string => Boolean(id)))];
+  const children = bindingsQuery.data?.children ?? [];
 
   return (
     <div className="space-y-5">
@@ -66,12 +66,12 @@ export function ScopePanel({ entityId }: { entityId: string }) {
 
       <section>
         <SectionLabel>Sub-projects</SectionLabel>
-        {childIds.length === 0 ? (
+        {children.length === 0 ? (
           <p className="mb-2 text-xs text-muted-foreground">No projects grouped under this one.</p>
         ) : (
           <div className="mb-2 flex flex-col">
-            {childIds.map((childId) => (
-              <ChildProjectRow key={childId} parentId={entityId} childId={childId} isAdmin={isAdmin} />
+            {children.map((child) => (
+              <ChildProjectRow key={child.id} parentId={entityId} child={child} isAdmin={isAdmin} />
             ))}
           </div>
         )}
@@ -230,27 +230,22 @@ function AddBindingForm({ entityId }: { entityId: string }) {
 
 function ChildProjectRow({
   parentId,
-  childId,
+  child,
   isAdmin,
 }: {
   parentId: string;
-  childId: string;
+  child: { id: string; name: string };
   isAdmin: boolean;
 }) {
   const queryClient = useQueryClient();
-  const nameQuery = useQuery({
-    queryKey: ["entity-drawer", "header-name", childId],
-    queryFn: () => api.entities.get(childId),
-    staleTime: 60_000,
-  });
   const ungroupMutation = useMutation({
-    mutationFn: () => api.entities.ungroupProject(parentId, childId),
+    mutationFn: () => api.entities.ungroupProject(parentId, child.id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: bindingsKey(parentId) }),
   });
 
   return (
     <div className="flex items-center gap-2 border-b py-2 last:border-b-0">
-      <span className="min-w-0 flex-1 truncate text-xs font-medium">{nameQuery.data?.entity.name ?? childId}</span>
+      <span className="min-w-0 flex-1 truncate text-xs font-medium">{child.name}</span>
       {isAdmin ? (
         <Button
           size="sm"

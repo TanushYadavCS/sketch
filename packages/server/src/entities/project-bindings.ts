@@ -11,6 +11,7 @@ const GROUPING_SOURCE = "user_grouping";
 const MAX_DEPTH = 32;
 
 export type EffectiveBinding = EntityProjectBindingRow & { viaProjectId: string; origin: boolean };
+export type GroupedProjectChild = { id: string; name: string };
 
 export class ProjectBindingError extends Error {
   constructor(public code: "NOT_A_PROJECT" | "ALREADY_GROUPED" | "WOULD_CYCLE") {
@@ -37,11 +38,12 @@ async function childrenOf(db: Kysely<DB>, parentId: string): Promise<string[]> {
   return rows.map((r) => r.source_entity_id);
 }
 
-async function parentOf(db: Kysely<DB>, childId: string): Promise<string | null> {
+async function groupingParentOf(db: Kysely<DB>, childId: string): Promise<string | null> {
   const row = await db
     .selectFrom("entity_relationships")
     .select("target_entity_id")
     .where("relationship_type", "=", PART_OF)
+    .where("source", "=", GROUPING_SOURCE)
     .where("source_entity_id", "=", childId)
     .executeTakeFirst();
   return row?.target_entity_id ?? null;
@@ -112,6 +114,20 @@ export function createProjectBindingsService(db: Kysely<DB>) {
       return ownBindings(projectId);
     },
 
+    async listGroupedChildren(projectId: string): Promise<GroupedProjectChild[]> {
+      return db
+        .selectFrom("entity_relationships")
+        .innerJoin("entities", "entities.id", "entity_relationships.source_entity_id")
+        .select(["entities.id", "entities.name"])
+        .where("entity_relationships.relationship_type", "=", PART_OF)
+        .where("entity_relationships.source", "=", GROUPING_SOURCE)
+        .where("entity_relationships.target_entity_id", "=", projectId)
+        .where("entities.deleted_at", "is", null)
+        .where("entities.merged_into_entity_id", "is", null)
+        .orderBy("entities.name")
+        .execute();
+    },
+
     async addBinding(
       projectId: string,
       input: {
@@ -144,7 +160,7 @@ export function createProjectBindingsService(db: Kysely<DB>) {
       if (!(await isLiveProject(db, parentId)) || !(await isLiveProject(db, childId))) {
         throw new ProjectBindingError("NOT_A_PROJECT");
       }
-      if ((await parentOf(db, childId)) !== null) throw new ProjectBindingError("ALREADY_GROUPED");
+      if ((await groupingParentOf(db, childId)) !== null) throw new ProjectBindingError("ALREADY_GROUPED");
       if ((await subtreeIds(db, childId)).includes(parentId)) throw new ProjectBindingError("WOULD_CYCLE");
       await sql`
         INSERT INTO entity_relationships
@@ -156,11 +172,13 @@ export function createProjectBindingsService(db: Kysely<DB>) {
       `.execute(db);
     },
 
-    async ungroupProject(childId: string): Promise<void> {
+    async ungroupProject(parentId: string, childId: string): Promise<void> {
       await db
         .deleteFrom("entity_relationships")
         .where("relationship_type", "=", PART_OF)
+        .where("source", "=", GROUPING_SOURCE)
         .where("source_entity_id", "=", childId)
+        .where("target_entity_id", "=", parentId)
         .execute();
     },
   };

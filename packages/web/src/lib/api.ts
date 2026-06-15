@@ -501,6 +501,11 @@ export interface EntityBinding {
   origin?: boolean;
 }
 
+export interface GroupedProjectChild {
+  id: string;
+  name: string;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1748,7 +1753,7 @@ export const api = {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
     },
     listBindings(id: string, effective = true) {
-      return request<{ bindings: EntityBinding[] }>(
+      return request<{ bindings: EntityBinding[]; children: GroupedProjectChild[] }>(
         `/api/entities/${id}/bindings${effective ? "?effective=true" : ""}`,
       );
     },

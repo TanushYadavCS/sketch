@@ -149,7 +149,7 @@ describe("project bindings", () => {
     const service = createProjectBindingsService(db);
     await service.groupProject("parent", "child");
 
-    await service.ungroupProject("child");
+    await service.ungroupProject("parent", "child");
 
     await expect(service.resolveEffectiveBindings("parent")).resolves.not.toEqual(
       expect.arrayContaining([expect.objectContaining({ source: "clickup", containerId: "child-space" })]),

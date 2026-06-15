@@ -20,11 +20,10 @@ export function createEntityBindingRoutes(db: Kysely<DB>) {
   const service = createProjectBindingsService(db);
 
   routes.get("/:id/bindings", async (c) => {
-    const denied = denyIfNotAdmin(c);
-    if (denied) return denied;
     const effective = c.req.query("effective") === "true";
     const bindings = await service.listBindings(c.req.param("id"), effective);
-    return c.json({ bindings });
+    const children = await service.listGroupedChildren(c.req.param("id"));
+    return c.json({ bindings, children });
   });
 
   routes.post("/:id/bindings", async (c) => {
@@ -85,7 +84,7 @@ export function createEntityBindingRoutes(db: Kysely<DB>) {
   routes.delete("/:id/group/:childId", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
-    await service.ungroupProject(c.req.param("childId"));
+    await service.ungroupProject(c.req.param("id"), c.req.param("childId"));
     return c.json({ ok: true });
   });
 

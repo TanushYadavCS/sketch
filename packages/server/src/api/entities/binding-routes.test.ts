@@ -100,6 +100,17 @@ describe("entity binding routes", () => {
     expect(res.status).toBe(403);
   });
 
+  it("allows members to read project scope data", async () => {
+    await seedEntity(db, "project", "Project");
+
+    const res = await app.request("/api/entities/project/bindings?effective=true", {
+      headers: { Cookie: memberCookie },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ bindings: [], children: [] });
+  });
+
   it("creates a project binding and lists effective bindings", async () => {
     await seedEntity(db, "company", "Company", "company");
     await seedEntity(db, "project", "Project");
@@ -168,5 +179,43 @@ describe("entity binding routes", () => {
       headers: { Cookie: adminCookie },
     });
     expect(ungroupRes.status).toBe(200);
+  });
+
+  it("ungroups only the selected user grouping relationship", async () => {
+    await seedEntity(db, "parent", "Parent");
+    await seedEntity(db, "other-parent", "Other Parent");
+    await seedEntity(db, "child", "Child");
+    await db
+      .insertInto("entity_relationships")
+      .values({
+        id: "learned",
+        source_entity_id: "child",
+        target_entity_id: "other-parent",
+        relationship_type: "part_of",
+        confidence: "INFERRED",
+        confidence_score: 0.8,
+        source: "llm_extraction",
+        valid_from: "",
+      })
+      .execute();
+    await app.request("/api/entities/parent/group", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ childId: "child" }),
+    });
+
+    const listRes = await app.request("/api/entities/parent/bindings?effective=true", {
+      headers: { Cookie: adminCookie },
+    });
+    expect((await listRes.json()).children).toEqual([{ id: "child", name: "Child" }]);
+
+    const ungroupRes = await app.request("/api/entities/parent/group/child", {
+      method: "DELETE",
+      headers: { Cookie: adminCookie },
+    });
+    expect(ungroupRes.status).toBe(200);
+    await expect(db.selectFrom("entity_relationships").select("source").execute()).resolves.toEqual([
+      { source: "llm_extraction" },
+    ]);
   });
 });
