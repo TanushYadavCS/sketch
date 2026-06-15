@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { googleConnectorFromQuery, googleScopesFor, resolveOrigin } from "./oauth";
+import {
+  googleConnectorFromQuery,
+  googleScopesFor,
+  initialGoogleScopeConfig,
+  resolveOrigin,
+  shouldRunGoogleFirstSync,
+} from "./oauth";
 
 /**
  * Exercises the origin used to build OAuth redirect URIs. The production bug:
@@ -40,5 +46,11 @@ describe("Google OAuth connector routing", () => {
     expect(googleConnectorFromQuery("calendar")).toBe("google_calendar");
     expect(googleScopesFor("google_calendar")).toContain("https://www.googleapis.com/auth/calendar.readonly");
     expect(googleScopesFor("google_calendar")).toContain("https://www.googleapis.com/auth/userinfo.email");
+  });
+
+  it("starts Calendar OAuth with an empty selectable scope instead of auto-syncing every calendar", () => {
+    expect(initialGoogleScopeConfig("google_calendar")).toEqual({ calendarIds: [] });
+    expect(shouldRunGoogleFirstSync("google_calendar")).toBe(false);
+    expect(shouldRunGoogleFirstSync("gmail")).toBe(true);
   });
 });

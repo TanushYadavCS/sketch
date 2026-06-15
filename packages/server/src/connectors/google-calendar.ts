@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { normalizeEmailValue } from "./email";
 import { ensureValidToken } from "./google-drive";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SourceItemRemovalRecord, SyncedItem } from "./types";
+import type {
+  BrowseResult,
+  Connector,
+  ConnectorCredentials,
+  OAuthCredentials,
+  SourceItemRemovalRecord,
+  SyncedItem,
+} from "./types";
 
 const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 export const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
@@ -181,6 +188,10 @@ function parseStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
     : [];
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function parseCursor(cursor: string | null): GoogleCalendarCursor | null {
@@ -481,13 +492,14 @@ async function collectCalendarSet(params: {
   ownerEmail: string | null | undefined;
   logger: Logger;
 }): Promise<CalendarSetCollection> {
+  const hasCalendarSelection = hasOwn(params.scopeConfig, "calendarIds");
   const selectedCalendarIds = new Set(parseStringArray(params.scopeConfig.calendarIds));
   const items: SyncedItem[] = [];
   const removals: SourceItemRemovalRecord[] = [];
   const cursor: GoogleCalendarCursor = { calendars: {}, lastSyncedAt: new Date().toISOString() };
 
   for (const calendar of params.calendars) {
-    if (selectedCalendarIds.size > 0 && !selectedCalendarIds.has(calendar.id)) continue;
+    if (hasCalendarSelection && !selectedCalendarIds.has(calendar.id)) continue;
     const syncToken = params.useSyncTokens ? (params.previousCursor?.calendars[calendar.id] ?? null) : null;
     const result = await collectEventsForCalendar({
       accessToken: params.accessToken,
@@ -504,6 +516,22 @@ async function collectCalendarSet(params: {
   }
 
   return { items, removals, cursor, expired: false };
+}
+
+function calendarBrowseResult(calendars: GoogleCalendarListEntry[]): BrowseResult {
+  return {
+    type: "flat",
+    items: calendars
+      .map((calendar) => ({
+        id: calendar.id,
+        name: `${calendar.summary?.trim() || calendar.id}${calendar.primary ? " (primary)" : ""}`,
+      }))
+      .sort((a, b) => {
+        if (a.id === "primary") return -1;
+        if (b.id === "primary") return 1;
+        return a.name.localeCompare(b.name);
+      }),
+  };
 }
 
 export function createGoogleCalendarConnector(): Connector {
@@ -573,6 +601,12 @@ export function createGoogleCalendarConnector(): Connector {
     async refreshTokens(credentials) {
       const valid = await ensureValidToken(credentials);
       return valid.access_token !== credentials.access_token ? valid : null;
+    },
+
+    async browseExisting({ credentials }) {
+      assertOAuth(credentials);
+      const valid = await ensureValidToken(credentials);
+      return calendarBrowseResult(await listCalendars(valid.access_token));
     },
   };
 }

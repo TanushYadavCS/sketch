@@ -114,6 +114,104 @@ describe("Google Calendar connector", () => {
     expect(requests.some((url) => url.pathname.includes("busy-only"))).toBe(false);
   });
 
+  it("browses readable calendars for scope selection", async () => {
+    const connector = createGoogleCalendarConnector();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({
+          items: [
+            primaryCalendar,
+            { id: "team", summary: "Team", accessRole: "reader" },
+            { id: "busy-only", summary: "Busy only", accessRole: "freeBusyReader" },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const result = await connector.browseExisting?.({ credentials: validCredentials(), logger });
+
+    expect(result).toEqual({
+      type: "flat",
+      items: [
+        { id: "primary", name: "Work" },
+        { id: "team", name: "Team" },
+      ],
+    });
+  });
+
+  it("syncs no calendars when calendarIds is present and empty", async () => {
+    const connector = createGoogleCalendarConnector();
+    const requests: URL[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      requests.push(url);
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar, { id: "team", summary: "Team", accessRole: "reader" }] });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { calendarIds: [] },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+    const cursor = JSON.parse(
+      (await connector.getCursor({
+        credentials: validCredentials(),
+        scopeConfig: { calendarIds: [] },
+        currentCursor: null,
+        logger,
+      })) ?? "{}",
+    );
+
+    expect(items).toEqual([]);
+    expect(cursor.calendars).toEqual({});
+    expect(requests.every((url) => !url.pathname.endsWith("/events"))).toBe(true);
+  });
+
+  it("syncs only selected calendarIds when a calendar scope is saved", async () => {
+    const connector = createGoogleCalendarConnector();
+    const requests: URL[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      requests.push(url);
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar, { id: "team", summary: "Team", accessRole: "reader" }] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/team/events") {
+        return jsonResponse({ items: [calendarEvent("team-event")], nextSyncToken: "sync-team-1" });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { calendarIds: ["team"] },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["team:team-event"]);
+    expect(requests.some((url) => url.pathname === "/calendar/v3/calendars/primary/events")).toBe(false);
+  });
+
   it("uses syncToken for incremental sync and removes cancelled events", async () => {
     const connector = createGoogleCalendarConnector();
     const removals: SourceItemRemovalRecord[] = [];

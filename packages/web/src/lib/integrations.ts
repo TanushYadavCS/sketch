@@ -97,6 +97,8 @@ export interface IntegrationDefinition {
   scopeType: "none" | "flat" | "nested" | "tree";
   /** Noun for scope items in the picker (pages, spaces, folders). */
   scopeItemNoun?: string;
+  /** Scope config key for flat generic pickers. Defaults to rootPages. */
+  scopeConfigKey?: string;
   /**
    * true  = each user holds their own credential row (per-user); any authenticated user can add it.
    * false = a single org-wide credential drives sync for everyone (admin-only).
@@ -255,7 +257,9 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       },
     ],
     scopeLabel: "calendars",
-    scopeType: "none",
+    scopeType: "flat",
+    scopeItemNoun: "calendars",
+    scopeConfigKey: "calendarIds",
     itemNoun: "events",
     credentialUrl: "https://console.cloud.google.com/apis/credentials",
     connectSteps: [

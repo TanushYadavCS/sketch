@@ -123,6 +123,14 @@ function googleConnectorName(connectorType: ConnectorType): string {
   return "Google Drive";
 }
 
+export function initialGoogleScopeConfig(connectorType: ConnectorType): Record<string, unknown> {
+  return connectorType === "google_calendar" ? { calendarIds: [] } : {};
+}
+
+export function shouldRunGoogleFirstSync(connectorType: ConnectorType): boolean {
+  return connectorType === "gmail";
+}
+
 function microsoftConnectorFromQuery(value: string | undefined): ConnectorType {
   return value === "teams" ? "teams" : "outlook";
 }
@@ -367,7 +375,7 @@ export function oauthRoutes(
         connectorType,
         authType: "oauth",
         credentials: JSON.stringify(validCreds),
-        scopeConfig: JSON.stringify({}),
+        scopeConfig: JSON.stringify(initialGoogleScopeConfig(connectorType)),
         createdBy: userId,
       });
 
@@ -376,7 +384,7 @@ export function oauthRoutes(
         "Google OAuth tokens saved",
       );
 
-      if (connectorType === "gmail" || connectorType === "google_calendar") {
+      if (shouldRunGoogleFirstSync(connectorType)) {
         runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
           logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Google first sync failed");
         });

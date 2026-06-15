@@ -218,6 +218,7 @@ export function ManageConnectorDialog({
               connectorId={connector.id}
               connectorType={connector.connectorType}
               scopeConfig={connector.scopeConfig}
+              scopeConfigKey={definition.scopeConfigKey}
               scopeLabel={definition.scopeLabel}
               scopeEntries={scopeEntries}
               onBrowsingChange={setIsBrowsingScope}
@@ -413,6 +414,7 @@ function ScopeEditorDispatch({
   connectorId,
   connectorType,
   scopeConfig,
+  scopeConfigKey,
   scopeLabel,
   scopeEntries,
   onBrowsingChange,
@@ -421,6 +423,7 @@ function ScopeEditorDispatch({
   connectorId: string;
   connectorType: string;
   scopeConfig: Record<string, unknown>;
+  scopeConfigKey?: string;
   scopeLabel: string;
   scopeEntries: [string, unknown][];
   onBrowsingChange?: (browsing: boolean) => void;
@@ -456,6 +459,7 @@ function ScopeEditorDispatch({
     <GenericScopeEditor
       connectorId={connectorId}
       scopeConfig={scopeConfig}
+      scopeConfigKey={scopeConfigKey}
       noun={scopeLabel}
       onBrowsingChange={onBrowsingChange}
     />
