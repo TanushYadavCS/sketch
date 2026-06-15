@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 
 export type ConnectorType =
   | "google_drive"
+  | "google_calendar"
   | "gmail"
   | "outlook"
   | "teams"

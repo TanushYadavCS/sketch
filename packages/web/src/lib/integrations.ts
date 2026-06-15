@@ -10,6 +10,7 @@
 
 export type IntegrationType =
   | "google_drive"
+  | "google_calendar"
   | "gmail"
   | "outlook"
   | "teams"
@@ -223,6 +224,43 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     connectSteps: [
       "Create an OAuth 2.0 Client in Google Cloud Console",
       "Enable the Gmail API for your project",
+      "Add the redirect URI shown below to your OAuth client",
+      "Paste the Client ID and Client Secret, then connect with Google",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
+  },
+  {
+    type: "google_calendar",
+    name: "Google Calendar",
+    description: "Calendar events and meetings",
+    category: "Calendar",
+    color: "#4285F4",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [
+      {
+        key: "client_id",
+        label: "Client ID",
+        type: "text",
+        placeholder: "123456789.apps.googleusercontent.com",
+        helpText: "OAuth 2.0 Client ID from Google Cloud Console",
+      },
+      {
+        key: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        placeholder: "GOCSPX-...",
+        helpText: "OAuth 2.0 Client Secret",
+      },
+    ],
+    scopeLabel: "calendars",
+    scopeType: "none",
+    itemNoun: "events",
+    credentialUrl: "https://console.cloud.google.com/apis/credentials",
+    connectSteps: [
+      "Create an OAuth 2.0 Client in Google Cloud Console",
+      "Enable the Google Calendar API for your project",
       "Add the redirect URI shown below to your OAuth client",
       "Paste the Client ID and Client Secret, then connect with Google",
     ],

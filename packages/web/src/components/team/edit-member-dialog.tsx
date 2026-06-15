@@ -724,6 +724,7 @@ function getProviderIdPlaceholder(provider: string): string {
     case "clickup":
       return "ClickUp user ID (numeric)";
     case "google_drive":
+    case "google_calendar":
       return "Google user ID or email";
     case "linear":
       return "Linear user ID";

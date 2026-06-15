@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { resolveOrigin } from "./oauth";
+import { googleConnectorFromQuery, googleScopesFor, resolveOrigin } from "./oauth";
 
 /**
  * Exercises the origin used to build OAuth redirect URIs. The production bug:
@@ -31,5 +31,14 @@ describe("resolveOrigin", () => {
 
   it("falls back to the request origin when no forwarded headers are present", async () => {
     expect(await originFor({ host: "capmobfinance.getsketch.ai" })).toBe("http://capmobfinance.getsketch.ai");
+  });
+});
+
+describe("Google OAuth connector routing", () => {
+  it("maps Google Calendar authorize requests to the calendar connector and scope", () => {
+    expect(googleConnectorFromQuery("google_calendar")).toBe("google_calendar");
+    expect(googleConnectorFromQuery("calendar")).toBe("google_calendar");
+    expect(googleScopesFor("google_calendar")).toContain("https://www.googleapis.com/auth/calendar.readonly");
+    expect(googleScopesFor("google_calendar")).toContain("https://www.googleapis.com/auth/userinfo.email");
   });
 });
