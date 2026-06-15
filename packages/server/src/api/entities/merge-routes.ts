@@ -4,6 +4,7 @@ import type { DB } from "../../db/schema";
 import {
   EntityMergeError,
   type EntityMergeErrorCode,
+  type EntityMergeMove,
   mergeEntities,
   previewMerge,
   unmergeEntities,
@@ -42,6 +43,14 @@ function handleMergeError(c: Context, err: unknown): Response {
     );
   }
   throw err;
+}
+
+function redactMove(move: EntityMergeMove): Omit<EntityMergeMove, "payload"> {
+  if ("payload" in move) {
+    const { payload: _payload, ...redacted } = move;
+    return redacted;
+  }
+  return move;
 }
 
 export function createEntityMergeRoutes(db: Kysely<DB>) {
@@ -86,7 +95,7 @@ export function createEntityMergeRoutes(db: Kysely<DB>) {
         loserId: body.loserId,
         userId: c.get("sub"),
       });
-      return c.json({ mergeId: result.mergeId, moves: result.moves });
+      return c.json({ mergeId: result.mergeId, moves: result.moves.map(redactMove) });
     } catch (err) {
       return handleMergeError(c, err);
     }

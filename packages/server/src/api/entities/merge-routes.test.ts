@@ -197,6 +197,9 @@ describe("entity merge routes - happy path + preview agree", () => {
         expect.objectContaining({ table: "entity_relationships", rowId: "rel-loser-company" }),
       ]),
     );
+    expect(merged.moves.find((move: { table: string }) => move.table === "entity_mentions")).not.toHaveProperty(
+      "payload",
+    );
 
     const listRes = await app.request("/api/entities/merges?entityId=survivor", { headers: { Cookie: adminCookie } });
     expect(listRes.status).toBe(200);
