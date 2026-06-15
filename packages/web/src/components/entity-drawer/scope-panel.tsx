@@ -29,6 +29,7 @@ function membersKey(entityId: string): unknown[] {
 function invalidateScopeQueries(queryClient: ReturnType<typeof useQueryClient>, entityId: string): void {
   queryClient.invalidateQueries({ queryKey: bindingsKey(entityId) });
   queryClient.invalidateQueries({ queryKey: membersKey(entityId) });
+  queryClient.invalidateQueries({ queryKey: ["projects"] });
 }
 
 export function ScopePanel({ entityId }: { entityId: string }) {
