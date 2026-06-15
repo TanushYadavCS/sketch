@@ -118,7 +118,7 @@ describe("ConnectorPicker connector capabilities", () => {
       await user.click(await screen.findByRole("button", { name: /Browse all/i }));
 
       expect(screen.getByText(def.description)).toBeInTheDocument();
-      expect(screen.getByText("1/3")).toBeInTheDocument();
+      expect(screen.queryByText("1 of 3 members connected")).not.toBeInTheDocument();
       expect(screen.queryByText("Test Member")).not.toBeInTheDocument();
       expect(screen.queryByText(`${def.type}@provider.test`)).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Connect mine" })).toBeInTheDocument();
@@ -126,6 +126,7 @@ describe("ConnectorPicker connector capabilities", () => {
 
       await user.click(screen.getByRole("button", { name: "Manage" }));
 
+      expect(screen.getByText("1 of 3 members connected")).toBeInTheDocument();
       expect(screen.getByText("Test Member")).toBeInTheDocument();
       expect(screen.getByText(`${def.type}@provider.test`)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "View Test Member" })).toBeInTheDocument();
@@ -156,7 +157,7 @@ describe("ConnectorPicker connector capabilities", () => {
 
     expect(await screen.findAllByText("Outlook")).toHaveLength(2);
     expect(screen.getByText("Microsoft 365 email messages and threads")).toBeInTheDocument();
-    expect(screen.getByText("1/3")).toBeInTheDocument();
+    expect(screen.queryByText("1 of 3 members connected")).not.toBeInTheDocument();
     expect(screen.queryByText("Test Member")).not.toBeInTheDocument();
     expect(screen.queryByText("member@microsoft.test")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect mine" })).toBeInTheDocument();
@@ -164,6 +165,7 @@ describe("ConnectorPicker connector capabilities", () => {
 
     await user.click(screen.getByRole("button", { name: "Manage" }));
 
+    expect(screen.getByText("1 of 3 members connected")).toBeInTheDocument();
     expect(screen.getByText("Test Member")).toBeInTheDocument();
     expect(screen.getByText("member@microsoft.test")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View Test Member" })).toBeInTheDocument();
@@ -196,12 +198,13 @@ describe("ConnectorPicker connector capabilities", () => {
 
     await user.click(await screen.findByRole("button", { name: /Browse all/i }));
     expect(screen.getByText("Meeting transcripts and summaries")).toBeInTheDocument();
-    expect(screen.getByText("2/3")).toBeInTheDocument();
+    expect(screen.queryByText("2 of 3 members connected")).not.toBeInTheDocument();
     expect(screen.queryByText("Test Member")).not.toBeInTheDocument();
     expect(screen.queryByText("member@fireflies.test")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Manage" }));
 
+    expect(screen.getByText("2 of 3 members connected")).toBeInTheDocument();
     expect(screen.getByText("Test Member")).toBeInTheDocument();
     expect(screen.getByText("member@fireflies.test")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View Test Member" })).toBeInTheDocument();

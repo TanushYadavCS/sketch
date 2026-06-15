@@ -62,10 +62,10 @@ function sortConnectorsForDisplay(connectors: ConnectorConfig[]): ConnectorConfi
   });
 }
 
-function connectorAdoptionRatio(connectedMemberCount: number, teamMemberCount: number): string {
+function connectorAdoptionSummary(connectedMemberCount: number, teamMemberCount: number): string {
   const denominator = Math.max(teamMemberCount, connectedMemberCount);
-  if (denominator <= 0) return "0/0";
-  return `${connectedMemberCount.toLocaleString()}/${denominator.toLocaleString()}`;
+  const memberLabel = denominator === 1 ? "member" : "members";
+  return `${connectedMemberCount.toLocaleString()} of ${denominator.toLocaleString()} ${memberLabel} connected`;
 }
 import {
   ArrowSquareOutIcon,
@@ -623,7 +623,9 @@ function ConnectorRow({
   const onlyOtherPerUserConnectors = definition.perUserAuth && isConnected && !canManage;
   const connectedAccounts = definition.perUserAuth ? sortConnectorsForDisplay(visibleConnectors) : [];
   const showConnectedAccounts = accountsExpanded && connectedAccounts.length > 0;
-  const adoptionRatio = definition.perUserAuth ? connectorAdoptionRatio(connectedMemberCount, teamMemberCount) : null;
+  const adoptionSummary = definition.perUserAuth
+    ? connectorAdoptionSummary(connectedMemberCount, teamMemberCount)
+    : null;
   const accountListId = `${definition.type}-connected-accounts`;
 
   const syncMutation = useMutation({
@@ -678,14 +680,6 @@ function ConnectorRow({
         {isConnected ? (
           <div className="flex flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
             <SyncStatusDot status={connector.syncStatus} />
-            {adoptionRatio && (
-              <span
-                className="shrink-0 text-xs text-muted-foreground"
-                aria-label={`${adoptionRatio} members connected`}
-              >
-                {adoptionRatio}
-              </span>
-            )}
             {canSync && (
               <Button
                 variant="ghost"
@@ -722,14 +716,6 @@ function ConnectorRow({
           </div>
         ) : canConnect ? (
           <div className="flex items-center justify-end gap-2 self-end sm:self-auto sm:shrink-0">
-            {adoptionRatio && (
-              <span
-                className="shrink-0 text-xs text-muted-foreground"
-                aria-label={`${adoptionRatio} members connected`}
-              >
-                {adoptionRatio}
-              </span>
-            )}
             <Button variant="outline" size="sm" className="h-7 whitespace-nowrap text-xs" onClick={onConnect}>
               <PlusIcon size={12} />
               Connect
@@ -744,6 +730,14 @@ function ConnectorRow({
 
       {showConnectedAccounts && (
         <div id={accountListId} className="mt-3 space-y-1 border-t border-border pt-2">
+          {adoptionSummary && (
+            <div className="flex items-center justify-between gap-3 px-2 pb-1">
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Connected accounts
+              </p>
+              <p className="shrink-0 text-[11px] text-muted-foreground">{adoptionSummary}</p>
+            </div>
+          )}
           {connectedAccounts.map((account) => {
             const label = connectorOwnerLabel(account);
             const hint = connectorAccountHint(account);
