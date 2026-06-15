@@ -269,6 +269,7 @@ export interface SuppressedEmailRecord {
 
 export interface SourceItemRemovalRecord {
   providerFileId?: string;
+  providerFileIdPrefix?: string;
   providerMessageId?: string | null;
   sourceCreatedBefore?: string;
   reason: string;

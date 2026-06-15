@@ -268,6 +268,63 @@ describe("Google Calendar connector", () => {
     expect(cursor.calendars).toEqual({ primary: "sync-primary-new" });
   });
 
+  it("prunes unreadable calendars and drops their stale sync token", async () => {
+    const connector = createGoogleCalendarConnector();
+    const removals: SourceItemRemovalRecord[] = [];
+    const teamCalendar = { id: "team", summary: "Team", accessRole: "reader" as const };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar, teamCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        expect(url.searchParams.get("syncToken")).toBe("sync-primary-old");
+        return jsonResponse({ items: [calendarEvent("updated")], nextSyncToken: "sync-primary-new" });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/team/events") {
+        expect(url.searchParams.get("syncToken")).toBe("sync-team-old");
+        return jsonResponse({ error: { message: "Forbidden" } }, 403);
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: JSON.stringify({ calendars: { primary: "sync-primary-old", team: "sync-team-old" } }),
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    const cursor = JSON.parse(
+      (await connector.getCursor({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        currentCursor: null,
+        logger,
+      })) ?? "{}",
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["primary:updated"]);
+    expect(removals).toEqual([
+      {
+        providerFileIdPrefix: "team:",
+        reason: "google_calendar_calendar_unreadable",
+      },
+    ]);
+    expect(cursor.calendars).toEqual({ primary: "sync-primary-new" });
+  });
+
   it("falls back to a full sync and wipes old rows when a sync token expires", async () => {
     const connector = createGoogleCalendarConnector();
     const removals: SourceItemRemovalRecord[] = [];

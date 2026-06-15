@@ -445,9 +445,19 @@ async function collectEventsForCalendar(params: {
       if (err instanceof GoogleCalendarApiError && (err.status === 403 || err.status === 404)) {
         params.logger.warn(
           { calendarId: params.calendar.id, status: err.status },
-          "Skipping unreadable Google Calendar",
+          "Pruning unreadable Google Calendar",
         );
-        return { items: [], removals: [], nextSyncToken: params.syncToken, expired: false };
+        return {
+          items: [],
+          removals: [
+            {
+              providerFileIdPrefix: `${params.calendar.id}:`,
+              reason: "google_calendar_calendar_unreadable",
+            },
+          ],
+          nextSyncToken: null,
+          expired: false,
+        };
       }
       throw err;
     }
