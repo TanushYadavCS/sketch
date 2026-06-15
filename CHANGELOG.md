@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.36.0] -- 2026-06-13
+
+- Zoho CRM: make the connector generally available by removing the experimental flag from the OAuth routes, connector APIs, and Files connector picker.
+- Docs: trim stale "currently gated" references from contributor guidance now that Zoho CRM is no longer hidden behind `EXPERIMENTAL_FLAG`.
+
+## [0.35.0] -- 2026-06-13
+
+- Connectors: enforce connector-scoped authorization across server routes so owner, admin, and member access is explicit, with disabled connectors exposing inert mutation capabilities.
+- Microsoft OAuth: support Outlook and Teams OAuth settings with saved workspace config, environment fallback, account-selection prompts, tenant-aware endpoints, and saved-settings precedence over later env vars.
+- Files UI: honor connector permission and capability flags across connector picking, file details, sharing, and management dialogs, including read-only states and admin Microsoft OAuth self-service when env config is missing.
+
 ## [0.34.1] -- 2026-06-11
 
 - Fix(OAuth): derive redirect origins from forwarded proxy headers for multi-tenant hosts, keeping Google, Microsoft, and Zoho callback URLs on the public `https://<tenant>.getsketch.ai` origin when `BASE_URL` is unset.

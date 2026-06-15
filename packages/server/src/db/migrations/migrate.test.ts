@@ -38,7 +38,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(91);
+      expect(logSpy).toHaveBeenCalledTimes(99);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +57,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(91);
+    expect(rows.rows).toHaveLength(99);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -144,7 +144,72 @@ describe("runMigrations — full sequence", () => {
     expect(names[87]).toBe("092-teams-provider-file-scope");
     expect(names[88]).toBe("093-microsoft-oauth-settings");
     expect(names[89]).toBe("094-microsoft-oauth-tenant");
-    expect(names[90]).toBe("095-google-calendar-provider-file-scope");
+    expect(names[90]).toBe("095-entity-review-connector-identity");
+    expect(names[91]).toBe("096-linear-project-entity-seeding-cleanup");
+    expect(names[92]).toBe("097-clickup-project-entity-seeding-cleanup");
+    expect(names[93]).toBe("098-entity-merge-ledger");
+    expect(names[94]).toBe("099-review-queue-seed-handle");
+    expect(names[95]).toBe("100-entity-project-bindings");
+    expect(names[96]).toBe("101-entity-project-member-overrides");
+    expect(names[97]).toBe("102-entity-creation-suppressions");
+    expect(names[98]).toBe("103-google-calendar-provider-file-scope");
+  });
+
+  it("creates the entity merge ledger tombstone schema", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const entityColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+    }>`PRAGMA table_info(entities)`.execute(db);
+    expect(entityColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "deleted_at", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "merged_into_entity_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    const mergeColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+      pk: number;
+    }>`PRAGMA table_info(entity_merges)`.execute(db);
+    expect(mergeColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "id", type: "TEXT", pk: 1 }),
+        expect.objectContaining({ name: "survivor_entity_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "merged_entity_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "entity_type", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "moves", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "merged_by_user_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "merged_at", type: "TEXT", notnull: 1, dflt_value: "CURRENT_TIMESTAMP" }),
+        expect.objectContaining({ name: "unmerged_at", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "unmerged_by_user_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    const foreignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(entity_merges)`.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "entities", from: "survivor_entity_id", to: "id", on_delete: "RESTRICT" }),
+        expect.objectContaining({ table: "entities", from: "merged_entity_id", to: "id", on_delete: "RESTRICT" }),
+        expect.objectContaining({ table: "users", from: "merged_by_user_id", to: "id", on_delete: "RESTRICT" }),
+        expect.objectContaining({ table: "users", from: "unmerged_by_user_id", to: "id", on_delete: "RESTRICT" }),
+      ]),
+    );
+
+    const indexes = await sql<{ name: string }>`PRAGMA index_list(entity_merges)`.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx"]),
+    );
   });
 
   it("creates the users table", async () => {
@@ -355,7 +420,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(91);
+    expect(rows.rows).toHaveLength(99);
   });
 
   it("creates entity_contact_points table", async () => {
@@ -397,6 +462,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(91);
+    expect(rows.rows).toHaveLength(99);
   });
 });

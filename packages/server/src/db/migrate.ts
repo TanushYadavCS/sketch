@@ -94,7 +94,15 @@ import * as m091 from "./migrations/091-cleanup-empty-relationships-and-review";
 import * as m092 from "./migrations/092-teams-provider-file-scope";
 import * as m093 from "./migrations/093-microsoft-oauth-settings";
 import * as m094 from "./migrations/094-microsoft-oauth-tenant";
-import * as m095 from "./migrations/095-google-calendar-provider-file-scope";
+import * as m095 from "./migrations/095-entity-review-connector-identity";
+import * as m096 from "./migrations/096-linear-project-entity-seeding-cleanup";
+import * as m097 from "./migrations/097-clickup-project-entity-seeding-cleanup";
+import * as m098 from "./migrations/098-entity-merge-ledger";
+import * as m099 from "./migrations/099-review-queue-seed-handle";
+import * as m100 from "./migrations/100-entity-project-bindings";
+import * as m101 from "./migrations/101-entity-project-member-overrides";
+import * as m102 from "./migrations/102-entity-creation-suppressions";
+import * as m103 from "./migrations/103-google-calendar-provider-file-scope";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -193,7 +201,15 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "092-teams-provider-file-scope": m092,
           "093-microsoft-oauth-settings": m093,
           "094-microsoft-oauth-tenant": m094,
-          "095-google-calendar-provider-file-scope": m095,
+          "095-entity-review-connector-identity": m095,
+          "096-linear-project-entity-seeding-cleanup": m096,
+          "097-clickup-project-entity-seeding-cleanup": m097,
+          "098-entity-merge-ledger": m098,
+          "099-review-queue-seed-handle": m099,
+          "100-entity-project-bindings": m100,
+          "101-entity-project-member-overrides": m101,
+          "102-entity-creation-suppressions": m102,
+          "103-google-calendar-provider-file-scope": m103,
         };
       },
     },

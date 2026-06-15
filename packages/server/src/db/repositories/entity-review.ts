@@ -42,6 +42,10 @@ export interface UpsertQueueRowInput {
   proposedName: string;
   normalizedName: string;
   entityType: string;
+  source?: string | null;
+  sourceId?: string | null;
+  seedSource?: string | null;
+  seedSourceId?: string | null;
   proposedEmail?: string | null;
   candidateEntityId: string | null;
   candidateScore: number | null;
@@ -60,6 +64,17 @@ export interface UpsertQueueRowResult {
   skipEvidence: boolean;
 }
 
+export interface UpsertSeedReviewRowInput {
+  proposedName: string;
+  normalizedName: string;
+  entityType: string;
+  seedSource: string;
+  seedSourceId: string;
+  candidateEntityId: string | null;
+  triggeredByUserId: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface UpsertEvidenceInput {
   reviewId: string;
   indexedFileId: string;
@@ -71,6 +86,45 @@ export interface UpsertEvidenceInput {
 const TERMINAL_STATUSES = new Set(["confirmed", "rejected", "confirming"]);
 
 export function createEntityReviewRepo(db: Kysely<DB>) {
+  async function findSeedReviewRow(seedSource: string, seedSourceId: string): Promise<QueueRow | undefined> {
+    return db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("seed_source", "=", seedSource)
+      .where("seed_source_id", "=", seedSourceId)
+      .orderBy("first_seen_at", "desc")
+      .orderBy("id", "desc")
+      .executeTakeFirst();
+  }
+
+  async function insertSeedReviewRow(input: UpsertSeedReviewRowInput, normalizedName: string): Promise<QueueRow> {
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id,
+        proposed_name: input.proposedName,
+        normalized_name: normalizedName,
+        entity_type: input.entityType,
+        proposed_email: null,
+        candidate_entity_id: input.candidateEntityId,
+        candidate_score: null,
+        candidate_reason: null,
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: input.triggeredByUserId,
+        seed_source: input.seedSource,
+        seed_source_id: input.seedSourceId,
+      })
+      .execute();
+
+    return db.selectFrom("entity_review_queue").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+  }
+
   return {
     /**
      * Insert or update a queue row keyed on (normalized_name, entity_type).
@@ -82,12 +136,23 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       const now = new Date().toISOString();
       const freezeMs = readReviewFreezeMs();
 
-      const existing = await db
-        .selectFrom("entity_review_queue")
-        .selectAll()
-        .where("normalized_name", "=", input.normalizedName)
-        .where("entity_type", "=", input.entityType)
-        .executeTakeFirst();
+      const existingBySource =
+        input.source && input.sourceId
+          ? await db
+              .selectFrom("entity_review_queue")
+              .selectAll()
+              .where("source", "=", input.source)
+              .where("source_id", "=", input.sourceId)
+              .executeTakeFirst()
+          : undefined;
+      const existing =
+        existingBySource ??
+        (await db
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("normalized_name", "=", input.normalizedName)
+          .where("entity_type", "=", input.entityType)
+          .executeTakeFirst());
 
       if (!existing) {
         const id = randomUUID();
@@ -98,6 +163,8 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             proposed_name: input.proposedName,
             normalized_name: input.normalizedName,
             entity_type: input.entityType,
+            source: input.source ?? null,
+            source_id: input.sourceId ?? null,
             proposed_email: input.proposedEmail ?? null,
             candidate_entity_id: input.candidateEntityId,
             candidate_score: input.candidateScore,
@@ -125,6 +192,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
 
       const reviewStartedAt = existing.review_started_at;
       const midReview = reviewStartedAt !== null && Date.now() - new Date(reviewStartedAt).getTime() < freezeMs;
+      const sourcePatch =
+        existing.source === null && existing.source_id === null && input.source && input.sourceId
+          ? { source: input.source, source_id: input.sourceId }
+          : {};
 
       if (midReview) {
         await db
@@ -132,6 +203,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           .set({
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            ...sourcePatch,
           })
           .where("id", "=", existing.id)
           .execute();
@@ -147,6 +219,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             candidate_generated_at: now,
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            ...sourcePatch,
           })
           .where("id", "=", existing.id)
           .execute();
@@ -158,6 +231,63 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         .where("id", "=", existing.id)
         .executeTakeFirstOrThrow();
       return { row: refreshed, skipEvidence: false };
+    },
+
+    findSeedReviewRow,
+
+    async upsertSeedReviewRow(input: UpsertSeedReviewRowInput): Promise<UpsertQueueRowResult> {
+      const existing = await findSeedReviewRow(input.seedSource, input.seedSourceId);
+      if (existing && TERMINAL_STATUSES.has(existing.status)) {
+        return { row: existing, skipEvidence: true };
+      }
+
+      const now = new Date().toISOString();
+      if (existing) {
+        await db
+          .updateTable("entity_review_queue")
+          .set({
+            proposed_name: input.proposedName,
+            candidate_entity_id: input.candidateEntityId,
+            candidate_score: null,
+            candidate_reason: null,
+            candidate_generated_at: now,
+            last_seen_at: now,
+            occurrence_count: existing.occurrence_count + 1,
+          })
+          .where("id", "=", existing.id)
+          .execute();
+
+        const refreshed = await db
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("id", "=", existing.id)
+          .executeTakeFirstOrThrow();
+        return { row: refreshed, skipEvidence: false };
+      }
+
+      try {
+        const row = await insertSeedReviewRow(input, input.normalizedName);
+        return { row, skipEvidence: false };
+      } catch (error) {
+        const rowForHandle = await findSeedReviewRow(input.seedSource, input.seedSourceId);
+        if (rowForHandle) {
+          return { row: rowForHandle, skipEvidence: TERMINAL_STATUSES.has(rowForHandle.status) };
+        }
+
+        const colliding = await db
+          .selectFrom("entity_review_queue")
+          .select(["id"])
+          .where("normalized_name", "=", input.normalizedName)
+          .where("entity_type", "=", input.entityType)
+          .executeTakeFirst();
+        if (!colliding) throw error;
+
+        const row = await insertSeedReviewRow(
+          input,
+          `${input.normalizedName}:${input.seedSource}:${input.seedSourceId}`,
+        );
+        return { row, skipEvidence: false };
+      }
     },
 
     /**

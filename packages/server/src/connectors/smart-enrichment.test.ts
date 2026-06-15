@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { EmbeddingProvider } from "./embeddings/types";
@@ -262,6 +263,12 @@ describe("smartEnrichFile — LLM extraction facts", () => {
   it("persists high-confidence relation facts and drops low-confidence relation outputs", async () => {
     const fileId = randomUUID();
     await seedFile(db, fileId);
+    await createEntityRepository(db).upsertEntityFromTool({
+      name: "Project Atlas",
+      sourceType: "project",
+      source: "google_drive",
+      sourceId: "project:atlas",
+    });
     const generator = {
       generate: async () => "Sarah Chen leads Project Atlas.",
       generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {

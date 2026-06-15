@@ -40,9 +40,11 @@ export type IndexedFileFactRelation =
   | "contributes_to"
   | "builds"
   | "part_of"
+  | "engagement_for"
   | "partner_of"
   | "deal_for"
-  | "primary_contact";
+  | "primary_contact"
+  | "member_of";
 
 export interface UpsertIndexedFileFactInput {
   indexedFileId?: string | null;

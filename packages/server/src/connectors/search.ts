@@ -19,7 +19,7 @@ import type { Kysely, SqlBool } from "kysely";
 import { sql } from "kysely";
 import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-metadata";
@@ -285,6 +285,7 @@ export async function getFileContent(
             )
             .select("entities.id")
             .where("entity_mentions.indexed_file_id", "=", fileId)
+            .where(whereLiveEntity())
             .where((eb) =>
               eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
             )
@@ -368,6 +369,7 @@ export async function filterAccessibleFileIds(
       )
       .select(["entity_mentions.indexed_file_id"])
       .where("entity_mentions.indexed_file_id", "in", fileIds)
+      .where(whereLiveEntity())
       .where((eb) =>
         eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
       )

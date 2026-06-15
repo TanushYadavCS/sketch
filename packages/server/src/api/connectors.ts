@@ -40,7 +40,7 @@ import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import { removeConnectorSourceItems } from "../connectors/sync-reconcile";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import { createConnectorRepository } from "../db/repositories/connectors";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
@@ -256,7 +256,6 @@ export function connectorRoutes(
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
-      | "EXPERIMENTAL_FLAG"
       | "ENCRYPTION_KEY"
       | "OPENROUTER_API_KEY"
     >
@@ -302,20 +301,12 @@ export function connectorRoutes(
     };
   }
 
-  function connectorEnabled(connectorType: ConnectorType): boolean {
-    return connectorType !== "zoho_crm" || appConfig?.EXPERIMENTAL_FLAG === true;
-  }
-
   function configVisible(config: { connector_type: string }): boolean {
-    return connectorEnabled(config.connector_type as ConnectorType);
+    return !!getConnector(config.connector_type as ConnectorType);
   }
 
   function configEnabled(config: { connector_type: string; sync_status?: string }): boolean {
     return configVisible(config) && config.sync_status !== "disabled";
-  }
-
-  function hiddenSources(): string[] {
-    return connectorEnabled("zoho_crm") ? [] : ["zoho_crm"];
   }
 
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
@@ -399,10 +390,6 @@ export function connectorRoutes(
     }
 
     const connectorType = parsed.data.connectorType as ConnectorType;
-    if (!connectorEnabled(connectorType)) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
-    }
-
     const connectorMeta = getConnector(connectorType);
 
     // Org-wide connectors (perUserAuth: false) are admin-only.
@@ -513,10 +500,7 @@ export function connectorRoutes(
     const access = c.req.query("access") || undefined;
 
     const viewer = getFileViewer(c);
-    if (source && !connectorEnabled(source as ConnectorType)) {
-      return c.json({ files: [], total: 0, enrichedTotal: 0, hasMore: false });
-    }
-    const filters = { connectorType: source, excludedSources: hiddenSources(), category, status, access };
+    const filters = { connectorType: source, excludedSources: [], category, status, access };
     // Collapse CRM activity members under their parent object rows.
     const [files, total, enrichedTotal] = await Promise.all([
       connectorRepo.listAllFiles({ limit, offset, viewer, collapseRollups: true, ...filters }),
@@ -561,7 +545,7 @@ export function connectorRoutes(
     const viewer = getFileViewer(c);
 
     const anchor = await connectorRepo.getRollupAnchorRef(c.req.param("id"), viewer);
-    if (!anchor || !connectorEnabled(anchor.source as ConnectorType)) {
+    if (!anchor) {
       return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     }
 
@@ -696,6 +680,7 @@ export function connectorRoutes(
         "entity_mentions.context_snippet",
       ])
       .where("entity_mentions.indexed_file_id", "=", fileId)
+      .where(whereLiveEntity())
       .execute();
 
     // Dedupe entities (a file may mention same entity in multiple chunks)
@@ -898,7 +883,7 @@ export function connectorRoutes(
 
   /** List indexed sources summary. */
   routes.get("/sources", async (c) => {
-    const sources = (await listIndexedSources(db)).filter((source) => connectorEnabled(source.source as ConnectorType));
+    const sources = await listIndexedSources(db);
     return c.json({ sources });
   });
 
@@ -908,9 +893,7 @@ export function connectorRoutes(
    * has access via per-file shares to files whose connector row they can't see.
    */
   routes.get("/file-counts-by-source", async (c) => {
-    const counts = (await connectorRepo.countFilesBySource(getFileViewer(c))).filter((row) =>
-      connectorEnabled(row.source as ConnectorType),
-    );
+    const counts = await connectorRepo.countFilesBySource(getFileViewer(c));
     return c.json({ counts });
   });
 
@@ -968,10 +951,6 @@ export function connectorRoutes(
     }
 
     const connectorType = parsed.data.connectorType as ConnectorType;
-    if (!connectorEnabled(connectorType)) {
-      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
-    }
-
     const connector = getConnector(connectorType);
     if (!connector.browse) {
       return c.json(

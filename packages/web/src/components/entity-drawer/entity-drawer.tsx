@@ -12,25 +12,41 @@
  * Driven by EntityUiProvider's stack. Each level renders independently —
  * pushing a related entity pushes a new id onto the stack; Back chip pops.
  */
+import { EntityMergeDialog } from "@/components/entity-merge-dialog";
 import { EntityShareDialog } from "@/components/entity-share-dialog";
 import type { EntityDetail, EntityRelationEvidenceRow, EntityRelationView, EntityRelationsResponse } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
 import {
   ArrowLeftIcon,
+  ArrowsLeftRightIcon,
   CaretDownIcon,
   CaretRightIcon,
   GlobeIcon,
   ShareNetworkIcon,
+  SpinnerGapIcon,
+  TrashIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { toast } from "sonner";
+import { ScopePanel } from "./scope-panel";
 import { TimelineStrip } from "./timeline-strip";
 
 const CONFIDENCE_LABEL: Record<string, string> = {
@@ -143,7 +159,12 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         <SummaryBlock entity={entity} accent={accent} />
-        <DrawerTabs entityId={entity.id} relations={relationsQuery.data} relationsLoading={relationsQuery.isLoading} />
+        <DrawerTabs
+          entityId={entity.id}
+          sourceType={entity.sourceType}
+          relations={relationsQuery.data}
+          relationsLoading={relationsQuery.isLoading}
+        />
       </div>
     </>
   );
@@ -158,6 +179,7 @@ interface DrawerHeaderProps {
 }
 
 function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: DrawerHeaderProps) {
+  const ui = useEntityUi();
   const lastSeen = entity.profile.lastSeenAt;
   // EntityDrawer mounts at root (outside the dashboard route context), so the
   // route-context auth hook is not available here — query the session directly.
@@ -168,6 +190,8 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
   });
   const isAdmin = sessionQuery.data?.role === "admin";
   const [shareOpen, setShareOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   return (
     <div
@@ -202,15 +226,35 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
                 </span>
               ) : null}
               {isAdmin ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 gap-1 text-[11px]"
-                  onClick={() => setShareOpen(true)}
-                >
-                  <ShareNetworkIcon size={12} />
-                  Share
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 text-[11px]"
+                    onClick={() => setMergeOpen(true)}
+                  >
+                    <ArrowsLeftRightIcon size={12} />
+                    Merge
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 text-[11px]"
+                    onClick={() => setShareOpen(true)}
+                  >
+                    <ShareNetworkIcon size={12} />
+                    Share
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 text-[11px] text-destructive hover:text-destructive"
+                    onClick={() => setDeleteOpen(true)}
+                  >
+                    <TrashIcon size={12} />
+                    Delete
+                  </Button>
+                </>
               ) : null}
             </div>
           </div>
@@ -233,9 +277,101 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
         </div>
       </div>
       {isAdmin ? (
-        <EntityShareDialog entityId={entity.id} entityName={entity.name} open={shareOpen} onOpenChange={setShareOpen} />
+        <>
+          <EntityShareDialog
+            entityId={entity.id}
+            entityName={entity.name}
+            open={shareOpen}
+            onOpenChange={setShareOpen}
+          />
+          <EntityMergeDialog
+            entityId={entity.id}
+            entityName={entity.name}
+            sourceType={entity.sourceType}
+            open={mergeOpen}
+            onOpenChange={setMergeOpen}
+            onMerged={(survivorId) => {
+              if (survivorId !== entity.id) ui.openEntity(survivorId);
+            }}
+          />
+          <DeleteEntityDialog
+            entityId={entity.id}
+            entityName={entity.name}
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+          />
+        </>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Admin-only soft delete. The entity is tombstoned server-side (hidden from the
+ * graph, recoverable by an admin) and its name is suppressed so the LLM
+ * enrichment paths don't re-mint it. On success the drawer closes and every
+ * surface that could still show the entity is invalidated.
+ */
+function DeleteEntityDialog({
+  entityId,
+  entityName,
+  open,
+  onOpenChange,
+}: {
+  entityId: string;
+  entityName: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const ui = useEntityUi();
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => api.entities.remove(entityId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["entity-drawer"] });
+      queryClient.invalidateQueries({ queryKey: ["entities"] });
+      queryClient.invalidateQueries({ queryKey: ["entity-graph"] });
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      toast.success(`${entityName} deleted`);
+      onOpenChange(false);
+      ui.closeAll();
+    },
+    onError: (err: Error) => {
+      toast.error(err.message);
+    },
+  });
+
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete {entityName}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            It will be hidden from the graph and won't be recreated automatically. An admin can restore it later.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            onClick={(e) => {
+              e.preventDefault();
+              deleteMutation.mutate();
+            }}
+            disabled={deleteMutation.isPending}
+          >
+            {deleteMutation.isPending ? (
+              <>
+                <SpinnerGapIcon size={14} className="animate-spin" />
+                Deleting...
+              </>
+            ) : (
+              "Delete"
+            )}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -325,12 +461,14 @@ function formatShortDate(iso: string): string {
 
 interface DrawerTabsProps {
   entityId: string;
+  sourceType: string;
   relations: EntityRelationsResponse | undefined;
   relationsLoading: boolean;
 }
 
-function DrawerTabs({ entityId, relations, relationsLoading }: DrawerTabsProps) {
-  const [tab, setTab] = useState<"timeline" | "relationships">("timeline");
+function DrawerTabs({ entityId, sourceType, relations, relationsLoading }: DrawerTabsProps) {
+  const isProject = sourceType === "project";
+  const [tab, setTab] = useState<"timeline" | "relationships" | "scope">("timeline");
   const timelineQuery = useQuery({
     queryKey: ["entity-drawer", "timeline", entityId],
     queryFn: () => api.entities.timeline(entityId),
@@ -360,8 +498,13 @@ function DrawerTabs({ entityId, relations, relationsLoading }: DrawerTabsProps) 
           label="Relationships"
           hint={relationsHint}
         />
+        {isProject ? (
+          <TabButton active={tab === "scope"} onClick={() => setTab("scope")} label="Scope" hint={null} />
+        ) : null}
       </div>
-      {tab === "timeline" ? (
+      {tab === "scope" && isProject ? (
+        <ScopePanel entityId={entityId} />
+      ) : tab === "timeline" ? (
         <TimelinePanel timelineQuery={timelineQuery} />
       ) : (
         <RelationshipsPanel relations={relations} isLoading={relationsLoading} entityId={entityId} />

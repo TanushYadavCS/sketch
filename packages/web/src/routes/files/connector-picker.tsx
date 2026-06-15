@@ -139,12 +139,6 @@ export function ConnectorPicker({
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
 
-  const setupStatus = useQuery({ queryKey: ["setup-status"], queryFn: () => api.setup.status() });
-  const experimentalEnabled = setupStatus.data?.experimentalFlag === true;
-  // Experimental connectors stay hidden until the flag is on (matches backend gating,
-  // which 404s their routes and rejects their connector creation otherwise).
-  const showDef = (def: IntegrationDefinition) => !def.experimentalOnly || experimentalEnabled;
-
   const connectedByType = new Map<string, ConnectorConfig>();
   // aggregatedByType drives sync-status indicator on the chip (which is
   // connector-row data). Chip *counts* read from `sourceCounts` so a member with
@@ -195,7 +189,7 @@ export function ConnectorPicker({
           icon={<FolderSimpleIcon size={12} />}
         />
 
-        {INTEGRATIONS.filter(showDef).map((def) => {
+        {INTEGRATIONS.map((def) => {
           const agg = aggregatedByType.get(def.type);
           const count = sourceCounts.get(def.type) ?? 0;
           // Render if the viewer either owns/can see a connector row of this
@@ -218,7 +212,7 @@ export function ConnectorPicker({
         })}
 
         {isAdmin &&
-          ORG_LEVEL_INTEGRATIONS.filter(showDef).map((def) => {
+          ORG_LEVEL_INTEGRATIONS.map((def) => {
             if (connectedByType.has(def.type)) return null;
             return (
               <button
@@ -251,7 +245,6 @@ export function ConnectorPicker({
         teamMemberCount={teamMemberCount}
         connectorMemberCounts={connectorMemberCounts}
         isAdmin={isAdmin}
-        experimentalEnabled={experimentalEnabled}
         onConnect={(def) => {
           setShowBrowseAll(false);
           // All connectors — per-user (Fireflies, Drive) and org-wide (ClickUp,
@@ -351,7 +344,6 @@ function BrowseConnectorsDialog({
   teamMemberCount,
   connectorMemberCounts,
   isAdmin,
-  experimentalEnabled,
   onConnect,
   onManage,
 }: {
@@ -361,7 +353,6 @@ function BrowseConnectorsDialog({
   teamMemberCount: number;
   connectorMemberCounts: Record<string, number>;
   isAdmin: boolean;
-  experimentalEnabled: boolean;
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
 }) {
@@ -409,7 +400,7 @@ function BrowseConnectorsDialog({
         {tab === "connectors" ? (
           <div className="-mr-1 min-h-0 overflow-y-auto pr-1">
             <div className="space-y-2">
-              {INTEGRATIONS.filter((def) => !def.experimentalOnly || experimentalEnabled).map((def) => {
+              {INTEGRATIONS.map((def) => {
                 const matchingConnectors = connectorsForDefinition(def, connectors);
                 const connector = preferredConnectorForDefinition(def, matchingConnectors);
                 return (

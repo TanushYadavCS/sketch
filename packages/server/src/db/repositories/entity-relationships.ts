@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
+import { whereLiveEntity } from "./entities";
 
 export type RelationConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 
@@ -97,6 +98,7 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
         ])
         .where("entity_relationships.source_entity_id", "=", entityId)
         .where("entities.status", "!=", "archived")
+        .where(whereLiveEntity())
         .orderBy(confidenceOrder)
         .orderBy(evidenceCount, "desc")
         .orderBy(confidenceScore, "desc")
@@ -126,6 +128,7 @@ export function createEntityRelationshipsRepository(db: Kysely<DB>) {
         ])
         .where("entity_relationships.target_entity_id", "=", entityId)
         .where("entities.status", "!=", "archived")
+        .where(whereLiveEntity())
         .orderBy(confidenceOrder)
         .orderBy(evidenceCount, "desc")
         .orderBy(confidenceScore, "desc")

@@ -543,6 +543,20 @@ export interface EntitiesTable {
   updated_at: string;
   ai_brief: string | null;
   share_with_everyone: Generated<number>;
+  deleted_at: string | null;
+  merged_into_entity_id: string | null;
+}
+
+export interface EntityMergesTable {
+  id: string;
+  survivor_entity_id: string;
+  merged_entity_id: string;
+  entity_type: string;
+  moves: string;
+  merged_by_user_id: string;
+  merged_at: Generated<string>;
+  unmerged_at: string | null;
+  unmerged_by_user_id: string | null;
 }
 
 export interface EntityShareEmailsTable {
@@ -662,6 +676,37 @@ export interface EntityDomainsTable {
   created_at: Generated<string>;
 }
 
+export interface EntityProjectBindingsTable {
+  id: string;
+  entity_id: string;
+  source: string;
+  container_id: string;
+  container_kind: string;
+  label: string | null;
+  connector_config_id: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
+export interface EntityProjectMemberOverridesTable {
+  id: string;
+  entity_id: string;
+  indexed_file_id: string;
+  mode: string;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
+export interface EntityCreationSuppressionsTable {
+  id: string;
+  normalized_name: string;
+  entity_type: string;
+  original_entity_id: string | null;
+  reason: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityRelationshipsTable {
   id: string;
   source_entity_id: string;
@@ -692,6 +737,8 @@ export interface EntityReviewQueueTable {
   proposed_name: string;
   normalized_name: string;
   entity_type: string;
+  source: string | null;
+  source_id: string | null;
   proposed_email: string | null;
   candidate_entity_id: string | null;
   candidate_score: number | null;
@@ -708,6 +755,8 @@ export interface EntityReviewQueueTable {
   resolved_by: string | null;
   resolved_at: string | null;
   resolved_entity_id: string | null;
+  seed_source: string | null;
+  seed_source_id: string | null;
 }
 
 export interface EntityReviewEvidenceTable {
@@ -802,6 +851,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_merges: EntityMergesTable;
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_contact_points: EntityContactPointsTable;
@@ -815,6 +865,9 @@ export interface DB {
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
   entity_domains: EntityDomainsTable;
+  entity_project_bindings: EntityProjectBindingsTable;
+  entity_project_member_overrides: EntityProjectMemberOverridesTable;
+  entity_creation_suppressions: EntityCreationSuppressionsTable;
   entity_relationships: EntityRelationshipsTable;
   entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }

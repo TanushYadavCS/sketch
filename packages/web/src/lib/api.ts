@@ -483,6 +483,106 @@ export interface EntityTimelineResponse {
   totalCount: number;
 }
 
+/**
+ * A connector container (data source) bound to a project entity. The effective
+ * list (GET ?effective=true) annotates each row with `viaProjectId` (the subtree
+ * project that contributed it) and `origin` (true when derived from the
+ * project's own source ref rather than an explicit binding).
+ */
+export interface EntityBinding {
+  id: string;
+  entityId: string;
+  source: string;
+  containerId: string;
+  containerKind: string;
+  label: string | null;
+  connectorConfigId: string | null;
+  viaProjectId?: string;
+  origin?: boolean;
+}
+
+export interface GroupedProjectChild {
+  id: string;
+  name: string;
+}
+
+/** Dry-run of merging `loserId` into `survivorId`: what moves and what collides. */
+export interface EntityMergePreview {
+  survivorId: string;
+  loserId: string;
+  blocked?: string;
+  counts: {
+    sourceRefs: number;
+    mentions: number;
+    relationships: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    candidates: number;
+    reviewQueue: number;
+  };
+  collisions: {
+    mentions: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    relationships: number;
+  };
+  selfLoopsDropped: number;
+}
+
+/** A past merge in an entity's ledger (raw server shape). Re-mergeable via unmerge. */
+export interface EntityMergeRecord {
+  id: string;
+  survivor_entity_id: string;
+  merged_entity_id: string;
+  entity_type: string;
+  merged_at: string;
+  unmerged_at: string | null;
+  unmerged_by_user_id: string | null;
+}
+
+/**
+ * A connector item (indexed file) that belongs to a project — nominated by one
+ * of the project's bindings (resolved up the spine) or added manually. `manual`
+ * marks a human-included file; `viaProjectId` (when set and not the project
+ * itself) marks one inherited from a grouped sub-project.
+ */
+export interface EntityMember {
+  indexedFileId: string;
+  fileName: string;
+  fileType: string | null;
+  source: string;
+  providerUrl: string | null;
+  viaProjectId: string | null;
+  containerId: string | null;
+  manual: boolean;
+}
+
+/**
+ * A confirmed project entity for the Projects index. `origin` distinguishes a
+ * project born from a connector container (`derived`) from one a human defined
+ * (`defined`). `sourceCount` is the effective bindings resolved up the spine;
+ * `subProjectCount` is the grouped children.
+ */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  origin: "derived" | "defined";
+  status: string;
+  sourceCount: number;
+  subProjectCount: number;
+}
+
+export interface BindableContainer {
+  source: string;
+  containerId: string;
+  containerKind: string;
+  label: string;
+}
+
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
 
 export type ResetCategory = "manual" | "connectors" | "ai";
@@ -1729,6 +1829,62 @@ export const api = {
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
     },
+    listBindings(id: string, effective = true) {
+      return request<{ bindings: EntityBinding[]; children: GroupedProjectChild[] }>(
+        `/api/entities/${id}/bindings${effective ? "?effective=true" : ""}`,
+      );
+    },
+    addBinding(
+      id: string,
+      data: { source: string; containerId: string; containerKind: string; label?: string | null },
+    ) {
+      return request<{ binding: EntityBinding }>(`/api/entities/${id}/bindings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    removeBinding(id: string, bindingId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/bindings/${bindingId}`, { method: "DELETE" });
+    },
+    groupProject(id: string, childId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/group`, {
+        method: "POST",
+        body: JSON.stringify({ childId }),
+      });
+    },
+    ungroupProject(id: string, childId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/group/${childId}`, { method: "DELETE" });
+    },
+    listMembers(id: string, limit?: number) {
+      const qs = limit ? `?limit=${limit}` : "";
+      return request<{ members: EntityMember[]; truncated: boolean }>(`/api/entities/${id}/members${qs}`);
+    },
+    setMembership(id: string, fileId: string, mode: "include" | "exclude") {
+      return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, {
+        method: "PUT",
+        body: JSON.stringify({ mode }),
+      });
+    },
+    clearMembership(id: string, fileId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, { method: "DELETE" });
+    },
+    previewMerge(survivorId: string, loserId: string) {
+      return request<EntityMergePreview>(
+        `/api/entities/${survivorId}/merge-preview?against=${encodeURIComponent(loserId)}`,
+      );
+    },
+    merge(survivorId: string, loserId: string) {
+      return request<{ mergeId: string }>("/api/entities/merges", {
+        method: "POST",
+        body: JSON.stringify({ survivorId, loserId }),
+      });
+    },
+    listMerges(entityId: string) {
+      return request<{ merges: EntityMergeRecord[] }>(`/api/entities/merges?entityId=${encodeURIComponent(entityId)}`);
+    },
+    unmerge(mergeId: string) {
+      return request<{ ok: true }>(`/api/entities/merges/${mergeId}`, { method: "DELETE" });
+    },
     listShares(id: string) {
       return request<EntitySharesResponse>(`/api/entities/${id}/shares`);
     },
@@ -1860,6 +2016,14 @@ export const api = {
         entities: EntityListItem[];
         total: number;
       }>(`/api/entities${qs ? `?${qs}` : ""}`);
+    },
+  },
+  projects: {
+    list() {
+      return request<{ projects: ProjectSummary[] }>("/api/projects");
+    },
+    bindableContainers() {
+      return request<{ containers: BindableContainer[] }>("/api/projects/bindable-containers");
     },
   },
   entityReview: {

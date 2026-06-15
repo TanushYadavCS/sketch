@@ -27,6 +27,7 @@ import {
   type EntityMentionConfidence,
   type EntityMentionRelation,
   createEntityRepository,
+  whereLiveEntity,
 } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -40,6 +41,7 @@ import {
   materializeFromFact,
   shouldMarkMaterialized,
 } from "./materialize";
+import { mergeEntitiesInTransaction } from "./merge";
 
 type Entity = Selectable<EntitiesTable>;
 
@@ -200,7 +202,12 @@ async function fetchRow(ctx: ResolveTxnCtx, reviewId: string): Promise<QueueRow>
 }
 
 async function fetchEntity(ctx: ResolveTxnCtx, entityId: string): Promise<Entity | undefined> {
-  return ctx.db.selectFrom("entities").selectAll().where("id", "=", entityId).executeTakeFirst();
+  return ctx.db
+    .selectFrom("entities")
+    .selectAll()
+    .where("id", "=", entityId)
+    .where(whereLiveEntity())
+    .executeTakeFirst();
 }
 
 /**
@@ -419,6 +426,7 @@ async function findStaleCandidates(ctx: ResolveTxnCtx, target: Entity, proposedN
     .selectAll()
     .where("source_type", "=", target.source_type)
     .where("id", "!=", target.id)
+    .where(whereLiveEntity())
     .execute();
   return candidates.filter((e) => {
     if (normalizeName(e.name) !== normalized) return false;
@@ -675,27 +683,49 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
 
     // Target selection.
     const targetId: string | null = opts.mergeIntoEntityId ?? row.candidate_entity_id;
-    if (!targetId) {
-      throw new ResolveError("CANDIDATE_MISSING", "row has no candidate_entity_id and no mergeIntoEntityId provided", {
-        currentRow: row,
-      });
-    }
     const pickedDifferent =
       opts.mergeIntoEntityId !== undefined &&
       row.candidate_entity_id !== null &&
       opts.mergeIntoEntityId !== row.candidate_entity_id;
 
     // 2. Existence check + type check.
-    let target = await fetchEntity(trxCtx, targetId);
-    if (!target) {
-      throw new ResolveError("TARGET_DELETED", "target entity deleted between candidate-gen and confirm", {
-        currentRow: row,
+    let target: Entity;
+    if (!targetId) {
+      if (!row.seed_source || !row.seed_source_id) {
+        throw new ResolveError(
+          "CANDIDATE_MISSING",
+          "row has no candidate_entity_id and no mergeIntoEntityId provided",
+          {
+            currentRow: row,
+          },
+        );
+      }
+      target = await trxCtx.entityRepo.upsertEntityFromTool({
+        name: row.proposed_name,
+        sourceType: row.entity_type,
+        source: row.seed_source,
+        sourceId: row.seed_source_id,
       });
+    } else {
+      const fetchedTarget = await fetchEntity(trxCtx, targetId);
+      if (!fetchedTarget) {
+        throw new ResolveError("TARGET_DELETED", "target entity deleted between candidate-gen and confirm", {
+          currentRow: row,
+        });
+      }
+      if (fetchedTarget.source_type !== row.entity_type) {
+        throw new ResolveError("TYPE_MISMATCH", "mergeIntoEntityId entity_type does not match queue row", {
+          target: fetchedTarget.source_type,
+          row: row.entity_type,
+        });
+      }
+      target = fetchedTarget;
     }
-    if (target.source_type !== row.entity_type) {
-      throw new ResolveError("TYPE_MISMATCH", "mergeIntoEntityId entity_type does not match queue row", {
-        target: target.source_type,
-        row: row.entity_type,
+    if (row.seed_source && row.seed_source_id) {
+      await trxCtx.entityRepo.upsertSourceRef({
+        entityId: target.id,
+        source: row.seed_source,
+        sourceId: row.seed_source_id,
       });
     }
 
@@ -728,7 +758,11 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         );
       }
       if (stales.length === 1) {
-        await mergeStaleEntityPortable(trxCtx, stales[0], target);
+        await mergeEntitiesInTransaction(trxCtx.db, {
+          survivorId: target.id,
+          loserId: stales[0].id,
+          userId: trxCtx.userId,
+        });
         mergedStaleEntityId = stales[0].id;
       }
     }
@@ -761,6 +795,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     if (row.entity_type === "company") {
       await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
+    await writeReviewSourceRef(trxCtx, row, target.id);
     await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // Pick-different: write rejection against original candidate so it isn't re-suggested.
@@ -791,6 +826,7 @@ async function findReResolveMatches(ctx: ResolveTxnCtx, row: QueueRow, excludeEn
     .selectFrom("entities")
     .selectAll()
     .where("source_type", "=", row.entity_type)
+    .where(whereLiveEntity())
     .execute();
   const excluded = new Set(excludeEntityIds.filter((id) => id != null));
   const out: Entity[] = [];
@@ -804,6 +840,15 @@ async function findReResolveMatches(ctx: ResolveTxnCtx, row: QueueRow, excludeEn
     if (aliases.some((a) => normalizeName(a) === normalized)) out.push(c);
   }
   return out;
+}
+
+async function writeReviewSourceRef(ctx: ResolveTxnCtx, row: QueueRow, entityId: string): Promise<void> {
+  if (!row.source || !row.source_id) return;
+  await ctx.entityRepo.upsertSourceRef({
+    entityId,
+    source: row.source,
+    sourceId: row.source_id,
+  });
 }
 
 export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: RejectOptions): Promise<RejectResult> {
@@ -878,13 +923,11 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (reResolvedToExisting) {
       target = matches[0];
     } else {
-      // 3. Create new entity. Decision recorded in plan §Helpers:
-      // - source/sourceId derived from the first evidence row so source_refs
-      //   carries honest provenance. When there is no evidence (rare —
-      //   ECR-01 always writes at least one), fall back to a synthetic
-      //   `entity-review` source.
-      const sourceFromEvidence = evidence[0]?.source ?? "entity-review";
-      const sourceId = `review:${reviewId}`;
+      // 3. Create new entity. Connector-backed queue rows carry source/sourceId
+      // from proposal time; older rows fall back to the evidence source and a
+      // synthetic review id.
+      const sourceFromEvidence = row.source ?? evidence[0]?.source ?? "entity-review";
+      const sourceId = row.source_id ?? `review:${reviewId}`;
       if (row.entity_type === "person") {
         const personData: {
           name: string;
@@ -947,6 +990,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (row.entity_type === "company") {
       await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
+    await writeReviewSourceRef(trxCtx, row, target.id);
     await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // 6. Mark resolved.

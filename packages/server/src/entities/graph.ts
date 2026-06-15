@@ -8,6 +8,8 @@ export const ENTITY_GRAPH_RELATION_TYPES = [
   "contributes_to",
   "builds",
   "part_of",
+  "member_of",
+  "engagement_for",
   "partner_of",
   "deal_for",
   "primary_contact",
@@ -85,12 +87,15 @@ export function relationDirectionAllowed(
   if (relationType === "part_of") {
     return (
       (sourceType === "project" && targetType === "project") ||
+      (sourceType === "project" && targetType === "product") ||
       (sourceType === "product" && targetType === "product") ||
       (sourceType === "team" && targetType === "company")
     );
   }
+  if (relationType === "member_of") return sourceType === "person" && targetType === "team";
   if (relationType === "deal_for") return sourceType === "deal" && targetType === "company";
   if (relationType === "primary_contact") return sourceType === "deal" && targetType === "person";
+  if (relationType === "engagement_for") return sourceType === "project" && targetType === "company";
   return sourceType === "company" && targetType === "company";
 }
 

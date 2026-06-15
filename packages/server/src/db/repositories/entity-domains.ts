@@ -4,6 +4,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
+import { whereLiveEntity } from "./entities";
 
 export type DomainKind = "corporate" | "personal" | "shared";
 export type RelationshipConfidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
@@ -14,6 +15,8 @@ export type EntityRelationshipType =
   | "contributes_to"
   | "builds"
   | "part_of"
+  | "member_of"
+  | "engagement_for"
   | "partner_of"
   | "deal_for"
   | "primary_contact";
@@ -192,6 +195,7 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         .where("entity_domains.domain", "=", domain)
         .where("entity_domains.kind", "=", "corporate")
         .where("entity_domains.entity_id", "is not", null)
+        .where(whereLiveEntity())
         .executeTakeFirst();
       return (row ?? null) as EntitiesTable | null;
     },

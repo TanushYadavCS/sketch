@@ -10,10 +10,10 @@
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { EntityDrawer } from "./entity-drawer";
 
@@ -134,6 +134,28 @@ function OpenOnMount({ id }: { id: string }) {
   return null;
 }
 
+/** Opens the drawer exactly once — unlike OpenOnMount it won't re-open after closeAll. */
+function OpenOnceHarness({ initialId }: { initialId: string }) {
+  return (
+    <EntityUiProvider>
+      <OpenOnce id={initialId} />
+      <EntityDrawer />
+    </EntityUiProvider>
+  );
+}
+
+function OpenOnce({ id }: { id: string }) {
+  const { openEntity } = useEntityUi();
+  const opened = useRef(false);
+  useEffect(() => {
+    if (!opened.current) {
+      opened.current = true;
+      openEntity(id);
+    }
+  }, [openEntity, id]);
+  return null;
+}
+
 describe("EntityDrawer", () => {
   it("renders header with identity chips and deterministic Summary block, Timeline as default tab", async () => {
     renderWithProviders(<DrawerHarness initialId="e-sarah" />);
@@ -193,6 +215,31 @@ describe("EntityDrawer", () => {
     await waitFor(() => {
       expect(screen.getByText(/Back to Sarah Chen/i)).toBeInTheDocument();
     });
+  });
+
+  it("lets an admin delete an entity: confirm fires DELETE and closes the drawer", async () => {
+    const user = userEvent.setup();
+    let deleted = false;
+    server.use(
+      http.get("/api/auth/session", () =>
+        HttpResponse.json({ authenticated: true, email: "admin@test.com", role: "admin" }),
+      ),
+      http.delete("/api/entities/e-sarah", () => {
+        deleted = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    renderWithProviders(<OpenOnceHarness initialId="e-sarah" />);
+    await screen.findByRole("heading", { name: /Sarah Chen/ });
+
+    await user.click(await screen.findByRole("button", { name: /Delete/ }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleted).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: /Sarah Chen/ })).not.toBeInTheDocument());
   });
 
   it("renders the company variant: primary domain chip in header, deterministic summary in body", async () => {

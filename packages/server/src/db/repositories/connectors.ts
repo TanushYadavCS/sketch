@@ -75,6 +75,8 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
       LEFT JOIN entity_share_emails ese
         ON ese.entity_id = ent_shared.id AND ese.email = ${email}
       WHERE em_shared.indexed_file_id = ${t}.id
+        AND ent_shared.deleted_at IS NULL
+        AND ent_shared.merged_into_entity_id IS NULL
         AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
     )
   )`;

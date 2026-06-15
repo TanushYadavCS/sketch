@@ -858,15 +858,15 @@ describe("Connectors API — authorization", () => {
     });
   });
 
-  describe("OAuth /api/oauth/zoho — experimental admin-only flow", () => {
-    it("is hidden when EXPERIMENTAL_FLAG is false", async () => {
+  describe("OAuth /api/oauth/zoho — admin-only flow", () => {
+    it("is available without EXPERIMENTAL_FLAG", async () => {
       const res = await app.request("/api/oauth/zoho/status", {
         headers: { Cookie: adminCookie },
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(200);
     });
 
-    it("hides existing Zoho configs and files when EXPERIMENTAL_FLAG is false", async () => {
+    it("shows existing Zoho configs and files without EXPERIMENTAL_FLAG", async () => {
       const cfg = await insertConfig(db, { connectorType: "zoho_crm", createdBy: adminId });
       await createConnectorRepository(db).upsertFile({
         source: "zoho_crm",
@@ -885,32 +885,30 @@ describe("Connectors API — authorization", () => {
       });
 
       const list = await app.request("/api/connectors", { headers: { Cookie: adminCookie } });
-      expect(await list.json()).toMatchObject({ connectors: [] });
+      expect(await list.json()).toMatchObject({ connectors: [{ id: cfg.id, connectorType: "zoho_crm" }] });
 
       const files = await app.request("/api/connectors/all-files", { headers: { Cookie: adminCookie } });
-      expect(await files.json()).toMatchObject({ files: [], total: 0, enrichedTotal: 0 });
+      expect(await files.json()).toMatchObject({ files: [{ source: "zoho_crm" }], total: 1, enrichedTotal: 0 });
 
       const bySource = await app.request("/api/connectors/file-counts-by-source", {
         headers: { Cookie: adminCookie },
       });
-      expect(await bySource.json()).toMatchObject({ counts: [] });
+      expect(await bySource.json()).toMatchObject({ counts: [{ source: "zoho_crm", count: 1 }] });
 
       const read = await app.request(`/api/connectors/${cfg.id}`, { headers: { Cookie: adminCookie } });
-      expect(read.status).toBe(404);
+      expect(read.status).toBe(200);
 
       const sync = await app.request(`/api/connectors/${cfg.id}/syncs`, {
         method: "POST",
         headers: { Cookie: adminCookie },
       });
-      expect(sync.status).toBe(404);
+      expect(sync.status).not.toBe(404);
     });
 
-    it("member cannot start Zoho OAuth when experimental features are enabled", async () => {
-      const flaggedApp = createApp(
-        db,
-        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
-        { logger },
-      );
+    it("member cannot start Zoho OAuth", async () => {
+      const flaggedApp = createApp(db, createTestConfig({ ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }), {
+        logger,
+      });
 
       const res = await flaggedApp.request("/api/oauth/zoho/authorize?region=in", {
         headers: { Cookie: memberCookie },
@@ -920,11 +918,9 @@ describe("Connectors API — authorization", () => {
     });
 
     it("admin authorize ignores query-string user_id and redirects to the selected Zoho region", async () => {
-      const flaggedApp = createApp(
-        db,
-        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
-        { logger },
-      );
+      const flaggedApp = createApp(db, createTestConfig({ ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }), {
+        logger,
+      });
 
       const res = await flaggedApp.request("/api/oauth/zoho/authorize?region=in&user_id=attacker", {
         headers: { Cookie: adminCookie },
@@ -940,11 +936,9 @@ describe("Connectors API — authorization", () => {
     });
 
     it("authorize is blocked with 409 when Zoho CRM is already connected", async () => {
-      const flaggedApp = createApp(
-        db,
-        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
-        { logger },
-      );
+      const flaggedApp = createApp(db, createTestConfig({ ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }), {
+        logger,
+      });
 
       await createConnectorRepository(db).createConfig({
         connectorType: "zoho_crm",
@@ -968,11 +962,9 @@ describe("Connectors API — authorization", () => {
     });
 
     it("callback exchanges tokens and stores a Zoho connector config", async () => {
-      const flaggedApp = createApp(
-        db,
-        createTestConfig({ EXPERIMENTAL_FLAG: true, ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }),
-        { logger },
-      );
+      const flaggedApp = createApp(db, createTestConfig({ ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsec" }), {
+        logger,
+      });
 
       const authorize = await flaggedApp.request("/api/oauth/zoho/authorize?region=in", {
         headers: { Cookie: adminCookie },

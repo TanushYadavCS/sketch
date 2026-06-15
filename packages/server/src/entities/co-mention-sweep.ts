@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
 
@@ -71,6 +72,8 @@ async function queryCoMentionRows(
     .select(["pm.entity_id as personEntityId", "tm.entity_id as targetEntityId", "pm.indexed_file_id as indexedFileId"])
     .where("p.source_type", "=", "person")
     .where("t.source_type", "in", ["project", "product"])
+    .where(whereLiveEntity("p"))
+    .where(whereLiveEntity("t"))
     .where("f.is_archived", "=", 0)
     .where("pm.confidence", "=", "EXTRACTED")
     .where("tm.confidence", "=", "EXTRACTED")

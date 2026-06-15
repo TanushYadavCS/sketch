@@ -230,6 +230,82 @@ export const handlers = [
     return HttpResponse.json({ active: false, currentJob: null, latestJob: null, blockedBy: null });
   }),
 
+  http.get("/api/entities/:id/bindings", () => {
+    return HttpResponse.json({ bindings: [] });
+  }),
+
+  http.post("/api/entities/:id/bindings", () => {
+    return HttpResponse.json({ binding: null });
+  }),
+
+  http.delete("/api/entities/:id/bindings/:bindingId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.post("/api/entities/:id/group", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.delete("/api/entities/:id/group/:childId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.get("/api/entities/:id/members", () => {
+    return HttpResponse.json({ members: [], truncated: false });
+  }),
+
+  http.put("/api/entities/:id/members/:fileId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.delete("/api/entities/:id/members/:fileId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.get("/api/entities/merges", () => {
+    return HttpResponse.json({ merges: [] });
+  }),
+
+  http.post("/api/entities/merges", () => {
+    return HttpResponse.json({ mergeId: "merge-1" });
+  }),
+
+  http.delete("/api/entities/merges/:mergeId", () => {
+    return HttpResponse.json({ ok: true });
+  }),
+
+  http.delete("/api/entities/:id", () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.get("/api/entities/:id/merge-preview", () => {
+    return HttpResponse.json({
+      survivorId: "s",
+      loserId: "l",
+      counts: {
+        sourceRefs: 0,
+        mentions: 0,
+        relationships: 0,
+        contactPoints: 0,
+        shareEmails: 0,
+        aliasRejections: 0,
+        domains: 0,
+        candidates: 0,
+        reviewQueue: 0,
+      },
+      collisions: { mentions: 0, contactPoints: 0, shareEmails: 0, aliasRejections: 0, domains: 0, relationships: 0 },
+      selfLoopsDropped: 0,
+    });
+  }),
+
+  http.get("/api/projects", () => {
+    return HttpResponse.json({ projects: [] });
+  }),
+
+  http.get("/api/projects/bindable-containers", () => {
+    return HttpResponse.json({ containers: [] });
+  }),
+
   http.get("/api/settings/identity", () => {
     return HttpResponse.json({ orgName: null, botName: "Sketch", orgContext: null });
   }),

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -1436,6 +1437,38 @@ describe("Entity drawer routes", () => {
       })
       .execute();
   }
+
+  it("DELETE /api/entities/:id tombstones the entity and releases source refs for future upserts", async () => {
+    await seedEntity("delete-me", "Acme", "company");
+    await seedZohoSourceRef("delete-me", "Accounts:acme");
+
+    const res = await app.request("/api/entities/delete-me", { method: "DELETE", headers: { Cookie: adminCookie } });
+
+    expect(res.status).toBe(200);
+    const deleted = await db.selectFrom("entities").selectAll().where("id", "=", "delete-me").executeTakeFirstOrThrow();
+    expect(deleted.deleted_at).not.toBeNull();
+    await expect(
+      db.selectFrom("entity_source_refs").selectAll().where("entity_id", "=", "delete-me").execute(),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.selectFrom("entity_creation_suppressions").selectAll().where("original_entity_id", "=", "delete-me").execute(),
+    ).resolves.toHaveLength(1);
+
+    const replacement = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Acme Replacement",
+      sourceType: "company",
+      source: "zoho_crm",
+      sourceId: "Accounts:acme",
+    });
+    expect(replacement.id).not.toBe("delete-me");
+    const ref = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "zoho_crm")
+      .where("source_id", "=", "Accounts:acme")
+      .executeTakeFirstOrThrow();
+    expect(ref.entity_id).toBe(replacement.id);
+  });
 
   it("GET /api/entities/:id returns profile with deterministic summary built from relationships + activity", async () => {
     await seedEntity("e1", "Sarah Chen", "person", { role: "Engineer", email: "sarah@stripe.com" });

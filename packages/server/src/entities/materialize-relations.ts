@@ -7,7 +7,7 @@ import {
   readRelationEndpoint,
   relationDirectionAllowed,
 } from "./graph";
-import { registerEntity } from "./materialize-deps";
+import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
@@ -43,8 +43,10 @@ export async function materializeLlmRelationFact(
   if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
   const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source");
+  if (sourceResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (sourceResult.kind === "queued_held") return sourceResult;
   const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target");
+  if (targetResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (targetResult.kind === "queued_held") return targetResult;
   if (sourceResult.entity.id === targetResult.entity.id) return { kind: "skipped", reason: "self_relation" };
 
@@ -213,14 +215,20 @@ async function materializeRelationEndpoint(
 ): Promise<
   | { kind: "resolved"; entity: EntityRow; created: boolean }
   | { kind: "queued_held"; reviewId: string; reason: "relation_endpoint" }
+  | { kind: "suppressed_endpoint" }
 > {
   const raw = readJsonObject(fact.raw);
+  const normalized = normalizeEntityMatchName(endpoint.type, endpoint.name);
+  if (await deps.suppressionRepo.isSuppressed(normalized, endpoint.type)) {
+    return { kind: "suppressed_endpoint" };
+  }
   const result = await proposeEntity(
     {
       entityRepo: deps.entityRepo,
       reviewRepo: deps.reviewRepo,
       lookup: deps.lookup,
       readEmail: deps.readEmail,
+      onEntityResolved: deps.onEntityResolved,
     },
     {
       name: endpoint.name,
@@ -233,6 +241,7 @@ async function materializeRelationEndpoint(
       aliases: endpoint.variations,
       metadata: { origin: "ai", relationEndpoint: true },
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+      queueInsteadOfCreate: endpoint.type === "project",
     },
   );
   if (result.kind === "queued") {

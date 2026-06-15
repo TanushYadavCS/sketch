@@ -37,7 +37,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(91);
+    expect(rows.rows).toHaveLength(99);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -121,7 +121,15 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[87]).toBe("092-teams-provider-file-scope");
     expect(names[88]).toBe("093-microsoft-oauth-settings");
     expect(names[89]).toBe("094-microsoft-oauth-tenant");
-    expect(names[90]).toBe("095-google-calendar-provider-file-scope");
+    expect(names[90]).toBe("095-entity-review-connector-identity");
+    expect(names[91]).toBe("096-linear-project-entity-seeding-cleanup");
+    expect(names[92]).toBe("097-clickup-project-entity-seeding-cleanup");
+    expect(names[93]).toBe("098-entity-merge-ledger");
+    expect(names[94]).toBe("099-review-queue-seed-handle");
+    expect(names[95]).toBe("100-entity-project-bindings");
+    expect(names[96]).toBe("101-entity-project-member-overrides");
+    expect(names[97]).toBe("102-entity-creation-suppressions");
+    expect(names[98]).toBe("103-google-calendar-provider-file-scope");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -137,7 +145,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(freshDb);
-      expect(rows.rows).toHaveLength(91);
+      expect(rows.rows).toHaveLength(99);
     } finally {
       await freshDb.destroy();
     }
@@ -149,6 +157,113 @@ describe("runMigrations on Postgres — full sequence", () => {
       WHERE table_schema = 'public' AND table_name = 'entity_contact_points'
     `.execute(db);
     expect(result.rows).toHaveLength(1);
+  });
+
+  it("creates the entity merge ledger tombstone schema", async () => {
+    const entityColumns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'entities'
+        AND column_name IN ('deleted_at', 'merged_into_entity_id')
+    `.execute(db);
+    expect(entityColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "deleted_at", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "merged_into_entity_id", data_type: "text", is_nullable: "YES" }),
+      ]),
+    );
+
+    const mergeColumns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'entity_merges'
+    `.execute(db);
+    expect(mergeColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "id", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "survivor_entity_id", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "merged_entity_id", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "entity_type", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "moves", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "merged_by_user_id", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "merged_at", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "unmerged_at", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "unmerged_by_user_id", data_type: "text", is_nullable: "YES" }),
+      ]),
+    );
+    expect(mergeColumns.rows.find((row) => row.column_name === "merged_at")?.column_default).toContain(
+      "CURRENT_TIMESTAMP",
+    );
+
+    const foreignKeys = await sql<{
+      column_name: string;
+      foreign_table_name: string;
+      foreign_column_name: string;
+      delete_rule: string;
+    }>`
+      SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, rc.delete_rule
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+       AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name = tc.constraint_name
+       AND ccu.table_schema = tc.table_schema
+      JOIN information_schema.referential_constraints rc
+        ON rc.constraint_name = tc.constraint_name
+       AND rc.constraint_schema = tc.table_schema
+      WHERE tc.table_schema = 'public'
+        AND tc.table_name = 'entity_merges'
+        AND tc.constraint_type = 'FOREIGN KEY'
+    `.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          column_name: "survivor_entity_id",
+          foreign_table_name: "entities",
+          foreign_column_name: "id",
+          delete_rule: "RESTRICT",
+        }),
+        expect.objectContaining({
+          column_name: "merged_entity_id",
+          foreign_table_name: "entities",
+          foreign_column_name: "id",
+          delete_rule: "RESTRICT",
+        }),
+        expect.objectContaining({
+          column_name: "merged_by_user_id",
+          foreign_table_name: "users",
+          foreign_column_name: "id",
+          delete_rule: "RESTRICT",
+        }),
+        expect.objectContaining({
+          column_name: "unmerged_by_user_id",
+          foreign_table_name: "users",
+          foreign_column_name: "id",
+          delete_rule: "RESTRICT",
+        }),
+      ]),
+    );
+
+    const indexes = await sql<{ indexname: string }>`
+      SELECT indexname FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'entity_merges'
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(
+      expect.arrayContaining(["entity_merges_survivor_idx", "entity_merges_merged_idx"]),
+    );
   });
 
   it("creates the users table", async () => {
