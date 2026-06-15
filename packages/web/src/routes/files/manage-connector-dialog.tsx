@@ -87,6 +87,7 @@ export function ManageConnectorDialog({
     onSuccess: () => {
       toast.success("Sync started.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });
@@ -505,6 +506,10 @@ function EmailScopeEditor({
     onSuccess: () => {
       toast.success("Sync scope updated — re-syncing.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
+      queryClient.invalidateQueries({ queryKey: ["all-files"] });
+      queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });

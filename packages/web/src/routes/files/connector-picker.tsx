@@ -631,6 +631,7 @@ function ConnectorRow({
     onSuccess: () => {
       toast.success("Sync started.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });

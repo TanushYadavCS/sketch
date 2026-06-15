@@ -418,6 +418,10 @@ export function GenericScopeEditor({
       toast.success("Scope updated. Re-sync started.");
       setSelectedIds(null);
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
+      queryClient.invalidateQueries({ queryKey: ["all-files"] });
+      queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
       queryClient.invalidateQueries({ queryKey: ["generic-browse", connectorId] });
     },
     onError: (error: Error) => toast.error(error.message),
