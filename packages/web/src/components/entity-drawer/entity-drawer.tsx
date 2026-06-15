@@ -266,6 +266,9 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
             sourceType={entity.sourceType}
             open={mergeOpen}
             onOpenChange={setMergeOpen}
+            onMerged={(survivorId) => {
+              if (survivorId !== entity.id) ui.openEntity(survivorId);
+            }}
           />
         </>
       ) : null}

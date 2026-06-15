@@ -30,13 +30,27 @@ interface EntityMergeDialogProps {
   sourceType: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onMerged?: (survivorId: string) => void;
 }
 
 function mergesKey(entityId: string): unknown[] {
   return ["entity-merge", "history", entityId];
 }
 
-export function EntityMergeDialog({ entityId, entityName, sourceType, open, onOpenChange }: EntityMergeDialogProps) {
+function invalidateEntitySurfaces(queryClient: ReturnType<typeof useQueryClient>): void {
+  queryClient.invalidateQueries({ queryKey: ["entity-drawer"] });
+  queryClient.invalidateQueries({ queryKey: ["entities"] });
+  queryClient.invalidateQueries({ queryKey: ["entity-graph"] });
+}
+
+export function EntityMergeDialog({
+  entityId,
+  entityName,
+  sourceType,
+  open,
+  onOpenChange,
+  onMerged,
+}: EntityMergeDialogProps) {
   const [otherId, setOtherId] = useState<string | null>(null);
   const [survivorId, setSurvivorId] = useState(entityId);
 
@@ -73,6 +87,7 @@ export function EntityMergeDialog({ entityId, entityName, sourceType, open, onOp
             onMerged={() => {
               reset();
               onOpenChange(false);
+              onMerged?.(survivorId);
             }}
           />
         ) : (
@@ -137,7 +152,7 @@ function MergePreviewPane({
   const mergeMutation = useMutation({
     mutationFn: () => api.entities.merge(survivorId, loserId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["entity-drawer"] });
+      invalidateEntitySurfaces(queryClient);
       queryClient.invalidateQueries({ queryKey: mergesKey(entityId) });
       onMerged();
     },
@@ -250,7 +265,7 @@ function MergeHistory({ entityId }: { entityId: string }) {
     mutationFn: (mergeId: string) => api.entities.unmerge(mergeId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: mergesKey(entityId) });
-      queryClient.invalidateQueries({ queryKey: ["entity-drawer"] });
+      invalidateEntitySurfaces(queryClient);
     },
   });
 
