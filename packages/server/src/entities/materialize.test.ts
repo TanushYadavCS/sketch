@@ -227,6 +227,39 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(queue).toHaveLength(0);
   });
 
+  it("promotes legacy project container source refs before queueing review", async () => {
+    const [fileId] = await seedFiles(db, 1);
+    const entityRepo = createEntityRepository(db);
+    const legacy = await entityRepo.upsertEntityFromTool({
+      name: "Old Atlas",
+      sourceType: "linear_project",
+      source: "linear",
+      sourceId: "project:atlas",
+    });
+    const factRepo = createIndexedFileFactRepository(db);
+    await factRepo.upsertFact({
+      indexedFileId: fileId,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: ADMIN_ID,
+      contentHash: "hash-1",
+      source: "linear",
+      factType: "structural_seed",
+      relation: "seeded",
+      subjectName: "Project Atlas",
+      subjectSource: "linear",
+      subjectSourceId: "project:atlas",
+      raw: { sourceType: "linear_project" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+
+    expect(summary.queued).toBe(0);
+    expect(summary.materialized).toBe(1);
+    const entity = await db.selectFrom("entities").selectAll().where("id", "=", legacy.id).executeTakeFirstOrThrow();
+    expect(entity).toMatchObject({ name: "Project Atlas", source_type: "project" });
+    await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);
+  });
+
   it("materializes contact point facts onto the referenced person", async () => {
     const [fileId] = await seedFiles(db, 1);
     const entityRepo = createEntityRepository(db);

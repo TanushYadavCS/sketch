@@ -119,6 +119,21 @@ async function materializeProjectCandidate(
     deps.index.bySourceRef.set(`${args.subjectSource}:${args.subjectSourceId}`, entity);
     return { kind: "entity_linked", entity, mentionWritten: Boolean(fact.indexed_file_id), countEntity: false };
   }
+  if (existing && isProjectCandidateSeed(existing.source_type)) {
+    const entity = await promoteLegacyProjectContainer(deps, existing as unknown as EntityRow, fact, args.metadata);
+    if (fact.indexed_file_id) {
+      await createMentionFromFact(deps, {
+        entityId: entity.id,
+        indexedFileId: fact.indexed_file_id,
+        contextSnippet: fact.context_snippet ?? null,
+        confidence: "EXTRACTED",
+        source: `${fact.source}_structural_seed`,
+        relation: "mentioned",
+      });
+    }
+    deps.index.bySourceRef.set(`${args.subjectSource}:${args.subjectSourceId}`, entity);
+    return { kind: "entity_linked", entity, mentionWritten: Boolean(fact.indexed_file_id), countEntity: false };
+  }
 
   const subjectName = fact.subject_name as string;
   const { row, skipEvidence } = await deps.reviewRepo.upsertSeedReviewRow({
@@ -145,6 +160,33 @@ async function materializeProjectCandidate(
     });
   }
   return { kind: "queued", reviewId: row.id };
+}
+
+async function promoteLegacyProjectContainer(
+  deps: MaterializeDeps,
+  existing: EntityRow,
+  fact: IndexedFileFactRow,
+  metadata?: Record<string, unknown>,
+): Promise<EntityRow> {
+  const now = new Date().toISOString();
+  const nextMetadata = metadata ? JSON.stringify(metadata) : existing.metadata;
+  await deps.db
+    .updateTable("entities")
+    .set({
+      name: fact.subject_name ?? existing.name,
+      source_type: "project",
+      metadata: nextMetadata,
+      updated_at: now,
+    })
+    .where("id", "=", existing.id)
+    .execute();
+  return {
+    ...existing,
+    name: fact.subject_name ?? existing.name,
+    source_type: "project",
+    metadata: nextMetadata,
+    updated_at: now,
+  };
 }
 
 export async function materializeParentEntity(
