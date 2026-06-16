@@ -27,7 +27,14 @@ import type { EntitiesTable } from "../db/schema";
 export type Entity = Selectable<EntitiesTable>;
 
 export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal";
-export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous" | "birth-gated";
+export type CandidateReason =
+  | "token-superset"
+  | "prefix"
+  | "exact-ambiguous"
+  | "llm-ambiguous"
+  | "birth-gated"
+  | "strict-normalized"
+  | "minhash";
 
 export interface ProposeInput {
   name: string;
@@ -89,6 +96,11 @@ export type EntityLookup = {
   getByAlias?(normalized: string): Entity[];
   /** All entities of the given type (used for prefix/token-superset scan). */
   listByType(entityType: ProposeEntityType): Entity[];
+  /** Same-type normalized-strict or MinHash candidates over names and aliases. */
+  findNameDedupCandidates?(
+    entityType: ProposeEntityType,
+    name: string,
+  ): Array<{ entity: Entity; score: number; reason: Extract<CandidateReason, "strict-normalized" | "minhash"> }>;
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
 };
@@ -251,6 +263,19 @@ async function persistEntity(
     sourceId: input.sourceId,
   });
   return { entity, created: true };
+}
+
+async function linkNameDedupCandidate(deps: ProposeDeps, input: ProposeInput, matched: Entity): Promise<ProposeResult> {
+  const { entity } = await persistEntity(deps, input, matched);
+  const aliasesToAppend = [input.name, ...(input.aliases ?? [])].filter(
+    (alias) => alias.trim() && alias.trim().toLowerCase() !== matched.name.trim().toLowerCase(),
+  );
+  for (const alias of aliasesToAppend) {
+    await deps.entityRepo.appendAlias(entity.id, alias);
+  }
+  const refreshed = (await deps.entityRepo.getEntity(entity.id)) ?? entity;
+  await deps.onEntityResolved?.(refreshed);
+  return { kind: "linked", entity: refreshed };
 }
 
 /**
@@ -460,6 +485,23 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
         );
       }
     }
+  }
+
+  const dedupCandidates = deps.lookup.findNameDedupCandidates?.(input.entityType, input.name) ?? [];
+  if (dedupCandidates.length > 0) {
+    let ranked: RankedCandidate[] = dedupCandidates.map((candidate) => ({
+      entity: candidate.entity,
+      score: candidate.score,
+      reason: candidate.reason,
+    }));
+    const filtered: RankedCandidate[] = [];
+    for (const r of ranked) {
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      if (!rejected) filtered.push(r);
+    }
+    ranked = filtered;
+    if (ranked.length === 1) return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    if (ranked.length > 1) return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
   }
 
   if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
