@@ -69,6 +69,10 @@ export function microsoftAuthorizeEndpoint(tenant = DEFAULT_TENANT): string {
   return `${MICROSOFT_AUTHORITY_BASE}/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize`;
 }
 
+export function microsoftAdminConsentEndpoint(tenant: string): string {
+  return `${MICROSOFT_AUTHORITY_BASE}/${encodeURIComponent(tenant)}/v2.0/adminconsent`;
+}
+
 export function resolveMicrosoftOAuthConfig(
   config: MicrosoftOAuthSettingsConfig | null,
   fallback: MicrosoftOAuthFallbackConfig,

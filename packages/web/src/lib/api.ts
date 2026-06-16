@@ -1599,6 +1599,9 @@ export const api = {
         ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`
         : "/api/oauth/microsoft/authorize";
     },
+    adminConsentUrl(connectorType: string) {
+      return `/api/oauth/microsoft/admin-consent?connector=${encodeURIComponent(connectorType)}`;
+    },
   },
   identities: {
     listForUser(userId: string) {
