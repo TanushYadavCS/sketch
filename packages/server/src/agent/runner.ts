@@ -40,6 +40,7 @@ import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
 import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
+import type { DailyBriefWriter } from "./tools/daily-brief";
 
 /**
  * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
@@ -213,6 +214,7 @@ export interface RunAgentParams {
   seedAuxCalls?: AuxLlmCall[];
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
+  dailyBriefWriter?: DailyBriefWriter;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
@@ -392,6 +394,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     conversationContext: params.conversationContext,
     agentInstructions: params.agentInstructions,
     agentAllowedTools: params.agentAllowedTools,
+    dailyBriefWriter: params.dailyBriefWriter,
     originOrgContextEnabled: params.claudeConfigDir !== undefined,
   });
 

@@ -3,6 +3,7 @@ dist/
 .env
 data
 data/
+tmp/
 .claude/
 .codex/
 .agents/

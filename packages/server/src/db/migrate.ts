@@ -102,7 +102,9 @@ import * as m099 from "./migrations/099-review-queue-seed-handle";
 import * as m100 from "./migrations/100-entity-project-bindings";
 import * as m101 from "./migrations/101-entity-project-member-overrides";
 import * as m102 from "./migrations/102-entity-creation-suppressions";
-import * as m103 from "./migrations/103-google-calendar-provider-file-scope";
+import * as m103 from "./migrations/103-daily-briefs";
+import * as m104 from "./migrations/104-daily-brief-item-metadata";
+import * as m105 from "./migrations/105-google-calendar-provider-file-scope";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -209,7 +211,9 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "100-entity-project-bindings": m100,
           "101-entity-project-member-overrides": m101,
           "102-entity-creation-suppressions": m102,
-          "103-google-calendar-provider-file-scope": m103,
+          "103-daily-briefs": m103,
+          "104-daily-brief-item-metadata": m104,
+          "105-google-calendar-provider-file-scope": m105,
         };
       },
     },

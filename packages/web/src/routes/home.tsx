@@ -1,116 +1,14 @@
-import type { ConversationRowProps } from "@/components/sketch/conversation-row";
-import { HomePane } from "@/components/sketch/home-pane";
-import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
-import { type WebChatConversationSummary, type WebChatUploadedAttachment, type WorkspaceSummary, api } from "@/lib/api";
+import { DailyBriefEmptyState } from "@/components/brief/brief-empty-state";
+import { DailyBrief } from "@/components/brief/daily-brief";
+import { api } from "@/lib/api";
+import { chatPrefillTargetFromPrompt } from "@/lib/chat-target";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { dashboardRoute, useDashboardAuth } from "./dashboard";
+import { dashboardRoute } from "./dashboard";
 
-function firstNameOf(name: string): string {
-  return name.trim().split(/\s+/)[0] || "there";
-}
-
-const NEXT_RUN_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-
-function plural(value: number, singular: string, pluralLabel = `${singular}s`): string {
-  return `${value} ${value === 1 ? singular : pluralLabel}`;
-}
-
-function formatNextRun(nextRunAt: string | null): string {
-  if (!nextRunAt) return "no upcoming runs";
-  return `next ${NEXT_RUN_FORMATTER.format(new Date(nextRunAt))}`;
-}
-
-function formatIntegrationApps(summary: WorkspaceSummary["integrations"]): string {
-  const visibleApps = summary.appNames.slice(0, 3);
-  if (visibleApps.length === 0) return "No connected apps";
-
-  const overflow = Math.max(0, summary.appNames.length - visibleApps.length);
-  return `${visibleApps.join(", ")}${overflow > 0 ? ` +${overflow}` : ""}`;
-}
-
-export function buildSummaryTiles(summary: WorkspaceSummary): TileDef[] {
-  return [
-    {
-      ...DEFAULT_TILES[0],
-      primary: plural(summary.automations.running, "running", "running"),
-      secondary: `${plural(summary.automations.total, "total", "total")} · ${formatNextRun(summary.automations.nextRunAt)}`,
-    },
-    {
-      ...DEFAULT_TILES[1],
-      primary: `${summary.skills.total} in library`,
-      secondary: `${summary.skills.yours} yours · ${summary.skills.shared} shared`,
-    },
-    {
-      ...DEFAULT_TILES[2],
-      primary: plural(summary.integrations.connected, "connected", "connected"),
-      secondary: formatIntegrationApps(summary.integrations),
-    },
-    {
-      ...DEFAULT_TILES[3],
-      primary: plural(summary.team.total, "member"),
-      secondary: `${plural(summary.team.humans, "person", "people")} · ${plural(summary.team.agents, "agent")}`,
-    },
-  ];
-}
-
-export function createWebChatConversationId(): string {
-  const uuid = globalThis.crypto?.randomUUID?.();
-  return `chat-${uuid ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
-}
-
-interface PendingWebChatSubmission {
-  text: string;
-  attachments: WebChatUploadedAttachment[];
-}
-
-const pendingWebChatSubmissions = new Map<string, PendingWebChatSubmission>();
-
-export function setPendingWebChatSubmission(conversationId: string, submission: PendingWebChatSubmission): void {
-  pendingWebChatSubmissions.set(conversationId, submission);
-}
-
-export function takePendingWebChatSubmission(conversationId: string): PendingWebChatSubmission | null {
-  const submission = pendingWebChatSubmissions.get(conversationId) ?? null;
-  pendingWebChatSubmissions.delete(conversationId);
-  return submission;
-}
-
-export function chatTargetFromPrompt(value: string, createId = createWebChatConversationId) {
-  return {
-    to: "/chat/$conversationId" as const,
-    params: { conversationId: createId() },
-    search: { message: value.trim() },
-  };
-}
-
-export function buildWebChatRecents(conversations: WebChatConversationSummary[]): ConversationRowProps[] {
-  return conversations.slice(0, 5).map((conversation) => ({
-    id: conversation.id,
-    title: conversation.title,
-    channel: conversation.channel,
-    occurredAt: conversation.updatedAt,
-  }));
-}
-
-const WEB_CHAT_CONVERSATIONS_QUERY_KEY = ["web-chat", "conversations"];
-
-function removeWebChatConversationFromCache(
-  data: { conversations: WebChatConversationSummary[] } | undefined,
-  conversationId: string,
-) {
-  return { conversations: (data?.conversations ?? []).filter((conversation) => conversation.id !== conversationId) };
-}
-
-function getDeleteConversationError(error: unknown) {
-  return error instanceof Error && error.message ? error.message : "Failed to delete conversation";
-}
+const DAILY_BRIEF_QUERY_KEY = ["daily-brief", "latest"];
 
 export const homeRoute = createRoute({
   getParentRoute: () => dashboardRoute,
@@ -119,47 +17,45 @@ export const homeRoute = createRoute({
 });
 
 export function HomePage() {
-  const auth = useDashboardAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const summaryQuery = useQuery({
-    queryKey: ["workspace", "summary"],
-    queryFn: () => api.workspace.summary(),
+  const briefQuery = useQuery({
+    queryKey: DAILY_BRIEF_QUERY_KEY,
+    queryFn: () => api.dailyBriefs.latest(),
+    refetchInterval: (query) => (query.state.data?.running ? 3000 : false),
   });
-  const webChatQuery = useQuery({
-    queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
-    queryFn: () => api.webChat.conversations(),
-  });
-  const deleteConversationMutation = useMutation({
-    mutationFn: (conversationId: string) => api.webChat.removeConversation(conversationId),
-    onSuccess: (_result, conversationId) => {
-      queryClient.setQueryData<{ conversations: WebChatConversationSummary[] }>(
-        WEB_CHAT_CONVERSATIONS_QUERY_KEY,
-        (data) => removeWebChatConversationFromCache(data, conversationId),
-      );
-      toast.success("Conversation deleted");
+  const generateMutation = useMutation({
+    mutationFn: () => api.dailyBriefs.create({ briefDate: briefQuery.data?.briefDate }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: DAILY_BRIEF_QUERY_KEY });
+      toast.success("Daily Brief generation started");
     },
     onError: (error) => {
-      toast.error(getDeleteConversationError(error));
+      toast.error(error instanceof Error ? error.message : "Failed to generate Daily Brief");
     },
   });
 
+  const brief = briefQuery.data?.brief ?? null;
+  const running = briefQuery.data?.running || generateMutation.isPending;
+
   return (
-    <HomePane
-      firstName={firstNameOf(auth.displayName)}
-      tiles={summaryQuery.data ? buildSummaryTiles(summaryQuery.data) : undefined}
-      recents={webChatQuery.data ? buildWebChatRecents(webChatQuery.data.conversations) : []}
-      deletingConversationId={deleteConversationMutation.variables ?? null}
-      onDeleteConversation={(conversation) => {
-        deleteConversationMutation.mutate(conversation.id);
-      }}
-      onSubmit={(value, attachments) => {
-        const target = chatTargetFromPrompt(value);
-        if (attachments.length > 0) {
-          setPendingWebChatSubmission(target.params.conversationId, { text: value.trim(), attachments });
-        }
-        void navigate(target);
-      }}
-    />
+    <TabContentContainer className="mx-auto box-border min-h-[calc(100vh-52px)] max-w-4xl px-5 py-10 sm:px-10">
+      {brief ? (
+        <DailyBrief
+          brief={brief}
+          running={running}
+          onOpenChat={(prompt) => {
+            void navigate(chatPrefillTargetFromPrompt(prompt));
+          }}
+        />
+      ) : (
+        <DailyBriefEmptyState
+          loading={briefQuery.isLoading}
+          running={running}
+          generating={generateMutation.isPending}
+          onGenerate={() => generateMutation.mutate()}
+        />
+      )}
+    </TabContentContainer>
   );
 }

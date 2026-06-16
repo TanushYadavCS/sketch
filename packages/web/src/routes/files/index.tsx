@@ -124,10 +124,19 @@ export function FilesPage() {
     const params = new URLSearchParams(window.location.search);
     const oauthStatus = params.get("oauth");
     const connectorId = params.get("connectorId");
+    const connectorParam = params.get("connector");
+    const isMicrosoftFlow = connectorParam === "teams" || connectorParam === "outlook";
 
-    if (!oauthStatus || connectors.length === 0) return;
+    if (!oauthStatus) return;
+    if (oauthStatus !== "admin_consent_granted" && connectors.length === 0) return;
 
     window.history.replaceState({}, "", window.location.pathname);
+
+    if (oauthStatus === "admin_consent_granted") {
+      const name = connectorParam === "outlook" ? "Outlook" : "Microsoft Teams";
+      toast.success(`Admin consent granted — teammates in your organization can now connect ${name}.`);
+      return;
+    }
 
     if (oauthStatus === "success" && connectorId) {
       const connector = connectors.find((c) => c.id === connectorId);
@@ -167,12 +176,27 @@ export function FilesPage() {
         return;
       }
 
+      if (reason === "admin_consent_required") {
+        toast.error(
+          "Your Microsoft admin must approve Sketch for this organization before you can connect. Ask an admin to grant consent, then try again.",
+          {
+            action: {
+              label: "Grant admin consent",
+              onClick: () => window.open(api.microsoftOAuth.adminConsentUrl(connectorParam ?? "teams"), "_self"),
+            },
+          },
+        );
+        return;
+      }
+
+      const provider = isMicrosoftFlow ? "Microsoft" : "Google";
       const messages: Record<string, string> = {
-        denied: "Google authorization was denied.",
-        no_refresh_token:
-          "No refresh token received — try revoking app access in Google Account settings and reconnecting.",
+        denied: `${provider} authorization was denied.`,
+        no_refresh_token: isMicrosoftFlow
+          ? "No refresh token received — disconnect Sketch in your Microsoft account and reconnect."
+          : "No refresh token received — try revoking app access in Google Account settings and reconnecting.",
         token_exchange: "Failed to exchange authorization code for tokens.",
-        not_configured: "Google OAuth is not configured.",
+        not_configured: `${provider} OAuth is not configured.`,
         internal: "An internal error occurred during authorization.",
       };
       toast.error(messages[reason] ?? `OAuth error: ${reason}`);

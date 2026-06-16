@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
+import { createWriteDailyBriefTool } from "./tools/daily-brief";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
@@ -46,6 +47,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ...createTeamTools(deps),
     ...createMessagingTools(deps),
     ...createInboxWorkflowTools(deps),
+    createWriteDailyBriefTool(deps.dailyBriefWriter),
     ...(deps.transcriptionEnabled
       ? [
           createTranscribeAudioTool({

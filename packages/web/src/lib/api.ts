@@ -918,6 +918,57 @@ export interface WorkspaceSummary {
   };
 }
 
+export interface DailyBriefKnowledgeRefs {
+  entityIds: string[];
+  fileIds: string[];
+  relationshipIds?: string[];
+  mentionIds?: string[];
+  sourceRefIds?: string[];
+  factIds?: string[];
+}
+
+export interface DailyBriefItem {
+  id: string;
+  sectionKey: "todos" | "customer_updates" | "active_projects";
+  title: string;
+  summary: string;
+  priority: "high" | "medium" | "low";
+  label: string;
+  displayRef: string | null;
+  actionType: string | null;
+  actionLabel: string | null;
+  actionPrompt: string | null;
+  sourceUrl: string | null;
+  knowledgeRefs: DailyBriefKnowledgeRefs;
+  sortOrder: number;
+}
+
+export interface DailyBrief {
+  id: string;
+  userId: string;
+  briefDate: string;
+  timezone: string;
+  status: string;
+  generatedAt: string | null;
+  masthead: {
+    title: string;
+    summary: string;
+    generatedFor?: string;
+  } | null;
+  sections: {
+    todos: DailyBriefItem[];
+    customer_updates: DailyBriefItem[];
+    active_projects: DailyBriefItem[];
+  };
+}
+
+export interface DailyBriefResponse {
+  brief: DailyBrief | null;
+  running: boolean;
+  briefDate: string;
+  timezone: string;
+}
+
 export type WebChatMessagePart =
   | { type: "text"; text: string }
   | { type: "data-progress"; id: string; data: { lines: string[] } }
@@ -961,6 +1012,23 @@ export interface WebChatUploadedAttachment {
 }
 
 export const api = {
+  dailyBriefs: {
+    latest(opts?: { date?: string }) {
+      const params = new URLSearchParams();
+      if (opts?.date) params.set("date", opts.date);
+      const qs = params.toString();
+      return request<DailyBriefResponse>(`/api/daily-briefs${qs ? `?${qs}` : ""}`);
+    },
+    get(id: string) {
+      return request<{ brief: DailyBrief }>(`/api/daily-briefs/${id}`);
+    },
+    create(body?: { briefDate?: string }) {
+      return request<{ generation: { id: string; status: string; briefDate: string } | null }>("/api/daily-briefs", {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
+      });
+    },
+  },
   webChat: {
     messages(conversationId = "default") {
       return request<WebChatMessagesResponse>(
@@ -1530,6 +1598,9 @@ export const api = {
       return connectorType
         ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`
         : "/api/oauth/microsoft/authorize";
+    },
+    adminConsentUrl(connectorType: string) {
+      return `/api/oauth/microsoft/admin-consent?connector=${encodeURIComponent(connectorType)}`;
     },
   },
   identities: {

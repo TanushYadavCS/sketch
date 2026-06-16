@@ -378,6 +378,11 @@ export function ConnectIntegrationDialog({
     window.open(api.microsoftOAuth.authorizeUrl(integration?.type), "_self");
   };
 
+  const handleGrantMicrosoftAdminConsent = () => {
+    if (!integration?.type) return;
+    window.open(api.microsoftOAuth.adminConsentUrl(integration.type), "_self");
+  };
+
   const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
   const toggleNotionPage = (pageId: string) => {
     setSelectedNotionPageIds((prev) => {
@@ -575,10 +580,25 @@ export function ConnectIntegrationDialog({
             </ol>
 
             {isOAuthConfigured ? (
-              <Button size="lg" className="w-full gap-2" onClick={handleConnectWithMicrosoft}>
-                <ConnectorLogo type={integration.type} size={16} className="text-white" />
-                Connect with Microsoft
-              </Button>
+              <>
+                <Button size="lg" className="w-full gap-2" onClick={handleConnectWithMicrosoft}>
+                  <ConnectorLogo type={integration.type} size={16} className="text-white" />
+                  Connect with Microsoft
+                </Button>
+                {isMicrosoft && (
+                  <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                    Teammates seeing a "needs admin approval" error? A Microsoft admin can{" "}
+                    <button
+                      type="button"
+                      onClick={handleGrantMicrosoftAdminConsent}
+                      className="font-medium text-foreground underline-offset-2 hover:underline"
+                    >
+                      grant admin consent for your organization
+                    </button>{" "}
+                    once so everyone can connect.
+                  </div>
+                )}
+              </>
             ) : (
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
                 Microsoft OAuth isn't configured on the server yet. Set <code>MICROSOFT_CLIENT_ID</code> and{" "}

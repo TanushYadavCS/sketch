@@ -513,6 +513,53 @@ export interface AutomationStepContentTable {
   updated_at: Generated<string>;
 }
 
+export interface DailyBriefsTable {
+  id: string;
+  user_id: string;
+  brief_date: string;
+  timezone: string;
+  status: string;
+  trigger_type: string;
+  agent_key: string;
+  agent_version: string;
+  agent_run_id: string | null;
+  masthead_json: string | null;
+  raw_payload_json: string | null;
+  error_message: string | null;
+  generated_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface DailyBriefItemsTable {
+  id: string;
+  daily_brief_id: string;
+  section_key: string;
+  title: string;
+  summary: string;
+  priority: string;
+  label: string | null;
+  display_ref: string | null;
+  action_type: string | null;
+  action_label: string | null;
+  action_prompt: string | null;
+  knowledge_refs_json: string;
+  source_url: string | null;
+  sort_order: number;
+  created_at: Generated<string>;
+}
+
+export interface DailyBriefConfigsTable {
+  user_id: string;
+  enabled: Generated<number>;
+  schedule_hour: Generated<number>;
+  schedule_minute: Generated<number>;
+  timezone: string | null;
+  max_items_per_section: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface InboxMessagesTable {
   id: string;
   sender_user_id: string;
@@ -849,6 +896,9 @@ export interface DB {
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
+  daily_briefs: DailyBriefsTable;
+  daily_brief_items: DailyBriefItemsTable;
+  daily_brief_configs: DailyBriefConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
   entity_merges: EntityMergesTable;

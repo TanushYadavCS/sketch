@@ -1,14 +1,14 @@
 import type { WorkspaceSummary } from "@/lib/api";
 import { api } from "@/lib/api";
-import { router } from "@/router";
-import { describe, expect, it, vi } from "vitest";
 import {
-  buildSummaryTiles,
-  buildWebChatRecents,
+  chatPrefillTargetFromPrompt,
   chatTargetFromPrompt,
   setPendingWebChatSubmission,
   takePendingWebChatSubmission,
-} from "./home";
+} from "@/lib/chat-target";
+import { router } from "@/router";
+import { describe, expect, it, vi } from "vitest";
+import { buildSummaryTiles, buildWebChatRecents } from "./chat";
 import { indexRoute } from "./index";
 
 vi.mock("@/lib/api", () => ({
@@ -186,6 +186,16 @@ describe("chatTargetFromPrompt", () => {
       to: "/chat/$conversationId",
       params: { conversationId: "chat-alpha" },
       search: { message: "Hi Sketch" },
+    });
+  });
+
+  it("creates a prefilled chat route target without auto-submit search state", () => {
+    const target = chatPrefillTargetFromPrompt("  Help me catch up  ", () => "chat-alpha");
+
+    expect(target).toEqual({
+      to: "/chat/$conversationId",
+      params: { conversationId: "chat-alpha" },
+      search: { prefill: "Help me catch up" },
     });
   });
 

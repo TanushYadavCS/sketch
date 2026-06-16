@@ -13,6 +13,8 @@ import type { Config } from "./config";
 import { startSyncScheduler } from "./connectors/sync";
 import { createPricingService } from "./cost/cost-pricing";
 import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
+import { DailyBriefScheduler } from "./daily-brief/scheduler";
+import { DailyBriefService } from "./daily-brief/service";
 import { backfillFilesConnectorCredentialEncryption } from "./db/credential-encryption-backfill";
 import { createDatabase } from "./db/index";
 import { runMigrations } from "./db/migrate";
@@ -327,6 +329,19 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const dailyBriefService = new DailyBriefService({
+    db,
+    config,
+    logger,
+    users,
+    settings: settingsRepo,
+    runAgent: trackedRunAgent,
+    buildMcpServers,
+    loadIntegrationProvider,
+    queueManager,
+  });
+  const dailyBriefScheduler = new DailyBriefScheduler({ service: dailyBriefService, logger });
+  dailyBriefScheduler.start();
 
   const slackAdapterDeps = {
     db,
@@ -412,6 +427,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger,
     localDeviceGateway,
     localClaudeSessionService,
+    dailyBriefService,
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
   localDeviceGateway.attach(server);
@@ -438,6 +454,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger.info("Shutting down...");
     await telemetry.shutdown();
     await syncScheduler.stop();
+    dailyBriefScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();
     await whatsapp.stop();

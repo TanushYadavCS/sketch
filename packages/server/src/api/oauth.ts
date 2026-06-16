@@ -20,6 +20,7 @@ import { GOOGLE_CALENDAR_SCOPE } from "../connectors/google-calendar";
 import { ensureValidToken } from "../connectors/google-drive";
 import {
   createMicrosoftGraphClient,
+  microsoftAdminConsentEndpoint,
   microsoftAuthorizeEndpoint,
   microsoftTokenEndpoint,
   resolveMicrosoftOAuthConfig,
@@ -70,6 +71,7 @@ const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "gmail"]);
 const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
+const MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE = "https://graph.microsoft.com/.default";
 
 /** In-memory nonce store. Entries expire after 10 minutes. */
 const pendingStates = new Map<
@@ -141,6 +143,22 @@ function microsoftScopesFor(connectorType: ConnectorType): string {
 
 function microsoftConnectorName(connectorType: ConnectorType): string {
   return connectorType === "teams" ? "Microsoft Teams" : "Outlook";
+}
+
+function extractMicrosoftConsentRequiredCode(errorDescription: string | undefined): string | undefined {
+  return errorDescription?.match(/\bAADSTS(?:90094|65001)\b/)?.[0];
+}
+
+function microsoftOAuthErrorReason(errorDescription: string | undefined, errorSubcode: string | undefined): string {
+  const consentRequiredCode = extractMicrosoftConsentRequiredCode(errorDescription);
+  if (
+    consentRequiredCode ||
+    errorSubcode === "consent_required" ||
+    errorDescription?.includes("error_subcode=consent_required")
+  ) {
+    return "admin_consent_required";
+  }
+  return "denied";
 }
 
 function parseGoogleState(state: string): { userId: string; connectorType: ConnectorType; nonce: string } | null {
@@ -468,15 +486,101 @@ export function oauthRoutes(
     return c.redirect(`${microsoftAuthorizeEndpoint(tenant)}?${params.toString()}`);
   });
 
+  routes.get("/microsoft/admin-consent", async (c) => {
+    const connectorParam = c.req.query("connector");
+    if (!connectorParam || !MICROSOFT_OAUTH_CONNECTORS.has(connectorParam as ConnectorType)) {
+      return c.json(
+        {
+          error: {
+            code: "UNSUPPORTED_CONNECTOR",
+            message: "Microsoft admin consent requires a Microsoft connector (Outlook or Teams)",
+            connector: connectorParam ?? null,
+          },
+        },
+        400,
+      );
+    }
+    const connectorType = connectorParam as ConnectorType;
+
+    const config = await settings.get();
+    const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
+      clientId: microsoftClientId,
+      clientSecret: microsoftClientSecret,
+      tenant: microsoftTenant,
+    });
+
+    if (!clientId || !clientSecret || !tenant) {
+      return c.json(
+        {
+          error: {
+            code: "OAUTH_CLIENT_NOT_CONFIGURED",
+            message:
+              "Set Microsoft OAuth credentials in settings or the server environment before granting admin consent",
+            connector: connectorType,
+          },
+        },
+        412,
+      );
+    }
+
+    const userId = c.get("sub");
+    if (!userId || typeof userId !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } }, 401);
+    }
+
+    cleanupExpiredStates();
+
+    const nonce = randomBytes(16).toString("hex");
+    const state = `${userId}:${connectorType}:${nonce}`;
+    pendingStates.set(nonce, { userId, connectorType, expiresAt: Date.now() + 10 * 60 * 1000 });
+
+    const origin = resolveOrigin(c, baseUrl);
+    const redirectUri = `${origin}/api/oauth/microsoft/callback`;
+    const adminConsentTenant = tenant === "common" ? "organizations" : tenant;
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      state,
+      scope: MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE,
+    });
+
+    return c.redirect(`${microsoftAdminConsentEndpoint(adminConsentTenant)}?${params.toString()}`);
+  });
+
   routes.get("/microsoft/callback", async (c) => {
     const code = c.req.query("code");
     const state = c.req.query("state");
     const error = c.req.query("error");
+    const errorDescription = c.req.query("error_description");
+    const errorSubcode = c.req.query("error_subcode");
+    const adminConsent = c.req.query("admin_consent");
 
     if (error) {
       const connectorType = state ? (parseMicrosoftState(state)?.connectorType ?? "outlook") : "outlook";
-      logger.warn({ error }, "Microsoft OAuth denied");
-      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=denied`);
+      const aadstsCode = extractMicrosoftConsentRequiredCode(errorDescription);
+      const reason = microsoftOAuthErrorReason(errorDescription, errorSubcode);
+      logger.warn(
+        { error, aadstsCode, consentRequired: reason === "admin_consent_required" },
+        "Microsoft OAuth denied",
+      );
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=${reason}`);
+    }
+
+    if (adminConsent === "True" || adminConsent === "true") {
+      const parsedState = state ? parseMicrosoftState(state) : null;
+      if (!parsedState) {
+        return c.redirect("/files?oauth=error&reason=invalid_state");
+      }
+
+      const { userId, connectorType, nonce } = parsedState;
+      cleanupExpiredStates();
+      const pending = pendingStates.get(nonce);
+      if (!pending || pending.userId !== userId || pending.connectorType !== connectorType) {
+        return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=invalid_state`);
+      }
+      pendingStates.delete(nonce);
+
+      return c.redirect(`/files?oauth=admin_consent_granted&connector=${connectorType}`);
     }
 
     if (!code || !state) {

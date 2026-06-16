@@ -18,6 +18,8 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
+const EXPECTED_MIGRATION_COUNT = 101;
+
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
 
@@ -37,7 +39,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(99);
+    expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 
   it("records migrations with correct names in order", async () => {
@@ -129,7 +131,9 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[95]).toBe("100-entity-project-bindings");
     expect(names[96]).toBe("101-entity-project-member-overrides");
     expect(names[97]).toBe("102-entity-creation-suppressions");
-    expect(names[98]).toBe("103-google-calendar-provider-file-scope");
+    expect(names[98]).toBe("103-daily-briefs");
+    expect(names[99]).toBe("104-daily-brief-item-metadata");
+    expect(names[100]).toBe("105-google-calendar-provider-file-scope");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -145,7 +149,7 @@ describe("runMigrations on Postgres — full sequence", () => {
       const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(freshDb);
-      expect(rows.rows).toHaveLength(99);
+      expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
     } finally {
       await freshDb.destroy();
     }
@@ -422,6 +426,16 @@ describe("runMigrations on Postgres — full sequence", () => {
 
   it("creates local Claude session tables", async () => {
     for (const table of ["local_claude_sessions", "local_claude_session_events"]) {
+      const result = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+  });
+
+  it("creates daily brief tables", async () => {
+    for (const table of ["daily_briefs", "daily_brief_items", "daily_brief_configs"]) {
       const result = await sql<{ table_name: string }>`
         SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}

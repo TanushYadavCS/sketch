@@ -97,6 +97,7 @@ export function EntityDrawer() {
             stackDepth={ui.stack.length}
             previousName={previousName}
             onBack={ui.popEntity}
+            onOpenEntity={ui.openEntity}
           />
         ) : null}
       </SheetContent>
@@ -119,9 +120,10 @@ interface EntityDrawerBodyProps {
   stackDepth: number;
   previousName: string | null;
   onBack: () => void;
+  onOpenEntity: (id: string) => void;
 }
 
-function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: EntityDrawerBodyProps) {
+function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEntity }: EntityDrawerBodyProps) {
   const profileQuery = useQuery({
     queryKey: ["entity-drawer", "profile", entityId],
     queryFn: () => api.entities.get(entityId),
@@ -156,6 +158,7 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack }: Entity
         previousName={previousName}
         onBack={onBack}
         accent={accent}
+        onOpenEntity={onOpenEntity}
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         <SummaryBlock entity={entity} accent={accent} />
@@ -176,10 +179,10 @@ interface DrawerHeaderProps {
   previousName: string | null;
   onBack: () => void;
   accent: string;
+  onOpenEntity: (id: string) => void;
 }
 
-function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: DrawerHeaderProps) {
-  const ui = useEntityUi();
+function DrawerHeader({ entity, stackDepth, previousName, onBack, accent, onOpenEntity }: DrawerHeaderProps) {
   const lastSeen = entity.profile.lastSeenAt;
   // EntityDrawer mounts at root (outside the dashboard route context), so the
   // route-context auth hook is not available here — query the session directly.
@@ -291,7 +294,7 @@ function DrawerHeader({ entity, stackDepth, previousName, onBack, accent }: Draw
             open={mergeOpen}
             onOpenChange={setMergeOpen}
             onMerged={(survivorId) => {
-              if (survivorId !== entity.id) ui.openEntity(survivorId);
+              if (survivorId !== entity.id) onOpenEntity(survivorId);
             }}
           />
           <DeleteEntityDialog
