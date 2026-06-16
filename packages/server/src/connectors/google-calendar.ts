@@ -103,6 +103,8 @@ interface CalendarSetCollection {
   expired: boolean;
 }
 
+type EventPerson = { name?: string; email?: string };
+
 class GoogleCalendarApiError extends Error {
   readonly status: number;
   readonly body: string;
@@ -247,8 +249,8 @@ function personKey(person: GoogleCalendarEventPerson): string | null {
   return normalizeEmailValue(person.email) ?? person.displayName?.trim().toLowerCase() ?? null;
 }
 
-function eventPeople(event: GoogleCalendarEvent): Array<{ name?: string; email?: string }> {
-  const people: Array<{ name?: string; email?: string }> = [];
+function eventPeople(event: GoogleCalendarEvent): EventPerson[] {
+  const people: EventPerson[] = [];
   const seen = new Set<string>();
   for (const person of [event.organizer, event.creator, ...(event.attendees ?? [])]) {
     if (!person) continue;
@@ -262,7 +264,11 @@ function eventPeople(event: GoogleCalendarEvent): Array<{ name?: string; email?:
   return people;
 }
 
-function eventAccessEmails(event: GoogleCalendarEvent, ownerEmail: string | null | undefined): string[] | null {
+function eventAccessEmails(
+  event: GoogleCalendarEvent,
+  ownerEmail: string | null | undefined,
+  extraPeople: EventPerson[] = [],
+): string[] | null {
   const emails = new Set<string>();
   const owner = normalizeEmailValue(ownerEmail);
   if (owner) emails.add(owner);
@@ -270,6 +276,10 @@ function eventAccessEmails(event: GoogleCalendarEvent, ownerEmail: string | null
   if (event.visibility !== "private") {
     for (const person of [event.organizer, event.creator, ...(event.attendees ?? [])]) {
       const email = normalizeEmailValue(person?.email);
+      if (email) emails.add(email);
+    }
+    for (const person of extraPeople) {
+      const email = normalizeEmailValue(person.email);
       if (email) emails.add(email);
     }
   }
@@ -299,6 +309,193 @@ function normalizeDescription(value: string | undefined): string | null {
     .replace(/[ \t]{2,}/g, " ")
     .trim();
   return text || null;
+}
+
+function normalizeDescriptionForParsing(value: string | undefined): string | null {
+  if (!value) return null;
+  const text = value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})>/gi, " $1 ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return text || null;
+}
+
+function hasCalendlyMarker(rawDescription: string | undefined, parsedDescription: string): boolean {
+  const source = `${rawDescription ?? ""}\n${parsedDescription}`;
+  return /\bcalendly\b/i.test(source) || /calendly\.com/i.test(source);
+}
+
+function cleanPersonName(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const name = value
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[<>()\[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,;:-]+|[\s,;:-]+$/g, "")
+    .trim();
+  if (!name || name.includes("@") || /^(?:none|n\/a|na)$/i.test(name) || name.length > 120) return null;
+  return name;
+}
+
+function emailsInValue(value: string): string[] {
+  const matches = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+  return [
+    ...new Set(matches.map((email) => normalizeEmailValue(email)).filter((email): email is string => Boolean(email))),
+  ];
+}
+
+function nameNearEmail(value: string, email: string): string | null {
+  const escapedEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return cleanPersonName(
+    value
+      .replace(new RegExp(`mailto:${escapedEmail}`, "gi"), "")
+      .replace(new RegExp(escapedEmail, "gi"), "")
+      .replace(/\bmailto:\b/gi, ""),
+  );
+}
+
+function peopleFromCalendlyValue(value: string): EventPerson[] {
+  const emails = emailsInValue(value);
+  if (emails.length === 0) {
+    const name = cleanPersonName(value);
+    return name ? [{ name }] : [];
+  }
+
+  const chunks = value
+    .split(/[\n;,]+|\s+\band\b\s+/i)
+    .map((chunk) => chunk.trim())
+    .filter(Boolean);
+
+  if (emails.length > 1 && chunks.length > 1) {
+    const chunkPeople = chunks.flatMap((chunk) => peopleFromCalendlyValue(chunk));
+    if (chunkPeople.length > 0) return chunkPeople;
+  }
+
+  if (emails.length === 1) {
+    const email = emails[0];
+    if (!email) return [];
+    const name = nameNearEmail(value, email) ?? undefined;
+    return [{ ...(name ? { name } : {}), email }];
+  }
+
+  return emails.map((email) => ({ email }));
+}
+
+function mergePeople(people: EventPerson[]): EventPerson[] {
+  const merged: EventPerson[] = [];
+  const emailIndexes = new Map<string, number>();
+  const nameIndexes = new Map<string, number>();
+
+  for (const person of people) {
+    const email = normalizeEmailValue(person.email) ?? undefined;
+    const name = cleanPersonName(person.name) ?? undefined;
+    if (!email && !name) continue;
+
+    if (email && emailIndexes.has(email)) {
+      const existing = merged[emailIndexes.get(email) ?? 0];
+      if (existing && !existing.name && name) existing.name = name;
+      continue;
+    }
+
+    const nameKey = name?.toLowerCase();
+    if (nameKey && nameIndexes.has(nameKey)) {
+      const existingIndex = nameIndexes.get(nameKey) ?? 0;
+      const existing = merged[existingIndex];
+      if (existing && !existing.email && email) {
+        existing.email = email;
+        emailIndexes.set(email, existingIndex);
+      }
+      continue;
+    }
+
+    const index = merged.length;
+    merged.push({ ...(name ? { name } : {}), ...(email ? { email } : {}) });
+    if (email) emailIndexes.set(email, index);
+    if (nameKey) nameIndexes.set(nameKey, index);
+  }
+
+  return merged;
+}
+
+type CalendlyFieldType = "name" | "email" | "guest";
+
+function isCalendlyPersonField(label: string): boolean {
+  return /^(?:invitee name|invitee email|invitee|email|name|guest emails?|additional guests?|guests?)$/i.test(
+    label.trim(),
+  );
+}
+
+function calendlyFieldType(label: string): CalendlyFieldType {
+  const normalized = label.toLowerCase().replace(/\s+/g, " ").trim();
+  if (normalized.includes("guest")) return "guest";
+  if (normalized.includes("email")) return "email";
+  return "name";
+}
+
+function calendlyDescriptionPeople(event: GoogleCalendarEvent): EventPerson[] {
+  const description = normalizeDescriptionForParsing(event.description);
+  if (!description || !hasCalendlyMarker(event.description, description)) return [];
+
+  const fields = [
+    ...description.matchAll(
+      /(?:^|\n)\s*(invitee name|invitee email|invitee|email|name|guest emails?|additional guests?|guests?|cancel|reschedule|location|event type|invitee time zone|time zone|questions? and answers?)\s*:\s*/gi,
+    ),
+  ];
+  const people: EventPerson[] = [];
+  let pendingName: string | undefined;
+
+  for (let index = 0; index < fields.length; index++) {
+    const field = fields[index];
+    const nextField = fields[index + 1];
+    const label = field[1];
+    if (!label || field.index === undefined) continue;
+
+    const start = field.index + field[0].length;
+    const end = nextField?.index ?? description.length;
+    const value = description.slice(start, end).trim();
+    if (!value || !isCalendlyPersonField(label)) continue;
+
+    const fieldType = calendlyFieldType(label);
+    if (fieldType === "email") {
+      const peopleFromValue = peopleFromCalendlyValue(value);
+      if (pendingName && peopleFromValue.length === 1 && peopleFromValue[0]?.email) {
+        people.push({ name: pendingName, email: peopleFromValue[0].email });
+        pendingName = undefined;
+      } else {
+        people.push(...peopleFromValue);
+      }
+      continue;
+    }
+
+    if (fieldType === "guest") {
+      people.push(...peopleFromCalendlyValue(value));
+      continue;
+    }
+
+    const peopleFromValue = peopleFromCalendlyValue(value);
+    const personWithEmail = peopleFromValue.find((person) => person.email);
+    if (personWithEmail) {
+      people.push(...peopleFromValue);
+      pendingName = undefined;
+    } else {
+      pendingName = peopleFromValue.find((person) => person.name)?.name ?? pendingName;
+    }
+  }
+
+  if (pendingName) people.push({ name: pendingName });
+  return mergePeople(people);
 }
 
 function eventContent(event: GoogleCalendarEvent, calendar: GoogleCalendarListEntry): string {
@@ -338,7 +535,8 @@ export function eventToSyncedItem(
   if (!event.id || event.status === "cancelled") return null;
 
   const content = eventContent(event, calendar);
-  const people = eventPeople(event);
+  const calendlyPeople = calendlyDescriptionPeople(event);
+  const people = mergePeople([...eventPeople(event), ...calendlyPeople]);
   const privateEvent = event.visibility === "private";
   const author = event.creator ?? event.organizer;
   const sourceCreatedAt = eventDateToIso(event.start) ?? normalizeTimestamp(event.created);
@@ -357,7 +555,7 @@ export function eventToSyncedItem(
     sourceCreatedAt,
     sourceUpdatedAt,
     mimeType: "text/calendar",
-    accessEmails: eventAccessEmails(event, ownerEmail),
+    accessEmails: eventAccessEmails(event, ownerEmail, calendlyPeople),
     attendees: !privateEvent && people.length > 0 ? people : undefined,
     authorEmail: normalizeEmailValue(author?.email) ?? undefined,
     authorName: author?.displayName?.trim() || undefined,

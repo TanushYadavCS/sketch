@@ -68,6 +68,123 @@ describe("Google Calendar connector", () => {
     ]);
   });
 
+  it("extracts Calendly invitees and guests from the event description when Google attendees are missing", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("calendly-1", {
+        attendees: [],
+        description: [
+          "Invitee:",
+          "Alice Buyer",
+          "Invitee Email:",
+          "alice@example.com",
+          "Additional Guests:",
+          "Bob Guest <bob@example.com>",
+          "carol@example.com",
+          "Cancel:",
+          "https://calendly.com/cancellations/abc",
+        ].join("\n"),
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.accessEmails?.sort()).toEqual([
+      "alice@example.com",
+      "bob@example.com",
+      "carol@example.com",
+      "owner@canvasx.ai",
+    ]);
+    expect(item?.attendees).toEqual([
+      { name: "Owner", email: "owner@canvasx.ai" },
+      { name: "Alice Buyer", email: "alice@example.com" },
+      { name: "Bob Guest", email: "bob@example.com" },
+      { email: "carol@example.com" },
+    ]);
+  });
+
+  it("pairs generic Calendly name and email labels for attendee extraction", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("calendly-generic", {
+        attendees: [],
+        description: [
+          "Name:",
+          "Morgan Lead",
+          "Email:",
+          "morgan@example.com",
+          "Reschedule:",
+          "https://calendly.com/reschedulings/abc",
+        ].join("\n"),
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.accessEmails?.sort()).toEqual(["morgan@example.com", "owner@canvasx.ai"]);
+    expect(item?.attendees).toEqual([
+      { name: "Owner", email: "owner@canvasx.ai" },
+      { name: "Morgan Lead", email: "morgan@example.com" },
+    ]);
+  });
+
+  it("does not duplicate Calendly invitees that are already Google attendees", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("calendly-duplicate", {
+        description: [
+          "Invitee:",
+          "Jane Doe",
+          "Invitee Email:",
+          "jane@example.com",
+          "Cancel:",
+          "https://calendly.com/cancellations/abc",
+        ].join("\n"),
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.attendees).toEqual([
+      { name: "Owner", email: "owner@canvasx.ai" },
+      { name: "Jane Doe", email: "jane@example.com" },
+    ]);
+    expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+  });
+
+  it("does not extract description contacts from private Calendly events", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("calendly-private", {
+        attendees: [],
+        visibility: "private",
+        description: [
+          "Invitee:",
+          "Alice Buyer",
+          "Invitee Email:",
+          "alice@example.com",
+          "Cancel:",
+          "https://calendly.com/cancellations/abc",
+        ].join("\n"),
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.accessEmails).toEqual(["owner@canvasx.ai"]);
+    expect(item?.attendees).toBeUndefined();
+  });
+
+  it("ignores labeled emails in non-Calendly descriptions", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("not-calendly", {
+        attendees: [],
+        description: ["Name:", "Alice Buyer", "Email:", "alice@example.com"].join("\n"),
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.accessEmails).toEqual(["owner@canvasx.ai"]);
+    expect(item?.attendees).toEqual([{ name: "Owner", email: "owner@canvasx.ai" }]);
+  });
+
   it("syncs readable calendars and stores per-calendar sync tokens", async () => {
     const connector = createGoogleCalendarConnector();
     const requests: URL[] = [];
