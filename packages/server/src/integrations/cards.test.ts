@@ -26,6 +26,10 @@ describe("integration cards", () => {
       queries: ["slack", "gmail"],
       listConnected: false,
     });
+    expect(extractCanvasIntegrationLookups("$CANVAS_CLI search-apps --queries=slack --output json")).toEqual({
+      queries: ["slack"],
+      listConnected: false,
+    });
     expect(extractCanvasIntegrationLookups("$CANVAS_CLI search-apps --output json")).toEqual({
       queries: [],
       listConnected: true,
@@ -36,6 +40,22 @@ describe("integration cards", () => {
       ),
     ).toEqual({
       queries: ["github"],
+      listConnected: false,
+    });
+    expect(
+      extractCanvasIntegrationLookups(
+        "$CANVAS_CLI direct-execute-action --component-key=google-calendar-oauth-create-event --output json",
+      ),
+    ).toEqual({
+      queries: ["google-calendar-oauth"],
+      listConnected: false,
+    });
+    expect(
+      extractCanvasIntegrationLookups(
+        "$CANVAS_CLI direct-execute-action --component-key microsoft-teams-send-message --output json",
+      ),
+    ).toEqual({
+      queries: ["microsoft-teams"],
       listConnected: false,
     });
     expect(
@@ -77,6 +97,13 @@ describe("integration cards", () => {
         input: { componentKey: "github-create-issue" },
       }),
     ).toEqual({ queries: ["github"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__direct_execute_action",
+        input: { componentKey: "google-calendar-oauth-create-event" },
+      }),
+    ).toEqual({ queries: ["google-calendar-oauth"], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
@@ -146,6 +173,60 @@ describe("integration cards", () => {
     });
 
     expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
+  });
+
+  it("collects missing cards for hyphenated Canvas app slugs", async () => {
+    const cards: unknown[] = [];
+    const queries: Array<string | undefined> = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async (query?: string) => {
+        queries.push(query);
+        if (query === "google-calendar-oauth") {
+          return {
+            apps: [
+              {
+                id: "google-calendar-oauth",
+                name: "Google Calendar",
+                description: "Calendar",
+                icon: "https://cdn.example/google-calendar.png",
+              },
+            ],
+            pageInfo: { endCursor: null, hasMore: false },
+          };
+        }
+        if (query === "google") {
+          return {
+            apps: [
+              { id: "google-drive", name: "Google Drive", description: "Files" },
+              { id: "google-calendar-oauth", name: "Google Calendar", description: "Calendar" },
+            ],
+            pageInfo: { endCursor: null, hasMore: false },
+          };
+        }
+        return { apps: [], pageInfo: { endCursor: null, hasMore: false } };
+      },
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "Bash",
+          input: {
+            command:
+              "$CANVAS_CLI direct-execute-action --component-key=google-calendar-oauth-create-event --output json",
+          },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(queries).toEqual(["google-calendar-oauth"]);
+    expect(cards).toMatchObject([{ appId: "google-calendar-oauth", appName: "Google Calendar", state: "connect" }]);
   });
 
   it("collects missing app cards from observed Canvas MCP search_apps progress", async () => {

@@ -165,12 +165,16 @@ export function connectedIntegrationCards(
 
 function shellFlagValue(command: string, flag: string): string | null {
   const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const doubleQuoted = command.match(new RegExp(`${escaped}\\s+"([^"]+)"`));
-  if (doubleQuoted?.[1]) return doubleQuoted[1];
-  const singleQuoted = command.match(new RegExp(`${escaped}\\s+'([^']+)'`));
-  if (singleQuoted?.[1]) return singleQuoted[1];
-  const bare = command.match(new RegExp(`${escaped}\\s+([^\\s]+)`));
-  return bare?.[1] ?? null;
+  const match = command.match(new RegExp(`${escaped}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|([^\\s|;&]+))`));
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
+function shellFlagValueAny(command: string, flags: string[]): string | null {
+  for (const flag of flags) {
+    const value = shellFlagValue(command, flag);
+    if (value !== null) return value;
+  }
+  return null;
 }
 
 function splitQueryList(value: string | null): string[] {
@@ -180,10 +184,65 @@ function splitQueryList(value: string | null): string[] {
     .filter(Boolean);
 }
 
+const COMPONENT_ACTION_START_SEGMENTS = new Set([
+  "accept",
+  "add",
+  "append",
+  "archive",
+  "assign",
+  "cancel",
+  "close",
+  "complete",
+  "copy",
+  "create",
+  "custom",
+  "delete",
+  "download",
+  "execute",
+  "export",
+  "fetch",
+  "find",
+  "forward",
+  "generate",
+  "get",
+  "import",
+  "insert",
+  "invite",
+  "list",
+  "lookup",
+  "make",
+  "move",
+  "open",
+  "post",
+  "publish",
+  "quick",
+  "reject",
+  "remove",
+  "reply",
+  "run",
+  "schedule",
+  "search",
+  "send",
+  "set",
+  "share",
+  "submit",
+  "sync",
+  "trigger",
+  "unarchive",
+  "update",
+  "upload",
+  "upsert",
+]);
+
 function appFromComponentKey(componentKey: string | null): string[] {
   const value = componentKey?.trim();
   if (!value) return [];
-  const app = value.split("-")[0]?.trim();
+  const parts = value
+    .split("-")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const actionIndex = parts.findIndex((part, index) => index > 0 && COMPONENT_ACTION_START_SEGMENTS.has(part));
+  const app = (actionIndex > 0 ? parts.slice(0, actionIndex).join("-") : parts[0])?.trim();
   return app ? [app] : [];
 }
 
@@ -241,19 +300,24 @@ export function extractCanvasIntegrationLookups(command: string): {
 
   if (/\bdirect-execute-action\b/.test(command) || /\bdirect_execute_action\b/.test(command)) {
     const componentKey =
-      typeof raw?.componentKey === "string" ? raw.componentKey : shellFlagValue(command, "--component-key");
+      typeof raw?.componentKey === "string"
+        ? raw.componentKey
+        : shellFlagValueAny(command, ["--component-key", "--componentKey"]);
     return { queries: appFromComponentKey(componentKey), listConnected: false };
   }
 
   if (/\bfetch-remote-options\b/.test(command) || /\bfetch_remote_options\b/.test(command)) {
     const componentKey =
-      typeof raw?.componentKey === "string" ? raw.componentKey : shellFlagValue(command, "--component-key");
+      typeof raw?.componentKey === "string"
+        ? raw.componentKey
+        : shellFlagValueAny(command, ["--component-key", "--componentKey"]);
     return { queries: appFromComponentKey(componentKey), listConnected: false };
   }
 
   if (/\bcreate-sketch-trigger-workflow\b/.test(command) || /\bcreate_sketch_trigger_workflow\b/.test(command)) {
     const rawSlug = raw?.triggerAppSlug;
-    const triggerAppSlug = typeof rawSlug === "string" ? rawSlug : shellFlagValue(command, "--trigger-app-slug");
+    const triggerAppSlug =
+      typeof rawSlug === "string" ? rawSlug : shellFlagValueAny(command, ["--trigger-app-slug", "--triggerAppSlug"]);
     return { queries: triggerAppSlug ? [triggerAppSlug] : [], listConnected: false };
   }
 
