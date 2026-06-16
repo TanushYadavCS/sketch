@@ -312,6 +312,21 @@ describe("buildSystemContext", () => {
       expect(result).toContain("fenced code blocks");
     });
 
+    it("tells the agent to resolve integration status without UI-render side effects", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("use SearchIntegrationApps to resolve the provider app and connected status");
+      expect(result).toContain(
+        "Omit SearchIntegrationApps.query when the user asks what integration accounts are connected",
+      );
+      expect(result).toContain("Never ask whether to show, pull up, open, or display a connection card");
+      expect(result).toContain("Should I pull up the connection card?");
+      expect(result).toContain("I can pull up the right card");
+      expect(result).toContain("Which Zoho product should I use?");
+      expect(result).toContain("Do not describe card rendering or UI mechanics");
+      expect(result).toContain("continue only with task-relevant guidance if needed");
+      expect(result).not.toContain("RequestIntegrationConnection");
+    });
+
     it("does not include Slack or WhatsApp link formatting", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).not.toContain("<url|text>");

@@ -1,3 +1,4 @@
+import { WEB_CHAT_PROGRESS_RENDERER_MODES, type WebChatProgressRendererMode } from "@sketch/shared";
 import {
   type ProgressSettingsSummary,
   REASONING_TEXT_OPTIONS,
@@ -29,6 +30,30 @@ export function resolveProgressDisplaySettings(input: {
     toolProgress: resolveToolProgress(input.tool_progress),
     reasoningText: resolveReasoningText(input.reasoning_text),
   };
+}
+
+export function resolveWebChatProgressRendererMode(
+  value: unknown,
+  fallback: ToolProgressCommand = "friendly",
+): WebChatProgressRendererMode {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "verbose") return "technical";
+    if (WEB_CHAT_PROGRESS_RENDERER_MODES.includes(normalized as WebChatProgressRendererMode)) {
+      return normalized as WebChatProgressRendererMode;
+    }
+  }
+  return fallback === "technical" ? "technical" : fallback;
+}
+
+export function progressDisplaySettingsForWebChatMode(
+  base: ProgressDisplaySettings,
+  mode: WebChatProgressRendererMode,
+): ProgressDisplaySettings {
+  if (mode === "technical") {
+    return { toolProgress: "technical", reasoningText: base.reasoningText };
+  }
+  return { toolProgress: mode, reasoningText: false };
 }
 
 export function isToolProgressCommand(text: string | null | undefined): boolean {

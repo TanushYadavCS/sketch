@@ -81,6 +81,14 @@ function webChatTranscriptPath(dataDir: string, userId: string, conversationId =
   return join(dataDir, "web-chat", userId, `${conversationId}.json`);
 }
 
+function webChatStreamChunks(text: string): Array<{ type?: string; data?: unknown }> {
+  return text.split("\n\n").flatMap((chunk) => {
+    const data = chunk.trim().replace(/^data:\s*/, "");
+    if (!data || data === "[DONE]") return [];
+    return [JSON.parse(data) as { type?: string; data?: unknown }];
+  });
+}
+
 describe("web chat API", () => {
   let db: Kysely<DB>;
   let dataDir: string;
@@ -130,7 +138,20 @@ describe("web chat API", () => {
     const text = await res.text();
     expect(text).toContain('"messageMetadata":{"createdAt":"');
     expect(text).toContain('"type":"data-progress"');
-    expect(text).toContain('📖 Reading \\"notes.md\\"');
+    expect(text).toContain("Using tool");
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-progress")).toMatchObject({
+      type: "data-progress",
+      data: {
+        lines: ["Using tool"],
+        items: [
+          {
+            kind: "tool",
+            label: "Using tool",
+            icon: { type: "tool" },
+          },
+        ],
+      },
+    });
     expect(text).toContain('"type":"text-delta"');
     expect(text).toContain("I can help with that.");
     expect(buildMcpServers).toHaveBeenCalledWith("karan@example.com");
@@ -146,6 +167,159 @@ describe("web chat API", () => {
     expect(call.userMessage).toContain("Karan Hudia");
     expect(call.userMessage).toContain("Can you summarize my workspace?");
     expect(call.taskContext).toBeUndefined();
+  });
+
+  it("streams assistant text deltas before the web chat agent run finishes", async () => {
+    await seedAdmin(db);
+    const deltaWritten = deferred<void>();
+    const finishAgent = deferred<void>();
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onTextDelta?.("Hel");
+      deltaWritten.resolve();
+      await finishAgent.promise;
+      return makeAgentResult("Hello");
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-streaming", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Stream this response" }),
+    });
+
+    expect(res.status).toBe(200);
+    await deltaWritten.promise;
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("Expected streaming response body");
+    const decoder = new TextDecoder();
+    let partial = "";
+    for (let index = 0; index < 8 && !partial.includes("Hel"); index += 1) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      partial += decoder.decode(chunk.value, { stream: true });
+    }
+
+    expect(partial).toContain('"type":"text-delta"');
+    expect(partial).toContain('"delta":"Hel"');
+    expect(partial).not.toContain('"delta":"Hello"');
+
+    finishAgent.resolve();
+    let rest = "";
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      rest += decoder.decode(chunk.value, { stream: true });
+    }
+    rest += decoder.decode();
+    const fullStream = partial + rest;
+    expect(fullStream).toContain('"delta":"lo"');
+    expect(fullStream).not.toContain('"delta":"Hello"');
+    expect(fullStream).toContain("data: [DONE]");
+  });
+
+  it("streams and persists integration connection cards from the web chat agent", async () => {
+    const admin = await seedAdmin(db);
+    const card = {
+      requestId: "integration-req-1",
+      appId: "github",
+      appName: "GitHub",
+      reason: "Connect GitHub so Sketch can inspect repository issues.",
+    };
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult("Connect GitHub first."),
+      pendingIntegrationConnections: [card],
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-integrations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Connect GitHub" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
+      type: "data-integration-connection",
+      data: card,
+    });
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-integrations"), "utf-8"),
+    );
+    expect(transcript.messages.at(-1).parts).toContainEqual({
+      type: "data-integration-connection",
+      id: "integration-connection-0",
+      data: card,
+    });
+  });
+
+  it("streams connected account cards from provider state for account enquiries", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("You have GitHub connected."));
+    const loadIntegrationProvider = vi.fn().mockResolvedValue({
+      listConnections: vi.fn().mockResolvedValue([
+        {
+          id: "conn-1",
+          providerId: "provider-1",
+          appId: "github",
+          appName: "GitHub",
+          icon: "https://cdn.example/github.png",
+          accountName: "Karan GitHub",
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ]),
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      loadIntegrationProvider,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-connected-accounts", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "What accounts are connected?" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
+      type: "data-integration-connection",
+      data: {
+        appId: "github",
+        appName: "GitHub",
+        state: "connected",
+        accountName: "Karan GitHub",
+        connectionId: "conn-1",
+      },
+    });
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-connected-accounts"), "utf-8"),
+    );
+    expect(transcript.messages.at(-1).parts).toContainEqual(
+      expect.objectContaining({
+        type: "data-integration-connection",
+        data: expect.objectContaining({
+          appId: "github",
+          state: "connected",
+          accountName: "Karan GitHub",
+        }),
+      }),
+    );
   });
 
   it("honors the current user's technical tool-progress setting", async () => {
@@ -171,6 +345,88 @@ describe("web chat API", () => {
 
     expect(res.status).toBe(200);
     await expect(res.text()).resolves.toContain('📖 Read: \\"notes.md\\"');
+  });
+
+  it("collapses disabled web chat tool progress to generic thinking", async () => {
+    const admin = await seedAdmin(db);
+    const users = createUserRepository(db);
+    await users.update(admin.id, { toolProgress: "off" });
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } });
+      return makeAgentResult("Done.");
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Check notes" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("Thinking");
+    expect(text).not.toContain("Read");
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-progress")).toMatchObject({
+      type: "data-progress",
+      data: {
+        lines: ["Thinking…"],
+        items: [{ kind: "reasoning", label: "Thinking…", icon: { type: "generic", name: "reasoning" } }],
+      },
+    });
+  });
+
+  it("gets and updates the current user's web chat progress setting", async () => {
+    const admin = await seedAdmin(db);
+    const users = createUserRepository(db);
+    await users.update(admin.id, { toolProgress: "technical" });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const current = await app.request("/api/web-chat/progress-settings", {
+      headers: { Cookie: cookie },
+    });
+    expect(current.status).toBe(200);
+    await expect(current.json()).resolves.toEqual({ toolProgress: "technical" });
+
+    const updated = await app.request("/api/web-chat/progress-settings", {
+      method: "PATCH",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ toolProgress: "off" }),
+    });
+    expect(updated.status).toBe(200);
+    await expect(updated.json()).resolves.toEqual({ toolProgress: "off" });
+    await expect(users.findById(admin.id)).resolves.toMatchObject({ tool_progress: "off" });
+  });
+
+  it("rejects invalid web chat progress settings", async () => {
+    await seedAdmin(db);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat/progress-settings", {
+      method: "PATCH",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ toolProgress: "verbose" }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Tool progress must be off, friendly, or technical" },
+    });
   });
 
   it("scopes the agent session to the web chat conversation id", async () => {
@@ -411,6 +667,48 @@ describe("web chat API", () => {
         { id: "a-history", role: "assistant", parts: [{ type: "text", text: "We discussed skills." }] },
       ],
       updatedAt: expect.any(String),
+    });
+  });
+
+  it("accepts legacy line-only web chat progress transcripts", async () => {
+    const admin = await seedAdmin(db);
+    const transcriptDir = join(dataDir, "web-chat", admin.id);
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, "chat-legacy-progress.json"),
+      JSON.stringify({
+        version: 1,
+        messages: [
+          { id: "u-history", role: "user", parts: [{ type: "text", text: "Check progress" }] },
+          {
+            id: "a-progress",
+            role: "assistant",
+            parts: [{ type: "data-progress", id: "progress", data: { lines: ['📖 Reading "notes.md"'] } }],
+          },
+        ],
+      }),
+    );
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat/messages?conversationId=chat-legacy-progress", {
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      messages: [
+        { id: "u-history", role: "user", parts: [{ type: "text", text: "Check progress" }] },
+        {
+          id: "a-progress",
+          role: "assistant",
+          parts: [{ type: "data-progress", id: "progress", data: { lines: ['📖 Reading "notes.md"'] } }],
+        },
+      ],
     });
   });
 
@@ -846,7 +1144,22 @@ describe("web chat API", () => {
         {
           id: "assistant-progress-user-msg-progress",
           role: "assistant",
-          parts: [{ type: "data-progress", id: "progress", data: { lines: ['📖 Reading "notes.md"'] } }],
+          parts: [
+            {
+              type: "data-progress",
+              id: "progress",
+              data: {
+                lines: ["Using tool"],
+                items: [
+                  {
+                    kind: "tool",
+                    label: "Using tool",
+                    icon: { type: "tool" },
+                  },
+                ],
+              },
+            },
+          ],
         },
       ],
     });
@@ -899,6 +1212,94 @@ describe("web chat API", () => {
 
     finishAgent.resolve();
     await res.text();
+  });
+
+  it("interrupts the active web chat agent run for a conversation", async () => {
+    const admin = await seedAdmin(db);
+    const paramsSeen = deferred<RunAgentParams>();
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      paramsSeen.resolve(params);
+      await new Promise((_resolve, reject) => {
+        params.abortController?.signal.addEventListener("abort", () => reject(new Error("Aborted by user")), {
+          once: true,
+        });
+      });
+      return makeAgentResult("Should not finish");
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const runResponse = await app.request("/api/web-chat?conversationId=chat-stop", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "user-msg-stop",
+          role: "user",
+          parts: [{ type: "text", text: "Keep working until I stop you" }],
+        },
+      }),
+    });
+    expect(runResponse.status).toBe(200);
+    const params = await paramsSeen.promise;
+
+    const stopResponse = await app.request("/api/web-chat/conversations/chat-stop/interruptions", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+
+    expect(stopResponse.status).toBe(200);
+    await expect(stopResponse.json()).resolves.toEqual({ success: true, interrupted: true });
+    expect(params.abortController?.signal.aborted).toBe(true);
+    const streamText = await runResponse.text();
+    expect(streamText).not.toContain("Stopped.");
+    expect(webChatStreamChunks(streamText).find((chunk) => chunk.type === "data-interruption")).toMatchObject({
+      type: "data-interruption",
+      data: {
+        detail: "Sketch paused.",
+        label: "Tell Sketch what to do differently.",
+      },
+    });
+
+    const transcript = JSON.parse(await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-stop"), "utf-8")) as {
+      messages: Array<{ role: string; parts: Array<{ type: string; text?: string; data?: unknown }> }>;
+    };
+    expect(transcript.messages.map((message) => ({ role: message.role, part: message.parts[0] }))).toEqual([
+      { role: "user", part: { type: "text", text: "Keep working until I stop you" } },
+      {
+        role: "assistant",
+        part: {
+          type: "data-interruption",
+          id: "interruption",
+          data: {
+            detail: "Sketch paused.",
+            label: "Tell Sketch what to do differently.",
+          },
+        },
+      },
+    ]);
+  });
+
+  it("reports no interruption when a web chat conversation is not running", async () => {
+    await seedAdmin(db);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const stopResponse = await app.request("/api/web-chat/conversations/chat-idle/interruptions", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+
+    expect(stopResponse.status).toBe(200);
+    await expect(stopResponse.json()).resolves.toEqual({ success: true, interrupted: false });
   });
 
   it("lists persisted web chat conversations for Home Recents", async () => {

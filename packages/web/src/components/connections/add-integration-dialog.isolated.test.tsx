@@ -12,6 +12,60 @@ describe("AddIntegrationDialog", () => {
     vi.restoreAllMocks();
   });
 
+  it("opens a direct connect state for an initial app id", async () => {
+    const user = userEvent.setup();
+    const onSuccess = vi.fn();
+    const onOpenChange = vi.fn();
+    const popup = { closed: false, close: vi.fn() };
+    const requests: string[] = [];
+
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+
+    server.use(
+      http.get("/api/mcp-servers/provider-1/apps", ({ request }) => {
+        const url = new URL(request.url);
+        requests.push(url.searchParams.toString());
+        return HttpResponse.json({
+          apps: [{ id: "github", name: "GitHub", description: "Code hosting", icon: "https://example.com/github.png" }],
+          pageInfo: { endCursor: null, hasMore: false },
+        });
+      }),
+      http.post("/api/mcp-servers/provider-1/connections", async ({ request }) => {
+        const body = await request.json();
+        expect(body).toMatchObject({
+          appId: "github",
+          callbackUrl: `${window.location.origin}/integrations/callback`,
+        });
+        return HttpResponse.json({ redirectUrl: "https://example.com/oauth" });
+      }),
+    );
+
+    renderWithProviders(
+      <AddIntegrationDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        providerId="provider-1"
+        connectedAppIds={new Set()}
+        initialAppId="github"
+        initialSearch="github"
+        onSuccess={onSuccess}
+      />,
+    );
+
+    expect(screen.queryByPlaceholderText("Search integrations...")).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Connect GitHub" })).toBeInTheDocument();
+    expect(screen.getByText("Code hosting")).toBeInTheDocument();
+    expect(requests).toEqual(["q=github&limit=10"]);
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+
+    await waitFor(() =>
+      expect(window.open).toHaveBeenCalledWith("https://example.com/oauth", "_blank", "width=600,height=700"),
+    );
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
   it("does not verify a cancelled OAuth flow from an existing org-shared connection owned by someone else", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });

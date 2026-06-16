@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { extractAssistantText, runAgent } from "./runner";
+import { extractAssistantText, extractAssistantTextDelta, runAgent } from "./runner";
 
 // Mock the SDK so runAgent can be tested without spawning subprocesses
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
@@ -26,7 +26,13 @@ vi.mock("./sketch-tools", () => {
       return [];
     }
   }
+  class MockIntegrationConnectionCollector {
+    drain() {
+      return [];
+    }
+  }
   return {
+    IntegrationConnectionCollector: MockIntegrationConnectionCollector,
     UploadCollector: MockUploadCollector,
     createSketchMcpServer: vi.fn().mockReturnValue({}),
   };
@@ -120,6 +126,27 @@ describe("extractAssistantText", () => {
       message: { content: "not an array" },
     };
     expect(extractAssistantText(message)).toBeNull();
+  });
+});
+
+describe("extractAssistantTextDelta", () => {
+  it("extracts text deltas from SDK partial assistant stream events", () => {
+    expect(
+      extractAssistantTextDelta({
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hel" } },
+      }),
+    ).toBe("Hel");
+  });
+
+  it("returns null for non-text partial events", () => {
+    expect(
+      extractAssistantTextDelta({
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: "{}" } },
+      }),
+    ).toBeNull();
+    expect(extractAssistantTextDelta({ type: "assistant" })).toBeNull();
   });
 });
 
@@ -339,6 +366,39 @@ describe("runAgent", () => {
     };
     expect(callArgs.options.model).toBe("claude-test-model");
     expect(callArgs.options.maxTurns).toBe(50);
+  });
+
+  it("enables SDK partial messages and forwards assistant text deltas", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const onTextDelta = vi.fn().mockResolvedValue(undefined);
+    let includePartialMessages: boolean | undefined;
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      const callArgs = args as { options: { includePartialMessages?: boolean } };
+      includePartialMessages = callArgs.options.includePartialMessages;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-stream" };
+        yield {
+          type: "stream_event",
+          event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hel" } },
+        };
+        yield {
+          type: "stream_event",
+          event: { type: "content_block_delta", delta: { type: "text_delta", text: "lo" } },
+        };
+        yield {
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Hello" }] },
+        };
+        yield makeRichResultMessage({ session_id: "sess-stream" });
+      })();
+    }) as unknown as typeof query);
+
+    const result = await runAgent(makeBaseParams({ onTextDelta }));
+
+    expect(includePartialMessages).toBe(true);
+    expect(onTextDelta).toHaveBeenNthCalledWith(1, "Hel");
+    expect(onTextDelta).toHaveBeenNthCalledWith(2, "lo");
+    expect(result.trace.finalText).toBe("Hello");
   });
 
   it("uses text attachment references for image prompts when the vision tool is configured", async () => {

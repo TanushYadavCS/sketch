@@ -5,6 +5,7 @@ import type { Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsersTable } from "../db/schema";
 import {
+  IntegrationConnectionCollector,
   UploadCollector,
   createSketchMcpServer,
   handleGetTeamDirectory,
@@ -106,6 +107,114 @@ describe("createSketchMcpServer", () => {
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(tools.ReadChatHistory).toBeDefined();
     expect(tools.SearchChatHistory).toBeDefined();
+  });
+
+  it("searches integration apps and queues a provider-backed missing-account card", async () => {
+    const collector = new UploadCollector();
+    const integrationConnectionCollector = new IntegrationConnectionCollector();
+    const loadIntegrationProvider = vi.fn().mockResolvedValue({
+      listApps: vi.fn().mockResolvedValue({
+        apps: [{ id: "github", name: "GitHub", description: "Code hosting", icon: "https://cdn.example/github.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+      listConnections: vi.fn().mockResolvedValue([]),
+    });
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      integrationConnectionCollector,
+      workspaceDir: tmpDir,
+      loadIntegrationProvider,
+      currentUserEmail: "alice@example.com",
+      currentUserName: "Alice",
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (input: { query?: string; limit?: number }) => Promise<{
+              content: { text: string }[];
+            }>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.SearchIntegrationApps.handler({ query: "github" });
+
+    const parsedResult = JSON.parse(result.content[0].text);
+    expect(parsedResult).toMatchObject({
+      ok: true,
+      apps: [{ app_id: "github", app_name: "GitHub", connected: false }],
+    });
+    expect(parsedResult.instruction).toContain("provider state identified one missing app account");
+    expect(loadIntegrationProvider).toHaveBeenCalled();
+    expect(integrationConnectionCollector.drain()).toMatchObject([
+      {
+        appId: "github",
+        appName: "GitHub",
+        icon: "https://cdn.example/github.png",
+        state: "connect",
+      },
+    ]);
+  });
+
+  it("lists connected integration accounts and omits the legacy render tool", async () => {
+    const collector = new UploadCollector();
+    const integrationConnectionCollector = new IntegrationConnectionCollector();
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      integrationConnectionCollector,
+      workspaceDir: tmpDir,
+      loadIntegrationProvider: vi.fn().mockResolvedValue({
+        listApps: vi.fn(),
+        listConnections: vi.fn().mockResolvedValue([
+          {
+            id: "conn-1",
+            providerId: "provider-1",
+            appId: "github",
+            appName: "GitHub",
+            icon: "https://cdn.example/github.png",
+            accountName: "Alice GitHub",
+            healthy: true,
+            status: "active",
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ]),
+      }),
+      currentUserEmail: "alice@example.com",
+      currentUserName: "Alice",
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (input: { query?: string; limit?: number }) => Promise<{
+              content: { text: string }[];
+            }>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    expect(tools.RequestIntegrationConnection).toBeUndefined();
+    const result = await tools.SearchIntegrationApps.handler({});
+    const parsedResult = JSON.parse(result.content[0].text);
+
+    expect(parsedResult).toMatchObject({
+      ok: true,
+      connected_accounts: [{ app_id: "github", app_name: "GitHub", state: "connected" }],
+    });
+    expect(integrationConnectionCollector.drain()).toMatchObject([
+      {
+        appId: "github",
+        appName: "GitHub",
+        state: "connected",
+        accountName: "Alice GitHub",
+        connectionId: "conn-1",
+      },
+    ]);
   });
 
   it("SearchChatHistory searches the scoped conversation", async () => {

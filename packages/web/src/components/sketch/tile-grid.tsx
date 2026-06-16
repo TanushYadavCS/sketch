@@ -77,15 +77,6 @@ function TileItem({ tile }: { tile: TileDef }) {
         <span className="text-[18px] font-semibold leading-[1.25] text-foreground">{tile.primary}</span>
         <span className="mt-[4px] text-[12px] leading-[1.45] text-muted-foreground">{tile.secondary}</span>
       </div>
-      <SparkleIcon
-        aria-hidden
-        size={32}
-        weight="duotone"
-        className={cn(
-          "pointer-events-none absolute -right-[4px] -top-[4px] text-[#FEED01]",
-          "opacity-[0.18] transition-opacity duration-200 ease-out group-hover:opacity-[0.32]",
-        )}
-      />
     </>
   );
 

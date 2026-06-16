@@ -13,6 +13,7 @@ import type {
   LlmProvider,
   McpServerRecord,
   PageInfo,
+  WebChatIntegrationConnectionData,
 } from "@sketch/shared";
 
 export type WorkspaceScope = "personal" | "org";
@@ -971,7 +972,24 @@ export interface DailyBriefResponse {
 
 export type WebChatMessagePart =
   | { type: "text"; text: string }
-  | { type: "data-progress"; id: string; data: { lines: string[] } }
+  | {
+      type: "data-progress";
+      id: string;
+      data: {
+        lines?: string[];
+        items?: Array<{
+          id?: string;
+          kind: string;
+          label: string;
+          detail?: string;
+          toolName?: string;
+          icon?: {
+            type: "tool" | "skill" | "canvas" | "generic";
+            name?: string;
+          };
+        }>;
+      };
+    }
   | {
       type: "data-file";
       id: string;
@@ -981,6 +999,11 @@ export type WebChatMessagePart =
         mediaType: string;
         sizeBytes?: number;
       };
+    }
+  | {
+      type: "data-integration-connection";
+      id: string;
+      data: WebChatIntegrationConnectionData;
     };
 
 export interface WebChatStoredMessage {
@@ -1011,6 +1034,12 @@ export interface WebChatUploadedAttachment {
   sizeBytes: number;
 }
 
+export type WebChatToolProgress = "off" | "friendly" | "technical";
+
+export interface WebChatProgressSettings {
+  toolProgress: WebChatToolProgress;
+}
+
 export const api = {
   dailyBriefs: {
     latest(opts?: { date?: string }) {
@@ -1030,6 +1059,15 @@ export const api = {
     },
   },
   webChat: {
+    progressSettings() {
+      return request<WebChatProgressSettings>("/api/web-chat/progress-settings");
+    },
+    updateProgressSettings(toolProgress: WebChatToolProgress) {
+      return request<WebChatProgressSettings>("/api/web-chat/progress-settings", {
+        method: "PATCH",
+        body: JSON.stringify({ toolProgress }),
+      });
+    },
     messages(conversationId = "default") {
       return request<WebChatMessagesResponse>(
         `/api/web-chat/messages?conversationId=${encodeURIComponent(conversationId)}`,
@@ -1042,6 +1080,12 @@ export const api = {
       return request<{ success: boolean }>(`/api/web-chat/conversations/${encodeURIComponent(conversationId)}`, {
         method: "DELETE",
       });
+    },
+    interrupt(conversationId: string) {
+      return request<{ success: boolean; interrupted: boolean }>(
+        `/api/web-chat/conversations/${encodeURIComponent(conversationId)}/interruptions`,
+        { method: "POST" },
+      );
     },
     transcribe(audioBlob: Blob, filename = "recording.webm") {
       const form = new FormData();
