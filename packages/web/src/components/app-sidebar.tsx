@@ -65,6 +65,7 @@ interface NavItem {
 
 const allPrimaryNav: NavItem[] = [
   { label: "Home", icon: <HouseIcon size={18} />, href: "/home" },
+  { label: "Chat", icon: <ChatCircleIcon size={18} />, href: "/chat" },
   { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
   { label: "Projects", icon: <FoldersIcon size={18} />, href: "/projects", adminOnly: true },
@@ -87,7 +88,8 @@ function formatRole(role?: "admin" | "member"): string | null {
 }
 
 function isNavItemActive(pathname: string, href: string): boolean {
-  if (href === "/home") return pathname === "/home" || pathname === "/chat" || pathname.startsWith("/chat/");
+  if (href === "/home") return pathname === "/home";
+  if (href === "/chat") return pathname === "/chat" || pathname.startsWith("/chat/");
   return pathname === href;
 }
 

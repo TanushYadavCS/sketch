@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
+const EXPECTED_MIGRATION_COUNT = 100;
+
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
     dialect: new SqliteDialect({ database: new SQLite(":memory:") }),
@@ -38,7 +40,7 @@ describe("runMigrations — full sequence", () => {
     try {
       await runMigrations(db);
       expect(logSpy).toHaveBeenCalledWith("Migration applied: 001-initial");
-      expect(logSpy).toHaveBeenCalledTimes(98);
+      expect(logSpy).toHaveBeenCalledTimes(EXPECTED_MIGRATION_COUNT);
 
       const quietDb = createBlankDb();
       logSpy.mockClear();
@@ -57,7 +59,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(98);
+    expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 
   it("records migrations with the correct names in order", async () => {
@@ -152,6 +154,8 @@ describe("runMigrations — full sequence", () => {
     expect(names[95]).toBe("100-entity-project-bindings");
     expect(names[96]).toBe("101-entity-project-member-overrides");
     expect(names[97]).toBe("102-entity-creation-suppressions");
+    expect(names[98]).toBe("103-daily-briefs");
+    expect(names[99]).toBe("104-daily-brief-item-metadata");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -411,6 +415,33 @@ describe("runMigrations — full sequence", () => {
     expect(row?.gemini_api_key).toBeNull();
   });
 
+  it("creates daily brief tables with default config values", async () => {
+    await runMigrations(db, { quiet: true });
+
+    for (const table of ["daily_briefs", "daily_brief_items", "daily_brief_configs"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+
+    await db.insertInto("users").values({ id: "user-daily-brief", name: "Daily Brief User" }).execute();
+    await db.insertInto("daily_brief_configs").values({ user_id: "user-daily-brief" }).execute();
+
+    const config = await db
+      .selectFrom("daily_brief_configs")
+      .select(["enabled", "schedule_hour", "schedule_minute", "max_items_per_section"])
+      .where("user_id", "=", "user-daily-brief")
+      .executeTakeFirstOrThrow();
+
+    expect(config).toEqual({
+      enabled: 1,
+      schedule_hour: 8,
+      schedule_minute: 0,
+      max_items_per_section: 4,
+    });
+  });
+
   it("running migrations twice is idempotent (only applies each migration once)", async () => {
     await runMigrations(db, { quiet: true });
     await runMigrations(db, { quiet: true });
@@ -419,7 +450,7 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
 
-    expect(rows.rows).toHaveLength(98);
+    expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 
   it("creates entity_contact_points table", async () => {
@@ -461,6 +492,6 @@ describe("runMigrations — incremental upgrade", () => {
     const rows = await sql<{ name: string }>`
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
-    expect(rows.rows).toHaveLength(98);
+    expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 });

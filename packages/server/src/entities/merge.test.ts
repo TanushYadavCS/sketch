@@ -395,7 +395,14 @@ describe("entity merge core", () => {
     await seedEntity(db, "third", "Third");
     await db
       .insertInto("entity_source_refs")
-      .values({ id: "ref-loser", entity_id: "loser", source: "linear", source_id: "u1", source_url: null })
+      .values({
+        id: "ref-loser",
+        entity_id: "loser",
+        source: "linear",
+        source_id: "u1",
+        source_url: null,
+        last_seen_at: "2026",
+      })
       .execute();
 
     const result = await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });

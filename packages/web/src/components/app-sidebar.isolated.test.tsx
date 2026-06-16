@@ -39,6 +39,7 @@ describe("AppSidebar", () => {
 
     const primaryLabels = [
       "Home",
+      "Chat",
       "Channels",
       "Files",
       "Team",
@@ -53,23 +54,26 @@ describe("AppSidebar", () => {
       .map((button) => button.textContent)
       .filter((label): label is string => Boolean(label && primaryLabels.includes(label)));
     expect(navButtons[0]).toBe("Home");
+    expect(navButtons[1]).toBe("Chat");
     expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "true");
   });
 
-  it("keeps Home selected while viewing the dedicated chat screen", () => {
+  it("selects Chat while viewing the dedicated chat screen", () => {
     mockPathname = "/chat";
 
     renderSidebar("admin");
 
-    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "false");
   });
 
-  it("keeps Home selected while viewing a specific web chat conversation", () => {
+  it("selects Chat while viewing a specific web chat conversation", () => {
     mockPathname = "/chat/web-chat-2026-05-26-abcdef";
 
     renderSidebar("admin");
 
-    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "false");
   });
 
   it("shows Account link for managed admins", async () => {

@@ -14,6 +14,7 @@ import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
 import type { AuxCostCollector } from "../aux-cost";
+import type { DailyBriefWriter } from "./daily-brief";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -86,6 +87,7 @@ export interface SketchMcpDeps {
   };
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
+  dailyBriefWriter?: DailyBriefWriter;
   originOrgContextEnabled?: boolean;
   publicMcp?: {
     userEmails?: string[];

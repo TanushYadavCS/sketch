@@ -846,7 +846,7 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
       .set({ entity_id: updates.entity_id })
       .where("id", "=", move.rowId)
       .where("entity_id", "=", move.repoint.entity_id.to)
-      .execute();
+      .executeTakeFirst();
     if (updatedCount(result) === 0) {
       throw new EntityMergeError("MERGE_CONFLICT", "source ref changed owner after merge", {
         table: move.table,

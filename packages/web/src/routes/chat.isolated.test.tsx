@@ -1,4 +1,6 @@
+import { setPendingWebChatSubmission, takePendingWebChatSubmission } from "@/lib/chat-target";
 import { render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPage,
@@ -9,7 +11,6 @@ import {
   titleFromChatMessages,
   validateChatSearch,
 } from "./chat";
-import { setPendingWebChatSubmission, takePendingWebChatSubmission } from "./home";
 
 const sendMessage = vi.fn();
 const setMessages = vi.fn();
@@ -17,6 +18,7 @@ const useChatArgs = vi.fn();
 const mocks = vi.hoisted(() => ({
   loadMessages: vi.fn().mockResolvedValue({ messages: [] }),
   navigate: vi.fn(),
+  search: { message: "Plan my day" } as Record<string, unknown>,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -48,20 +50,37 @@ vi.mock("@tanstack/react-router", async () => {
   return {
     ...actual,
     useParams: () => ({ conversationId: "chat-alpha" }),
-    useSearch: () => ({ message: "Plan my day" }),
+    useSearch: () => mocks.search,
     useNavigate: () => mocks.navigate,
   };
 });
 
+vi.mock("./dashboard", () => ({
+  dashboardRoute: { id: "__root__/dashboard" },
+  useDashboardAuth: () => ({ displayName: "Karan Nijhawan" }),
+}));
+
+vi.mock("@/components/sketch/home-pane", () => ({
+  HomePane: ({ firstName }: { firstName: string; children?: ReactNode }) => <div>Chat launcher for {firstName}</div>,
+}));
+
 describe("chat route", () => {
   afterEach(() => {
     takePendingWebChatSubmission("chat-alpha");
+    mocks.search = { message: "Plan my day" };
   });
 
   it("validates optional initial message search state", () => {
     expect(validateChatSearch({ message: "  Hello  " })).toEqual({ message: "Hello" });
+    expect(validateChatSearch({ prefill: "  Draft this  " })).toEqual({ prefill: "Draft this" });
+    expect(validateChatSearch({ message: "  Hello  ", prefill: "  Draft this  " })).toEqual({
+      message: "Hello",
+      prefill: "Draft this",
+    });
     expect(validateChatSearch({ message: "" })).toEqual({});
+    expect(validateChatSearch({ prefill: "" })).toEqual({});
     expect(validateChatSearch({ message: ["No"] })).toEqual({});
+    expect(validateChatSearch({ prefill: ["No"] })).toEqual({});
   });
 
   it("extracts visible user and assistant text from AI SDK UI messages", () => {
@@ -264,6 +283,25 @@ describe("chat route", () => {
       search: {},
       replace: true,
     });
+  });
+
+  it("prefills the composer without submitting the chat", async () => {
+    mocks.search = { prefill: "Plan with Sketch" };
+    sendMessage.mockClear();
+    mocks.navigate.mockClear();
+
+    render(<ChatPage />);
+
+    expect(screen.getByLabelText("Message Sketch")).toHaveValue("Plan with Sketch");
+    await waitFor(() =>
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        to: "/chat/$conversationId",
+        params: { conversationId: "chat-alpha" },
+        search: {},
+        replace: true,
+      }),
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("submits pending Home attachments after history loads", async () => {

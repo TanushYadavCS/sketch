@@ -6,6 +6,10 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@theme {
+  --font-serif: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

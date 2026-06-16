@@ -76,7 +76,7 @@ function LoginPage() {
               window.location.assign(returnTo);
               return;
             }
-            navigate({ to: "/channels" });
+            navigate({ to: "/home" });
           }}
         />
       )}
