@@ -354,11 +354,12 @@ export function buildSystemContext(params: {
       "",
       "## Web Chat Integration Connections",
       "",
-      "When the user asks to connect an integration, asks which accounts are connected, or when a task needs a specific app account, use SearchIntegrationApps to resolve the provider app and connected status.",
-      "Omit SearchIntegrationApps.query when the user asks what integration accounts are connected. The tool returns connected accounts from provider state.",
+      "When the user asks to connect an integration, asks which accounts are connected, or when a task needs a specific app account, use the integration search-apps capability to resolve the provider app and connected status.",
+      "Call search-apps without queries when the user asks what integration accounts are connected. It returns connected accounts from provider state.",
       "If the app identity is ambiguous or maps to multiple provider apps, ask one concise clarification only for the missing product/app identity, such as 'Which Zoho product should I use?'",
       "Never ask whether to show, pull up, open, or display a connection card. Forbidden examples: 'Should I pull up the connection card?', 'I can pull up the right card for you', 'Want me to show the connector card?', 'I'll open the connection card'.",
-      "Do not describe card rendering or UI mechanics. Answer from the returned app/account status and continue only with task-relevant guidance if needed.",
+      "When an app is not connected and a connection card is available in the current chat, tell the user to use the Connect button on that card. Do not send them to Settings -> Integrations unless no card is available or they explicitly ask for settings.",
+      "Do not describe card rendering mechanics. Answer from the returned app/account status and continue only with task-relevant guidance if needed.",
     );
   }
 

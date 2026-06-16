@@ -4,7 +4,6 @@ import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/
 import { createWriteDailyBriefTool } from "./tools/daily-brief";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
-import { createSearchIntegrationAppsTool } from "./tools/integration-connection";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
 import { createMessagingTools } from "./tools/messaging";
@@ -33,7 +32,6 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     createSearchChatHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
-    createSearchIntegrationAppsTool(deps),
     createLocalRunCommandTool(deps),
     createLocalClaudeSessionTool(deps),
     createManageScheduledTasksTool({

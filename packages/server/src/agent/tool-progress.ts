@@ -81,7 +81,6 @@ const TOOL_KIND: Record<string, WebProgressItemKind> = {
   GetEntityContext: "entity",
   ReadChatHistory: "chat",
   SearchChatHistory: "chat",
-  SearchIntegrationApps: "integration",
   local_run_command: "local",
   local_claude_session: "local",
   GetTeamDirectory: "chat",
@@ -111,7 +110,6 @@ const PRIMARY_ARG: Record<string, string> = {
   SearchEntities: "queries",
   local_claude_session: "action",
   SearchChatHistory: "query",
-  SearchIntegrationApps: "query",
   SearchUsers: "query",
 };
 
@@ -149,11 +147,6 @@ const FRIENDLY_TARGET_LINES: Record<string, FriendlyTargetLine> = {
     keys: ["query"],
     fallback: "Searching chat history",
   },
-  SearchIntegrationApps: {
-    prefix: "Searching integration apps for",
-    keys: ["query"],
-    fallback: "Searching integration apps",
-  },
 };
 
 const FRIENDLY_STATIC_LINES: Record<string, string> = {
@@ -180,7 +173,6 @@ const FRIENDLY_WEB_LABELS: Record<string, string> = {
   GetEntityContext: "Reading connected knowledge",
   ReadChatHistory: "Reading chat history",
   SearchChatHistory: "Searching chat history",
-  SearchIntegrationApps: "Searching integrations",
   local_run_command: "Using local device",
   local_claude_session: "Using local Claude Code",
   GetTeamDirectory: "Reading team directory",

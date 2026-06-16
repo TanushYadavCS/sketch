@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectIntegrationCardsFromProgressEvents,
   extractCanvasIntegrationLookups,
+  extractIntegrationLookupsFromProgressEvent,
   isConnectedAccountsInquiry,
   resolveIntegrationLookup,
 } from "./cards";
@@ -45,6 +46,44 @@ describe("integration cards", () => {
       queries: ["linear"],
       listConnected: false,
     });
+  });
+
+  it("extracts app lookups from Canvas MCP tool events", () => {
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__search_apps",
+        input: { queries: ["slack", "gmail"] },
+      }),
+    ).toEqual({ queries: ["slack", "gmail"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "searchApps",
+        input: { queries: "notion" },
+      }),
+    ).toEqual({ queries: ["notion"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__search_apps",
+        input: {},
+      }),
+    ).toEqual({ queries: [], listConnected: true });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__direct_execute_action",
+        input: { componentKey: "github-create-issue" },
+      }),
+    ).toEqual({ queries: ["github"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__search_components",
+        input: { queries: [{ app: "linear", query: "create issue" }] },
+      }),
+    ).toEqual({ queries: ["linear"], listConnected: false });
   });
 
   it("resolves exactly matched apps to connect or connected cards from provider state", async () => {
@@ -107,5 +146,71 @@ describe("integration cards", () => {
     });
 
     expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
+  });
+
+  it("collects missing app cards from observed Canvas MCP search_apps progress", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async () => ({
+        apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__search_apps",
+          input: { queries: ["slack"] },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
+  });
+
+  it("collects connected account cards from observed Canvas MCP search_apps without queries", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [
+        {
+          id: "conn-1",
+          providerId: "provider-1",
+          appId: "github",
+          appName: "GitHub",
+          healthy: true,
+          status: "active",
+          accountName: "Alice GitHub",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      listApps: async () => {
+        throw new Error("should not list apps");
+      },
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__search_apps",
+          input: {},
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([
+      { appId: "github", appName: "GitHub", state: "connected", accountName: "Alice GitHub" },
+    ]);
   });
 });

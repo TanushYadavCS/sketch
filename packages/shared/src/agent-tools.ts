@@ -107,12 +107,6 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
-    name: "mcp__sketch__SearchIntegrationApps",
-    label: "Search integration apps",
-    description: "Search integration provider apps, list connected accounts, and check connected status.",
-    category: "sketch",
-  },
-  {
     name: "mcp__sketch__local_run_command",
     label: "Run local Mac command",
     description: "Run shell commands on a paired local Mac through Sketch Local.",

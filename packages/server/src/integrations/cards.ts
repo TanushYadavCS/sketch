@@ -202,6 +202,11 @@ function rawStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+function stringListValue(value: unknown): string[] {
+  if (typeof value === "string") return splitQueryList(value);
+  return rawStringArray(value);
+}
+
 function rawQueryApps(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
@@ -255,6 +260,57 @@ export function extractCanvasIntegrationLookups(command: string): {
   return { queries: [], listConnected: false };
 }
 
+function extractMcpIntegrationLookups(
+  toolName: string | undefined,
+  input: Record<string, unknown> | undefined,
+): {
+  queries: string[];
+  listConnected: boolean;
+} {
+  const match = toolName?.match(/^mcp__(.+?)__(.+)$/);
+  const normalizedToolName = (match?.[2] ?? toolName ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/_/g, "-")
+    .toLowerCase();
+
+  if (normalizedToolName === "search-apps") {
+    const queries = stringListValue(input?.queries);
+    return { queries, listConnected: queries.length === 0 };
+  }
+
+  if (normalizedToolName === "get-components") {
+    return { queries: stringListValue(input?.apps), listConnected: false };
+  }
+
+  if (normalizedToolName === "search-components") {
+    return { queries: rawQueryApps(input?.queries), listConnected: false };
+  }
+
+  if (normalizedToolName === "direct-execute-action" || normalizedToolName === "fetch-remote-options") {
+    const componentKey = typeof input?.componentKey === "string" ? input.componentKey : null;
+    return { queries: appFromComponentKey(componentKey), listConnected: false };
+  }
+
+  if (normalizedToolName === "create-sketch-trigger-workflow") {
+    const triggerAppSlug = typeof input?.triggerAppSlug === "string" ? input.triggerAppSlug : null;
+    return { queries: triggerAppSlug ? [triggerAppSlug] : [], listConnected: false };
+  }
+
+  return { queries: [], listConnected: false };
+}
+
+export function extractIntegrationLookupsFromProgressEvent(event: IntegrationProgressEventLike): {
+  queries: string[];
+  listConnected: boolean;
+} {
+  if (event.kind !== "tool_use") return { queries: [], listConnected: false };
+  if (event.toolName === "Bash") {
+    const command = typeof event.input?.command === "string" ? event.input.command : "";
+    return extractCanvasIntegrationLookups(command);
+  }
+  return extractMcpIntegrationLookups(event.toolName, event.input);
+}
+
 export async function collectIntegrationCardsFromProgressEvents(params: {
   events: IntegrationProgressEventLike[];
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -267,9 +323,7 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
   const queries = new Set<string>();
   let listConnected = false;
   for (const event of params.events) {
-    if (event.kind !== "tool_use" || event.toolName !== "Bash") continue;
-    const command = typeof event.input?.command === "string" ? event.input.command : "";
-    const lookup = extractCanvasIntegrationLookups(command);
+    const lookup = extractIntegrationLookupsFromProgressEvent(event);
     for (const query of lookup.queries) queries.add(query);
     listConnected ||= lookup.listConnected;
   }

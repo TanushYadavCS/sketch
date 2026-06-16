@@ -860,7 +860,7 @@ function IntegrationConnectionAppIcon({ connection }: { connection: ChatThreadIn
     <AppIcon
       name={connection.appName}
       icon={connection.icon}
-      className="size-10 rounded-[8px] text-[12px]"
+      className="size-10 rounded-[8px] bg-transparent text-[12px]"
       imageClassName="size-8"
     />
   );

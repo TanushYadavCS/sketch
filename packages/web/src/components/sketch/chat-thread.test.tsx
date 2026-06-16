@@ -258,7 +258,9 @@ describe("ChatThread", () => {
     );
 
     expect(screen.getByText("Connect GitHub")).toBeInTheDocument();
-    expect(document.querySelector("[data-integration-connection-card] img")).toHaveAttribute("src", iconUrl);
+    const icon = document.querySelector("[data-integration-connection-card] img");
+    expect(icon).toHaveAttribute("src", iconUrl);
+    expect(icon?.parentElement).toHaveClass("bg-transparent");
   });
 
   it("renders connected integration account cards without a connect action", () => {

@@ -314,16 +314,17 @@ describe("buildSystemContext", () => {
 
     it("tells the agent to resolve integration status without UI-render side effects", () => {
       const result = buildSystemContext({ platform: "web" });
-      expect(result).toContain("use SearchIntegrationApps to resolve the provider app and connected status");
-      expect(result).toContain(
-        "Omit SearchIntegrationApps.query when the user asks what integration accounts are connected",
-      );
+      expect(result).toContain("use the integration search-apps capability");
+      expect(result).toContain("Call search-apps without queries when the user asks what integration accounts");
       expect(result).toContain("Never ask whether to show, pull up, open, or display a connection card");
       expect(result).toContain("Should I pull up the connection card?");
       expect(result).toContain("I can pull up the right card");
       expect(result).toContain("Which Zoho product should I use?");
-      expect(result).toContain("Do not describe card rendering or UI mechanics");
+      expect(result).toContain("use the Connect button on that card");
+      expect(result).toContain("Do not send them to Settings -> Integrations unless no card is available");
+      expect(result).toContain("Do not describe card rendering mechanics");
       expect(result).toContain("continue only with task-relevant guidance if needed");
+      expect(result).not.toContain("SearchIntegrationApps");
       expect(result).not.toContain("RequestIntegrationConnection");
     });
 
