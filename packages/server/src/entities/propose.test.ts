@@ -1390,4 +1390,42 @@ describe("proposeEntity", () => {
     expect(second.kind).toBe("linked");
     expect(projects).toHaveLength(1);
   });
+
+  it("27. strict name dedup links and appends the incoming spelling as an alias", async () => {
+    const entityRepo = createEntityRepository(db);
+    const redseer = await entityRepo.upsertEntity({
+      name: "Redseer Consulting",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "RedseerConsulting",
+        entityType: "company",
+        subtype: "external",
+        source: "llm",
+        sourceId: "mention-redseer",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(redseer.id);
+    expect(JSON.parse(result.entity.aliases ?? "[]")).toContain("RedseerConsulting");
+    expect(materializeDeps.index.byNormalizedAlias.get(normalizeName("RedseerConsulting"))?.map((e) => e.id)).toContain(
+      redseer.id,
+    );
+  });
 });

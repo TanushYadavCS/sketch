@@ -8,6 +8,14 @@ import { createEntitySuppressionRepository } from "../db/repositories/entity-sup
 import type { DB } from "../db/schema";
 import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
+import {
+  type CandidatePoolEntry,
+  addToCandidatePool,
+  buildCandidatePool,
+  findFuzzyMatches,
+  findStrictMatches,
+  removeFromCandidatePool,
+} from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
@@ -47,9 +55,12 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   for (const t of supportedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, EntityRow[]>();
   const byNormalizedAlias = new Map<string, EntityRow[]>();
+  const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
+  for (const t of supportedTypes) dedupEntriesByType.set(t, []);
   for (const e of entities) {
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
+    dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "name", value: e.name });
     const nameKey = normalizeEntityMatchName(entityType, e.name);
     if (nameKey) {
       const bucket = byNormalizedName.get(nameKey);
@@ -57,6 +68,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
       else byNormalizedName.set(nameKey, [e]);
     }
     for (const alias of parseAliasesString(e.aliases)) {
+      dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "alias", value: alias });
       const aliasKey = normalizeEntityMatchName(entityType, alias);
       if (!aliasKey) continue;
       const bucket = byNormalizedAlias.get(aliasKey);
@@ -90,7 +102,9 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     if (bucket) bucket.push(row.entity_id);
     else companyIdsByDomain.set(domain, [row.entity_id]);
   }
-  return { entitiesByType, byNormalizedName, byNormalizedAlias, bySourceRef, companyIdsByDomain };
+  const dedupPoolsByType = new Map<ProposeEntityType, ReturnType<typeof buildCandidatePool>>();
+  for (const t of supportedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
+  return { entitiesByType, byNormalizedName, byNormalizedAlias, dedupPoolsByType, bySourceRef, companyIdsByDomain };
 }
 
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
@@ -117,6 +131,17 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
       index.byNormalizedAlias.set(aliasKey, [entity]);
     }
   }
+  const pool = index.dedupPoolsByType.get(entityType);
+  if (pool) {
+    addToCandidatePool(pool, [
+      { entityId: entity.id, valueKind: "name", value: entity.name },
+      ...parseAliasesString(entity.aliases).map((value) => ({
+        entityId: entity.id,
+        valueKind: "alias" as const,
+        value,
+      })),
+    ]);
+  }
 }
 
 function removeEntityFromMapBuckets<T extends EntityRow>(map: Map<string, T[]>, entityId: string): void {
@@ -134,6 +159,9 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   }
   removeEntityFromMapBuckets(index.byNormalizedName, entityId);
   removeEntityFromMapBuckets(index.byNormalizedAlias, entityId);
+  for (const pool of index.dedupPoolsByType.values()) {
+    removeFromCandidatePool(pool, entityId);
+  }
 }
 
 export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIndex, entity: Entity): Promise<void> {
@@ -176,6 +204,31 @@ export async function buildMaterializeDeps(
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
     getByAlias: (n) => index.byNormalizedAlias.get(n) ?? [],
     listByType: (t: ProposeEntityType) => index.entitiesByType.get(t) ?? [],
+    findNameDedupCandidates: (entityType, name) => {
+      const pool = index.dedupPoolsByType.get(entityType);
+      if (!pool) return [];
+      const entitiesById = new Map((index.entitiesByType.get(entityType) ?? []).map((entity) => [entity.id, entity]));
+      const strict = findStrictMatches(name, pool);
+      const strictEntityIds = new Set(strict.map((match) => match.entityId));
+      const fuzzy = findFuzzyMatches(name, pool);
+      const byEntity = new Map<
+        string,
+        {
+          entity: EntityRow;
+          score: number;
+          reason: "strict-normalized" | "minhash";
+        }
+      >();
+      for (const match of [...strict, ...fuzzy]) {
+        const entity = entitiesById.get(match.entityId);
+        if (!entity) continue;
+        const reason = strictEntityIds.has(match.entityId) ? "strict-normalized" : "minhash";
+        const existing = byEntity.get(match.entityId);
+        if (!existing || match.score > existing.score)
+          byEntity.set(match.entityId, { entity, score: match.score, reason });
+      }
+      return [...byEntity.values()].sort((a, b) => b.score - a.score || a.entity.id.localeCompare(b.entity.id));
+    },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
   };
 

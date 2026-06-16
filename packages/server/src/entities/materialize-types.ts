@@ -6,6 +6,7 @@ import type { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { EntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
+import type { CandidatePool } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 export interface ReplayFactsSummary {
@@ -31,6 +32,7 @@ export interface LookupIndex {
   entitiesByType: Map<ProposeEntityType, EntityRow[]>;
   byNormalizedName: Map<string, EntityRow[]>;
   byNormalizedAlias: Map<string, EntityRow[]>;
+  dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
   bySourceRef: Map<string, EntityRow>;
   companyIdsByDomain: Map<string, string[]>;
 }
