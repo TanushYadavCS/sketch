@@ -50,7 +50,7 @@ function scoreCandidate(
   mentionTokens: string[],
   entity: Entity,
   ctx: RankerContext,
-  worksAtLookup: (entityId: string) => string | null,
+  worksAtLookup: (entityId: string) => readonly string[],
 ): number | null {
   const entityTokens = tokens(entity.name);
   if (!hasTokenOverlap(mentionTokens, entityTokens)) return null;
@@ -58,8 +58,8 @@ function scoreCandidate(
   let score = 0;
   if (ctx.extractedPersons.some((p) => p.entityId === entity.id)) score += 10;
 
-  const companyId = worksAtLookup(entity.id);
-  if (companyId) {
+  const companyIds = worksAtLookup(entity.id);
+  for (const companyId of companyIds) {
     if (ctx.extractedCompanies.some((c) => c.entityId === companyId)) score += 5;
     else if (ctx.contextCompanies.some((c) => c.entityId === companyId)) score += 2;
   }
@@ -72,7 +72,7 @@ export function rankPersonLlmMention(
   mention: ExtractedMention,
   candidates: Entity[],
   ctx: RankerContext,
-  worksAtLookup: (entityId: string) => string | null,
+  worksAtLookup: (entityId: string) => readonly string[],
 ): LlmMentionDecision {
   const mentionTokens = tokens(mention.name);
   const ranked = candidates

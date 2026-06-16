@@ -216,6 +216,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
       {
         entityRepo,
         reviewRepo: createEntityReviewRepo(db),
+        domainsRepo,
         lookup,
         readEmail,
       },

@@ -21,6 +21,28 @@ export interface InferAffiliationInput {
   firstObservedByUserId?: string | null;
 }
 
+export type PersonScopeKey = { kind: "company"; value: string } | { kind: "domain"; value: string };
+
+export function personScopeKeyId(scope: PersonScopeKey): string {
+  return `${scope.kind}:${scope.value}`;
+}
+
+export function isTrustedPersonScopeKey(scopeKey: string): boolean {
+  return scopeKey.startsWith("company:");
+}
+
+export async function personScopeKey(
+  email: string | null | undefined,
+  domainsRepo: EntityDomainsRepository,
+): Promise<PersonScopeKey | null> {
+  const domain = domainsRepo.normalizeEmailDomain(email);
+  if (!domain) return null;
+  if (await domainsRepo.isPersonalOrShared(domain)) return null;
+  const companyIds = await domainsRepo.getCompanyIdsByDomain(domain);
+  if (companyIds.length > 0) return { kind: "company", value: [...companyIds].sort()[0] };
+  return { kind: "domain", value: domain };
+}
+
 /**
  * Role-account local-parts: shared mailboxes, not real people. A single
  * `hello@stripe.com` notification email should NOT promote Stripe as a

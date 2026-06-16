@@ -35,6 +35,7 @@ export interface LookupIndex {
   dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
   bySourceRef: Map<string, EntityRow>;
   companyIdsByDomain: Map<string, string[]>;
+  personScopeKeysByEntityId: Map<string, string[]>;
 }
 
 export interface MaterializeDeps {

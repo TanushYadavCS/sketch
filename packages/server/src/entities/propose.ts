@@ -21,8 +21,10 @@
 import type { Selectable } from "kysely";
 import { normalizeName } from "../connectors/name-normalize";
 import type { UpsertPersonEntityData, createEntityRepository } from "../db/repositories/entities";
+import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
+import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
 
 export type Entity = Selectable<EntitiesTable>;
 
@@ -67,6 +69,11 @@ export interface ProposeInput {
    * entity and queuing an ambiguous match are unaffected.
    */
   queueInsteadOfCreate?: boolean;
+  /**
+   * Applies the person seed creation gate for name-only proposals. When true,
+   * an unscoped incoming person proposal queues instead of linking by name.
+   */
+  strictPersonScopeGate?: boolean;
 }
 
 export type ProposeResult =
@@ -108,11 +115,13 @@ export type EntityLookup = {
   }>;
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
+  getPersonScopeKeys?(entityId: string): string[];
 };
 
 export interface ProposeDeps {
   entityRepo: ReturnType<typeof createEntityRepository>;
   reviewRepo: EntityReviewRepository;
+  domainsRepo?: EntityDomainsRepository;
   lookup: EntityLookup;
   /** Read an entity's email from its metadata JSON. */
   readEmail: (entity: Entity) => string | null;
@@ -240,15 +249,28 @@ async function persistEntity(
   matched?: Entity,
 ): Promise<{ entity: Entity; created: boolean }> {
   if (input.entityType === "person") {
+    if (matched) {
+      await deps.entityRepo.upsertSourceRef({
+        entityId: matched.id,
+        source: input.source,
+        sourceId: input.sourceId,
+      });
+      if (input.email) {
+        await deps.entityRepo.attachEmailIfAbsent(matched.id, input.email);
+        await deps.entityRepo.appendAlias(matched.id, input.email);
+      }
+      const entity = (await deps.entityRepo.getEntity(matched.id)) ?? matched;
+      return { entity, created: false };
+    }
     const personData: UpsertPersonEntityData = {
-      name: matched?.name ?? input.name,
+      name: input.name,
       email: input.email ?? undefined,
       subtype: input.subtype,
       source: input.source,
       sourceId: input.sourceId,
     };
-    const entity = await deps.entityRepo.upsertPersonEntity(personData);
-    return { entity, created: !matched };
+    const entity = await deps.entityRepo.createPersonEntity(personData);
+    return { entity, created: true };
   }
 
   if (matched) {
@@ -335,6 +357,15 @@ function pickConfirmedCanonical(candidates: Entity[], input: ProposeInput, looku
   return sorted[0];
 }
 
+function isSingleStrictPersonReference(ranked: RankedCandidate[]): boolean {
+  return (
+    ranked.length === 1 &&
+    (ranked[0].reason === "exact-ambiguous" ||
+      ranked[0].reason === "strict-normalized" ||
+      ranked[0].reason === "minhash")
+  );
+}
+
 async function queueProposal(
   deps: ProposeDeps,
   input: ProposeInput,
@@ -377,8 +408,95 @@ async function queueProposal(
   };
 }
 
+async function decideScopedPersonCandidates(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  ranked: RankedCandidate[],
+): Promise<ProposeResult> {
+  if (!deps.domainsRepo) {
+    if (input.email) {
+      const { entity } = await persistEntity(deps, input);
+      return { kind: "created", entity };
+    }
+    if (ranked.length === 1 && isSingleStrictPersonReference(ranked) && canAutoLinkNameDedupCandidate(input, ranked[0])) {
+      return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    }
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  const incomingScope = deps.domainsRepo ? await personScopeKey(input.email ?? null, deps.domainsRepo) : null;
+  if (!incomingScope) {
+    if (
+      !input.strictPersonScopeGate &&
+      isSingleStrictPersonReference(ranked) &&
+      canAutoLinkNameDedupCandidate(input, ranked[0])
+    ) {
+      return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    }
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  const incomingScopeId = personScopeKeyId(incomingScope);
+  const candidatesWithScopes = ranked.map((candidate) => {
+    const scopeKeys = new Set(deps.lookup.getPersonScopeKeys?.(candidate.entity.id) ?? []);
+    return { candidate, scopeKeys };
+  });
+  const matching = candidatesWithScopes.filter(({ scopeKeys }) => scopeKeys.has(incomingScopeId));
+  if (matching.length === 1) return linkNameDedupCandidate(deps, input, matching[0].candidate.entity);
+  if (matching.length >= 2) {
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  const allCandidatesTrusted = candidatesWithScopes.every(
+    ({ scopeKeys }) => scopeKeys.size > 0 && [...scopeKeys].some(isTrustedPersonScopeKey),
+  );
+  if (allCandidatesTrusted) {
+    if (input.queueInsteadOfCreate) {
+      return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+    }
+    const { entity } = await persistEntity(deps, input);
+    return { kind: "created", entity };
+  }
+  return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+}
+
+async function decideNameCandidates(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  ranked: RankedCandidate[],
+): Promise<ProposeResult> {
+  if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
+  if (ranked.length === 1) return linkNameDedupCandidate(deps, input, ranked[0].entity);
+  const winner = pickConfirmedCanonical(
+    ranked.map((candidate) => candidate.entity),
+    input,
+    deps.lookup,
+  );
+  if (winner) {
+    const { entity } = await persistEntity(deps, input, winner);
+    return { kind: "linked", entity };
+  }
+  return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+}
+
 export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
   const normalized = normalizeMatchName(input.entityType, input.name);
+
+  if (input.source && input.sourceId) {
+    const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+    if (found && found.source_type === input.entityType) {
+      await deps.entityRepo.upsertSourceRef({
+        entityId: found.id,
+        source: input.source,
+        sourceId: input.sourceId,
+      });
+      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+        await deps.entityRepo.appendAlias(found.id, input.name);
+      }
+      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
+      await deps.onEntityResolved?.(entity);
+      return { kind: "linked", entity };
+    }
+  }
 
   // 1) Email fast-path — exact match against existing entity's stored email.
   if (input.entityType === "person" && input.email) {
@@ -398,29 +516,6 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
         await deps.onEntityResolved?.(entity);
         return { kind: "linked", entity };
       }
-    }
-
-    // 2) Email present but no entity matched it. An email is identity-grade;
-    //    a name collision against a different email is a different person.
-    //    Auto-create instead of queuing.
-    const { entity } = await persistEntity(deps, input);
-    return { kind: "created", entity };
-  }
-
-  if (input.entityType !== "person" && input.source && input.sourceId) {
-    const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
-    if (found && found.source_type === input.entityType) {
-      await deps.entityRepo.upsertSourceRef({
-        entityId: found.id,
-        source: input.source,
-        sourceId: input.sourceId,
-      });
-      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
-        await deps.entityRepo.appendAlias(found.id, input.name);
-      }
-      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
-      await deps.onEntityResolved?.(entity);
-      return { kind: "linked", entity };
     }
   }
 
@@ -449,21 +544,14 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
   if (exactById.size === 1) {
     const matched = exactById.values().next().value as Entity;
-    const { entity } = await persistEntity(deps, input, matched);
-    return { kind: "linked", entity };
+    return decideNameCandidates(deps, input, normalized, [{ entity: matched, score: 1, reason: "exact-ambiguous" }]);
   }
   if (exactById.size > 1) {
-    const winner = pickConfirmedCanonical([...exactById.values()], input, deps.lookup);
-    if (winner) {
-      const { entity } = await persistEntity(deps, input, winner);
-      return { kind: "linked", entity };
-    }
-    return queueProposal(
+    return decideNameCandidates(
       deps,
       input,
       normalized,
       [...exactById.values()].map((entity) => ({ entity, score: 1, reason: "exact-ambiguous" })),
-      "exact-ambiguous",
     );
   }
 
@@ -511,11 +599,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
       if (!rejected) filtered.push(r);
     }
     ranked = filtered;
-    if (ranked.length === 1 && canAutoLinkNameDedupCandidate(input, ranked[0])) {
-      return linkNameDedupCandidate(deps, input, ranked[0].entity);
-    }
-    if (ranked.length === 1) return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
-    if (ranked.length > 1) return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
+    if (ranked.length > 0) return decideNameCandidates(deps, input, normalized, ranked);
   }
 
   if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
@@ -561,5 +645,6 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
   }
+  if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
   return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
 }

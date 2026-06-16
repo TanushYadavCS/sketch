@@ -6,6 +6,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
+import { personScopeKey, personScopeKeyId } from "./affiliations";
 import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
 import {
@@ -105,10 +106,51 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   }
   const dedupPoolsByType = new Map<ProposeEntityType, ReturnType<typeof buildCandidatePool>>();
   for (const t of supportedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
-  return { entitiesByType, byNormalizedName, byNormalizedAlias, dedupPoolsByType, bySourceRef, companyIdsByDomain };
+  const personScopeKeysByEntityId = await buildPersonScopeKeys(
+    db,
+    entities.filter((entity) => entity.source_type === "person"),
+  );
+  return {
+    entitiesByType,
+    byNormalizedName,
+    byNormalizedAlias,
+    dedupPoolsByType,
+    bySourceRef,
+    companyIdsByDomain,
+    personScopeKeysByEntityId,
+  };
+}
+
+async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promise<Map<string, string[]>> {
+  const scopeKeys = new Map<string, Set<string>>();
+  for (const person of persons) scopeKeys.set(person.id, new Set());
+  const domainsRepo = createEntityDomainsRepository(db);
+  for (const person of persons) {
+    const email = readPersonEmailFromMetadata(person.metadata);
+    const scope = await personScopeKey(email, domainsRepo);
+    if (scope) scopeKeys.get(person.id)?.add(personScopeKeyId(scope));
+  }
+
+  const personIds = persons.map((person) => person.id);
+  const worksAtRows =
+    personIds.length > 0
+      ? await db
+          .selectFrom("entity_relationships")
+          .select(["source_entity_id", "target_entity_id"])
+          .where("relationship_type", "=", "works_at")
+          .where("source_entity_id", "in", personIds)
+          .where("valid_to", "is", null)
+          .execute()
+      : [];
+  for (const row of worksAtRows) {
+    scopeKeys.get(row.source_entity_id)?.add(personScopeKeyId({ kind: "company", value: row.target_entity_id }));
+  }
+
+  return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
 }
 
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
+  const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
   const typeBucket = index.entitiesByType.get(entityType);
@@ -143,6 +185,9 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
       })),
     ]);
   }
+  if (entityType === "person" && existingPersonScopeKeys) {
+    index.personScopeKeysByEntityId.set(entity.id, existingPersonScopeKeys);
+  }
 }
 
 function removeEntityFromMapBuckets<T extends EntityRow>(map: Map<string, T[]>, entityId: string): void {
@@ -163,6 +208,7 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   for (const pool of index.dedupPoolsByType.values()) {
     removeFromCandidatePool(pool, entityId);
   }
+  index.personScopeKeysByEntityId.delete(entityId);
 }
 
 export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIndex, entity: Entity): Promise<void> {
@@ -177,6 +223,9 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
     if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
   }
   registerEntity(index, row);
+  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
+  const personScopeKeys = scopeKeys.get(row.id);
+  if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
   for (const ref of sourceRefs) {
     index.bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
   }
@@ -237,6 +286,7 @@ export async function buildMaterializeDeps(
       return [...byEntity.values()].sort((a, b) => b.score - a.score || a.entity.id.localeCompare(b.entity.id));
     },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
+    getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
   };
 
   const fileToConnector = new Map<string, string>();

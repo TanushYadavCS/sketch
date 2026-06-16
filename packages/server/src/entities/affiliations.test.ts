@@ -400,11 +400,12 @@ describe("ELP-02: affiliation inference", () => {
     // test 18 — recreate must reproduce the same graph shape (one promoted
     // company, one corporate domain row, five works_at edges) as live sync
     // crossing the threshold organically.
-    for (let i = 0; i < 5; i++) {
+    const names = ["Charlie Adams", "Priya Rao", "Mateo Silva", "Noor Khan", "Elena Ivers"];
+    for (let i = 0; i < names.length; i++) {
       const fileId = await seedFile(db, `charlie-file-${i}`);
       await seedPersonSeedFact(db, {
         fileId,
-        name: `Charlie Person ${i}`,
+        name: names[i],
         email: `person${i}@charlie.com`,
         sourceId: `charlie-${i}`,
       });
@@ -479,11 +480,12 @@ describe("ELP-02: affiliation inference", () => {
       })
       .execute();
 
-    for (let i = 0; i < 5; i++) {
+    const names = ["Manual Charlie", "Iris Quinn", "Omar Reed", "Lina Soto", "Victor Tan"];
+    for (let i = 0; i < names.length; i++) {
       const fileId = await seedFile(db, `manual-charlie-file-${i}`);
       await seedPersonSeedFact(db, {
         fileId,
-        name: `Manual Charlie Person ${i}`,
+        name: names[i],
         email: `manual${i}@charlie.com`,
         sourceId: `manual-charlie-${i}`,
       });
