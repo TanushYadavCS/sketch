@@ -22,6 +22,8 @@ export interface EntityDedupBackfillOptions {
   fuzzyThreshold?: number;
   sampleLimit?: number;
   batchSize?: number;
+  /** Entity ids to leave untouched — any pair where either side matches is dropped. */
+  excludeEntityIds?: string[];
 }
 
 export interface EntityDedupBackfillPair {
@@ -276,23 +278,28 @@ export async function runEntityDedupBackfill(
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const scans = await loadTypeScans(db);
   const discovered = await discoverPairs(db, scans, { fuzzyThreshold, batchSize });
+  const excludeIds = new Set(options.excludeEntityIds ?? []);
+  const keepPair = (pair: EntityDedupBackfillPair): boolean =>
+    !excludeIds.has(pair.survivorId) && !excludeIds.has(pair.loserId);
+  const autoMerge = discovered.autoMerge.filter(keepPair);
+  const queueCandidates = discovered.queue.filter(keepPair);
   const result: EntityDedupBackfillResult = {
     mode: execute ? "execute" : "dry-run",
-    autoMergeCandidates: discovered.autoMerge,
-    queuedCandidates: discovered.queue,
+    autoMergeCandidates: autoMerge,
+    queuedCandidates: queueCandidates,
     merged: [],
     queued: [],
     skipped: [],
     samples: {
-      autoMerge: discovered.autoMerge.slice(0, sampleLimit),
-      queue: discovered.queue.slice(0, sampleLimit),
+      autoMerge: autoMerge.slice(0, sampleLimit),
+      queue: queueCandidates.slice(0, sampleLimit),
     },
   };
 
   if (!execute) return result;
 
   let processed = 0;
-  for (const pair of discovered.autoMerge) {
+  for (const pair of autoMerge) {
     processed += 1;
     const preview = await previewMerge(db, { survivorId: pair.survivorId, loserId: pair.loserId });
     if (preview.blocked) {
@@ -304,7 +311,7 @@ export async function runEntityDedupBackfill(
     if (processed % batchSize === 0) await yieldToEventLoop();
   }
 
-  for (const pair of discovered.queue) {
+  for (const pair of queueCandidates) {
     processed += 1;
     await queuePair(db, pair, options.userId);
     result.queued.push(pair);
@@ -339,6 +346,7 @@ async function main(): Promise<void> {
       "user-id": { type: "string", default: "entity-dedup-backfill" },
       "fuzzy-threshold": { type: "string", default: String(DEFAULT_FUZZY_THRESHOLD) },
       "sample-limit": { type: "string", default: String(DEFAULT_SAMPLE_LIMIT) },
+      "exclude-entity": { type: "string" },
     },
   });
   const config = loadConfig();
@@ -351,6 +359,10 @@ async function main(): Promise<void> {
       userId: parsed.values["user-id"],
       fuzzyThreshold: Number(parsed.values["fuzzy-threshold"]),
       sampleLimit: Number(parsed.values["sample-limit"]),
+      excludeEntityIds: parsed.values["exclude-entity"]
+        ?.split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
     });
     printResult(result);
   } finally {
