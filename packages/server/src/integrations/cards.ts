@@ -29,14 +29,16 @@ export interface IntegrationProgressEventLike {
   input?: Record<string, unknown>;
 }
 
-const CONNECTED_ACCOUNTS_RE =
-  /\b(what|which|list|show|tell|display|view|see|connected|connection|connections|accounts|integrations|apps)\b/i;
-const CONNECTED_ACCOUNTS_TARGET_RE =
-  /\b(connected\s+(accounts|apps|integrations|connections)|apps\s+are\s+connected|connections?|accounts?|integrations?)\b/i;
+const CONNECTED_ACCOUNTS_INQUIRY_PATTERNS = [
+  /\b(list|show|display|view|see)\b.*\b(connected\s+(accounts|apps|integrations|connections)|connections|accounts)\b/i,
+  /\b(what|which)\b.*\b(accounts|apps|integrations|connections)\b.*\bconnected\b/i,
+  /\b(what|which)\b.*\bconnected\s+(accounts|apps|integrations|connections)\b/i,
+  /^\s*(my\s+)?connected\s+(accounts|apps|integrations|connections)\??\s*$/i,
+];
 
 export function isConnectedAccountsInquiry(text: string): boolean {
   const normalized = text.trim();
-  return CONNECTED_ACCOUNTS_RE.test(normalized) && CONNECTED_ACCOUNTS_TARGET_RE.test(normalized);
+  return CONNECTED_ACCOUNTS_INQUIRY_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 export function normalizeIntegrationLookup(value: string | undefined): string {

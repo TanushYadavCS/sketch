@@ -222,6 +222,36 @@ describe("web chat API", () => {
     expect(fullStream).toContain("data: [DONE]");
   });
 
+  it("closes an open streamed text part before emitting an agent error", async () => {
+    await seedAdmin(db);
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onTextDelta?.("Partial answer");
+      throw new Error("agent exploded");
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-streaming-error", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Stream then fail" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const textDeltaIndex = text.indexOf('"type":"text-delta"');
+    const textEndIndex = text.indexOf('"type":"text-end"');
+    const errorIndex = text.indexOf('"type":"error"');
+    expect(textDeltaIndex).toBeGreaterThanOrEqual(0);
+    expect(textEndIndex).toBeGreaterThan(textDeltaIndex);
+    expect(errorIndex).toBeGreaterThan(textEndIndex);
+    expect(text).toContain('"errorText":"agent exploded"');
+  });
+
   it("streams and persists integration connection cards from the web chat agent", async () => {
     const admin = await seedAdmin(db);
     const card = {
@@ -320,6 +350,53 @@ describe("web chat API", () => {
         }),
       }),
     );
+  });
+
+  it("does not append connected account cards for app-specific connection checks", async () => {
+    await seedAdmin(db);
+    const aimfoxCard = {
+      requestId: "integration-aimfox-1",
+      appId: "aimfox",
+      appName: "Aimfox",
+      state: "connect" as const,
+      reason: "Connect Aimfox so Sketch can work with it.",
+    };
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult("Your Aimfox account is not connected yet."),
+      pendingIntegrationConnections: [aimfoxCard],
+    });
+    const loadIntegrationProvider = vi.fn().mockResolvedValue({
+      listConnections: vi.fn().mockResolvedValue([
+        {
+          id: "conn-1",
+          providerId: "provider-1",
+          appId: "github",
+          appName: "GitHub",
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ]),
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      loadIntegrationProvider,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-specific-connected-check", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Is my Aimfox account connected?" }),
+    });
+
+    expect(res.status).toBe(200);
+    const cards = webChatStreamChunks(await res.text()).filter((chunk) => chunk.type === "data-integration-connection");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ data: aimfoxCard });
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
   });
 
   it("honors the current user's technical tool-progress setting", async () => {

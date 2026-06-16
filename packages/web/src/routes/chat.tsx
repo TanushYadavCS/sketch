@@ -844,6 +844,7 @@ export function ChatPage() {
     () => (serversQuery.data ?? []).find((server) => server.type != null) ?? null,
     [serversQuery.data],
   );
+  const providerLoading = hasIntegrationConnectionCards && serversQuery.isLoading;
   const connectionsQuery = useQuery({
     queryKey: ["connections", provider?.id],
     queryFn: () => api.mcpServers.listConnections(provider?.id ?? ""),
@@ -867,9 +868,11 @@ export function ChatPage() {
       statuses[connection.requestId] =
         connection.state === "connected" || connectedAppIds.has(connection.appId)
           ? "connected"
-          : providerUnavailable
-            ? "unavailable"
-            : (localIntegrationConnectionStatuses[connection.requestId] ?? "idle");
+          : providerLoading
+            ? "loading"
+            : providerUnavailable
+              ? "unavailable"
+              : (localIntegrationConnectionStatuses[connection.requestId] ?? "idle");
     }
     return statuses;
   }, [
@@ -878,6 +881,7 @@ export function ChatPage() {
     integrationConnectionCards,
     localIntegrationConnectionStatuses,
     provider,
+    providerLoading,
     serversQuery.isError,
     serversQuery.isFetched,
     serversQuery.isLoading,
@@ -960,6 +964,7 @@ export function ChatPage() {
 
   const handleConnectIntegration = useCallback(
     (connection: ChatThreadIntegrationConnection) => {
+      if (providerLoading) return;
       if (!provider) {
         setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "unavailable" }));
         toast.error("No integration provider is configured");
@@ -968,7 +973,7 @@ export function ChatPage() {
       setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "connecting" }));
       setActiveIntegrationConnection(connection);
     },
-    [provider],
+    [provider, providerLoading],
   );
 
   const handleIntegrationConnected = useCallback(() => {

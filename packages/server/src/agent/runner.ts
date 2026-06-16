@@ -679,16 +679,18 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     }
   }
 
-  try {
-    await collectIntegrationCardsFromProgressEvents({
-      events: progressEvents,
-      loadIntegrationProvider: params.loadIntegrationProvider,
-      collector: integrationConnectionCollector,
-      userEmail: params.userEmail ?? null,
-      userName: params.userName,
-    });
-  } catch (err) {
-    logger.warn({ err }, "Failed to resolve integration cards from agent progress");
+  if (params.responseSurface === "web" && params.contextType !== "scheduled_task") {
+    try {
+      await collectIntegrationCardsFromProgressEvents({
+        events: progressEvents,
+        loadIntegrationProvider: params.loadIntegrationProvider,
+        collector: integrationConnectionCollector,
+        userEmail: params.userEmail ?? null,
+        userName: params.userName,
+      });
+    } catch (err) {
+      logger.warn({ err }, "Failed to resolve integration cards from agent progress");
+    }
   }
 
   const pendingUploads = uploadCollector.drain();

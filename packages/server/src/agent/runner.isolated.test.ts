@@ -27,8 +27,16 @@ vi.mock("./sketch-tools", () => {
     }
   }
   class MockIntegrationConnectionCollector {
+    private pending: unknown[] = [];
+
+    collect(card: unknown) {
+      this.pending.push(card);
+    }
+
     drain() {
-      return [];
+      const cards = [...this.pending];
+      this.pending = [];
+      return cards;
     }
   }
   return {
@@ -645,6 +653,102 @@ describe("runAgent", () => {
       expect(tc.startedAt).toBeGreaterThan(0);
       expect(tc.endedAt).toBeGreaterThanOrEqual(tc.startedAt);
     }
+  });
+
+  it("skips progress-derived integration cards outside interactive web chat", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const scenarios: Array<Partial<Parameters<typeof runAgent>[0]>> = [
+      {},
+      { responseSurface: "web", contextType: "scheduled_task" },
+    ];
+
+    for (const overrides of scenarios) {
+      vi.mocked(query).mockImplementation((() => {
+        return (async function* () {
+          yield { type: "system", subtype: "init", session_id: "sess-canvas-cli" };
+          yield {
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "t1",
+                  name: "Bash",
+                  input: {
+                    command: "$CANVAS_CLI direct-execute-action --component-key github-create-issue --output json",
+                  },
+                },
+              ],
+            },
+          };
+          yield makeRichResultMessage({ session_id: "sess-canvas-cli" });
+        })();
+      }) as unknown as typeof query);
+      const provider = {
+        getBrokerSpec: vi.fn().mockReturnValue(null),
+        listConnections: vi.fn().mockRejectedValue(new Error("should not list connections")),
+        listApps: vi.fn().mockRejectedValue(new Error("should not list apps")),
+      };
+
+      const result = await runAgent(
+        makeBaseParams({
+          ...overrides,
+          userEmail: "alice@example.com",
+          loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+        }),
+      );
+
+      expect(provider.listConnections).not.toHaveBeenCalled();
+      expect(provider.listApps).not.toHaveBeenCalled();
+      expect(result.pendingIntegrationConnections).toEqual([]);
+    }
+  });
+
+  it("collects progress-derived missing integration cards for web chat", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-web-canvas-cli" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "t1",
+                name: "Bash",
+                input: {
+                  command: "$CANVAS_CLI direct-execute-action --component-key github-create-issue --output json",
+                },
+              },
+            ],
+          },
+        };
+        yield makeRichResultMessage({ session_id: "sess-web-canvas-cli" });
+      })();
+    }) as unknown as typeof query);
+    const provider = {
+      getBrokerSpec: vi.fn().mockReturnValue(null),
+      listConnections: vi.fn().mockResolvedValue([]),
+      listApps: vi.fn().mockResolvedValue({
+        apps: [{ id: "github", name: "GitHub", description: "Code hosting", icon: "https://cdn.example/github.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    };
+
+    const result = await runAgent(
+      makeBaseParams({
+        responseSurface: "web",
+        contextType: "dm",
+        userEmail: "alice@example.com",
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+      }),
+    );
+
+    expect(provider.listConnections).toHaveBeenCalledWith("alice@example.com", "TestUser");
+    expect(result.pendingIntegrationConnections).toMatchObject([
+      { appId: "github", appName: "GitHub", state: "connect" },
+    ]);
   });
 
   it("sets skillName to null when Skill tool has no input.skill", async () => {

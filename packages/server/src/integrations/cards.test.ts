@@ -12,8 +12,12 @@ describe("integration cards", () => {
     expect(isConnectedAccountsInquiry("what accounts are connected?")).toBe(true);
     expect(isConnectedAccountsInquiry("show my connected integrations")).toBe(true);
     expect(isConnectedAccountsInquiry("which apps are connected?")).toBe(true);
+    expect(isConnectedAccountsInquiry("What integrations have I connected?")).toBe(true);
     expect(isConnectedAccountsInquiry("connect github")).toBe(false);
     expect(isConnectedAccountsInquiry("what apps do you support?")).toBe(false);
+    expect(isConnectedAccountsInquiry("How do I add integrations?")).toBe(false);
+    expect(isConnectedAccountsInquiry("What integrations do you support?")).toBe(false);
+    expect(isConnectedAccountsInquiry("Is my Aimfox account connected?")).toBe(false);
   });
 
   it("extracts app lookups from Canvas CLI commands", () => {

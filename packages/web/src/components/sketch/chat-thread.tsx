@@ -50,7 +50,13 @@ export interface ChatThreadFile {
   sizeBytes?: number;
 }
 
-export type ChatThreadIntegrationConnectionStatus = "idle" | "connecting" | "connected" | "error" | "unavailable";
+export type ChatThreadIntegrationConnectionStatus =
+  | "idle"
+  | "loading"
+  | "connecting"
+  | "connected"
+  | "error"
+  | "unavailable";
 
 export interface ChatThreadIntegrationConnection {
   requestId: string;
@@ -873,7 +879,11 @@ function IntegrationConnectionCard({
   const state = integrationConnectionState(effectiveStatus);
   const connectedState = effectiveStatus === "connected";
   const disabled =
-    effectiveStatus === "connecting" || connectedState || effectiveStatus === "unavailable" || !onConnect;
+    effectiveStatus === "loading" ||
+    effectiveStatus === "connecting" ||
+    connectedState ||
+    effectiveStatus === "unavailable" ||
+    !onConnect;
   const StatusIcon = state.icon;
   const title = connectedState ? `${connection.appName} connected` : `Connect ${connection.appName}`;
   const description = connectedState
@@ -901,7 +911,11 @@ function IntegrationConnectionCard({
                 state.badgeClassName,
               )}
             >
-              <StatusIcon size={12} className={cn(effectiveStatus === "connecting" && "animate-spin")} aria-hidden />
+              <StatusIcon
+                size={12}
+                className={cn((effectiveStatus === "loading" || effectiveStatus === "connecting") && "animate-spin")}
+                aria-hidden
+              />
               {state.label}
             </span>
           </div>
@@ -919,7 +933,7 @@ function IntegrationConnectionCard({
           disabled={disabled}
           onClick={() => onConnect?.(connection)}
         >
-          {effectiveStatus === "connecting" ? (
+          {effectiveStatus === "loading" || effectiveStatus === "connecting" ? (
             <SpinnerGapIcon size={14} className="animate-spin" />
           ) : connectedState ? (
             <CheckCircleIcon size={14} />
@@ -940,6 +954,13 @@ function integrationConnectionState(status: ChatThreadIntegrationConnectionStatu
   badgeClassName: string;
 } {
   switch (status) {
+    case "loading":
+      return {
+        label: "Checking",
+        buttonLabel: "Connect",
+        icon: SpinnerGapIcon,
+        badgeClassName: "bg-muted text-muted-foreground",
+      };
     case "connecting":
       return {
         label: "In progress",

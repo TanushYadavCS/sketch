@@ -38,6 +38,16 @@ const mocks = vi.hoisted(() => ({
   search: { message: "Plan my day" } as Record<string, unknown>,
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 vi.mock("@/lib/api", () => ({
   api: {
     webChat: {
@@ -725,5 +735,76 @@ describe("chat route", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Connected" })).toBeDisabled());
     await waitFor(() => expect(screen.queryByTitle("Connect GitHub")).not.toBeInTheDocument());
+  });
+
+  it("keeps integration cards disabled while the provider configuration is loading", async () => {
+    const user = userEvent.setup();
+    const servers =
+      deferred<
+        Array<{
+          id: string;
+          type: string;
+          slug: string;
+          displayName: string;
+          url: string;
+          apiUrl: string;
+          credentials: Record<string, never>;
+          mode: string;
+          createdAt: string;
+          updatedAt: string;
+        }>
+      >();
+    mocks.search = {};
+    mockChatMessages = [
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "Connect GitHub first." },
+          {
+            type: "data-integration-connection",
+            id: "integration-connection-0",
+            data: {
+              requestId: "integration-req-1",
+              appId: "github",
+              appName: "GitHub",
+              reason: "Connect GitHub so Sketch can inspect repository issues.",
+            },
+          },
+        ],
+      },
+    ];
+    mocks.listMcpServers.mockReturnValue(servers.promise);
+    mocks.createConnection.mockResolvedValue({ redirectUrl: "about:blank" });
+
+    renderWithProviders(<ChatPage />);
+
+    const connectButton = await screen.findByRole("button", { name: "Connect" });
+    await waitFor(() => expect(connectButton).toBeDisabled());
+    expect(screen.getByText("Checking")).toBeInTheDocument();
+    await user.click(connectButton);
+    expect(mocks.createConnection).not.toHaveBeenCalled();
+
+    servers.resolve([
+      {
+        id: "provider-1",
+        type: "canvas",
+        slug: "canvas",
+        displayName: "Canvas",
+        url: "https://mcp.example",
+        apiUrl: "https://canvas.example",
+        credentials: {},
+        mode: "mcp",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Connect" })).not.toBeDisabled());
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() =>
+      expect(mocks.createConnection).toHaveBeenCalledWith("provider-1", "github", expect.any(String)),
+    );
   });
 });

@@ -1412,6 +1412,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           );
           return;
         }
+        const message = errorMessage(err);
+        closeTextPart();
         deps.logger.warn({ err }, "Web chat run failed");
         await completeWebChatProgressMessage(
           deps.config,
@@ -1420,9 +1422,9 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           deps.logger,
           conversationId,
           progressMessageId,
-          createAssistantTranscriptMessage(errorMessage(err), []),
+          createAssistantTranscriptMessage(message, []),
         );
-        write({ type: "error", errorText: errorMessage(err) });
+        write({ type: "error", errorText: message });
       } finally {
         write({ type: "finish-step" });
         write({ type: "finish" });
