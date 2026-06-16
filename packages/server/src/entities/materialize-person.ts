@@ -22,15 +22,33 @@ export async function materializePersonSeed(
   if (!fact.subject_name || !fact.subject_source || !fact.subject_source_id) {
     return { kind: "skipped", reason: "missing_person_seed_subject" };
   }
+  const triggeredByUserId = deps.resolveOwner(fact);
+  if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
   const raw = readJsonObject(fact.raw);
   const subtype = raw.subtype === "internal" ? "internal" : "external";
-  const entity = (await deps.entityRepo.upsertPersonEntity({
-    name: fact.subject_name,
-    email: fact.subject_email ?? undefined,
-    subtype,
-    source: fact.subject_source,
-    sourceId: fact.subject_source_id,
-  })) as unknown as EntityRow;
+  const result = await proposeEntity(
+    {
+      entityRepo: deps.entityRepo,
+      reviewRepo: deps.reviewRepo,
+      domainsRepo: deps.domainsRepo,
+      lookup: deps.lookup,
+      readEmail: deps.readEmail,
+      onEntityResolved: deps.onEntityResolved,
+    },
+    {
+      name: fact.subject_name,
+      email: fact.subject_email ?? null,
+      entityType: "person",
+      subtype,
+      source: fact.subject_source,
+      sourceId: fact.subject_source_id,
+      evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
+      triggeredByUserId,
+      strictPersonScopeGate: true,
+    },
+  );
+  if (result.kind === "queued") return { kind: "queued", reviewId: result.reviewId };
+  const entity = result.entity as unknown as EntityRow;
   deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
   registerEntity(deps.index, entity);
   await inferAffiliationFromEmail(
@@ -39,9 +57,10 @@ export async function materializePersonSeed(
       personEntityId: entity.id,
       email: fact.subject_email,
       evidenceFileId: fact.indexed_file_id,
-      firstObservedByUserId: fact.created_by_user_id,
+      firstObservedByUserId: triggeredByUserId,
     },
   );
+  await deps.onEntityResolved(entity);
   return { kind: "structural", entity };
 }
 
@@ -92,7 +111,10 @@ async function buildPersonRankerContext(
   };
 }
 
-async function loadWorksAtCompanies(deps: MaterializeDeps, personEntityIds: string[]): Promise<Map<string, string>> {
+async function loadWorksAtCompanies(
+  deps: MaterializeDeps,
+  personEntityIds: string[],
+): Promise<Map<string, Set<string>>> {
   if (personEntityIds.length === 0) return new Map();
   const rows = await deps.db
     .selectFrom("entity_relationships")
@@ -101,7 +123,13 @@ async function loadWorksAtCompanies(deps: MaterializeDeps, personEntityIds: stri
     .where("source_entity_id", "in", personEntityIds)
     .where("valid_to", "is", null)
     .execute();
-  return new Map(rows.map((row) => [row.source_entity_id, row.target_entity_id]));
+  const out = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const bucket = out.get(row.source_entity_id);
+    if (bucket) bucket.add(row.target_entity_id);
+    else out.set(row.source_entity_id, new Set([row.target_entity_id]));
+  }
+  return out;
 }
 
 export async function materializePersonFact(
@@ -152,7 +180,7 @@ export async function materializePersonFact(
         { name: fact.subject_name, aliases: variations, entityType: "person" },
         candidates,
         context,
-        (entityId) => worksAtByPerson.get(entityId) ?? null,
+        (entityId) => [...(worksAtByPerson.get(entityId) ?? [])],
       );
       if (decision.kind === "confident_match") {
         entity = decision.entity as unknown as EntityRow;
@@ -171,6 +199,7 @@ export async function materializePersonFact(
         {
           entityRepo: deps.entityRepo,
           reviewRepo: deps.reviewRepo,
+          domainsRepo: deps.domainsRepo,
           lookup: deps.lookup,
           readEmail: deps.readEmail,
           onEntityResolved: deps.onEntityResolved,
@@ -214,6 +243,7 @@ export async function materializePersonFact(
         firstObservedByUserId: fact.created_by_user_id,
       },
     );
+    await deps.onEntityResolved(entity);
   }
 
   if (!entity || !fact.indexed_file_id) return { kind: resultKind, entity, mentionWritten: false };

@@ -1307,6 +1307,49 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirstOrThrow();
     },
 
+    async createPersonEntity(data: UpsertPersonEntityData) {
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const metadata = data.email ? { email: data.email } : {};
+      const initialAliases = data.email ? JSON.stringify([data.email]) : null;
+
+      await db
+        .insertInto("entities")
+        .values({
+          id,
+          name: data.name,
+          source_type: "person",
+          subtype: data.subtype,
+          aliases: initialAliases,
+          metadata: JSON.stringify(metadata),
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+
+      await db
+        .insertInto("entity_source_refs")
+        .values({
+          id: randomUUID(),
+          entity_id: id,
+          source: data.source,
+          source_id: data.sourceId,
+          source_url: null,
+          last_seen_at: now,
+        })
+        .execute();
+
+      return await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
+    },
+
     // ── Archive / Cleanup ──
 
     async archiveEntitiesForArchivedFiles() {

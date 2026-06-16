@@ -1287,7 +1287,7 @@ describe("proposeEntity", () => {
     expect(refreshed.aliases ? JSON.parse(refreshed.aliases) : []).toContain("Project Atlas");
   });
 
-  it("25. person source-ref is skipped so email identity semantics still win", async () => {
+  it("25. person source-ref links before email identity", async () => {
     const entityRepo = createEntityRepository(db);
     const bob = await entityRepo.upsertPersonEntity({
       name: "Bob Chen",
@@ -1326,8 +1326,8 @@ describe("proposeEntity", () => {
 
     expect(result.kind).toBe("linked");
     if (result.kind !== "linked") throw new Error("unreachable");
-    expect(result.entity.id).toBe(alice.id);
-    expect(result.entity.id).not.toBe(bob.id);
+    expect(result.entity.id).toBe(bob.id);
+    expect(result.entity.id).not.toBe(alice.id);
   });
 
   it("26. same-batch source-ref link refreshes materialization index and avoids double-create", async () => {
