@@ -9,6 +9,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB, EntitiesTable } from "../db/schema";
+import { type NeighborSet, buildAdjacencyIndex, overlapCoefficient, owningCompanyScope } from "../entities/adjacency";
 import {
   type AdjudicationGenerator,
   type EntityAdjudicationConfidence,
@@ -18,7 +19,13 @@ import {
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "../entities/affiliations";
 import { readPersonEmailFromMetadata } from "../entities/materialize-json";
 import { mergeEntities, previewMerge } from "../entities/merge";
-import { type CandidatePoolEntry, buildCandidatePool, findFuzzyMatches, normalizeStrict } from "../entities/name-dedup";
+import {
+  type CandidatePoolEntry,
+  buildCandidatePool,
+  findFuzzyMatches,
+  normalizeFuzzy,
+  normalizeStrict,
+} from "../entities/name-dedup";
 import type { ProposeEntityType } from "../entities/propose";
 import { yieldToEventLoop } from "../lib/event-loop";
 
@@ -31,6 +38,10 @@ export interface EntityDedupBackfillOptions {
   sampleLimit?: number;
   batchSize?: number;
   useLlm?: boolean;
+  adjacencyThreshold?: number;
+  noAdjacency?: boolean;
+  adjacencyMinShared?: number;
+  adjacencyThresholdNoLexical?: number;
   /** Entity ids to leave untouched — any pair where either side matches is dropped. */
   excludeEntityIds?: string[];
   /** Structured generator for adjudication (Gemini in prod; a fake in tests). */
@@ -43,7 +54,14 @@ export interface EntityDedupBackfillPair {
   loserId: string;
   survivorName: string;
   loserName: string;
-  reason: "strict" | "fuzzy" | "token-set" | "ambiguous" | "person_scope_missing" | "person_scope_mismatch";
+  reason:
+    | "strict"
+    | "fuzzy"
+    | "token-set"
+    | "adjacency"
+    | "ambiguous"
+    | "person_scope_missing"
+    | "person_scope_mismatch";
   score: number;
 }
 
@@ -62,6 +80,10 @@ export interface EntityDedupBackfillResult {
   merged: EntityDedupBackfillPair[];
   queued: EntityDedupBackfillPair[];
   skipped: EntityDedupBackfillPair[];
+  counts: {
+    adjacencyCandidates: number;
+    ownerGateBlocked: number;
+  };
   samples: {
     autoMerge: EntityDedupBackfillPair[];
     queue: EntityDedupBackfillPair[];
@@ -73,6 +95,7 @@ interface TypeScan {
   entityType: string;
   entities: Entity[];
   entries: CandidatePoolEntry[];
+  evidenceCounts: Map<string, number>;
 }
 
 interface PersonScopes {
@@ -81,13 +104,20 @@ interface PersonScopes {
 
 const SUPPORTED_TYPES: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
 const DEFAULT_FUZZY_THRESHOLD = 0.85;
+const DEFAULT_ADJACENCY_THRESHOLD = 0.5;
+const DEFAULT_ADJACENCY_MIN_SHARED = 2;
+const DEFAULT_ADJACENCY_THRESHOLD_NO_LEXICAL = 0.7;
 const DEFAULT_SAMPLE_LIMIT = 10;
 const DEFAULT_BATCH_SIZE = 100;
 const BACKFILL_SOURCE = "entity_dedup_backfill";
+const ADJACENCY_TYPES = new Set<ProposeEntityType>(["product", "project", "team"]);
+const OWNER_GATE_TYPES = new Set<ProposeEntityType>(["product", "project", "team"]);
+const SIGNIFICANT_TOKEN_STOPWORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to"]);
 const REASON_RANK: Record<EntityDedupBackfillPair["reason"], number> = {
   strict: 3,
   "token-set": 2,
   fuzzy: 1,
+  adjacency: -1,
   ambiguous: 0,
   person_scope_missing: 0,
   person_scope_mismatch: 0,
@@ -111,8 +141,77 @@ function persistedPairKey(a: string, b: string): string {
   return [a, b].sort().map(encodeURIComponent).join("~");
 }
 
-function chooseSurvivor(a: Entity, b: Entity): { survivor: Entity; loser: Entity } {
+function significantNameTokens(name: string): Set<string> {
+  return new Set(
+    normalizeFuzzy(name)
+      .split(" ")
+      .filter((token) => token.length >= 3 && !SIGNIFICANT_TOKEN_STOPWORDS.has(token)),
+  );
+}
+
+function nameTokenCount(name: string): number {
+  return normalizeFuzzy(name).split(" ").filter(Boolean).length;
+}
+
+async function buildEvidenceCounts(db: Kysely<DB>, entityIds: string[]): Promise<Map<string, number>> {
+  const uniqueIds = [...new Set(entityIds)];
+  const counts = new Map<string, number>(uniqueIds.map((id) => [id, 0]));
+  if (uniqueIds.length === 0) return counts;
+
+  const relationshipRows = await db
+    .selectFrom("entity_relationships")
+    .select(["source_entity_id", "target_entity_id", db.fn.count<number>("id").distinct().as("count")])
+    .where((eb) => eb.or([eb("source_entity_id", "in", uniqueIds), eb("target_entity_id", "in", uniqueIds)]))
+    .where("valid_to", "is", null)
+    .groupBy(["source_entity_id", "target_entity_id"])
+    .execute();
+  for (const row of relationshipRows) {
+    const count = Number(row.count);
+    if (counts.has(row.source_entity_id))
+      counts.set(row.source_entity_id, (counts.get(row.source_entity_id) ?? 0) + count);
+    if (counts.has(row.target_entity_id))
+      counts.set(row.target_entity_id, (counts.get(row.target_entity_id) ?? 0) + count);
+  }
+
+  const mentionRows = await db
+    .selectFrom("entity_mentions")
+    .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+    .select([
+      "entity_mentions.entity_id",
+      db.fn.count<number>("entity_mentions.indexed_file_id").distinct().as("count"),
+    ])
+    .where("entity_mentions.entity_id", "in", uniqueIds)
+    .where("indexed_files.is_archived", "=", 0)
+    .groupBy("entity_mentions.entity_id")
+    .execute();
+  for (const row of mentionRows) {
+    counts.set(row.entity_id, (counts.get(row.entity_id) ?? 0) + Number(row.count));
+  }
+
+  return counts;
+}
+
+function chooseSurvivor(
+  a: Entity,
+  b: Entity,
+  evidenceCounts: Map<string, number> = new Map(),
+): { survivor: Entity; loser: Entity } {
   const sorted = [a, b].sort((left, right) => {
+    if (ADJACENCY_TYPES.has(left.source_type as ProposeEntityType) && left.source_type === right.source_type) {
+      if (left.status !== right.status) {
+        if (left.status === "confirmed") return -1;
+        if (right.status === "confirmed") return 1;
+      }
+      if (right.hotness !== left.hotness) return right.hotness - left.hotness;
+      const leftEvidenceCount = evidenceCounts.get(left.id) ?? 0;
+      const rightEvidenceCount = evidenceCounts.get(right.id) ?? 0;
+      if (rightEvidenceCount !== leftEvidenceCount) return rightEvidenceCount - leftEvidenceCount;
+      if (left.created_at !== right.created_at) return left.created_at.localeCompare(right.created_at);
+      const leftTokenCount = nameTokenCount(left.name);
+      const rightTokenCount = nameTokenCount(right.name);
+      if (rightTokenCount !== leftTokenCount) return rightTokenCount - leftTokenCount;
+      return left.id.localeCompare(right.id);
+    }
     if (right.hotness !== left.hotness) return right.hotness - left.hotness;
     if (left.status !== right.status) {
       if (left.status === "confirmed") return -1;
@@ -130,8 +229,9 @@ function toPair(
   b: Entity,
   reason: EntityDedupBackfillPair["reason"],
   score: number,
+  evidenceCounts?: Map<string, number>,
 ): EntityDedupBackfillPair {
-  const { survivor, loser } = chooseSurvivor(a, b);
+  const { survivor, loser } = chooseSurvivor(a, b, evidenceCounts);
   return {
     entityType,
     survivorId: survivor.id,
@@ -154,6 +254,10 @@ async function loadTypeScans(db: Kysely<DB>): Promise<TypeScan[]> {
   const byType = new Map<string, Entity[]>();
   for (const type of SUPPORTED_TYPES) byType.set(type, []);
   for (const entity of entities) byType.get(entity.source_type)?.push(entity);
+  const evidenceCounts = await buildEvidenceCounts(
+    db,
+    entities.map((entity) => entity.id),
+  );
 
   return [...byType].map(([entityType, rows]) => ({
     entityType,
@@ -162,6 +266,7 @@ async function loadTypeScans(db: Kysely<DB>): Promise<TypeScan[]> {
       { entityId: entity.id, valueKind: "name" as const, value: entity.name },
       ...parseAliases(entity.aliases).map((value) => ({ entityId: entity.id, valueKind: "alias" as const, value })),
     ]),
+    evidenceCounts,
   }));
 }
 
@@ -213,10 +318,59 @@ function addUniquePair(map: Map<string, EntityDedupBackfillPair>, pair: EntityDe
   if (pair.score === existing.score && REASON_RANK[pair.reason] > REASON_RANK[existing.reason]) map.set(key, pair);
 }
 
+async function ownerGateBlocksPair(db: Kysely<DB>, pair: EntityDedupBackfillPair): Promise<boolean> {
+  if (!OWNER_GATE_TYPES.has(pair.entityType as ProposeEntityType)) return false;
+  const survivorOwner = await owningCompanyScope(db, pair.survivorId);
+  const loserOwner = await owningCompanyScope(db, pair.loserId);
+  return Boolean(survivorOwner && loserOwner && survivorOwner !== loserOwner);
+}
+
+function sharedAdjacencyNeighbors(a: NeighborSet, b: NeighborSet): Set<string> {
+  const [smaller, larger] = a.size <= b.size ? [a, b] : [b, a];
+  const shared = new Set<string>();
+  for (const key of smaller) {
+    if (larger.has(key)) shared.add(key);
+  }
+  return shared;
+}
+
+function passesAdjacencyFloors(
+  a: Entity,
+  b: Entity,
+  sharedNeighbors: Set<string>,
+  opts: Required<
+    Pick<EntityDedupBackfillOptions, "adjacencyThreshold" | "adjacencyMinShared" | "adjacencyThresholdNoLexical">
+  > & {
+    adjacencyIndex: Map<string, NeighborSet>;
+  },
+): boolean {
+  if (sharedNeighbors.size < opts.adjacencyMinShared) return false;
+  const overlap = overlapCoefficient(
+    opts.adjacencyIndex.get(a.id) ?? new Set(),
+    opts.adjacencyIndex.get(b.id) ?? new Set(),
+  );
+  const hasSharedRelNeighbor = [...sharedNeighbors].some((neighbor) => neighbor.startsWith("rel:"));
+  const aTokens = significantNameTokens(a.name);
+  const bTokens = significantNameTokens(b.name);
+  const hasSharedNameToken = [...aTokens].some((token) => bTokens.has(token));
+  if (overlap < opts.adjacencyThreshold) return false;
+  if (hasSharedNameToken) return true;
+  if (hasSharedRelNeighbor) return overlap >= opts.adjacencyThresholdNoLexical;
+  return false;
+}
+
 async function discoverPairs(
   db: Kysely<DB>,
   scans: TypeScan[],
-  opts: Required<Pick<EntityDedupBackfillOptions, "fuzzyThreshold" | "batchSize">>,
+  opts: Required<
+    Pick<
+      EntityDedupBackfillOptions,
+      "fuzzyThreshold" | "batchSize" | "adjacencyThreshold" | "adjacencyMinShared" | "adjacencyThresholdNoLexical"
+    >
+  > & {
+    adjacencyIndex: Map<string, NeighborSet>;
+    noAdjacency: boolean;
+  },
 ): Promise<{ autoMerge: EntityDedupBackfillPair[]; queue: EntityDedupBackfillPair[] }> {
   const autoMerge = new Map<string, EntityDedupBackfillPair>();
   const queue = new Map<string, EntityDedupBackfillPair>();
@@ -241,8 +395,8 @@ async function discoverPairs(
         const pair =
           scan.entityType === "person"
             ? classifyPersonStrictPair(toPair(scan.entityType, a, b, "strict", 1), personScopes)
-            : toPair(scan.entityType, a, b, "strict", 1);
-        if (pair.reason === "strict") addUniquePair(autoMerge, pair);
+            : toPair(scan.entityType, a, b, "strict", 1, scan.evidenceCounts);
+        if (pair.reason === "strict" && !(await ownerGateBlocksPair(db, pair))) addUniquePair(autoMerge, pair);
         else addUniquePair(queue, pair);
         continue;
       }
@@ -250,7 +404,7 @@ async function discoverPairs(
         for (let j = i + 1; j < ids.length; j += 1) {
           const a = entitiesById.get(ids[i]);
           const b = entitiesById.get(ids[j]);
-          if (a && b) addUniquePair(queue, toPair(scan.entityType, a, b, "ambiguous", 1));
+          if (a && b) addUniquePair(queue, toPair(scan.entityType, a, b, "ambiguous", 1, scan.evidenceCounts));
         }
       }
     }
@@ -265,7 +419,10 @@ async function discoverPairs(
           const a = entitiesById.get(ids[i]);
           const b = entitiesById.get(ids[j]);
           if (!a || !b) continue;
-          addUniquePair(queue, toPair(scan.entityType, a, b, ids.length === 2 ? "token-set" : "ambiguous", 1));
+          addUniquePair(
+            queue,
+            toPair(scan.entityType, a, b, ids.length === 2 ? "token-set" : "ambiguous", 1, scan.evidenceCounts),
+          );
           seenExactPairKeys.add(key);
         }
       }
@@ -282,7 +439,28 @@ async function discoverPairs(
         if (seenExactPairKeys.has(pairKey(entry.entityId, match.entityId))) continue;
         const matched = entitiesById.get(match.entityId);
         if (!matched) continue;
-        addUniquePair(queue, toPair(scan.entityType, entity, matched, "fuzzy", match.score));
+        addUniquePair(queue, toPair(scan.entityType, entity, matched, "fuzzy", match.score, scan.evidenceCounts));
+      }
+    }
+
+    if (!opts.noAdjacency && ADJACENCY_TYPES.has(scan.entityType as ProposeEntityType)) {
+      for (let i = 0; i < scan.entities.length; i += 1) {
+        for (let j = i + 1; j < scan.entities.length; j += 1) {
+          const a = scan.entities[i];
+          const b = scan.entities[j];
+          const key = pairKey(a.id, b.id);
+          if (autoMerge.has(key) || queue.has(key)) continue;
+          const sharedNeighbors = sharedAdjacencyNeighbors(
+            opts.adjacencyIndex.get(a.id) ?? new Set(),
+            opts.adjacencyIndex.get(b.id) ?? new Set(),
+          );
+          if (!passesAdjacencyFloors(a, b, sharedNeighbors, opts)) continue;
+          const score = overlapCoefficient(
+            opts.adjacencyIndex.get(a.id) ?? new Set(),
+            opts.adjacencyIndex.get(b.id) ?? new Set(),
+          );
+          addUniquePair(queue, toPair(scan.entityType, a, b, "adjacency", score, scan.evidenceCounts));
+        }
       }
     }
   }
@@ -314,7 +492,13 @@ async function queuePair(db: Kysely<DB>, pair: EntityDedupBackfillPair, userId: 
     candidateEntityId: pair.reason === "ambiguous" ? null : pair.survivorId,
     candidateScore: pair.reason === "ambiguous" ? null : pair.score,
     candidateReason:
-      pair.reason === "fuzzy" ? "minhash" : pair.reason === "token-set" ? "token-set" : "strict-normalized",
+      pair.reason === "fuzzy"
+        ? "minhash"
+        : pair.reason === "token-set"
+          ? "token-set"
+          : pair.reason === "adjacency"
+            ? "adjacency"
+            : "strict-normalized",
     triggeredByUserId: userId,
   });
 }
@@ -356,6 +540,14 @@ async function adjudicatePair(
   pair: EntityDedupBackfillPair,
   generator: AdjudicationGenerator,
 ): Promise<EntityDedupBackfillAdjudication> {
+  if (await ownerGateBlocksPair(db, pair)) {
+    return {
+      pair,
+      matchEntityId: null,
+      confidence: "low",
+      reason: "owner-scope mismatch",
+    };
+  }
   const loserContext = await buildEntityAdjudicationContext(db, pair.loserId);
   const survivorContext = await buildEntityAdjudicationContext(db, pair.survivorId);
   const verdict = await adjudicateEntityMatch(generator, loserContext, [survivorContext]);
@@ -452,6 +644,7 @@ async function adjudicateCandidates(
     }
     const adjudication = await adjudicatePair(db, pair, generator);
     result.adjudicated.push(adjudication);
+    if (adjudication.reason === "owner-scope mismatch") result.counts.ownerGateBlocked++;
     result.samples.adjudicated = result.adjudicated.slice(0, sampleLimit);
     processed += 1;
     if (processed % batchSize === 0) await yieldToEventLoop();
@@ -466,9 +659,29 @@ export async function runEntityDedupBackfill(
   const sampleLimit = options.sampleLimit ?? DEFAULT_SAMPLE_LIMIT;
   const fuzzyThreshold = options.fuzzyThreshold ?? DEFAULT_FUZZY_THRESHOLD;
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+  const adjacencyThreshold = options.adjacencyThreshold ?? DEFAULT_ADJACENCY_THRESHOLD;
+  const adjacencyMinShared = options.adjacencyMinShared ?? DEFAULT_ADJACENCY_MIN_SHARED;
+  const adjacencyThresholdNoLexical = options.adjacencyThresholdNoLexical ?? DEFAULT_ADJACENCY_THRESHOLD_NO_LEXICAL;
+  const noAdjacency = options.noAdjacency === true;
   const useLlm = options.useLlm !== false;
   const scans = await loadTypeScans(db);
-  const discovered = await discoverPairs(db, scans, { fuzzyThreshold, batchSize });
+  const adjacencyIndex = noAdjacency
+    ? new Map<string, NeighborSet>()
+    : await buildAdjacencyIndex(
+        db,
+        scans
+          .flatMap((scan) => (ADJACENCY_TYPES.has(scan.entityType as ProposeEntityType) ? scan.entities : []))
+          .map((entity) => entity.id),
+      );
+  const discovered = await discoverPairs(db, scans, {
+    fuzzyThreshold,
+    batchSize,
+    adjacencyThreshold,
+    adjacencyMinShared,
+    adjacencyThresholdNoLexical,
+    adjacencyIndex,
+    noAdjacency,
+  });
   const excludeIds = new Set(options.excludeEntityIds ?? []);
   const keepPair = (pair: EntityDedupBackfillPair): boolean =>
     !excludeIds.has(pair.survivorId) && !excludeIds.has(pair.loserId);
@@ -482,6 +695,10 @@ export async function runEntityDedupBackfill(
     merged: [],
     queued: [],
     skipped: [],
+    counts: {
+      adjacencyCandidates: queueCandidates.filter((pair) => pair.reason === "adjacency").length,
+      ownerGateBlocked: 0,
+    },
     samples: {
       autoMerge: autoMerge.slice(0, sampleLimit),
       queue: queueCandidates.slice(0, sampleLimit),
@@ -506,6 +723,7 @@ export async function runEntityDedupBackfill(
       }
       const adjudication = await adjudicatePair(db, resolved, generator);
       result.adjudicated.push(adjudication);
+      if (adjudication.reason === "owner-scope mismatch") result.counts.ownerGateBlocked++;
       result.samples.adjudicated = result.adjudicated.slice(0, sampleLimit);
       const handled = await applyAdjudication(db, adjudication, result, options, mergedAway);
       if (!handled) {
@@ -555,6 +773,8 @@ function printResult(result: EntityDedupBackfillResult): void {
         merged: result.merged.length,
         queued: result.queued.length,
         skipped: result.skipped.length,
+        adjacencyCandidates: result.counts.adjacencyCandidates,
+        ownerGateBlocked: result.counts.ownerGateBlocked,
         samples: result.samples,
       },
       null,
@@ -569,6 +789,8 @@ async function main(): Promise<void> {
       execute: { type: "boolean", default: false },
       "user-id": { type: "string", default: "entity-dedup-backfill" },
       "fuzzy-threshold": { type: "string", default: String(DEFAULT_FUZZY_THRESHOLD) },
+      "adjacency-threshold": { type: "string", default: String(DEFAULT_ADJACENCY_THRESHOLD) },
+      "no-adjacency": { type: "boolean", default: false },
       "sample-limit": { type: "string", default: String(DEFAULT_SAMPLE_LIMIT) },
       "exclude-entity": { type: "string" },
       "no-llm": { type: "boolean", default: false },
@@ -593,6 +815,8 @@ async function main(): Promise<void> {
       execute: parsed.values.execute,
       userId: parsed.values["user-id"],
       fuzzyThreshold: Number(parsed.values["fuzzy-threshold"]),
+      adjacencyThreshold: Number(parsed.values["adjacency-threshold"]),
+      noAdjacency: parsed.values["no-adjacency"] === true,
       sampleLimit: Number(parsed.values["sample-limit"]),
       useLlm,
       generator,

@@ -1,6 +1,8 @@
 import type { Kysely } from "kysely";
 import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { owningCompanyScope } from "./adjacency";
+import { LLM_RELATION_CONFIDENCE_THRESHOLD } from "./graph";
 import { readPersonEmailFromMetadata } from "./materialize-json";
 
 export type EntityAdjudicationConfidence = "high" | "medium" | "low";
@@ -35,6 +37,9 @@ export interface EntityContext {
   email: string | null;
   corporateDomains: string[];
   worksAtCompanies: string[];
+  contributors: string[];
+  owningCompany: string | null;
+  partOfParent: string | null;
   mentionFiles: EntityMentionFileContext[];
   coMentionedEntities: EntityCoMentionContext[];
 }
@@ -81,6 +86,9 @@ function renderContext(context: EntityContext): string {
     email: context.email,
     corporateDomains: context.corporateDomains,
     worksAtCompanies: context.worksAtCompanies,
+    contributors: context.contributors,
+    owningCompany: context.owningCompany,
+    partOfParent: context.partOfParent,
     mentionFiles: context.mentionFiles,
     coMentionedEntities: context.coMentionedEntities,
   });
@@ -117,6 +125,45 @@ export async function buildEntityAdjudicationContext(db: Kysely<DB>, entityId: s
     .limit(5)
     .execute();
 
+  const contributors = await db
+    .selectFrom("entity_relationships")
+    .innerJoin("entities as contributor", "contributor.id", "entity_relationships.source_entity_id")
+    .select("contributor.name")
+    .where("entity_relationships.target_entity_id", "=", entityId)
+    .where("entity_relationships.relationship_type", "in", ["contributes_to", "leads"])
+    .where("entity_relationships.valid_to", "is", null)
+    .where("entity_relationships.confidence", "!=", "AMBIGUOUS")
+    .where("entity_relationships.confidence_score", ">=", LLM_RELATION_CONFIDENCE_THRESHOLD)
+    .where("contributor.source_type", "in", ["person", "team"])
+    .where(whereLiveEntity("contributor"))
+    .orderBy("contributor.name", "asc")
+    .limit(5)
+    .execute();
+
+  const owningCompanyId = await owningCompanyScope(db, entityId);
+  const owningCompany = owningCompanyId
+    ? await db
+        .selectFrom("entities")
+        .select("name")
+        .where("id", "=", owningCompanyId)
+        .where(whereLiveEntity())
+        .executeTakeFirst()
+    : null;
+
+  const partOfParent = await db
+    .selectFrom("entity_relationships")
+    .innerJoin("entities as parent", "parent.id", "entity_relationships.target_entity_id")
+    .select("parent.name")
+    .where("entity_relationships.source_entity_id", "=", entityId)
+    .where("entity_relationships.relationship_type", "=", "part_of")
+    .where("entity_relationships.valid_to", "is", null)
+    .where("entity_relationships.confidence", "!=", "AMBIGUOUS")
+    .where("entity_relationships.confidence_score", ">=", LLM_RELATION_CONFIDENCE_THRESHOLD)
+    .where("parent.source_type", "in", ["project", "product"])
+    .where(whereLiveEntity("parent"))
+    .orderBy("parent.name", "asc")
+    .executeTakeFirst();
+
   const mentionFiles = await db
     .selectFrom("entity_mentions")
     .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
@@ -149,6 +196,9 @@ export async function buildEntityAdjudicationContext(db: Kysely<DB>, entityId: s
     email: readPersonEmailFromMetadata(entity.metadata),
     corporateDomains: corporateDomains.map((row) => row.domain),
     worksAtCompanies: worksAtCompanies.map((row) => row.name),
+    contributors: contributors.map((row) => row.name),
+    owningCompany: owningCompany?.name ?? null,
+    partOfParent: partOfParent?.name ?? null,
     mentionFiles: mentionFiles.map((row) => ({
       fileName: row.file_name,
       sourcePath: row.source_path,

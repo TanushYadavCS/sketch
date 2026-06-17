@@ -37,7 +37,8 @@ export type CandidateReason =
   | "birth-gated"
   | "strict-normalized"
   | "token-set"
-  | "minhash";
+  | "minhash"
+  | "adjacency";
 
 export interface ProposeInput {
   name: string;
