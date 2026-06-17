@@ -3,9 +3,13 @@ import {
   buildCandidatePool,
   findDedupCandidates,
   findFuzzyMatch,
+  findStrictMatches,
+  findTokenSetMatches,
   jaccard,
   lshBands,
   minhashSignature,
+  normalizeTokenSet,
+  removeFromCandidatePool,
   shingles,
 } from "./name-dedup";
 
@@ -44,5 +48,28 @@ describe("name-dedup", () => {
 
     expect(findFuzzyMatch("Sarah", sarahPool)).toBeNull();
     expect(findFuzzyMatch("KT", initialsPool)).toBeNull();
+  });
+
+  it("unifies a word-order permutation the strict key misses", () => {
+    const pool = buildCandidatePool([{ entityId: "ohoud", valueKind: "name", value: "Ohoud Zitan" }]);
+
+    expect(findStrictMatches("Zitan, Ohoud", pool)).toEqual([]);
+    expect(findTokenSetMatches("Zitan, Ohoud", pool)).toEqual([
+      { entityId: "ohoud", score: 1, valueKind: "name", value: "Ohoud Zitan" },
+    ]);
+  });
+
+  it("does not key bare single-token names", () => {
+    expect(normalizeTokenSet("Sanaa")).toBe("");
+    const pool = buildCandidatePool([{ entityId: "sanaa-a", valueKind: "name", value: "Sanaa" }]);
+    expect(findTokenSetMatches("Sanaa", pool)).toEqual([]);
+  });
+
+  it("prunes token-set buckets when an entity is removed", () => {
+    const pool = buildCandidatePool([{ entityId: "ohoud", valueKind: "name", value: "Ohoud Zitan" }]);
+    removeFromCandidatePool(pool, "ohoud");
+
+    expect(findTokenSetMatches("Zitan, Ohoud", pool)).toEqual([]);
+    expect(pool.byTokenSetKey.size).toBe(0);
   });
 });

@@ -14,6 +14,7 @@ interface IndexedCandidatePoolEntry extends CandidatePoolEntry {
 
 export interface CandidatePool {
   byStrictKey: Map<string, CandidatePoolEntry[]>;
+  byTokenSetKey: Map<string, CandidatePoolEntry[]>;
   shinglesByEntryKey: Map<string, Set<string>>;
   entriesByKey: Map<string, CandidatePoolEntry>;
   lshBucketsByBand: Map<string, string[]>;
@@ -38,6 +39,27 @@ export function normalizeStrict(name: string): string {
   return stripDomainSuffix(name)
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Order-insensitive key: lowercase, strip non-alphanumerics to spaces, then
+ * sort the tokens. `Ohoud Zitan` and `Zitan, Ohoud` both collapse to
+ * `ohoud zitan`, catching the "Last, First" vs "First Last" permutation class
+ * that {@link normalizeStrict} (order-preserving) misses.
+ *
+ * Returns `""` for fewer than two tokens. A single-token bag carries no
+ * reordering signal, so keying it would over-collapse bare first names
+ * (`Sanaa` vs an unrelated `Sanaa`). The caller treats `""` as "no key".
+ */
+export function normalizeTokenSet(name: string): string {
+  const tokens = stripDomainSuffix(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+  if (tokens.length < 2) return "";
+  return tokens.sort().join(" ");
 }
 
 export function normalizeFuzzy(name: string): string {
@@ -112,6 +134,7 @@ export function lshBands(signature: BigUint64Array, bandSize = BAND_SIZE): strin
 export function buildCandidatePool(entries: CandidatePoolEntry[]): CandidatePool {
   const pool: CandidatePool = {
     byStrictKey: new Map(),
+    byTokenSetKey: new Map(),
     shinglesByEntryKey: new Map(),
     entriesByKey: new Map(),
     lshBucketsByBand: new Map(),
@@ -128,6 +151,13 @@ export function addToCandidatePool(pool: CandidatePool, entries: CandidatePoolEn
       const bucket = pool.byStrictKey.get(strictKey);
       if (bucket) bucket.push(indexed);
       else pool.byStrictKey.set(strictKey, [indexed]);
+    }
+
+    const tokenSetKey = normalizeTokenSet(indexed.value);
+    if (tokenSetKey) {
+      const bucket = pool.byTokenSetKey.get(tokenSetKey);
+      if (bucket) bucket.push(indexed);
+      else pool.byTokenSetKey.set(tokenSetKey, [indexed]);
     }
 
     const entryShingles = shingles(indexed.value);
@@ -151,6 +181,12 @@ export function removeFromCandidatePool(pool: CandidatePool, entityId: string): 
     else if (filtered.length !== bucket.length) pool.byStrictKey.set(key, filtered);
   }
 
+  for (const [key, bucket] of pool.byTokenSetKey) {
+    const filtered = bucket.filter((entry) => entry.entityId !== entityId);
+    if (filtered.length === 0) pool.byTokenSetKey.delete(key);
+    else if (filtered.length !== bucket.length) pool.byTokenSetKey.set(key, filtered);
+  }
+
   const removedKeys = new Set<string>();
   for (const [entryKey, entry] of pool.entriesByKey) {
     if (entry.entityId === entityId) {
@@ -170,6 +206,20 @@ export function removeFromCandidatePool(pool: CandidatePool, entityId: string): 
 
 export function findStrictMatches(name: string, pool: CandidatePool): DedupHit[] {
   const matches = pool.byStrictKey.get(normalizeStrict(name)) ?? [];
+  return dedupeEntityMatches(matches.map((entry) => ({ ...entry, score: 1 })));
+}
+
+/**
+ * Order-insensitive matches: entities whose name/alias is a token-permutation
+ * of `name` (e.g. `Zitan, Ohoud` against an existing `Ohoud Zitan`). Score 1 —
+ * the token bag is identical — but unlike a strict match this is genuinely
+ * ambiguous (a reorder vs two namesakes like `Li Wang` / `Wang Li`), so callers
+ * must treat it as a recall candidate to adjudicate, not an auto-link.
+ */
+export function findTokenSetMatches(name: string, pool: CandidatePool): DedupHit[] {
+  const key = normalizeTokenSet(name);
+  if (!key) return [];
+  const matches = pool.byTokenSetKey.get(key) ?? [];
   return dedupeEntityMatches(matches.map((entry) => ({ ...entry, score: 1 })));
 }
 
@@ -199,7 +249,11 @@ export function findFuzzyMatches(name: string, pool: CandidatePool, opts: { thre
 
 export function findDedupCandidates(name: string, pool: CandidatePool, opts: { threshold?: number } = {}): DedupHit[] {
   const byEntity = new Map<string, DedupHit>();
-  for (const match of [...findStrictMatches(name, pool), ...findFuzzyMatches(name, pool, opts)]) {
+  for (const match of [
+    ...findStrictMatches(name, pool),
+    ...findTokenSetMatches(name, pool),
+    ...findFuzzyMatches(name, pool, opts),
+  ]) {
     const existing = byEntity.get(match.entityId);
     if (!existing || match.score > existing.score) byEntity.set(match.entityId, match);
   }
