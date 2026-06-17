@@ -1,12 +1,20 @@
 import { parseArgs } from "node:util";
 import type { Kysely, Selectable } from "kysely";
 import { loadConfig, validateConfig } from "../config";
+import { createGeminiGenerator } from "../connectors/gemini-generate";
 import { createDatabase } from "../db";
 import { runMigrations } from "../db/migrate";
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB, EntitiesTable } from "../db/schema";
+import {
+  type AdjudicationGenerator,
+  type EntityAdjudicationConfidence,
+  adjudicateEntityMatch,
+  buildEntityAdjudicationContext,
+} from "../entities/adjudicate";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "../entities/affiliations";
 import { readPersonEmailFromMetadata } from "../entities/materialize-json";
 import { mergeEntities, previewMerge } from "../entities/merge";
@@ -22,8 +30,11 @@ export interface EntityDedupBackfillOptions {
   fuzzyThreshold?: number;
   sampleLimit?: number;
   batchSize?: number;
+  useLlm?: boolean;
   /** Entity ids to leave untouched — any pair where either side matches is dropped. */
   excludeEntityIds?: string[];
+  /** Structured generator for adjudication (Gemini in prod; a fake in tests). */
+  generator?: AdjudicationGenerator;
 }
 
 export interface EntityDedupBackfillPair {
@@ -32,20 +43,29 @@ export interface EntityDedupBackfillPair {
   loserId: string;
   survivorName: string;
   loserName: string;
-  reason: "strict" | "fuzzy" | "ambiguous" | "person_scope_missing" | "person_scope_mismatch";
+  reason: "strict" | "fuzzy" | "token-set" | "ambiguous" | "person_scope_missing" | "person_scope_mismatch";
   score: number;
+}
+
+export interface EntityDedupBackfillAdjudication {
+  pair: EntityDedupBackfillPair;
+  matchEntityId: string | null;
+  confidence: EntityAdjudicationConfidence;
+  reason: string;
 }
 
 export interface EntityDedupBackfillResult {
   mode: "dry-run" | "execute";
   autoMergeCandidates: EntityDedupBackfillPair[];
   queuedCandidates: EntityDedupBackfillPair[];
+  adjudicated: EntityDedupBackfillAdjudication[];
   merged: EntityDedupBackfillPair[];
   queued: EntityDedupBackfillPair[];
   skipped: EntityDedupBackfillPair[];
   samples: {
     autoMerge: EntityDedupBackfillPair[];
     queue: EntityDedupBackfillPair[];
+    adjudicated: EntityDedupBackfillAdjudication[];
   };
 }
 
@@ -64,6 +84,14 @@ const DEFAULT_FUZZY_THRESHOLD = 0.85;
 const DEFAULT_SAMPLE_LIMIT = 10;
 const DEFAULT_BATCH_SIZE = 100;
 const BACKFILL_SOURCE = "entity_dedup_backfill";
+const REASON_RANK: Record<EntityDedupBackfillPair["reason"], number> = {
+  strict: 3,
+  "token-set": 2,
+  fuzzy: 1,
+  ambiguous: 0,
+  person_scope_missing: 0,
+  person_scope_mismatch: 0,
+};
 
 function parseAliases(raw: string | null): string[] {
   if (!raw) return [];
@@ -178,7 +206,11 @@ function classifyPersonStrictPair(pair: EntityDedupBackfillPair, scopes: PersonS
 function addUniquePair(map: Map<string, EntityDedupBackfillPair>, pair: EntityDedupBackfillPair): void {
   const key = pairKey(pair.survivorId, pair.loserId);
   const existing = map.get(key);
-  if (!existing || pair.score > existing.score) map.set(key, pair);
+  if (!existing || pair.score > existing.score) {
+    map.set(key, pair);
+    return;
+  }
+  if (pair.score === existing.score && REASON_RANK[pair.reason] > REASON_RANK[existing.reason]) map.set(key, pair);
 }
 
 async function discoverPairs(
@@ -194,15 +226,13 @@ async function discoverPairs(
   for (const scan of scans) {
     const entitiesById = new Map(scan.entities.map((entity) => [entity.id, entity]));
     const pool = buildCandidatePool(scan.entries);
-    const strictPairKeys = new Set<string>();
+    const seenExactPairKeys = new Set<string>();
 
     for (const bucket of pool.byStrictKey.values()) {
       const ids = [...new Set(bucket.map((entry) => entry.entityId))].sort();
       if (ids.length < 2) continue;
       for (let i = 0; i < ids.length; i += 1) {
-        for (let j = i + 1; j < ids.length; j += 1) {
-          strictPairKeys.add(pairKey(ids[i], ids[j]));
-        }
+        for (let j = i + 1; j < ids.length; j += 1) seenExactPairKeys.add(pairKey(ids[i], ids[j]));
       }
       if (ids.length === 2) {
         const a = entitiesById.get(ids[0]);
@@ -225,6 +255,22 @@ async function discoverPairs(
       }
     }
 
+    for (const bucket of pool.byTokenSetKey.values()) {
+      const ids = [...new Set(bucket.map((entry) => entry.entityId))].sort();
+      if (ids.length < 2) continue;
+      for (let i = 0; i < ids.length; i += 1) {
+        for (let j = i + 1; j < ids.length; j += 1) {
+          const key = pairKey(ids[i], ids[j]);
+          if (seenExactPairKeys.has(key)) continue;
+          const a = entitiesById.get(ids[i]);
+          const b = entitiesById.get(ids[j]);
+          if (!a || !b) continue;
+          addUniquePair(queue, toPair(scan.entityType, a, b, ids.length === 2 ? "token-set" : "ambiguous", 1));
+          seenExactPairKeys.add(key);
+        }
+      }
+    }
+
     let scanned = 0;
     for (const entry of scan.entries) {
       scanned += 1;
@@ -233,7 +279,7 @@ async function discoverPairs(
       if (!entity) continue;
       for (const match of findFuzzyMatches(entry.value, pool, { threshold: opts.fuzzyThreshold })) {
         if (match.entityId === entry.entityId) continue;
-        if (strictPairKeys.has(pairKey(entry.entityId, match.entityId))) continue;
+        if (seenExactPairKeys.has(pairKey(entry.entityId, match.entityId))) continue;
         const matched = entitiesById.get(match.entityId);
         if (!matched) continue;
         addUniquePair(queue, toPair(scan.entityType, entity, matched, "fuzzy", match.score));
@@ -267,7 +313,8 @@ async function queuePair(db: Kysely<DB>, pair: EntityDedupBackfillPair, userId: 
     sourceId: persistedPairKey(pair.survivorId, pair.loserId),
     candidateEntityId: pair.reason === "ambiguous" ? null : pair.survivorId,
     candidateScore: pair.reason === "ambiguous" ? null : pair.score,
-    candidateReason: pair.reason === "fuzzy" ? "minhash" : "strict-normalized",
+    candidateReason:
+      pair.reason === "fuzzy" ? "minhash" : pair.reason === "token-set" ? "token-set" : "strict-normalized",
     triggeredByUserId: userId,
   });
 }
@@ -304,6 +351,113 @@ async function resolveQueuedPair(
   };
 }
 
+async function adjudicatePair(
+  db: Kysely<DB>,
+  pair: EntityDedupBackfillPair,
+  generator: AdjudicationGenerator,
+): Promise<EntityDedupBackfillAdjudication> {
+  const loserContext = await buildEntityAdjudicationContext(db, pair.loserId);
+  const survivorContext = await buildEntityAdjudicationContext(db, pair.survivorId);
+  const verdict = await adjudicateEntityMatch(generator, loserContext, [survivorContext]);
+  return {
+    pair,
+    matchEntityId: verdict.matchEntityId,
+    confidence: verdict.confidence,
+    reason: verdict.reason,
+  };
+}
+
+async function applyAutoMerges(
+  db: Kysely<DB>,
+  pairs: EntityDedupBackfillPair[],
+  result: EntityDedupBackfillResult,
+  options: EntityDedupBackfillOptions,
+  mergedAway: Set<string>,
+  batchSize: number,
+): Promise<void> {
+  let processed = 0;
+  for (const pair of pairs) {
+    if (pair.survivorId === pair.loserId || mergedAway.has(pair.survivorId) || mergedAway.has(pair.loserId)) {
+      result.skipped.push(pair);
+      continue;
+    }
+    processed += 1;
+    const preview = await previewMerge(db, { survivorId: pair.survivorId, loserId: pair.loserId });
+    if (preview.blocked) {
+      result.skipped.push(pair);
+      continue;
+    }
+    await mergeEntities(db, { survivorId: pair.survivorId, loserId: pair.loserId, userId: options.userId });
+    mergedAway.add(pair.loserId);
+    result.merged.push(pair);
+    if (processed % batchSize === 0) await yieldToEventLoop();
+  }
+}
+
+async function applyAdjudication(
+  db: Kysely<DB>,
+  adjudication: EntityDedupBackfillAdjudication,
+  result: EntityDedupBackfillResult,
+  options: EntityDedupBackfillOptions,
+  mergedAway: Set<string>,
+): Promise<boolean> {
+  const pair = adjudication.pair;
+  if (pair.survivorId === pair.loserId || mergedAway.has(pair.survivorId) || mergedAway.has(pair.loserId)) {
+    result.skipped.push(pair);
+    return true;
+  }
+  if (adjudication.confidence !== "high") return false;
+  if (adjudication.matchEntityId === pair.survivorId) {
+    const preview = await previewMerge(db, { survivorId: pair.survivorId, loserId: pair.loserId });
+    if (preview.blocked) {
+      result.skipped.push(pair);
+      return true;
+    }
+    await mergeEntities(db, { survivorId: pair.survivorId, loserId: pair.loserId, userId: options.userId });
+    mergedAway.add(pair.loserId);
+    result.merged.push(pair);
+    return true;
+  }
+  if (adjudication.matchEntityId === null) {
+    const reviewRepo = createEntityReviewRepo(db);
+    await reviewRepo.addRejection({
+      entityId: pair.survivorId,
+      rejectedName: pair.loserName,
+      rejectedBy: options.userId,
+    });
+    await reviewRepo.addRejection({
+      entityId: pair.loserId,
+      rejectedName: pair.survivorName,
+      rejectedBy: options.userId,
+    });
+    return true;
+  }
+  return false;
+}
+
+async function adjudicateCandidates(
+  db: Kysely<DB>,
+  result: EntityDedupBackfillResult,
+  queueCandidates: EntityDedupBackfillPair[],
+  generator: AdjudicationGenerator,
+  sampleLimit: number,
+  batchSize: number,
+  mergedAway: Set<string>,
+): Promise<void> {
+  let processed = 0;
+  for (const pair of queueCandidates) {
+    if (pair.survivorId === pair.loserId || mergedAway.has(pair.survivorId) || mergedAway.has(pair.loserId)) {
+      result.skipped.push(pair);
+      continue;
+    }
+    const adjudication = await adjudicatePair(db, pair, generator);
+    result.adjudicated.push(adjudication);
+    result.samples.adjudicated = result.adjudicated.slice(0, sampleLimit);
+    processed += 1;
+    if (processed % batchSize === 0) await yieldToEventLoop();
+  }
+}
+
 export async function runEntityDedupBackfill(
   db: Kysely<DB>,
   options: EntityDedupBackfillOptions,
@@ -312,6 +466,7 @@ export async function runEntityDedupBackfill(
   const sampleLimit = options.sampleLimit ?? DEFAULT_SAMPLE_LIMIT;
   const fuzzyThreshold = options.fuzzyThreshold ?? DEFAULT_FUZZY_THRESHOLD;
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+  const useLlm = options.useLlm !== false;
   const scans = await loadTypeScans(db);
   const discovered = await discoverPairs(db, scans, { fuzzyThreshold, batchSize });
   const excludeIds = new Set(options.excludeEntityIds ?? []);
@@ -323,31 +478,57 @@ export async function runEntityDedupBackfill(
     mode: execute ? "execute" : "dry-run",
     autoMergeCandidates: autoMerge,
     queuedCandidates: queueCandidates,
+    adjudicated: [],
     merged: [],
     queued: [],
     skipped: [],
     samples: {
       autoMerge: autoMerge.slice(0, sampleLimit),
       queue: queueCandidates.slice(0, sampleLimit),
+      adjudicated: [],
     },
   };
 
+  const generator = options.generator;
+  if (useLlm && generator && queueCandidates.length > 0) {
+    if (!execute) {
+      await adjudicateCandidates(db, result, queueCandidates, generator, sampleLimit, batchSize, new Set());
+      return result;
+    }
+    const mergedAway = new Set<string>();
+    await applyAutoMerges(db, autoMerge, result, options, mergedAway, batchSize);
+    let processed = 0;
+    for (const pair of queueCandidates) {
+      const resolved = await resolveQueuedPair(db, pair);
+      if (!resolved) {
+        result.skipped.push(pair);
+        continue;
+      }
+      const adjudication = await adjudicatePair(db, resolved, generator);
+      result.adjudicated.push(adjudication);
+      result.samples.adjudicated = result.adjudicated.slice(0, sampleLimit);
+      const handled = await applyAdjudication(db, adjudication, result, options, mergedAway);
+      if (!handled) {
+        await queuePair(db, resolved, options.userId);
+        result.queued.push(resolved);
+      }
+      processed += 1;
+      if (processed % batchSize === 0) await yieldToEventLoop();
+    }
+    return result;
+  }
+
   if (!execute) return result;
 
+  const mergedAway = new Set<string>();
+  await applyAutoMerges(db, autoMerge, result, options, mergedAway, batchSize);
+
   let processed = 0;
-  for (const pair of autoMerge) {
-    processed += 1;
-    const preview = await previewMerge(db, { survivorId: pair.survivorId, loserId: pair.loserId });
-    if (preview.blocked) {
+  for (const pair of queueCandidates) {
+    if (pair.survivorId === pair.loserId || mergedAway.has(pair.survivorId) || mergedAway.has(pair.loserId)) {
       result.skipped.push(pair);
       continue;
     }
-    await mergeEntities(db, { survivorId: pair.survivorId, loserId: pair.loserId, userId: options.userId });
-    result.merged.push(pair);
-    if (processed % batchSize === 0) await yieldToEventLoop();
-  }
-
-  for (const pair of queueCandidates) {
     processed += 1;
     const resolved = await resolveQueuedPair(db, pair);
     if (!resolved) {
@@ -370,6 +551,7 @@ function printResult(result: EntityDedupBackfillResult): void {
         mode: result.mode,
         autoMergeCandidates: result.autoMergeCandidates.length,
         queuedCandidates: result.queuedCandidates.length,
+        adjudicated: result.adjudicated.length,
         merged: result.merged.length,
         queued: result.queued.length,
         skipped: result.skipped.length,
@@ -389,6 +571,7 @@ async function main(): Promise<void> {
       "fuzzy-threshold": { type: "string", default: String(DEFAULT_FUZZY_THRESHOLD) },
       "sample-limit": { type: "string", default: String(DEFAULT_SAMPLE_LIMIT) },
       "exclude-entity": { type: "string" },
+      "no-llm": { type: "boolean", default: false },
     },
   });
   const config = loadConfig();
@@ -396,11 +579,23 @@ async function main(): Promise<void> {
   const db = await createDatabase(config);
   try {
     await runMigrations(db);
+    const useLlm = parsed.values["no-llm"] !== true;
+    let generator: AdjudicationGenerator | undefined;
+    if (useLlm) {
+      const settingsRow = await createSettingsRepository(db, config.ENCRYPTION_KEY).get();
+      if (settingsRow?.gemini_api_key) {
+        generator = createGeminiGenerator(settingsRow.gemini_api_key);
+      } else {
+        console.warn("No Gemini API key in settings; adjudication disabled — pairs fall back to the review queue.");
+      }
+    }
     const result = await runEntityDedupBackfill(db, {
       execute: parsed.values.execute,
       userId: parsed.values["user-id"],
       fuzzyThreshold: Number(parsed.values["fuzzy-threshold"]),
       sampleLimit: Number(parsed.values["sample-limit"]),
+      useLlm,
+      generator,
       excludeEntityIds: parsed.values["exclude-entity"]
         ?.split(",")
         .map((id) => id.trim())
