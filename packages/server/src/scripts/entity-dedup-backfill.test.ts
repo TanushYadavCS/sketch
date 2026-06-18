@@ -152,6 +152,27 @@ describe("entity dedup backfill", () => {
       }),
     ]);
     await expect(db.selectFrom("entity_merges").selectAll().execute()).resolves.toHaveLength(0);
-    await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(1);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(1);
+    expect(queue[0]?.source_id).not.toContain("\0");
+  });
+
+  it("re-resolves queued pairs after strict auto-merges", async () => {
+    await seedEntity(db, { id: "redseer-a", name: "Redseer Consulting", type: "company" });
+    await seedEntity(db, { id: "redseer-b", name: "RedseerConsulting", type: "company" });
+    await seedEntity(db, { id: "redseer-c", name: "Redseer Consultng", type: "company" });
+
+    const result = await runEntityDedupBackfill(db, { execute: true, userId: USER_ID, fuzzyThreshold: 0.7 });
+
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["deleted_at", "merged_into_entity_id"])
+        .where("id", "=", "redseer-b")
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ merged_into_entity_id: "redseer-a" });
+    expect(result.queued.some((pair) => pair.survivorId === "redseer-b" || pair.loserId === "redseer-b")).toBe(false);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue.some((row) => row.candidate_entity_id === "redseer-b")).toBe(false);
   });
 });

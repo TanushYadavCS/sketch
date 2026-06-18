@@ -79,6 +79,10 @@ function pairKey(a: string, b: string): string {
   return [a, b].sort().join("\0");
 }
 
+function persistedPairKey(a: string, b: string): string {
+  return [a, b].sort().map(encodeURIComponent).join("~");
+}
+
 function chooseSurvivor(a: Entity, b: Entity): { survivor: Entity; loser: Entity } {
   const sorted = [a, b].sort((left, right) => {
     if (right.hotness !== left.hotness) return right.hotness - left.hotness;
@@ -260,12 +264,44 @@ async function queuePair(db: Kysely<DB>, pair: EntityDedupBackfillPair, userId: 
     normalizedName: `${BACKFILL_SOURCE}:${pair.entityType}:${normalizeStrict(pair.survivorName || pair.loserName)}`,
     entityType: pair.entityType,
     source: BACKFILL_SOURCE,
-    sourceId: pairKey(pair.survivorId, pair.loserId),
+    sourceId: persistedPairKey(pair.survivorId, pair.loserId),
     candidateEntityId: pair.reason === "ambiguous" ? null : pair.survivorId,
     candidateScore: pair.reason === "ambiguous" ? null : pair.score,
     candidateReason: pair.reason === "fuzzy" ? "minhash" : "strict-normalized",
     triggeredByUserId: userId,
   });
+}
+
+async function resolveLiveEntity(db: Kysely<DB>, entityId: string): Promise<Entity | null> {
+  const seen = new Set<string>();
+  let currentId: string | null = entityId;
+
+  while (currentId) {
+    if (seen.has(currentId)) return null;
+    seen.add(currentId);
+    const row = await db.selectFrom("entities").selectAll().where("id", "=", currentId).executeTakeFirst();
+    if (!row) return null;
+    if (!row.deleted_at && !row.merged_into_entity_id) return row;
+    currentId = row.merged_into_entity_id;
+  }
+
+  return null;
+}
+
+async function resolveQueuedPair(
+  db: Kysely<DB>,
+  pair: EntityDedupBackfillPair,
+): Promise<EntityDedupBackfillPair | null> {
+  const survivor = await resolveLiveEntity(db, pair.survivorId);
+  const loser = await resolveLiveEntity(db, pair.loserId);
+  if (!survivor || !loser || survivor.id === loser.id) return null;
+  return {
+    ...pair,
+    survivorId: survivor.id,
+    loserId: loser.id,
+    survivorName: survivor.name,
+    loserName: loser.name,
+  };
 }
 
 export async function runEntityDedupBackfill(
@@ -313,8 +349,14 @@ export async function runEntityDedupBackfill(
 
   for (const pair of queueCandidates) {
     processed += 1;
-    await queuePair(db, pair, options.userId);
-    result.queued.push(pair);
+    const resolved = await resolveQueuedPair(db, pair);
+    if (!resolved) {
+      result.skipped.push(pair);
+      if (processed % batchSize === 0) await yieldToEventLoop();
+      continue;
+    }
+    await queuePair(db, resolved, options.userId);
+    result.queued.push(resolved);
     if (processed % batchSize === 0) await yieldToEventLoop();
   }
 
