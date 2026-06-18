@@ -11,6 +11,7 @@ let mockAuth: { role: "admin" | "member"; email: string; userId?: string } = {
   role: "admin",
   email: "admin@test.com",
 };
+const mockNavigate = vi.fn();
 
 function setMockAuth(auth: Partial<typeof mockAuth>) {
   mockAuth = { ...mockAuth, ...auth };
@@ -21,11 +22,13 @@ vi.mock("@tanstack/react-router", async () => {
   return {
     ...actual,
     useRouteContext: () => ({ auth: mockAuth }),
+    useNavigate: () => mockNavigate,
   };
 });
 
 afterEach(() => {
   mockAuth = { role: "admin", email: "admin@test.com" };
+  mockNavigate.mockReset();
 });
 
 function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTaskListItem {
@@ -284,6 +287,26 @@ describe("ScheduledTasksPage", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Paused")).toBeInTheDocument();
+    });
+  });
+
+  it("opens the builder from the actions menu", async () => {
+    installTaskHandlers([buildTask()]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Post the Monday revenue summary")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
+    await user.click(screen.getByRole("menuitem", { name: /open builder/i }));
+
+    expect(mockNavigate).toHaveBeenCalledWith({
+      to: "/scheduled-tasks/$taskId/edit",
+      params: { taskId: "task-1" },
+      search: {},
     });
   });
 

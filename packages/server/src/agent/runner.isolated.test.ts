@@ -26,7 +26,13 @@ vi.mock("./sketch-tools", () => {
       return [];
     }
   }
+  class MockAutomationArtifactCollector {
+    drain() {
+      return [];
+    }
+  }
   return {
+    AutomationArtifactCollector: MockAutomationArtifactCollector,
     UploadCollector: MockUploadCollector,
     createSketchMcpServer: vi.fn().mockReturnValue({}),
   };

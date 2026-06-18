@@ -11,6 +11,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Insertable, Kysely, Selectable } from "kysely";
+import { sql } from "kysely";
 import type { DB, ScheduledTasksTable } from "../schema";
 
 export type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
@@ -32,6 +33,7 @@ export interface UpdatableFields {
   output_platform: string | null;
   output_thread_ts: string | null;
   output_mode: string;
+  last_edited_by: string | null;
 }
 
 export function createScheduledTaskRepository(db: Kysely<DB>) {
@@ -85,7 +87,11 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
       if (!existing) return undefined;
 
       if (Object.keys(fields).length > 0) {
-        await db.updateTable("scheduled_tasks").set(fields).where("id", "=", id).execute();
+        await db
+          .updateTable("scheduled_tasks")
+          .set({ ...fields, updated_at: sql`CURRENT_TIMESTAMP` })
+          .where("id", "=", id)
+          .execute();
       }
 
       return db.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
@@ -100,7 +106,11 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
     },
 
     async updateStatus(id: string, status: "active" | "paused" | "completed"): Promise<void> {
-      await db.updateTable("scheduled_tasks").set({ status }).where("id", "=", id).execute();
+      await db
+        .updateTable("scheduled_tasks")
+        .set({ status, updated_at: sql`CURRENT_TIMESTAMP` })
+        .where("id", "=", id)
+        .execute();
     },
 
     async remove(id: string): Promise<boolean> {

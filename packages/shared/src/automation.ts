@@ -1,0 +1,162 @@
+import { z } from "zod";
+
+export const workflowTriggerConfigSchema = z.object({
+  type: z.enum(["webhook", "schedule", "canvas"]),
+  scheduleType: z.enum(["cron", "interval", "once"]).optional(),
+  scheduleValue: z.string().optional(),
+  timezone: z.string().optional(),
+  app: z.string().optional(),
+  eventDescription: z.string().optional(),
+  componentKey: z.string().optional(),
+  configuredProps: z.record(z.string(), z.unknown()).optional(),
+  status: z.enum(["pending_canvas_setup", "active", "error"]).optional(),
+  canvasWorkflowId: z.string().optional(),
+  canvasTriggerNodeId: z.string().optional(),
+  canvasActionNodeId: z.string().optional(),
+  errorMessage: z.string().optional(),
+});
+
+export type WorkflowTriggerConfig = z.infer<typeof workflowTriggerConfigSchema>;
+
+export const workflowStepSchema = z.object({
+  id: z.string().trim().min(1),
+  type: z.enum(["trigger", "action", "agent"]),
+  label: z.string().trim().min(1),
+  icon: z.string().trim().min(1).default("circle"),
+  position: z.object({ x: z.number(), y: z.number() }).default({ x: 0, y: 0 }),
+  agentMode: z.enum(["light", "sketch"]).optional(),
+  agentSkills: z.array(z.string()).optional(),
+  agentModel: z.string().optional(),
+  agentMcpServers: z.array(z.string()).optional(),
+  timeout: z.number().int().positive().optional(),
+  triggerConfig: workflowTriggerConfigSchema.optional(),
+});
+
+export type WorkflowStep = z.infer<typeof workflowStepSchema>;
+
+export const workflowEdgeSchema = z.object({
+  id: z.string().trim().min(1),
+  from: z.string().trim().min(1),
+  to: z.string().trim().min(1),
+  condition: z.string().optional(),
+  label: z.string().optional(),
+});
+
+export type WorkflowEdge = z.infer<typeof workflowEdgeSchema>;
+
+export const workflowDeliverySchema = z.object({
+  platform: z.enum(["slack", "whatsapp"]),
+  targetType: z.enum(["dm", "channel", "group", "thread"]),
+  targetId: z.string().trim().min(1),
+  threadTs: z.string().nullable(),
+  mode: z.enum(["deliver", "silent"]),
+  label: z.string().optional(),
+});
+
+export type WorkflowDelivery = z.infer<typeof workflowDeliverySchema>;
+
+export const automationStepContentSchema = z.object({
+  taskId: z.string(),
+  stepId: z.string(),
+  contentType: z.enum(["prompt", "script"]),
+  content: z.string(),
+  apps: z.array(z.string()).nullable(),
+  updatedAt: z.string().nullable().optional(),
+});
+
+export type AutomationStepContent = z.infer<typeof automationStepContentSchema>;
+
+export const stepOutputSchema = z.object({
+  output: z.unknown(),
+  status: z.enum(["completed", "failed", "skipped"]),
+  duration_ms: z.number(),
+  error: z.object({ message: z.string(), stack: z.string().optional() }).optional(),
+});
+
+export type StepOutput = z.infer<typeof stepOutputSchema>;
+
+export const automationRunSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  triggerData: z.unknown().nullable(),
+  status: z.enum(["running", "completed", "failed"]),
+  stepOutputs: z.record(z.string(), stepOutputSchema),
+  errorMessage: z.string().nullable(),
+  startedAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+
+export type AutomationRun = z.infer<typeof automationRunSchema>;
+
+export const automationDefinitionSchema = z.object({
+  id: z.string(),
+  platform: z.enum(["slack", "whatsapp"]),
+  contextType: z.enum(["dm", "channel", "group"]),
+  deliveryTarget: z.string(),
+  threadTs: z.string().nullable(),
+  prompt: z.string(),
+  scheduleType: z.enum(["cron", "interval", "once", "external"]),
+  scheduleValue: z.string(),
+  timezone: z.string(),
+  sessionMode: z.literal("fresh"),
+  nextRunAt: z.string().nullable(),
+  lastRunAt: z.string().nullable(),
+  status: z.enum(["active", "paused", "completed"]),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  revision: z.number().int().nonnegative(),
+  title: z.string().nullable(),
+  description: z.string().nullable(),
+  delivery: workflowDeliverySchema,
+  steps: z.array(workflowStepSchema),
+  edges: z.array(workflowEdgeSchema),
+  stepContent: z.record(z.string(), automationStepContentSchema),
+  latestRun: automationRunSchema.nullable(),
+  recentRuns: z.array(automationRunSchema),
+});
+
+export type AutomationDefinition = z.infer<typeof automationDefinitionSchema>;
+
+export const automationArtifactSchema = z.object({
+  taskId: z.string(),
+  kind: z.string().default("New automation"),
+  title: z.string(),
+  description: z.string(),
+  tags: z.array(z.string()),
+  scheduleLabel: z.string(),
+  deliveryLabel: z.string(),
+  builderUrl: z.string(),
+  status: z.enum(["active", "paused", "completed"]),
+});
+
+export type AutomationArtifact = z.infer<typeof automationArtifactSchema>;
+
+export const automationBuilderSaveRequestSchema = z.object({
+  expectedRevision: z.number().int().nonnegative().optional(),
+  title: z.string().trim().min(1).nullable(),
+  description: z.string().nullable(),
+  prompt: z.string().trim().min(1),
+  scheduleType: z.enum(["cron", "interval", "once", "external"]),
+  scheduleValue: z.string().trim().min(1),
+  timezone: z.string().trim().min(1),
+  status: z.enum(["active", "paused", "completed"]),
+  delivery: workflowDeliverySchema,
+  steps: z.array(workflowStepSchema).min(2),
+  edges: z.array(workflowEdgeSchema),
+  stepContent: z.record(z.string(), automationStepContentSchema),
+});
+
+export type AutomationBuilderSaveRequest = z.infer<typeof automationBuilderSaveRequestSchema>;
+
+export type AutomationUiStepStatus = "idle" | "running" | "success" | "failed" | "skipped";
+
+export function automationUiStatusFromRunStatus(
+  status: StepOutput["status"] | "running" | undefined,
+): AutomationUiStepStatus {
+  if (!status) return "idle";
+  if (status === "completed") return "success";
+  if (status === "failed") return "failed";
+  if (status === "skipped") return "skipped";
+  return "running";
+}

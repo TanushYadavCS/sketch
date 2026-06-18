@@ -42,7 +42,7 @@ import { Skeleton } from "@sketch/ui/components/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createRoute } from "@tanstack/react-router";
+import { createRoute, useNavigate } from "@tanstack/react-router";
 import { type MouseEvent, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
@@ -167,6 +167,7 @@ function formatDelivery(task: ScheduledTaskListItem): string {
 
 export function ScheduledTasksPage() {
   const auth = useDashboardAuth();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [deletingTask, setDeletingTask] = useState<ScheduledTaskListItem | null>(null);
@@ -262,6 +263,9 @@ export function ScheduledTasksPage() {
                   onResume={() => resumeMutation.mutate(task.id)}
                   onDelete={() => setDeletingTask(task)}
                   onTrigger={() => triggerMutation.mutate(task.id)}
+                  onOpenBuilder={() =>
+                    navigate({ to: "/scheduled-tasks/$taskId/edit", params: { taskId: task.id }, search: {} })
+                  }
                 />
               ))}
             </div>
@@ -310,6 +314,7 @@ function TaskRow({
   onResume,
   onDelete,
   onTrigger,
+  onOpenBuilder,
 }: {
   task: ScheduledTaskListItem;
   isAdmin: boolean;
@@ -321,13 +326,14 @@ function TaskRow({
   onResume: () => void;
   onDelete: () => void;
   onTrigger: () => void;
+  onOpenBuilder: () => void;
 }) {
   const multi = isMultiStep(task);
   const canvasManaged = isCanvasManaged(task);
   const displayName = task.title ?? task.prompt;
   const stepSummary = multi ? getStepSummary(task) : null;
   const lastRunLabel = formatRelativeTime(task.lastRunAt);
-  const hasActions = task.canPause || task.canResume || task.canDelete || task.status === "active";
+  const hasActions = true;
 
   return (
     <div className={cn(!isLast && "border-b border-border")}>
@@ -407,6 +413,10 @@ function TaskRow({
                   Run now
                 </DropdownMenuItem>
               ) : null}
+              <DropdownMenuItem onClick={onOpenBuilder}>
+                <LightningIcon size={16} />
+                Open Builder
+              </DropdownMenuItem>
               {task.canPause ? (
                 <DropdownMenuItem disabled={isMutating} onClick={onPause}>
                   <PauseIcon size={16} />

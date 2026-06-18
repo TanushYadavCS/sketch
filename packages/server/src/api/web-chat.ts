@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
+import { type AutomationArtifact, automationArtifactSchema } from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
@@ -93,7 +94,10 @@ interface WebChatFile {
   sizeBytes: number;
 }
 
-type WebChatTranscriptPart = { type: "text"; text: string } | { type: "data-file"; id: string; data: WebChatFile };
+type WebChatTranscriptPart =
+  | { type: "text"; text: string }
+  | { type: "data-file"; id: string; data: WebChatFile }
+  | { type: "data-automation"; id: string; data: AutomationArtifact };
 type WebChatProgressTranscriptPart = { type: "data-progress"; id: string; data: { lines: string[] } };
 type WebChatStoredPart = WebChatTranscriptPart | WebChatProgressTranscriptPart;
 
@@ -131,6 +135,7 @@ type WebChatUiChunk =
   | { type: "start-step" }
   | { type: "data-progress"; id: string; data: { lines: string[] } }
   | { type: "data-file"; id: string; data: WebChatFile }
+  | { type: "data-automation"; id: string; data: AutomationArtifact }
   | { type: "text-start"; id: string }
   | { type: "text-delta"; id: string; delta: string }
   | { type: "text-end"; id: string }
@@ -449,6 +454,11 @@ function sanitizeTranscriptPart(part: unknown): WebChatStoredPart | null {
     if (!Array.isArray(lines) || !lines.every((line) => typeof line === "string")) return null;
     return { type: "data-progress", id: part.id, data: { lines } };
   }
+  if (part.type === "data-automation" && typeof part.id === "string") {
+    const artifact = automationArtifactSchema.safeParse(part.data);
+    if (!artifact.success) return null;
+    return { type: "data-automation", id: part.id, data: artifact.data };
+  }
   if (part.type !== "data-file" || typeof part.id !== "string" || !isRecord(part.data)) return null;
 
   const { name, url, mediaType, sizeBytes } = part.data;
@@ -563,11 +573,15 @@ function createProgressTranscriptMessage(id: string, lines = ["Thinking…"]): W
 function createAssistantTranscriptMessage(
   finalText: string,
   files: Array<{ id: string; data: WebChatFile }>,
+  automations: Array<{ id: string; data: AutomationArtifact }> = [],
 ): WebChatTranscriptMessage | null {
   const parts: WebChatTranscriptPart[] = [];
   if (finalText) parts.push({ type: "text", text: finalText });
   for (const file of files) {
     parts.push({ type: "data-file", id: file.id, data: file.data });
+  }
+  for (const automation of automations) {
+    parts.push({ type: "data-automation", id: automation.id, data: automation.data });
   }
   if (parts.length === 0) return null;
   return { id: `assistant-${randomUUID()}`, role: "assistant", createdAt: new Date().toISOString(), parts };
@@ -1091,6 +1105,13 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           fileParts.push({ id, data: file });
           write({ type: "data-file", id, data: file });
         }
+        const automationParts = (result.trace.automationArtifacts ?? []).map((artifact, index) => ({
+          id: `automation-${index}`,
+          data: artifact,
+        }));
+        for (const automation of automationParts) {
+          write({ type: "data-automation", id: automation.id, data: automation.data });
+        }
 
         await completeWebChatProgressMessage(
           deps.config,
@@ -1099,7 +1120,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           deps.logger,
           conversationId,
           progressMessageId,
-          createAssistantTranscriptMessage(finalText, fileParts),
+          createAssistantTranscriptMessage(finalText, fileParts, automationParts),
         );
       } catch (err) {
         if (abortController.signal.aborted) return;

@@ -7,13 +7,32 @@ import type { SkillCategory } from "@/lib/skills-data";
 import type {
   AgentEnvironmentShareTargetInput,
   AgentEnvironmentVariableRecord,
+  AutomationArtifact,
+  AutomationBuilderSaveRequest,
+  AutomationDefinition,
+  AutomationRun,
+  AutomationStepContent,
   FileMetadata,
   IntegrationApp,
   IntegrationConnection,
   LlmProvider,
   McpServerRecord,
   PageInfo,
+  StepOutput,
+  WorkflowEdge,
+  WorkflowStep,
 } from "@sketch/shared";
+
+export type {
+  AutomationArtifact,
+  AutomationBuilderSaveRequest,
+  AutomationDefinition,
+  AutomationRun,
+  AutomationStepContent,
+  StepOutput,
+  WorkflowEdge,
+  WorkflowStep,
+};
 
 export type WorkspaceScope = "personal" | "org";
 
@@ -972,6 +991,7 @@ export interface DailyBriefResponse {
 export type WebChatMessagePart =
   | { type: "text"; text: string }
   | { type: "data-progress"; id: string; data: { lines: string[] } }
+  | { type: "data-automation"; id: string; data: AutomationArtifact }
   | {
       type: "data-file";
       id: string;
@@ -1713,6 +1733,28 @@ export const api = {
     async getRun(taskId: string, runId: string) {
       const res = await request<{ run: AutomationRunItem }>(`/api/scheduled-tasks/${taskId}/runs/${runId}`);
       return res.run;
+    },
+    async get(taskId: string) {
+      const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`);
+      return res.automation;
+    },
+    async save(taskId: string, body: AutomationBuilderSaveRequest) {
+      const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      return res.automation;
+    },
+    run(taskId: string) {
+      return request<{ status: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
+        method: "POST",
+      });
+    },
+    testStep(taskId: string, stepId: string, body: { input?: unknown; useLatestUpstreamOutput?: boolean } = {}) {
+      return request<{ run: unknown }>(`/api/scheduled-tasks/${taskId}/steps/${stepId}/runs`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
     },
     async getStepContent(taskId: string) {
       const res = await request<{ stepContent: AutomationStepContentItem[] }>(

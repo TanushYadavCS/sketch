@@ -36,6 +36,7 @@ import type { RecordWorkflowStep } from "../telemetry/agent-run-telemetry";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
+import { testAutomationStep } from "../workflows/runtime";
 import { createWorkflowDeliveryCapture, providerTimestampFromWhatsApp } from "./delivery-capture";
 import { parseOnceSchedule } from "./parse-once";
 import { getScheduledTaskRowQueueKey } from "./queue-key";
@@ -428,6 +429,52 @@ export class TaskScheduler {
 
     const refreshed = await this.repo.getById(id);
     return refreshed ? this.toScheduledTask(refreshed) : null;
+  }
+
+  async refreshTaskSchedule(id: string): Promise<ScheduledTask | null> {
+    const row = await this.repo.getById(id);
+    if (!row) return null;
+    this.unscheduleTask(id);
+    if (row.status === "active") {
+      try {
+        await this.scheduleTask(row);
+      } catch (err) {
+        this.deps.logger.error({ err, taskId: id }, "TaskScheduler: failed to refresh task schedule, pausing it");
+        await this.repo.updateStatus(id, "paused");
+      }
+    }
+    const refreshed = await this.repo.getById(id);
+    return refreshed ? this.toScheduledTask(refreshed) : null;
+  }
+
+  async executeStepById(
+    id: string,
+    stepId: string,
+    options: { input?: unknown; useLatestUpstreamOutput?: boolean } = {},
+  ): Promise<AutomationExecutionResult | null> {
+    const row = await this.repo.getById(id);
+    if (!row) throw new Error(`Task ${id} not found`);
+    return testAutomationStep({
+      task: row,
+      triggerData: { testedAt: new Date().toISOString(), taskId: id, stepId },
+      db: this.deps.db,
+      logger: this.deps.logger,
+      config: this.deps.config,
+      runsRepo: this.deps.automationRunsRepo,
+      stepContentRepo: this.deps.stepContentRepo,
+      loadIntegrationProvider: this.deps.loadIntegrationProvider,
+      listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
+      userRepo: this.deps.userRepo,
+      runAgent: this.deps.runAgent,
+      buildMcpServers: this.deps.buildMcpServers,
+      getSlack: this.deps.getSlack,
+      inboxMessagesRepo: this.deps.inboxMessagesRepo,
+      sendDm: this.deps.sendDm,
+      recordWorkflowStep: this.deps.recordWorkflowStep,
+      stepId,
+      input: options.input,
+      useLatestUpstreamOutput: options.useLatestUpstreamOutput,
+    });
   }
 
   async removeTask(id: string): Promise<boolean> {

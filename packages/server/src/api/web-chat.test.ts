@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AutomationArtifact } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunAgentParams } from "../agent/runner";
@@ -12,7 +13,11 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
-function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string[] = []) {
+function makeAgentResult(
+  finalText = "Hello from Sketch",
+  pendingUploads: string[] = [],
+  automationArtifacts: AutomationArtifact[] = [],
+) {
   return {
     messageSent: true,
     sessionId: "sess-web-1",
@@ -38,7 +43,7 @@ function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string
     fileSizes: [],
     promptMode: "text" as const,
     toolCalls: [],
-    trace: { progressEvents: [], finalText },
+    trace: { progressEvents: [], finalText, automationArtifacts },
   };
 }
 
@@ -537,6 +542,70 @@ describe("web chat API", () => {
               mediaType: "application/pdf",
               sizeBytes: 9,
             },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("streams and persists structured automation artifacts from successful web chat runs", async () => {
+    const admin = await seedAdmin(db);
+    const artifact: AutomationArtifact = {
+      taskId: "task-automation",
+      kind: "New automation",
+      title: "Daily account brief",
+      description: "Summarizes account activity every morning.",
+      tags: ["ClickUp", "Slack"],
+      scheduleLabel: "Cron: 0 9 * * 1 (UTC)",
+      deliveryLabel: "Slack dm",
+      builderUrl: "/scheduled-tasks/task-automation/edit",
+      status: "active",
+    };
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Created the automation.", [], [artifact]));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "user-msg-automation",
+          role: "user",
+          parts: [{ type: "text", text: "Create a weekly account automation" }],
+        },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const streamText = await res.text();
+    expect(streamText).toContain('"type":"data-automation"');
+    expect(streamText).toContain('"taskId":"task-automation"');
+
+    const transcript = JSON.parse(await readFile(webChatTranscriptPath(dataDir, admin.id), "utf-8")) as {
+      messages: unknown[];
+    };
+    expect(transcript.messages).toEqual([
+      {
+        id: "user-msg-automation",
+        role: "user",
+        createdAt: expect.any(String),
+        parts: [{ type: "text", text: "Create a weekly account automation" }],
+      },
+      {
+        id: expect.any(String),
+        role: "assistant",
+        createdAt: expect.any(String),
+        parts: [
+          { type: "text", text: "Created the automation." },
+          {
+            type: "data-automation",
+            id: "automation-0",
+            data: artifact,
           },
         ],
       },

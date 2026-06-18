@@ -3,7 +3,13 @@ import { ChatThread, type ChatThreadFile, type ChatThreadMessage } from "@/compo
 import type { ConversationRowProps } from "@/components/sketch/conversation-row";
 import { HomePane } from "@/components/sketch/home-pane";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
-import { type WebChatConversationSummary, type WebChatUploadedAttachment, type WorkspaceSummary, api } from "@/lib/api";
+import {
+  type AutomationArtifact,
+  type WebChatConversationSummary,
+  type WebChatUploadedAttachment,
+  type WorkspaceSummary,
+  api,
+} from "@/lib/api";
 import {
   createWebChatConversationId,
   setPendingWebChatSubmission,
@@ -29,6 +35,7 @@ type WebChatDataParts = {
     mediaType: string;
     sizeBytes?: number;
   };
+  automation: AutomationArtifact;
 };
 
 type WebChatMetadata = {
@@ -146,6 +153,10 @@ function filesFromMessage(message: WebChatMessage): ChatThreadFile[] {
     .filter((file) => file.name.trim().length > 0 && file.url.trim().length > 0);
 }
 
+function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
+  return message.parts.filter((part) => part.type === "data-automation").map((part) => part.data);
+}
+
 function createdAtFromMessage(message: WebChatMessage): string | undefined {
   const value = message.createdAt;
   if (typeof value === "string" && value.trim()) return value;
@@ -186,8 +197,9 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
     if (message.role !== "user" && message.role !== "assistant") return [];
     const text = textFromMessage(message);
     const files = filesFromMessage(message);
+    const automations = automationsFromMessage(message);
     const createdAt = createdAtFromMessage(message);
-    if (text || files.length > 0) {
+    if (text || files.length > 0 || automations.length > 0) {
       return [
         {
           id: message.id,
@@ -195,6 +207,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
           text: text || undefined,
           createdAt,
           files: files.length > 0 ? files : undefined,
+          automations: automations.length > 0 ? automations : undefined,
         },
       ];
     }
@@ -212,7 +225,8 @@ export function hasPendingAssistantProgress(messages: WebChatMessage[]): boolean
   return (
     progressLinesFromMessage(latestMessage).length > 0 &&
     !textFromMessage(latestMessage) &&
-    filesFromMessage(latestMessage).length === 0
+    filesFromMessage(latestMessage).length === 0 &&
+    automationsFromMessage(latestMessage).length === 0
   );
 }
 
@@ -333,6 +347,7 @@ export function ChatPage() {
         textFromMessage(latestMessage).length,
         progressLinesFromMessage(latestMessage).join("\n").length,
         filesFromMessage(latestMessage).length,
+        automationsFromMessage(latestMessage).length,
         chat.status,
       ].join(":")
     : "";
@@ -424,6 +439,7 @@ export function ChatPage() {
             messages={buildChatThreadMessages(chat.messages)}
             busy={chatBusy}
             error={chat.error?.message ?? null}
+            conversationId={conversationId}
           />
         </div>
       </div>

@@ -207,6 +207,39 @@ describe("chat route", () => {
     ]);
   });
 
+  it("extracts automation data parts as assistant automation cards", () => {
+    const artifact = {
+      taskId: "task-123",
+      kind: "New automation",
+      title: "Daily account brief",
+      description: "Summarizes account updates.",
+      tags: ["ClickUp", "Slack"],
+      scheduleLabel: "Every hour",
+      deliveryLabel: "Slack dm",
+      builderUrl: "/scheduled-tasks/task-123/edit",
+      status: "active" as const,
+    };
+    const messages = buildChatThreadMessages([
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "Created the automation." },
+          { type: "data-automation", id: "automation-0", data: artifact },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: "a1",
+        role: "assistant",
+        text: "Created the automation.",
+        automations: [artifact],
+      },
+    ]);
+  });
+
   it("puts uploaded attachments in the AI SDK request body and visible message parts", () => {
     const attachment = {
       name: "notes.txt",

@@ -6,10 +6,14 @@ import type { IntegrationProvider } from "../../integrations/types";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { getActiveTaskContextQueueKey, getScheduledTaskQueueKey } from "../../scheduler/queue-key";
 import type { TaskScheduler } from "../../scheduler/service";
-import { normalizeScheduleTriggerSteps, normalizeScheduleTriggerStepsJson } from "../../scheduler/trigger-metadata";
+import {
+  formatIntervalScheduleLabel,
+  normalizeScheduleTriggerSteps,
+  normalizeScheduleTriggerStepsJson,
+} from "../../scheduler/trigger-metadata";
 import type { ScheduledTask, TaskContext } from "../../scheduler/types";
 import type { WorkflowStep } from "../../workflows/types";
-import type { SearchableUserRepo } from "./types";
+import type { AutomationArtifactCollector, SearchableUserRepo } from "./types";
 
 const workflowStepSchema = z.object({
   id: z.string(),
@@ -170,6 +174,7 @@ export interface ManageScheduledTasksDeps {
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
   config?: { BASE_URL?: string; PORT: number };
+  automationArtifactCollector?: AutomationArtifactCollector;
 }
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
@@ -273,6 +278,94 @@ function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContex
     outputThreadTs,
     outputMode,
   };
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (!trimmed || seen.has(trimmed.toLowerCase())) continue;
+    seen.add(trimmed.toLowerCase());
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function displayPlatform(value: string): string {
+  return value === "whatsapp" ? "WhatsApp" : "Slack";
+}
+
+function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["config"]): string {
+  const path = `/scheduled-tasks/${encodeURIComponent(taskId)}/edit`;
+  const base = config?.BASE_URL?.replace(/\/$/, "");
+  return base ? `${base}${path}` : path;
+}
+
+function buildArtifactTags(params: {
+  steps: WorkflowStepInput[];
+  scheduleType: string;
+  deliveryPlatform: string;
+}): string[] {
+  const trigger = params.steps.find((step) => step.type === "trigger");
+  const apps = params.steps.flatMap((step) => step.apps ?? []);
+  return uniqueStrings([
+    trigger?.triggerConfig?.app,
+    ...apps,
+    displayPlatform(params.deliveryPlatform),
+    params.scheduleType === "external" ? "Triggered" : "Scheduled",
+  ]).slice(0, 5);
+}
+
+function buildArtifactScheduleLabel(params: {
+  scheduleType: string;
+  scheduleValue: string;
+  timezone: string;
+  steps: WorkflowStepInput[];
+}): string {
+  if (params.scheduleType === "external") {
+    const trigger = params.steps.find((step) => step.type === "trigger")?.triggerConfig;
+    if (trigger?.type === "canvas") {
+      return uniqueStrings(["Canvas", trigger.app, trigger.eventDescription]).join(" - ") || "Canvas trigger";
+    }
+    return "External trigger";
+  }
+  if (params.scheduleType === "interval") return formatIntervalScheduleLabel(params.scheduleValue);
+  if (params.scheduleType === "once") return `Once: ${params.scheduleValue} (${params.timezone})`;
+  return `Cron: ${params.scheduleValue} (${params.timezone})`;
+}
+
+function collectAutomationArtifact(params: {
+  deps: ManageScheduledTasksDeps;
+  task: ScheduledTask;
+  steps: WorkflowStepInput[];
+  scheduleType: string;
+  scheduleValue: string;
+  timezone: string;
+}): string {
+  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config);
+  const delivery = params.task.delivery;
+  const deliveryLabel =
+    delivery.mode === "silent"
+      ? "Silent"
+      : `${displayPlatform(delivery.platform)} ${delivery.targetType === "thread" ? "thread" : delivery.targetType}`;
+
+  params.deps.automationArtifactCollector?.collect({
+    taskId: params.task.id,
+    kind: "New automation",
+    title: params.task.title ?? params.task.prompt,
+    description: params.task.description ?? `${buildArtifactScheduleLabel(params)}. Delivery: ${deliveryLabel}.`,
+    tags: buildArtifactTags({
+      steps: params.steps,
+      scheduleType: params.scheduleType,
+      deliveryPlatform: delivery.platform,
+    }),
+    scheduleLabel: buildArtifactScheduleLabel(params),
+    deliveryLabel,
+    builderUrl,
+    status: params.task.status,
+  });
+  return builderUrl;
 }
 
 export async function handleManageScheduledTasks(
@@ -526,8 +619,18 @@ export async function handleManageScheduledTasks(
         webhookUrl = `${baseUrl}/api/webhooks/wf/${task.id}`;
       }
 
+      const builderUrl = collectAutomationArtifact({
+        deps,
+        task,
+        steps,
+        scheduleType,
+        scheduleValue,
+        timezone: resolvedTimezone,
+      });
+
       const response: Record<string, unknown> = { ...task };
       if (webhookUrl) response.webhookUrl = webhookUrl;
+      response.builderUrl = builderUrl;
       return text(`Automation created:\n${JSON.stringify(response, null, 2)}`);
     }
 

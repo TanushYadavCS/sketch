@@ -1,8 +1,10 @@
+import type { AutomationArtifact } from "@/lib/api";
 import { FileTextIcon } from "@phosphor-icons/react";
 import { cn } from "@sketch/ui/lib/utils";
 import { type ReactNode, isValidElement } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AutomationArtifactCard } from "./automation-artifact-card";
 import { SketchMessage, UserMessage } from "./chat-message";
 
 export interface ChatThreadFile {
@@ -18,6 +20,7 @@ export interface ChatThreadMessage {
   text?: string;
   createdAt?: string;
   files?: ChatThreadFile[];
+  automations?: AutomationArtifact[];
   progressLines?: string[];
 }
 
@@ -25,6 +28,7 @@ export interface ChatThreadProps {
   messages?: ChatThreadMessage[];
   busy?: boolean;
   error?: string | null;
+  conversationId?: string;
   className?: string;
 }
 
@@ -102,14 +106,14 @@ const markdownComponents: Components = {
   },
 };
 
-export function ChatThread({ messages = [], busy = false, error, className }: ChatThreadProps) {
+export function ChatThread({ messages = [], busy = false, error, conversationId, className }: ChatThreadProps) {
   if (messages.length === 0 && !busy && !error) return null;
   const showBusy = busy && messages.at(-1)?.role !== "assistant";
 
   return (
     <section aria-label="Chat thread" className={cn("flex flex-col gap-[24px]", className)}>
       {messages.map((message) => (
-        <MessageRow key={message.id} message={message} />
+        <MessageRow key={message.id} message={message} conversationId={conversationId} />
       ))}
 
       {showBusy ? (
@@ -130,11 +134,11 @@ export function ChatThread({ messages = [], busy = false, error, className }: Ch
   );
 }
 
-function MessageRow({ message }: { message: ChatThreadMessage }) {
+function MessageRow({ message, conversationId }: { message: ChatThreadMessage; conversationId?: string }) {
   if (message.role === "user") {
     return (
       <UserMessage footer={<MessageTimestamp createdAt={message.createdAt} align="right" />}>
-        <MessageContent message={message} />
+        <MessageContent message={message} conversationId={conversationId} />
       </UserMessage>
     );
   }
@@ -155,7 +159,7 @@ function MessageRow({ message }: { message: ChatThreadMessage }) {
 
   return (
     <SketchMessage footer={<MessageTimestamp createdAt={message.createdAt} align="left" />}>
-      <MessageContent message={message} />
+      <MessageContent message={message} conversationId={conversationId} />
     </SketchMessage>
   );
 }
@@ -187,31 +191,36 @@ function MessageTimestamp({ createdAt, align }: { createdAt?: string; align: "le
   );
 }
 
-function MessageContent({ message }: { message: ChatThreadMessage }) {
-  if (!message.files?.length) {
-    return message.text ? <MarkdownMessage text={message.text} /> : null;
-  }
+function MessageContent({ message, conversationId }: { message: ChatThreadMessage; conversationId?: string }) {
+  const hasFiles = Boolean(message.files?.length);
+  const hasAutomations = Boolean(message.automations?.length);
+  if (!hasFiles && !hasAutomations) return message.text ? <MarkdownMessage text={message.text} /> : null;
 
   return (
     <div className="min-w-0 space-y-[10px]">
       {message.text ? <MarkdownMessage text={message.text} /> : null}
-      <div className="flex flex-wrap gap-[8px]">
-        {message.files.map((file) => (
-          <a
-            key={`${file.url}:${file.name}`}
-            href={file.url}
-            download={file.name}
-            className={cn(
-              "inline-flex max-w-full items-center gap-[8px] rounded-[8px] border border-border",
-              "bg-background/70 px-[10px] py-[8px] text-[13px] text-foreground/90 transition-colors",
-              "hover:border-foreground/25 hover:bg-muted/70",
-            )}
-          >
-            <FileTextIcon size={16} className="shrink-0 text-muted-foreground" aria-hidden />
-            <span className="truncate">{file.name}</span>
-          </a>
-        ))}
-      </div>
+      {hasFiles ? (
+        <div className="flex flex-wrap gap-[8px]">
+          {message.files?.map((file) => (
+            <a
+              key={`${file.url}:${file.name}`}
+              href={file.url}
+              download={file.name}
+              className={cn(
+                "inline-flex max-w-full items-center gap-[8px] rounded-[8px] border border-border",
+                "bg-background/70 px-[10px] py-[8px] text-[13px] text-foreground/90 transition-colors",
+                "hover:border-foreground/25 hover:bg-muted/70",
+              )}
+            >
+              <FileTextIcon size={16} className="shrink-0 text-muted-foreground" aria-hidden />
+              <span className="truncate">{file.name}</span>
+            </a>
+          ))}
+        </div>
+      ) : null}
+      {message.automations?.map((artifact) => (
+        <AutomationArtifactCard key={artifact.taskId} artifact={artifact} conversationId={conversationId} />
+      ))}
     </div>
   );
 }

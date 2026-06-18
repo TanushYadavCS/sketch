@@ -12,7 +12,7 @@ import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
-import { type SketchMcpDeps, UploadCollector } from "./tools/types";
+import { AutomationArtifactCollector, type SketchMcpDeps, UploadCollector } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
 
@@ -20,7 +20,7 @@ export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/i
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
 export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
-export { UploadCollector };
+export { AutomationArtifactCollector, UploadCollector };
 export type { SketchMcpDeps };
 
 export function createSketchMcpServer(deps: SketchMcpDeps) {
@@ -38,6 +38,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       taskContext: deps.taskContext,
       stepContentRepo: deps.stepContentRepo,
       automationRunsRepo: deps.automationRunsRepo,
+      automationArtifactCollector: deps.automationArtifactCollector,
       userRepo: deps.userRepo,
       loadIntegrationProvider: deps.loadIntegrationProvider,
       queueManager: deps.queueManager,

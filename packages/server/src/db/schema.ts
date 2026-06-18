@@ -491,6 +491,9 @@ export interface ScheduledTasksTable {
   output_platform: string | null;
   output_thread_ts: string | null;
   output_mode: Generated<string>;
+  updated_at: Generated<string>;
+  revision: Generated<number>;
+  last_edited_by: string | null;
 }
 
 export interface AutomationRunsTable {

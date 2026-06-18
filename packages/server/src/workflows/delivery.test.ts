@@ -27,6 +27,9 @@ function makeTask(overrides: Partial<ScheduledTaskRow> = {}): ScheduledTaskRow {
     output_platform: null,
     output_thread_ts: null,
     output_mode: "deliver",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    revision: 0,
+    last_edited_by: null,
     ...overrides,
   };
 }

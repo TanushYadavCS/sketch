@@ -376,6 +376,34 @@ describe("handleManageScheduledTasks — add", () => {
     expect(result.content[0].text).toContain("Automation created:");
   });
 
+  it("collects structured automation artifacts for successful adds", async () => {
+    const task = makeTask({ id: "new-task", title: "Daily account brief", prompt: "Daily account brief" });
+    const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(task) });
+    const automationArtifactCollector = {
+      collect: vi.fn(),
+      drain: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationArtifactCollector"]>;
+    const result = await handleManageScheduledTasks(
+      { action: "add", prompt: "Daily account brief", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+        automationArtifactCollector,
+      },
+    );
+
+    expect(result.content[0].text).toContain('"builderUrl": "/scheduled-tasks/new-task/edit"');
+    expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "new-task",
+        title: "Daily account brief",
+        builderUrl: "/scheduled-tasks/new-task/edit",
+        status: "active",
+      }),
+    );
+  });
+
   it("persists agent step prompts via stepContentRepo for multi-step workflows", async () => {
     const localRepo = makeMockStepContentRepo();
     const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(makeTask({ id: "wf-1" })) });
