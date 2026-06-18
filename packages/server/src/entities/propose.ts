@@ -419,7 +419,11 @@ async function decideScopedPersonCandidates(
       const { entity } = await persistEntity(deps, input);
       return { kind: "created", entity };
     }
-    if (ranked.length === 1 && isSingleStrictPersonReference(ranked) && canAutoLinkNameDedupCandidate(input, ranked[0])) {
+    if (
+      ranked.length === 1 &&
+      isSingleStrictPersonReference(ranked) &&
+      canAutoLinkNameDedupCandidate(input, ranked[0])
+    ) {
       return linkNameDedupCandidate(deps, input, ranked[0].entity);
     }
     return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
