@@ -34,6 +34,7 @@ export type CandidateReason =
   | "llm-ambiguous"
   | "birth-gated"
   | "strict-normalized"
+  | "token-set"
   | "minhash";
 
 export interface ProposeInput {
@@ -96,11 +97,15 @@ export type EntityLookup = {
   getByAlias?(normalized: string): Entity[];
   /** All entities of the given type (used for prefix/token-superset scan). */
   listByType(entityType: ProposeEntityType): Entity[];
-  /** Same-type normalized-strict or MinHash candidates over names and aliases. */
+  /** Same-type normalized-strict, token-set, or MinHash candidates over names and aliases. */
   findNameDedupCandidates?(
     entityType: ProposeEntityType,
     name: string,
-  ): Array<{ entity: Entity; score: number; reason: Extract<CandidateReason, "strict-normalized" | "minhash"> }>;
+  ): Array<{
+    entity: Entity;
+    score: number;
+    reason: Extract<CandidateReason, "strict-normalized" | "token-set" | "minhash">;
+  }>;
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
 };
@@ -164,6 +169,12 @@ function hasTokenOverlap(a: string[], b: string[]): boolean {
   if (a.length === 0 || b.length === 0) return false;
   const bSet = new Set(b);
   return a.some((token) => bSet.has(token));
+}
+
+function canAutoLinkNameDedupCandidate(input: ProposeInput, candidate: RankedCandidate): boolean {
+  if (candidate.reason === "token-set") return false;
+  if (input.entityType === "person" && candidate.reason === "strict-normalized" && !input.email) return false;
+  return true;
 }
 
 /**
@@ -500,7 +511,10 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
       if (!rejected) filtered.push(r);
     }
     ranked = filtered;
-    if (ranked.length === 1) return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    if (ranked.length === 1 && canAutoLinkNameDedupCandidate(input, ranked[0])) {
+      return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    }
+    if (ranked.length === 1) return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
     if (ranked.length > 1) return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
   }
 

@@ -15,6 +15,7 @@ import {
   buildCandidatePool,
   findFuzzyMatches,
   findStrictMatches,
+  findTokenSetMatches,
   removeFromCandidatePool,
 } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
@@ -239,19 +240,25 @@ export async function buildMaterializeDeps(
       const entitiesById = new Map((index.entitiesByType.get(entityType) ?? []).map((entity) => [entity.id, entity]));
       const strict = findStrictMatches(name, pool);
       const strictEntityIds = new Set(strict.map((match) => match.entityId));
+      const tokenSet = findTokenSetMatches(name, pool);
+      const tokenSetEntityIds = new Set(tokenSet.map((match) => match.entityId));
       const fuzzy = findFuzzyMatches(name, pool);
       const byEntity = new Map<
         string,
         {
           entity: EntityRow;
           score: number;
-          reason: "strict-normalized" | "minhash";
+          reason: "strict-normalized" | "token-set" | "minhash";
         }
       >();
-      for (const match of [...strict, ...fuzzy]) {
+      for (const match of [...strict, ...tokenSet, ...fuzzy]) {
         const entity = entitiesById.get(match.entityId);
         if (!entity) continue;
-        const reason = strictEntityIds.has(match.entityId) ? "strict-normalized" : "minhash";
+        const reason = strictEntityIds.has(match.entityId)
+          ? "strict-normalized"
+          : tokenSetEntityIds.has(match.entityId)
+            ? "token-set"
+            : "minhash";
         const existing = byEntity.get(match.entityId);
         if (!existing || match.score > existing.score)
           byEntity.set(match.entityId, { entity, score: match.score, reason });

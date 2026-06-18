@@ -1428,4 +1428,76 @@ describe("proposeEntity", () => {
       redseer.id,
     );
   });
+
+  it("28. compact person strict-name collisions queue instead of auto-linking", async () => {
+    const entityRepo = createEntityRepository(db);
+    const ann = await entityRepo.upsertEntity({
+      name: "Ann A",
+      sourceType: "person",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Anna",
+        entityType: "person",
+        subtype: "external",
+        source: "llm",
+        sourceId: "mention-anna",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("queued");
+    expect(result.candidateEntityId).toBe(ann.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(ann.id);
+    expect(queue.candidate_reason).toBe("strict-normalized");
+  });
+
+  it("29. materialized lookup queues token-set reorder matches", async () => {
+    const entityRepo = createEntityRepository(db);
+    const ohoud = await entityRepo.upsertEntity({
+      name: "Ohoud Zitan",
+      sourceType: "person",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Zitan, Ohoud",
+        entityType: "person",
+        subtype: "external",
+        source: "llm",
+        sourceId: "mention-zitan-ohoud",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("queued");
+    expect(result.candidateEntityId).toBe(ohoud.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(ohoud.id);
+    expect(queue.candidate_reason).toBe("token-set");
+  });
 });
