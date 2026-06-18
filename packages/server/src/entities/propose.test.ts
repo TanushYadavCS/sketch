@@ -1459,6 +1459,7 @@ describe("proposeEntity", () => {
     );
 
     expect(result.kind).toBe("queued");
+    if (result.kind !== "queued") throw new Error("unreachable");
     expect(result.candidateEntityId).toBe(ann.id);
     const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
     expect(queue.candidate_entity_id).toBe(ann.id);
@@ -1495,6 +1496,7 @@ describe("proposeEntity", () => {
     );
 
     expect(result.kind).toBe("queued");
+    if (result.kind !== "queued") throw new Error("unreachable");
     expect(result.candidateEntityId).toBe(ohoud.id);
     const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
     expect(queue.candidate_entity_id).toBe(ohoud.id);
