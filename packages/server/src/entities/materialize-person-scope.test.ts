@@ -144,6 +144,31 @@ describe("materializePersonSeed company-scoped dedup", () => {
     expect(await people(db)).toHaveLength(2);
   });
 
+  it("preserves the matching company-scoped person when linking a new source ref", async () => {
+    await createCompanyWithDomain(db, "company-acme", "Acme", "acme.com");
+    await createCompanyWithDomain(db, "company-globex", "Globex", "globex.com");
+    await upsertPersonSeed(db, { name: "Ashish Banka", email: "ashish@acme.com", sourceId: "person-1" });
+    await upsertPersonSeed(db, { name: "Ashish Banka", email: "ashish@globex.com", sourceId: "person-2" });
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+    await upsertPersonSeed(db, { name: "Ashish Banka", email: "ashish.alt@globex.com", sourceId: "person-3" });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+
+    expect(summary.queued).toBe(0);
+    const rows = await people(db);
+    expect(rows).toHaveLength(2);
+    const globexPerson = rows.find((row) => JSON.parse(row.metadata ?? "{}").email === "ashish@globex.com");
+    const sourceRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "connector")
+      .where("source_id", "=", "person-3")
+      .executeTakeFirstOrThrow();
+    expect(sourceRef.entity_id).toBe(globexPerson?.id);
+    expect(JSON.parse(globexPerson?.aliases ?? "[]")).toContain("ashish.alt@globex.com");
+  });
+
   it("queues personal, candidate-unscoped, and name-only same-name seeds", async () => {
     const domainsRepo = createEntityDomainsRepository(db);
     await domainsRepo.upsertDomain({ entityId: null, domain: "gmail.com", kind: "personal", source: "test" });
