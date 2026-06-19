@@ -1,15 +1,16 @@
+import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatThread, type ChatThreadMessage } from "@/components/sketch/chat-thread";
 import {
-  type AutomationBuilderSaveRequest,
+  type AutomationArtifact,
   type AutomationDefinition,
   type AutomationStepContent,
   type StepOutput,
-  type WebChatStoredMessage,
+  type WebChatUploadedAttachment,
   type WorkflowEdge,
   type WorkflowStep,
   api,
 } from "@/lib/api";
-import { ApiRequestError } from "@/lib/api";
+import { useChat } from "@ai-sdk/react";
 import {
   BracketsCurlyIcon,
   CalendarDotsIcon,
@@ -51,33 +52,21 @@ import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-
 import {
   Background,
   BackgroundVariant,
-  type Connection,
   Controls,
   type Edge,
-  type EdgeChange,
   Handle,
   type Node,
-  type NodeChange,
   type NodeProps,
   Position,
   ReactFlow,
   ReactFlowProvider,
-  addEdge,
-  applyEdgeChanges,
   useEdgesState,
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import {
-  type CSSProperties,
-  type ComponentType,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { DefaultChatTransport, type UIMessage } from "ai";
+import { type CSSProperties, type ComponentType, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 
@@ -100,8 +89,28 @@ interface DraftAutomation {
   revision: number;
 }
 
-type DraftUpdater = (update: (draft: DraftAutomation) => DraftAutomation) => void;
 type UiStatus = "idle" | "running" | "success" | "failed" | "skipped";
+
+type BuilderWebChatDataParts = {
+  progress: {
+    lines: string[];
+  };
+  file: {
+    name: string;
+    url: string;
+    mediaType: string;
+    sizeBytes?: number;
+  };
+  automation: AutomationArtifact;
+};
+
+type BuilderWebChatMetadata = {
+  createdAt?: string;
+};
+
+type BuilderWebChatMessage = UIMessage<BuilderWebChatMetadata, BuilderWebChatDataParts> & {
+  createdAt?: string | Date;
+};
 
 const canvasToolbarButtonClass =
   "h-8 rounded-[7px] border-white/10 bg-[#101010]/90 text-white/82 shadow-none backdrop-blur hover:bg-[#1b1b1b] hover:text-white";
@@ -109,6 +118,14 @@ const builderInputClass =
   "h-10 rounded-[8px] border-white/10 bg-[#101010] text-[13px] text-white shadow-none placeholder:text-white/35 focus-visible:border-brand-accent/55 focus-visible:ring-brand-accent/20";
 const builderTextareaClass =
   "rounded-[8px] border-white/10 bg-[#1d1d1b] text-[13px] leading-5 text-white shadow-none placeholder:text-white/35 focus-visible:border-brand-accent/55 focus-visible:ring-brand-accent/20";
+const builderReadOnlyInputClass = cn(
+  builderInputClass,
+  "cursor-default focus-visible:border-white/10 focus-visible:ring-0",
+);
+const builderReadOnlyTextareaClass = cn(
+  builderTextareaClass,
+  "cursor-default focus-visible:border-white/10 focus-visible:ring-0",
+);
 const flowEdgeStyle = {
   stroke: "rgba(255, 255, 255, 0.22)",
   strokeWidth: 1.6,
@@ -141,50 +158,15 @@ function draftFromDefinition(automation: AutomationDefinition): DraftAutomation 
   };
 }
 
-function serializeDraft(draft: DraftAutomation): string {
-  return JSON.stringify({
-    title: draft.title,
-    description: draft.description,
-    prompt: draft.prompt,
-    scheduleType: draft.scheduleType,
-    scheduleValue: draft.scheduleValue,
-    timezone: draft.timezone,
-    status: draft.status,
-    delivery: draft.delivery,
-    steps: draft.steps,
-    edges: draft.edges,
-    stepContent: draft.stepContent,
-  });
-}
-
-function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequest {
-  return {
-    expectedRevision: draft.revision,
-    title: draft.title?.trim() || draft.prompt,
-    description: draft.description,
-    prompt: draft.prompt,
-    scheduleType: draft.scheduleType,
-    scheduleValue: draft.scheduleValue,
-    timezone: draft.timezone,
-    status: draft.status,
-    delivery: draft.delivery,
-    steps: draft.steps,
-    edges: draft.edges,
-    stepContent: draft.stepContent,
-  };
-}
-
-function AutomationBuilderPage() {
+export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
   const search = useSearch({ from: automationBuilderRoute.id }) as BuilderSearch;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const queryKey = ["scheduled-tasks", taskId, "builder"];
+  const queryKey = useMemo(() => ["scheduled-tasks", taskId, "builder"] as const, [taskId]);
   const [draft, setDraft] = useState<DraftAutomation | null>(null);
-  const [baseline, setBaseline] = useState("");
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [conflict, setConflict] = useState(false);
 
   const automationQuery = useQuery({
     queryKey,
@@ -194,45 +176,8 @@ function AutomationBuilderPage() {
 
   useEffect(() => {
     if (!automationQuery.data) return;
-    setDraft((current) => current ?? draftFromDefinition(automationQuery.data));
-    setBaseline((current) => current || serializeDraft(draftFromDefinition(automationQuery.data)));
+    setDraft(draftFromDefinition(automationQuery.data));
   }, [automationQuery.data]);
-
-  useEffect(() => {
-    if (!draft) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (serializeDraft(draft) === baseline) return;
-      event.preventDefault();
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [baseline, draft]);
-
-  const updateDraft: DraftUpdater = useCallback((update) => {
-    setDraft((current) => (current ? update(current) : current));
-  }, []);
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (!draft) throw new Error("Automation is not loaded");
-      return api.scheduledTasks.save(taskId, saveRequestFromDraft(draft));
-    },
-    onSuccess: (automation) => {
-      const next = draftFromDefinition(automation);
-      setDraft(next);
-      setBaseline(serializeDraft(next));
-      setConflict(false);
-      queryClient.setQueryData(queryKey, automation);
-      toast.success("Automation saved");
-    },
-    onError: (error) => {
-      if (error instanceof ApiRequestError && error.status === 409) {
-        setConflict(true);
-        return;
-      }
-      toast.error(error instanceof Error ? error.message : "Failed to save automation");
-    },
-  });
 
   const runMutation = useMutation({
     mutationFn: () => api.scheduledTasks.run(taskId),
@@ -265,7 +210,6 @@ function AutomationBuilderPage() {
   }
 
   const automation = automationQuery.data;
-  const dirty = serializeDraft(draft) !== baseline;
   const selectedRun = selectedRunId
     ? automation.recentRuns.find((run) => run.id === selectedRunId)
     : automation.latestRun;
@@ -278,7 +222,13 @@ function AutomationBuilderPage() {
   return (
     <div className="relative flex h-[calc(100vh-52px)] min-h-0 overflow-hidden bg-background">
       {hasSidecar && search.conversationId ? (
-        <BuilderChatSidecar conversationId={search.conversationId} title={builderTitle} className="hidden 2xl:flex" />
+        <BuilderChatSidecar
+          conversationId={search.conversationId}
+          taskId={taskId}
+          title={builderTitle}
+          queryKey={queryKey}
+          className="hidden lg:flex"
+        />
       ) : null}
 
       <div className="relative min-h-0 min-w-0 flex-1 bg-[#050505] text-white">
@@ -315,11 +265,6 @@ function AutomationBuilderPage() {
           </div>
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
-            {dirty ? (
-              <Badge className="h-6 rounded-full bg-brand-accent px-2.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[#161300]">
-                Unsaved
-              </Badge>
-            ) : null}
             <Button
               size="sm"
               variant="outline"
@@ -327,19 +272,6 @@ function AutomationBuilderPage() {
               onClick={() => navigate({ to: "/scheduled-tasks" })}
             >
               Close
-            </Button>
-            <Button
-              size="sm"
-              className="h-8 gap-1.5 rounded-[7px] bg-white text-[#0b0b0b] shadow-none hover:bg-white/88"
-              onClick={() => saveMutation.mutate()}
-              disabled={!dirty || saveMutation.isPending}
-            >
-              {saveMutation.isPending ? (
-                <SpinnerGapIcon size={14} className="animate-spin" />
-              ) : (
-                <CheckCircleIcon size={14} />
-              )}
-              Save
             </Button>
             <Button
               size="sm"
@@ -357,42 +289,12 @@ function AutomationBuilderPage() {
           </div>
         </div>
 
-        {conflict ? (
-          <div className="absolute top-32 right-4 z-20 max-w-sm rounded-[8px] border border-red-400/24 bg-[#101010] px-4 py-3 text-sm text-white shadow-[0_18px_48px_rgba(0,0,0,0.42)] sm:top-16">
-            <p className="font-medium text-red-300">Revision conflict</p>
-            <p className="mt-1 text-white/58">This automation changed elsewhere. Reload or discard your draft.</p>
-            <div className="mt-3 flex gap-2">
-              <Button
-                size="sm"
-                className="rounded-[7px] bg-white text-[#0b0b0b] shadow-none"
-                onClick={() => window.location.reload()}
-              >
-                Reload
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className={canvasToolbarButtonClass}
-                onClick={() => {
-                  const next = draftFromDefinition(automation);
-                  setDraft(next);
-                  setBaseline(serializeDraft(next));
-                  setConflict(false);
-                }}
-              >
-                Discard
-              </Button>
-            </div>
-          </div>
-        ) : null}
-
         <AutomationCanvas
           draft={draft}
           selectedStepId={selectedStepId}
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
           onSelectStep={setSelectedStepId}
-          updateDraft={updateDraft}
         />
       </div>
 
@@ -401,7 +303,6 @@ function AutomationBuilderPage() {
         draft={draft}
         step={selectedStep}
         output={selectedOutput}
-        updateDraft={updateDraft}
         onClose={() => setSelectedStepId(null)}
         onTest={(stepId) => testMutation.mutate(stepId)}
         testingStepId={testMutation.variables ?? null}
@@ -410,7 +311,7 @@ function AutomationBuilderPage() {
   );
 }
 
-function textFromStoredMessage(message: WebChatStoredMessage): string {
+function textFromBuilderMessage(message: BuilderWebChatMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
     .map((part) => part.text)
@@ -418,42 +319,235 @@ function textFromStoredMessage(message: WebChatStoredMessage): string {
     .trim();
 }
 
-function chatThreadMessages(messages: WebChatStoredMessage[]): ChatThreadMessage[] {
-  return messages.flatMap((message) => {
-    const text = textFromStoredMessage(message);
-    if (!text) return [];
-    return [{ id: message.id, role: message.role, text, createdAt: message.createdAt }];
+function progressLinesFromBuilderMessage(message: BuilderWebChatMessage): string[] {
+  const progressPart = message.parts.find((part) => part.type === "data-progress");
+  return progressPart?.data.lines.filter((line) => line.trim().length > 0) ?? [];
+}
+
+function filesFromBuilderMessage(message: BuilderWebChatMessage) {
+  return message.parts
+    .filter((part) => part.type === "data-file")
+    .map((part) => part.data)
+    .filter((file) => file.name.trim().length > 0 && file.url.trim().length > 0);
+}
+
+function automationsFromBuilderMessage(message: BuilderWebChatMessage): AutomationArtifact[] {
+  return message.parts.filter((part) => part.type === "data-automation").map((part) => part.data);
+}
+
+function createdAtFromBuilderMessage(message: BuilderWebChatMessage): string | undefined {
+  const value = message.createdAt;
+  if (typeof value === "string" && value.trim()) return value;
+  if (value instanceof Date) return value.toISOString();
+  return message.metadata?.createdAt?.trim() || undefined;
+}
+
+function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThreadMessage[] {
+  return messages.flatMap<ChatThreadMessage>((message) => {
+    if (message.role !== "user" && message.role !== "assistant") return [];
+    const text = textFromBuilderMessage(message);
+    const files = filesFromBuilderMessage(message);
+    const automations = automationsFromBuilderMessage(message);
+    const createdAt = createdAtFromBuilderMessage(message);
+    if (text || files.length > 0 || automations.length > 0) {
+      return [
+        {
+          id: message.id,
+          role: message.role,
+          text: text || undefined,
+          createdAt,
+          files: files.length > 0 ? files : undefined,
+          automations: automations.length > 0 ? automations : undefined,
+        },
+      ];
+    }
+    if (message.role === "assistant") {
+      const progressLines = progressLinesFromBuilderMessage(message);
+      if (progressLines.length > 0) return [{ id: message.id, role: message.role, createdAt, progressLines }];
+    }
+    return [];
   });
+}
+
+function hasPendingBuilderAssistantProgress(messages: BuilderWebChatMessage[]): boolean {
+  const latestMessage = messages.at(-1);
+  if (!latestMessage || latestMessage.role !== "assistant") return false;
+  return (
+    progressLinesFromBuilderMessage(latestMessage).length > 0 &&
+    !textFromBuilderMessage(latestMessage) &&
+    filesFromBuilderMessage(latestMessage).length === 0 &&
+    automationsFromBuilderMessage(latestMessage).length === 0
+  );
+}
+
+function outgoingBuilderTextMessage(text: string, attachments: WebChatUploadedAttachment[] = []) {
+  const metadata = { createdAt: new Date().toISOString() };
+  if (attachments.length === 0) {
+    return { text, metadata };
+  }
+
+  return {
+    metadata,
+    parts: [
+      { type: "text" as const, text },
+      ...attachments.map((attachment, index) => ({
+        type: "data-file" as const,
+        id: `attachment-${index}`,
+        data: {
+          name: attachment.name,
+          url: attachment.url,
+          mediaType: attachment.mediaType,
+          sizeBytes: attachment.sizeBytes,
+        },
+      })),
+    ],
+  };
+}
+
+function outgoingBuilderRequestOptions(taskId: string, attachments: WebChatUploadedAttachment[]) {
+  return {
+    body: {
+      automationTaskId: taskId,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    },
+  };
 }
 
 function BuilderChatSidecar({
   conversationId,
+  taskId,
   title,
+  queryKey,
   className,
 }: {
   conversationId: string;
+  taskId: string;
   title: string;
+  queryKey: readonly unknown[];
   className?: string;
 }) {
-  const query = useQuery({
-    queryKey: ["web-chat", conversationId, "builder-sidecar"],
-    queryFn: () => api.webChat.messages(conversationId),
+  const queryClient = useQueryClient();
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const threadScrollRef = useRef<HTMLDivElement | null>(null);
+  const wasBusyRef = useRef(false);
+  const transport = useMemo(
+    () =>
+      new DefaultChatTransport<BuilderWebChatMessage>({
+        api: `/api/web-chat?conversationId=${encodeURIComponent(conversationId)}`,
+      }),
+    [conversationId],
+  );
+  const chat = useChat<BuilderWebChatMessage>({
+    id: conversationId,
+    transport,
   });
+  const historyReady = loadedConversationId === conversationId;
+  const latestMessage = chat.messages.at(-1);
+  const threadScrollKey = latestMessage
+    ? [
+        latestMessage.id,
+        latestMessage.role,
+        textFromBuilderMessage(latestMessage).length,
+        progressLinesFromBuilderMessage(latestMessage).join("\n").length,
+        filesFromBuilderMessage(latestMessage).length,
+        automationsFromBuilderMessage(latestMessage).length,
+        chat.status,
+      ].join(":")
+    : "";
+  const hasBackgroundRun = hasPendingBuilderAssistantProgress(chat.messages);
+  const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadedConversationId(null);
+    chat.setMessages([]);
+    void api.webChat
+      .messages(conversationId)
+      .then(({ messages }) => {
+        if (!cancelled) {
+          chat.setMessages(messages as BuilderWebChatMessage[]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadedConversationId(conversationId);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chat.setMessages, conversationId]);
+
+  useEffect(() => {
+    if (!historyReady || !threadScrollKey) return;
+    const frameId = window.requestAnimationFrame(() => {
+      const el = threadScrollRef.current;
+      if (!el) return;
+      if (typeof el.scrollTo === "function") {
+        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      } else {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [historyReady, threadScrollKey]);
+
+  useEffect(() => {
+    if (!historyReady || !hasBackgroundRun || chat.status !== "ready") return;
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      void api.webChat.messages(conversationId).then(({ messages }) => {
+        if (!cancelled) {
+          chat.setMessages(messages as BuilderWebChatMessage[]);
+        }
+      });
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
+
+  useEffect(() => {
+    const busy = chat.status === "submitted" || chat.status === "streaming";
+    if (busy) {
+      wasBusyRef.current = true;
+      return;
+    }
+    if (!historyReady || !wasBusyRef.current) return;
+    wasBusyRef.current = false;
+    void queryClient.invalidateQueries({ queryKey });
+  }, [chat.status, historyReady, queryClient, queryKey]);
 
   return (
     <aside
       className={cn(
-        "w-[400px] min-w-[320px] max-w-[600px] resize-x flex-col overflow-hidden border-r border-white/10 bg-[#050505] text-white",
+        "w-[400px] min-w-[320px] max-w-[600px] shrink-0 resize-x flex-col overflow-hidden border-r border-white/10 bg-[#050505] text-white",
         className,
       )}
     >
       <div className="border-b border-white/10 px-4 py-3">
         <p className="truncate text-[13px] font-semibold">{title}</p>
       </div>
-      <div className="chat-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5">
+      <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5">
         <ChatThread
-          messages={query.data ? chatThreadMessages(query.data.messages) : []}
+          className="gap-4"
+          messages={historyReady ? builderChatThreadMessages(chat.messages) : []}
+          busy={chatBusy}
+          error={chat.error?.message ?? null}
           conversationId={conversationId}
+        />
+      </div>
+      <div className="shrink-0 border-t border-white/10 bg-[#050505] px-3 py-3">
+        <ChatInput
+          key={conversationId}
+          disabled={!historyReady || chatBusy}
+          disabledPlaceholder={historyReady ? "Sketch is thinking..." : "Loading conversation..."}
+          placeholder="Reply to Sketch..."
+          onSubmit={(value, attachments) => {
+            void chat.sendMessage(
+              outgoingBuilderTextMessage(value, attachments),
+              outgoingBuilderRequestOptions(taskId, attachments),
+            );
+          }}
         />
       </div>
     </aside>
@@ -629,14 +723,12 @@ function AutomationCanvas({
   stepOutputs,
   runStatus,
   onSelectStep,
-  updateDraft,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: "running" | "completed" | "failed";
   onSelectStep: (stepId: string | null) => void;
-  updateDraft: DraftUpdater;
 }) {
   return (
     <ReactFlowProvider>
@@ -646,7 +738,6 @@ function AutomationCanvas({
         stepOutputs={stepOutputs}
         runStatus={runStatus}
         onSelectStep={onSelectStep}
-        updateDraft={updateDraft}
       />
     </ReactFlowProvider>
   );
@@ -658,14 +749,12 @@ function AutomationCanvasFlow({
   stepOutputs,
   runStatus,
   onSelectStep,
-  updateDraft,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: "running" | "completed" | "failed";
   onSelectStep: (stepId: string | null) => void;
-  updateDraft: DraftUpdater;
 }) {
   const { fitView } = useReactFlow<BuilderNode>();
   const initialNodes = useMemo<BuilderNode[]>(
@@ -709,65 +798,22 @@ function AutomationCanvasFlow({
     return () => window.cancelAnimationFrame(frame);
   }, [fitView, selectedStepId]);
 
-  const onNodesChange = useCallback(
-    (changes: NodeChange<BuilderNode>[]) => {
-      onNodesChangeBase(changes);
-    },
-    [onNodesChangeBase],
-  );
-
-  const onEdgesChange = useCallback(
-    (changes: EdgeChange[]) => {
-      setEdges((current) => applyEdgeChanges(changes, current));
-      const removed = changes.filter((change) => change.type === "remove").map((change) => change.id);
-      if (removed.length > 0) {
-        updateDraft((current) => ({
-          ...current,
-          edges: current.edges.filter((edge) => !removed.includes(edge.id)),
-        }));
-      }
-    },
-    [setEdges, updateDraft],
-  );
-
-  const onConnect = useCallback(
-    (connection: Connection) => {
-      if (!connection.source || !connection.target || connection.source === connection.target) return;
-      const id = `${connection.source}-${connection.target}`;
-      updateDraft((current) => {
-        if (current.edges.some((edge) => edge.from === connection.source && edge.to === connection.target))
-          return current;
-        return {
-          ...current,
-          edges: [...current.edges, { id, from: connection.source as string, to: connection.target as string }],
-        };
-      });
-      setEdges((current) =>
-        addEdge(
-          { ...connection, id, type: "smoothstep", className: "automation-builder-edge", style: flowEdgeStyle },
-          current,
-        ),
-      );
-    },
-    [setEdges, updateDraft],
-  );
-
   return (
     <ReactFlow
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onConnect={onConnect}
+      onNodesChange={onNodesChangeBase}
       onNodeClick={(_, node) => onSelectStep(node.id)}
       onPaneClick={() => onSelectStep(null)}
-      onNodeDragStop={(_, node) => {
-        updateDraft((current) => ({
-          ...current,
-          steps: current.steps.map((step) => (step.id === node.id ? { ...step, position: node.position } : step)),
-        }));
-      }}
+      nodesDraggable={false}
+      nodesConnectable={false}
+      edgesReconnectable={false}
+      nodesFocusable={false}
+      edgesFocusable={false}
+      deleteKeyCode={null}
+      multiSelectionKeyCode={null}
+      selectionKeyCode={null}
       fitView
       fitViewOptions={{ padding: 0.35, maxZoom: 1.05 }}
       minZoom={0.35}
@@ -933,7 +979,6 @@ function NodeDrawer({
   draft,
   step,
   output,
-  updateDraft,
   onClose,
   onTest,
   testingStepId,
@@ -941,7 +986,6 @@ function NodeDrawer({
   draft: DraftAutomation;
   step: WorkflowStep | null;
   output?: StepOutput;
-  updateDraft: DraftUpdater;
   onClose: () => void;
   onTest: (stepId: string) => void;
   testingStepId: string | null;
@@ -1003,7 +1047,7 @@ function NodeDrawer({
 
       <div className="chat-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
         {tab === "input" ? (
-          <NodeInputPanel draft={draft} step={step} content={content} updateDraft={updateDraft} />
+          <NodeInputPanel draft={draft} step={step} content={content} />
         ) : (
           <OutputPanel output={output} />
         )}
@@ -1050,90 +1094,39 @@ function formatDuration(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-function updateStep(
-  draft: DraftAutomation,
-  stepId: string,
-  update: (step: WorkflowStep) => WorkflowStep,
-): DraftAutomation {
-  return { ...draft, steps: draft.steps.map((step) => (step.id === stepId ? update(step) : step)) };
-}
-
-function updateStepContent(
-  draft: DraftAutomation,
-  step: WorkflowStep,
-  update: (content: AutomationStepContent) => AutomationStepContent,
-): DraftAutomation {
-  const existing =
-    draft.stepContent[step.id] ??
-    ({
-      taskId: "",
-      stepId: step.id,
-      contentType: step.type === "action" ? "script" : "prompt",
-      content: "",
-      apps: null,
-      updatedAt: null,
-    } satisfies AutomationStepContent);
-  return { ...draft, stepContent: { ...draft.stepContent, [step.id]: update(existing) } };
-}
-
 function NodeInputPanel({
   draft,
   step,
   content,
-  updateDraft,
 }: {
   draft: DraftAutomation;
   step: WorkflowStep;
   content?: AutomationStepContent;
-  updateDraft: DraftUpdater;
 }) {
   return (
     <div className="flex min-h-full flex-col gap-5">
       <Field label="Label">
-        <Input
-          value={step.label}
-          className={builderInputClass}
-          onChange={(event) =>
-            updateDraft((current) => updateStep(current, step.id, (s) => ({ ...s, label: event.target.value })))
-          }
-        />
+        <Input value={step.label} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
       </Field>
 
-      {step.type === "trigger" ? <TriggerFields draft={draft} step={step} updateDraft={updateDraft} /> : null}
+      {step.type === "trigger" ? <TriggerFields draft={draft} /> : null}
 
       {step.type === "agent" ? (
         <>
           <Field label="Uses">
             <Input
               value={(content?.apps ?? []).join(", ")}
-              className={builderInputClass}
-              onChange={(event) => {
-                const apps = event.target.value
-                  .split(",")
-                  .map((item) => item.trim())
-                  .filter(Boolean);
-                updateDraft((current) =>
-                  updateStepContent(current, step, (existing) => ({
-                    ...existing,
-                    apps: apps.length > 0 ? apps : null,
-                  })),
-                );
-              }}
+              className={builderReadOnlyInputClass}
+              readOnly
+              aria-readonly="true"
             />
           </Field>
           <Field label="Prompt" grow>
             <Textarea
               value={content?.content ?? ""}
-              className={cn(builderTextareaClass, "min-h-[320px] flex-1 resize-none font-mono")}
-              onChange={(event) =>
-                updateDraft((current) =>
-                  updateStepContent(current, step, (existing) => ({
-                    ...existing,
-                    contentType: "prompt",
-                    content: event.target.value,
-                  })),
-                )
-              }
+              className={cn(builderReadOnlyTextareaClass, "min-h-[320px] flex-1 resize-none font-mono")}
+              readOnly
+              aria-readonly="true"
             />
           </Field>
         </>
@@ -1144,34 +1137,17 @@ function NodeInputPanel({
           <Field label="Uses">
             <Input
               value={(content?.apps ?? []).join(", ")}
-              className={builderInputClass}
-              onChange={(event) => {
-                const apps = event.target.value
-                  .split(",")
-                  .map((item) => item.trim())
-                  .filter(Boolean);
-                updateDraft((current) =>
-                  updateStepContent(current, step, (existing) => ({
-                    ...existing,
-                    apps: apps.length > 0 ? apps : null,
-                  })),
-                );
-              }}
+              className={builderReadOnlyInputClass}
+              readOnly
+              aria-readonly="true"
             />
           </Field>
           <Field label="Script" grow>
             <Textarea
               value={content?.content ?? ""}
-              className={cn(builderTextareaClass, "min-h-[340px] flex-1 resize-none font-mono")}
-              onChange={(event) =>
-                updateDraft((current) =>
-                  updateStepContent(current, step, (existing) => ({
-                    ...existing,
-                    contentType: "script",
-                    content: event.target.value,
-                  })),
-                )
-              }
+              className={cn(builderReadOnlyTextareaClass, "min-h-[340px] flex-1 resize-none font-mono")}
+              readOnly
+              aria-readonly="true"
             />
           </Field>
         </>
@@ -1180,88 +1156,29 @@ function NodeInputPanel({
   );
 }
 
-function TriggerFields({
-  draft,
-  step,
-  updateDraft,
-}: {
-  draft: DraftAutomation;
-  step: WorkflowStep;
-  updateDraft: DraftUpdater;
-}) {
-  const config = step.triggerConfig ?? { type: "schedule" as const };
-  const setTrigger = (next: WorkflowStep["triggerConfig"]) => {
-    updateDraft((current) => updateStep(current, step.id, (s) => ({ ...s, triggerConfig: next })));
-  };
+function TriggerFields({ draft }: { draft: DraftAutomation }) {
+  const triggerStep = draft.steps.find((step) => step.type === "trigger");
+  const config = triggerStep?.triggerConfig ?? { type: "schedule" as const };
   return (
     <>
       <Field label="Trigger type">
-        <Input
-          value={config.type}
-          className={builderInputClass}
-          onChange={(event) => setTrigger({ ...config, type: event.target.value as "schedule" | "webhook" | "canvas" })}
-        />
+        <Input value={config.type} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
       </Field>
       {config.type === "schedule" ? (
         <>
           <Field label="Schedule type">
             <Input
               value={draft.scheduleType === "external" ? "cron" : draft.scheduleType}
-              className={builderInputClass}
-              onChange={(event) => {
-                const scheduleType = event.target.value as "cron" | "interval" | "once";
-                updateDraft((current) => ({
-                  ...current,
-                  scheduleType,
-                  steps: current.steps.map((s) =>
-                    s.id === step.id
-                      ? {
-                          ...s,
-                          triggerConfig: {
-                            ...config,
-                            type: "schedule",
-                            scheduleType,
-                            scheduleValue: current.scheduleValue,
-                            timezone: current.timezone,
-                          },
-                        }
-                      : s,
-                  ),
-                }));
-              }}
+              className={builderReadOnlyInputClass}
+              readOnly
+              aria-readonly="true"
             />
           </Field>
           <Field label="Schedule value">
-            <Input
-              value={draft.scheduleValue}
-              className={builderInputClass}
-              onChange={(event) => {
-                const scheduleValue = event.target.value;
-                updateDraft((current) => ({
-                  ...current,
-                  scheduleValue,
-                  steps: current.steps.map((s) =>
-                    s.id === step.id ? { ...s, triggerConfig: { ...config, type: "schedule", scheduleValue } } : s,
-                  ),
-                }));
-              }}
-            />
+            <Input value={draft.scheduleValue} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
           </Field>
           <Field label="Timezone">
-            <Input
-              value={draft.timezone}
-              className={builderInputClass}
-              onChange={(event) => {
-                const timezone = event.target.value;
-                updateDraft((current) => ({
-                  ...current,
-                  timezone,
-                  steps: current.steps.map((s) =>
-                    s.id === step.id ? { ...s, triggerConfig: { ...config, type: "schedule", timezone } } : s,
-                  ),
-                }));
-              }}
-            />
+            <Input value={draft.timezone} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
           </Field>
         </>
       ) : null}

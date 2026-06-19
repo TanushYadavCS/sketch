@@ -214,6 +214,24 @@ function extractLatestUserMessage(body: unknown): LatestUserMessage | null {
   return null;
 }
 
+function extractAutomationTaskId(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  const taskId = typeof body.automationTaskId === "string" ? body.automationTaskId.trim() : "";
+  return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
+}
+
+function webChatCurrentMessage(message: string, automationTaskId: string | null): string {
+  if (!automationTaskId) return message;
+  return [
+    "<automation_builder>",
+    `task_id: ${automationTaskId}`,
+    "The user is viewing this automation in the builder. Apply requested automation changes with ManageScheduledTasks instead of asking the user to edit the builder directly.",
+    "</automation_builder>",
+    "",
+    message,
+  ].join("\n");
+}
+
 function relativeWorkspacePath(workspaceDir: string, filePath: string): string | null {
   const workspace = resolve(workspaceDir);
   const file = resolve(filePath);
@@ -962,6 +980,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       return c.json(badRequest("VALIDATION_ERROR", "Message is required"), 400);
     }
     const message = latestUserMessage.text;
+    const automationTaskId = extractAutomationTaskId(body);
 
     const currentUser = await deps.users.findById(c.get("sub"));
     if (!currentUser) {
@@ -1010,7 +1029,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const userMessage = buildSketchContext({
       messages: [],
       currentUserName: currentUser.name,
-      currentMessage: message,
+      currentMessage: webChatCurrentMessage(message, automationTaskId),
       currentUserEmail: currentUser.email,
       currentUserPhone: currentUser.whatsapp_number,
       workspaceDir,

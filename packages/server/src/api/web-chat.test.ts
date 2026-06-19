@@ -153,6 +153,43 @@ describe("web chat API", () => {
     expect(call.taskContext).toBeUndefined();
   });
 
+  it("adds active automation context for builder sidecar messages without changing the transcript", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated the automation."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-alpha", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        automationTaskId: "task-automation",
+        message: {
+          id: "user-msg-builder",
+          role: "user",
+          parts: [{ type: "text", text: "Change it to run daily at 9am" }],
+        },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.userMessage).toContain("<automation_builder>");
+    expect(call.userMessage).toContain("task_id: task-automation");
+    expect(call.userMessage).toContain("Change it to run daily at 9am");
+
+    const transcript = JSON.parse(await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-alpha"), "utf-8")) as {
+      messages: Array<{ parts: Array<{ type: string; text?: string }> }>;
+    };
+    expect(transcript.messages[0].parts).toEqual([{ type: "text", text: "Change it to run daily at 9am" }]);
+  });
+
   it("honors the current user's technical tool-progress setting", async () => {
     const admin = await seedAdmin(db);
     const users = createUserRepository(db);
