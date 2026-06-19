@@ -619,7 +619,7 @@ export async function handleManageScheduledTasks(
         webhookUrl = `${baseUrl}/api/webhooks/wf/${task.id}`;
       }
 
-      const builderUrl = collectAutomationArtifact({
+      collectAutomationArtifact({
         deps,
         task,
         steps,
@@ -630,7 +630,6 @@ export async function handleManageScheduledTasks(
 
       const response: Record<string, unknown> = { ...task };
       if (webhookUrl) response.webhookUrl = webhookUrl;
-      response.builderUrl = builderUrl;
       return text(`Automation created:\n${JSON.stringify(response, null, 2)}`);
     }
 

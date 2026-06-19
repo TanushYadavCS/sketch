@@ -306,13 +306,21 @@ describe("web chat API", () => {
       builderUrl: "/scheduled-tasks/task-123/edit",
       status: "active" as const,
     };
-    const runAgent = vi.fn().mockResolvedValue({
-      ...makeAgentResult("Automation created."),
-      trace: {
-        progressEvents: [],
-        finalText: "Automation created.",
-        automationArtifacts: [artifact],
-      },
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "ManageScheduledTasks",
+        input: { action: "add" },
+      });
+      await params.onTextDelta?.("Automation created. Open builder: /scheduled-tasks/task-123/edit");
+      return {
+        ...makeAgentResult("Automation created. Open builder: /scheduled-tasks/task-123/edit"),
+        trace: {
+          progressEvents: [],
+          finalText: "Automation created. Open builder: /scheduled-tasks/task-123/edit",
+          automationArtifacts: [artifact],
+        },
+      };
     });
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
@@ -329,7 +337,14 @@ describe("web chat API", () => {
 
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-automation")).toMatchObject({
+    const chunks = webChatStreamChunks(text);
+    const visibleText = chunks
+      .filter((chunk) => chunk.type === "text-delta")
+      .map((chunk) => (chunk as { delta?: string }).delta ?? "")
+      .join("");
+    expect(visibleText).toBe("All set - here's the automation.");
+    expect(visibleText).not.toContain("/scheduled-tasks/task-123/edit");
+    expect(chunks.find((chunk) => chunk.type === "data-automation")).toMatchObject({
       type: "data-automation",
       data: artifact,
     });

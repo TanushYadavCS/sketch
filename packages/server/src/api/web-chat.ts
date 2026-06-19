@@ -267,6 +267,73 @@ function webChatCurrentMessage(message: string, automationTaskId: string | null)
   ].join("\n");
 }
 
+const AUTOMATION_CARD_INTRO_TEXT = "All set - here's the automation.";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function safeUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+function automationBuilderReferences(artifact: AutomationArtifact): string[] {
+  const references = new Set<string>();
+  const builderUrl = artifact.builderUrl.trim();
+  if (builderUrl) references.add(builderUrl);
+  references.add(`/scheduled-tasks/${encodeURIComponent(artifact.taskId)}/edit`);
+
+  const absoluteBuilderUrl = safeUrl(builderUrl);
+  if (absoluteBuilderUrl) {
+    references.add(`${absoluteBuilderUrl.pathname}${absoluteBuilderUrl.search}${absoluteBuilderUrl.hash}`);
+  }
+
+  return Array.from(references).filter((reference) => reference.length > 0);
+}
+
+function stripAutomationBuilderReferences(text: string, artifacts: AutomationArtifact[]): string {
+  let stripped = text;
+  for (const artifact of artifacts) {
+    for (const reference of automationBuilderReferences(artifact)) {
+      const pattern = escapeRegExp(reference);
+      stripped = stripped
+        .replace(new RegExp(`\\[[^\\]]*\\]\\(${pattern}\\)`, "gi"), "")
+        .replace(new RegExp(`<${pattern}>`, "gi"), "")
+        .replace(new RegExp(pattern, "gi"), "");
+    }
+  }
+
+  return stripped
+    .replace(/^[ \t]*(?:open|view|edit|builder|link)(?: the)?(?: automation| builder)?[: -]*$/gim, "")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function looksLikeAutomationToolDump(text: string): boolean {
+  return (
+    /^Automation created:\s*[{[]/s.test(text) ||
+    (/^Automation created:/i.test(text) && /"(?:id|prompt|scheduleType|schedule_type|deliveryTarget)"/.test(text))
+  );
+}
+
+function normalizeAutomationAssistantText(text: string, artifacts: AutomationArtifact[]): string {
+  if (artifacts.length === 0) return text;
+
+  const stripped = stripAutomationBuilderReferences(text, artifacts)
+    .replace(/\s+(?:open|view|edit|builder|link)(?: the)?(?: automation| builder)?[: -]*$/i, "")
+    .trim();
+  if (!stripped || /^Automation created:?\.?$/i.test(stripped) || looksLikeAutomationToolDump(stripped)) {
+    return AUTOMATION_CARD_INTRO_TEXT;
+  }
+
+  return stripped;
+}
+
 function relativeWorkspacePath(workspaceDir: string, filePath: string): string | null {
   const workspace = resolve(workspaceDir);
   const file = resolve(filePath);
@@ -1268,6 +1335,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       let progressPartIndex = 0;
       let wroteOffProgress = false;
       let currentTextPart = "";
+      let sawAutomationTool = false;
+      let bufferedTextAfterAutomationTool = "";
 
       const startTextPart = () => {
         textPartId = `text-${textPartIndex}`;
@@ -1335,6 +1404,10 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               responseSurface: "web",
               contextType: "dm",
               onProgressEvent: async (event) => {
+                if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
+                  sawAutomationTool = true;
+                  closeTextPart();
+                }
                 progressRenderer.renderEvent(event);
                 const lines = progressRenderer.getLines();
                 const progressData = createWebProgressData(event, progressSettings, progressMode, lines);
@@ -1357,6 +1430,10 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                 }
               },
               onTextDelta: async (delta) => {
+                if (sawAutomationTool) {
+                  bufferedTextAfterAutomationTool += delta;
+                  return;
+                }
                 writeTextDelta(delta);
               },
               onSessionId: async () => {},
@@ -1392,7 +1469,9 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ),
         );
 
-        const finalText = result.trace.finalText ?? "";
+        const automationArtifacts = result.trace.automationArtifacts ?? [];
+        const rawFinalText = result.trace.finalText?.trim() ? result.trace.finalText : bufferedTextAfterAutomationTool;
+        const finalText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
         writeFinalText(finalText);
 
         const fileParts: Array<{ id: string; data: WebChatFile }> = [];
@@ -1422,7 +1501,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           write({ type: "data-integration-connection", id, data: connection });
           return { id, data: connection };
         });
-        const automationParts = (result.trace.automationArtifacts ?? []).map((artifact, index) => {
+        const automationParts = automationArtifacts.map((artifact, index) => {
           const id = `automation-${index}`;
           write({ type: "data-automation", id, data: artifact });
           return { id, data: artifact };

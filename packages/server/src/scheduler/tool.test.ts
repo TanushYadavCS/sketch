@@ -393,7 +393,7 @@ describe("handleManageScheduledTasks — add", () => {
       },
     );
 
-    expect(result.content[0].text).toContain('"builderUrl": "/scheduled-tasks/new-task/edit"');
+    expect(result.content[0].text).not.toContain("builderUrl");
     expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: "new-task",
