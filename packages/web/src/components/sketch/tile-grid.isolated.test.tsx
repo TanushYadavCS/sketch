@@ -24,4 +24,10 @@ describe("TileGrid", () => {
     expect(screen.getByText("Connected apps")).toBeInTheDocument();
     expect(screen.getByText("Team members")).toBeInTheDocument();
   });
+
+  it("renders only the leading icon in each workspace tile", () => {
+    const { container } = render(<TileGrid />);
+
+    expect(container.querySelectorAll("a svg")).toHaveLength(4);
+  });
 });

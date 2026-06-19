@@ -9,7 +9,8 @@
  */
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
-import { AGENT_BUILT_IN_TOOL_NAMES, type AutomationArtifact, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
+import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
+import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -19,6 +20,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
+import { collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
@@ -39,7 +41,12 @@ import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
-import { AutomationArtifactCollector, UploadCollector, createSketchMcpServer } from "./sketch-tools";
+import {
+  AutomationArtifactCollector,
+  IntegrationConnectionCollector,
+  UploadCollector,
+  createSketchMcpServer,
+} from "./sketch-tools";
 import type { DailyBriefWriter } from "./tools/daily-brief";
 
 /**
@@ -92,6 +99,7 @@ export interface AgentResult {
   costUsd: number;
   auxCostUsd: number;
   pendingUploads: string[];
+  pendingIntegrationConnections?: WebChatIntegrationConnectionData[];
   trace: RunTrace;
 }
 
@@ -156,6 +164,7 @@ export interface RunAgentParams {
   platform: "slack" | "whatsapp";
   responseSurface?: ResponseSurface;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
+  onTextDelta?: (delta: string) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
@@ -259,6 +268,19 @@ export function extractAssistantText(message: unknown): string | null {
   return joined.trim() ? joined : null;
 }
 
+export function extractAssistantTextDelta(message: unknown): string | null {
+  if (!message || typeof message !== "object") return null;
+  const msg = message as Record<string, unknown>;
+  if (msg.type !== "stream_event") return null;
+
+  const event = msg.event as Record<string, unknown> | undefined;
+  if (!event || event.type !== "content_block_delta") return null;
+
+  const delta = event.delta as Record<string, unknown> | undefined;
+  if (!delta || delta.type !== "text_delta" || typeof delta.text !== "string") return null;
+  return delta.text ? delta.text : null;
+}
+
 export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
   const isFresh = params.sessionMode === "fresh";
@@ -359,10 +381,12 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   }
 
   const uploadCollector = new UploadCollector();
+  const integrationConnectionCollector = new IntegrationConnectionCollector();
   const automationArtifactCollector = new AutomationArtifactCollector();
   const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
+    integrationConnectionCollector,
     automationArtifactCollector,
     auxCostCollector,
     workspaceDir: absWorkspace,
@@ -382,6 +406,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
+    currentUserEmail: params.userEmail ?? null,
+    currentUserName: params.userName,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,
     workspaceKey: params.workspaceKey,
@@ -494,6 +520,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
         },
         systemPrompt: systemAppend,
         abortController: params.abortController,
+        includePartialMessages: Boolean(params.onTextDelta),
         tools: sdkBuiltInTools as string[],
         permissionMode: "default" as const,
         allowDangerouslySkipPermissions: false,
@@ -516,6 +543,17 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       if (message.type === "system" && message.subtype === "init") {
         sessionId = message.session_id;
         await notifySessionId(sessionId);
+      }
+
+      if (message.type === "stream_event" && params.onTextDelta) {
+        const delta = extractAssistantTextDelta(message);
+        if (delta) {
+          try {
+            await params.onTextDelta(delta);
+          } catch (err) {
+            logger.warn({ err }, "Failed to deliver assistant text delta");
+          }
+        }
       }
 
       if (message.type === "assistant") {
@@ -649,22 +687,46 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     }
   }
 
+  if (params.responseSurface === "web" && params.contextType !== "scheduled_task") {
+    try {
+      await collectIntegrationCardsFromProgressEvents({
+        events: progressEvents,
+        loadIntegrationProvider: params.loadIntegrationProvider,
+        collector: integrationConnectionCollector,
+        userEmail: params.userEmail ?? null,
+        userName: params.userName,
+      });
+    } catch (err) {
+      logger.warn({ err }, "Failed to resolve integration cards from agent progress");
+    }
+  }
+
   const pendingUploads = uploadCollector.drain();
+  const pendingIntegrationConnections = integrationConnectionCollector.drain();
   const automationArtifacts = automationArtifactCollector.drain();
   const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
   const auxCostUsd = sumAuxCost(auxLlmCalls);
   logger.info(
-    { userId: userName, sessionId, sdkCostUsd, auxCostUsd, pendingUploads: pendingUploads.length },
+    {
+      userId: userName,
+      sessionId,
+      sdkCostUsd,
+      auxCostUsd,
+      pendingUploads: pendingUploads.length,
+      pendingIntegrationConnections: pendingIntegrationConnections.length,
+      automationArtifacts: automationArtifacts.length,
+    },
     "Agent run completed",
   );
   const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
-    messageSent: finalText !== null,
+    messageSent: finalText !== null || pendingIntegrationConnections.length > 0 || automationArtifacts.length > 0,
     sessionId,
     costUsd: sdkCostUsd,
     auxCostUsd,
     pendingUploads,
+    pendingIntegrationConnections,
     trace: {
       progressEvents,
       finalText,

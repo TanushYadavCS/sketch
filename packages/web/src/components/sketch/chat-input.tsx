@@ -1,5 +1,23 @@
-import { type WebChatUploadedAttachment, api } from "@/lib/api";
-import { MicrophoneIcon, PaperPlaneTiltIcon, PaperclipIcon, StopIcon, XIcon } from "@phosphor-icons/react";
+import { type WebChatToolProgress, type WebChatUploadedAttachment, api } from "@/lib/api";
+import {
+  CaretDownIcon,
+  MicrophoneIcon,
+  PaperPlaneTiltIcon,
+  PaperclipIcon,
+  PauseIcon,
+  StopIcon,
+  WrenchIcon,
+  XIcon,
+} from "@phosphor-icons/react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@sketch/ui/components/dropdown-menu";
 import { cn } from "@sketch/ui/lib/utils";
 import {
   type ChangeEvent,
@@ -21,11 +39,24 @@ export interface ChatInputAttachment {
   error?: string;
 }
 
+export interface ChatInputRendererOption {
+  value: WebChatToolProgress;
+  label: string;
+}
+
 export interface ChatInputProps {
   initialValue?: string;
   placeholder?: string;
   disabled?: boolean;
   disabledPlaceholder?: string;
+  running?: boolean;
+  runningPlaceholder?: string;
+  stopping?: boolean;
+  rendererValue?: WebChatToolProgress;
+  rendererSaving?: boolean;
+  rendererOptions?: ChatInputRendererOption[];
+  onRendererChange?: (value: WebChatToolProgress) => void;
+  onStop?: () => void;
   onSubmit?: (value: string, attachments: WebChatUploadedAttachment[]) => void;
 }
 
@@ -65,6 +96,14 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
     placeholder = "Ask Sketch anything…",
     disabled = false,
     disabledPlaceholder = "Resolve account issue to continue",
+    running = false,
+    runningPlaceholder = "Sketch is working...",
+    stopping = false,
+    rendererValue,
+    rendererSaving = false,
+    rendererOptions = [],
+    onRendererChange,
+    onStop,
     onSubmit,
   },
   ref,
@@ -113,9 +152,14 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
   const hasUploadedAttachments = attachments.some((a) => a.uploaded);
   const hasContent = value.trim().length > 0 || hasUploadedAttachments;
   const hasPendingUploads = attachments.some((a) => a.uploading);
-  const inputBusy = disabled || transcribing;
+  const inputBusy = disabled || transcribing || running;
+  const attachmentControlsBusy = inputBusy || running;
 
   function submitNow() {
+    if (running) {
+      onStop?.();
+      return;
+    }
     if (inputBusy || hasPendingUploads) return;
     const trimmed = value.trim();
     const uploaded = attachments.flatMap((a) => (a.uploaded ? [a.uploaded] : []));
@@ -140,7 +184,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
 
   const handleFiles = useCallback(
     (files: FileList | null) => {
-      if (!files || inputBusy) return;
+      if (!files || attachmentControlsBusy) return;
       const newAttachments: ChatInputAttachment[] = Array.from(files).map((file) => ({
         file,
         uploading: true,
@@ -166,7 +210,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
           });
       }
     },
-    [inputBusy],
+    [attachmentControlsBusy],
   );
 
   function removeAttachment(file: File) {
@@ -174,7 +218,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
   }
 
   async function startRecording() {
-    if (inputBusy || recording) return;
+    if (attachmentControlsBusy || recording) return;
     setVoiceError(null);
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setVoiceError("Voice recording is not available in this browser.");
@@ -286,7 +330,9 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
               ? "Transcribing audio..."
               : recording
                 ? "Recording... click stop when done"
-                : (voiceError ?? placeholder)
+                : running
+                  ? runningPlaceholder
+                  : (voiceError ?? placeholder)
         }
         disabled={inputBusy}
         className={cn(
@@ -310,8 +356,15 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
         </div>
       ) : null}
 
-      <div className="flex items-center justify-between px-[10px] pb-[10px] pt-[2px]">
-        <div className="flex items-center gap-[4px]">
+      <div className="flex items-center justify-between px-[12px] pb-[12px] pt-[4px]">
+        <div className="flex items-center gap-[6px]">
+          <ProgressModeMenu
+            value={rendererValue}
+            saving={rendererSaving}
+            options={rendererOptions}
+            disabled={disabled || running}
+            onChange={onRendererChange}
+          />
           <input
             ref={fileInputRef}
             type="file"
@@ -326,7 +379,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
           <IconButton
             icon={<PaperclipIcon size={16} aria-hidden />}
             label="Attach a file"
-            disabled={inputBusy}
+            disabled={attachmentControlsBusy}
             onClick={() => fileInputRef.current?.click()}
           />
           {recording ? (
@@ -341,18 +394,91 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(functio
             <IconButton
               icon={<MicrophoneIcon size={16} aria-hidden />}
               label="Record voice"
-              disabled={inputBusy}
+              disabled={attachmentControlsBusy}
               onClick={startRecording}
               loading={transcribing}
             />
           )}
         </div>
         <div className="min-w-0 flex-1" />
-        <SubmitButton disabled={inputBusy || hasPendingUploads} empty={!hasContent} onClick={submitNow} />
+        <SubmitButton
+          disabled={inputBusy || hasPendingUploads}
+          empty={!hasContent}
+          running={running}
+          stopping={stopping}
+          onClick={submitNow}
+        />
       </div>
     </form>
   );
 });
+
+function ProgressModeMenu({
+  value,
+  saving,
+  options,
+  disabled,
+  onChange,
+}: {
+  value?: WebChatToolProgress;
+  saving: boolean;
+  options: ChatInputRendererOption[];
+  disabled: boolean;
+  onChange?: (value: WebChatToolProgress) => void;
+}) {
+  if (!value || options.length === 0 || !onChange) return null;
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Progress updates: ${selected.label}`}
+          title={`Progress updates: ${selected.label}`}
+          disabled={disabled || saving}
+          className={cn(
+            "flex h-[36px] w-[48px] shrink-0 items-center justify-center gap-[4px] rounded-full border border-border/70",
+            "bg-muted/80 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
+            "transition-colors duration-150 ease-out",
+            "hover:border-foreground/15 hover:bg-foreground/10 hover:text-foreground",
+            "data-[state=open]:border-foreground/20 data-[state=open]:bg-foreground/10 data-[state=open]:text-foreground",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/45",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+            !disabled && !saving && "cursor-pointer",
+          )}
+        >
+          <WrenchIcon size={16} aria-hidden />
+          <CaretDownIcon size={11} aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        sideOffset={8}
+        className="w-[190px] p-[6px] data-[state=closed]:!animate-none data-[state=open]:!animate-none"
+      >
+        <DropdownMenuLabel className="px-[8px] pt-[5px] pb-[4px] text-[11px] font-semibold leading-none tracking-normal text-muted-foreground">
+          Progress updates
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator className="my-[4px]" />
+        <DropdownMenuRadioGroup value={value} onValueChange={(next) => onChange(next as WebChatToolProgress)}>
+          {options.map((option) => (
+            <DropdownMenuRadioItem
+              key={option.value}
+              value={option.value}
+              className="h-[32px] cursor-pointer rounded-[7px] pl-[8px] text-[13px] data-[state=checked]:bg-muted/70"
+            >
+              <span className="flex min-w-0 flex-1 items-center">
+                <span>{option.label}</span>
+              </span>
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function IconButton({
   icon,
@@ -378,9 +504,9 @@ function IconButton({
       aria-busy={loading ? true : undefined}
       className={cn(
         "relative flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full",
-        "transition-all duration-200 ease-out cursor-pointer",
+        "transition-[background-color,color,transform,opacity] duration-150 ease-out cursor-pointer",
         active
-          ? "bg-red-500 text-white shadow-[0_2px_8px_rgba(239,68,68,0.5),0_0_20px_rgba(239,68,68,0.25)] hover:scale-[1.04] active:scale-[0.97]"
+          ? "bg-muted text-foreground hover:bg-foreground/15 hover:scale-[1.04] active:scale-[0.97]"
           : loading
             ? "bg-muted text-brand-accent cursor-wait"
             : "bg-muted text-muted-foreground hover:text-foreground hover:bg-foreground/15 hover:scale-[1.04] active:scale-[0.97]",
@@ -450,7 +576,39 @@ function AttachmentChip({
   );
 }
 
-function SubmitButton({ disabled, empty, onClick }: { disabled: boolean; empty: boolean; onClick: () => void }) {
+function SubmitButton({
+  disabled,
+  empty,
+  running,
+  stopping,
+  onClick,
+}: {
+  disabled: boolean;
+  empty: boolean;
+  running: boolean;
+  stopping: boolean;
+  onClick: () => void;
+}) {
+  if (running) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={stopping}
+        aria-label={stopping ? "Pausing Sketch" : "Pause Sketch"}
+        aria-busy={stopping ? true : undefined}
+        className={cn(
+          "flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full",
+          "border border-border/70 bg-muted/80 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
+          "transition-colors duration-150 ease-out cursor-pointer hover:border-foreground/15 hover:bg-foreground/10 hover:text-foreground",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/45 disabled:cursor-wait disabled:opacity-70",
+        )}
+      >
+        <PauseIcon size={15} weight="fill" aria-hidden />
+      </button>
+    );
+  }
+
   const ready = !disabled && !empty;
   return (
     <button
@@ -462,7 +620,7 @@ function SubmitButton({ disabled, empty, onClick }: { disabled: boolean; empty: 
         "flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full",
         "transition-all duration-200 ease-out cursor-pointer",
         ready
-          ? "bg-brand-yellow text-brand-brown shadow-[0_2px_8px_rgba(254,237,1,0.5),0_0_20px_rgba(254,237,1,0.25)] hover:shadow-[0_2px_12px_rgba(254,237,1,0.6),0_0_28px_rgba(254,237,1,0.3)] hover:scale-[1.04] active:scale-[0.97]"
+          ? "bg-foreground text-background shadow-[0_2px_8px_rgba(0,0,0,0.16),0_0_18px_rgba(0,0,0,0.08)] hover:bg-foreground/90 hover:shadow-[0_2px_12px_rgba(0,0,0,0.18),0_0_24px_rgba(0,0,0,0.1)] dark:bg-brand-accent dark:text-black dark:shadow-[0_2px_8px_rgba(254,237,1,0.5),0_0_20px_rgba(254,237,1,0.25)] dark:hover:bg-brand-accent/90 dark:hover:shadow-[0_2px_12px_rgba(254,237,1,0.6),0_0_28px_rgba(254,237,1,0.3)] hover:scale-[1.04] active:scale-[0.97]"
           : "bg-muted text-muted-foreground/70 cursor-not-allowed",
       )}
     >

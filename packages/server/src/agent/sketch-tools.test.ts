@@ -108,6 +108,15 @@ describe("createSketchMcpServer", () => {
     expect(tools.SearchChatHistory).toBeDefined();
   });
 
+  it("does not expose integration card rendering tools", () => {
+    const collector = new UploadCollector();
+    const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });
+    const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+
+    expect(tools.RequestIntegrationConnection).toBeUndefined();
+    expect(tools.SearchIntegrationApps).toBeUndefined();
+  });
+
   it("SearchChatHistory searches the scoped conversation", async () => {
     const collector = new UploadCollector();
     const searchMessages = vi.fn().mockResolvedValue({

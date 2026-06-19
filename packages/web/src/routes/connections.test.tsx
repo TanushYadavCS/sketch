@@ -1,8 +1,14 @@
 import type { IntegrationConnection } from "@sketch/shared";
 import { describe, expect, it } from "vitest";
-import { getPersonallyConnectedAppIds } from "./connections";
+import { getPersonallyConnectedAppIds, integrationAppConnectFromSearch } from "./connections";
 
 describe("ConnectionsPage helpers", () => {
+  it("validates direct app connect search params", () => {
+    expect(integrationAppConnectFromSearch("github")).toBe("github");
+    expect(integrationAppConnectFromSearch(" app-store-connect ")).toBe("app-store-connect");
+    expect(integrationAppConnectFromSearch("../github")).toBeNull();
+  });
+
   it("does not treat org-shared apps as personal connections", () => {
     const connections = [
       {

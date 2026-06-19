@@ -69,13 +69,13 @@
 
   .markdown-body a {
     @apply break-words underline underline-offset-4 transition-colors;
-    color: var(--brand-accent);
-    text-decoration-color: color-mix(in oklch, var(--brand-accent) 64%, transparent);
+    color: var(--accent-foreground);
+    text-decoration-color: color-mix(in oklch, var(--accent-foreground) 52%, transparent);
   }
 
   .markdown-body a:hover {
-    color: var(--brand-accent);
-    text-decoration-color: var(--brand-accent);
+    color: var(--accent-foreground);
+    text-decoration-color: var(--accent-foreground);
   }
 
   .markdown-body blockquote {
@@ -209,13 +209,59 @@
   }
 }
 
-@keyframes sketch-text-thinking {
+@keyframes sketch-progress-change {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-shimmer-text {
+  0% {
+    background-position: 240px center;
+  }
+  100% {
+    background-position: 0 center;
+  }
+}
+
+@keyframes sketch-response-fading {
   0%,
   100% {
     opacity: 1;
   }
   50% {
-    opacity: 0.55;
+    opacity: 0.78;
+  }
+}
+
+@keyframes sketch-collapsible-timeline-open {
+  from {
+    height: 0;
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-collapsible-timeline-close {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    height: 0;
+    opacity: 0;
+    transform: translateY(-2px);
   }
 }
 
@@ -224,114 +270,81 @@
   transform-origin: center;
 }
 
-.sketch-text-thinking {
-  animation: sketch-text-thinking 1.4s ease-in-out infinite;
+.sketch-progress-change {
+  animation: sketch-progress-change 180ms ease-out both;
 }
 
-.automation-builder-flow .react-flow__pane {
-  cursor: grab;
+.sketch-timeline-window {
+  transition: height 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.automation-builder-flow .react-flow__pane:active {
-  cursor: grabbing;
+.sketch-timeline-window-track {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
 }
 
-.automation-builder-flow .react-flow__node {
-  outline: none;
+.sketch-timeline-entry {
+  transition: opacity 220ms ease-out;
 }
 
-.automation-builder-flow .react-flow__node:focus-visible .automation-node-shell {
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--brand-accent) 72%, transparent), 0 18px 38px rgba(0, 0, 0, 0.52);
+.sketch-timeline-entry-exiting {
+  opacity: 0;
 }
 
-.automation-builder-flow .react-flow__edge-path {
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.automation-builder-flow .react-flow__edge:hover .react-flow__edge-path {
-  stroke: rgba(255, 255, 255, 0.36);
-}
-
-.automation-builder-flow .react-flow__edge.animated .react-flow__edge-path {
-  stroke-dasharray: 7 8;
-  animation: automation-edge-flow 0.9s linear infinite;
-}
-
-.automation-builder-handle.react-flow__handle {
-  width: 7px;
-  height: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: #101010;
-  box-shadow: 0 0 0 2px #050505;
-  opacity: 0.58;
-  transition: opacity 150ms ease, border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
-}
-
-.group\/node:hover .automation-builder-handle.react-flow__handle {
-  border-color: rgba(255, 255, 255, 0.3);
-  background: #141414;
-  opacity: 0.8;
-}
-
-.automation-builder-handle.react-flow__handle.connectingto,
-.automation-builder-handle.react-flow__handle.connectingfrom {
-  border-color: rgba(254, 237, 1, 0.7);
-  background: var(--brand-accent);
-  opacity: 1;
-}
-
-.automation-builder-handle.react-flow__handle-left:hover {
-  transform: translate(-50%, -50%) scale(1.08);
-}
-
-.automation-builder-handle.react-flow__handle-right:hover {
-  transform: translate(50%, -50%) scale(1.08);
-}
-
-.automation-builder-controls.react-flow__controls {
+.sketch-collapsible-timeline-content {
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(10, 10, 10, 0.88);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
-  backdrop-filter: blur(12px);
+  contain: layout paint;
+  transform-origin: top;
+  will-change: height, opacity, transform;
 }
 
-.automation-builder-controls .react-flow__controls-button {
-  width: 30px;
-  height: 30px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  background: transparent;
-  color: rgba(255, 255, 255, 0.72);
-  fill: currentColor;
+.sketch-collapsible-timeline-content[data-state="open"] {
+  animation: sketch-collapsible-timeline-open 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.automation-builder-controls .react-flow__controls-button:last-child {
-  border-bottom: 0;
+.sketch-collapsible-timeline-content[data-state="closed"] {
+  animation: sketch-collapsible-timeline-close 180ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.automation-builder-controls .react-flow__controls-button:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.92);
+.sketch-shimmer-text,
+.sketch-shimmer-progress {
+  will-change: background-position;
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 0%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 36%,
+    var(--foreground) 50%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 64%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 100%
+  );
+  background-size: 240px 100%;
+  background-repeat: repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: sketch-shimmer-text 2.2s linear infinite;
 }
 
-.automation-builder-controls .react-flow__controls-button svg {
-  max-width: 14px;
-  max-height: 14px;
+.sketch-shimmer-text {
+  display: inline-block;
 }
 
-@keyframes automation-edge-flow {
-  to {
-    stroke-dashoffset: -15;
-  }
+.sketch-shimmer-progress {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.sketch-response-fading {
+  animation: sketch-response-fading 2s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sketch-icon-thinking,
-  .sketch-text-thinking,
-  .automation-builder-flow .react-flow__edge.animated .react-flow__edge-path {
+  .sketch-timeline-window,
+  .sketch-timeline-window-track,
+  .sketch-timeline-entry,
+  .sketch-collapsible-timeline-content {
     animation: none !important;
-    opacity: 0.7;
+    transition: none;
   }
 }
