@@ -1,6 +1,27 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatThread } from "./chat-thread";
+
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  if (originalClipboardDescriptor) {
+    Object.defineProperty(navigator, "clipboard", originalClipboardDescriptor);
+  } else {
+    Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+
+function stubClipboardWriteText() {
+  const writeText = vi.fn<(value: string) => Promise<void>>().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
+}
 
 describe("ChatThread", () => {
   it("uses the Apeksha chat message treatment for user and Sketch messages", () => {
@@ -27,12 +48,353 @@ describe("ChatThread", () => {
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
   });
 
+  it("renders interrupted runs as guidance instead of a Sketch message", () => {
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            interruption: {
+              detail: "Sketch paused.",
+              label: "Tell Sketch what to do differently.",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Sketch")).not.toBeInTheDocument();
+    expect(screen.getByText("Sketch paused.").closest("[data-interruption-notice]")).toBeInTheDocument();
+    expect(screen.getByText("Tell Sketch what to do differently.").closest("[data-interruption-notice]")).toHaveClass(
+      "border-l-2",
+    );
+  });
+
   it("shows live tool progress instead of the generic thinking row", () => {
+    render(
+      <ChatThread
+        busy
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            progressItems: [
+              {
+                id: "read-notes",
+                kind: "tool-call",
+                label: 'Reading "notes.md"',
+                detail: "Checking the uploaded notes",
+                toolName: "Read",
+                icon: { type: "tool", name: "Read" },
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('Reading "notes.md"').closest("[data-progress-item]")).toBeInTheDocument();
+    expect(screen.getByText("Checking the uploaded notes")).toBeInTheDocument();
+    const activeLine = screen.getByText('Reading "notes.md"').closest("[data-progress-line]");
+    expect(activeLine).toHaveClass("sketch-shimmer-progress");
+    expect(screen.getByText("Checking the uploaded notes").closest("[data-progress-line]")).toBe(activeLine);
+    expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
+  });
+
+  it("renders legacy progress lines without visible Slack emoji treatment", () => {
     render(<ChatThread busy messages={[{ id: "a1", role: "assistant", progressLines: ['📖 Reading "notes.md"'] }]} />);
 
-    expect(screen.getByText('📖 Reading "notes.md"').closest("div")).toHaveClass("sketch-text-thinking");
-    expect(screen.getByText('📖 Reading "notes.md"').closest("div")).toHaveClass("italic");
-    expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
+    expect(screen.getByText('Reading "notes.md"').closest("[data-progress-item]")).toBeInTheDocument();
+    expect(screen.queryByText('📖 Reading "notes.md"')).not.toBeInTheDocument();
+  });
+
+  it("renders assistant progress as a timeline with text between tool calls", () => {
+    const timeline = [
+      { id: "text-0", type: "text" as const, text: "Let me check the workspace." },
+      {
+        id: "progress-0",
+        type: "progress" as const,
+        progressItems: [{ kind: "file", label: "Reading", detail: "notes.md", toolName: "Read" }],
+      },
+      { id: "text-2", type: "text" as const, text: "I found the relevant note. Checking the tests next." },
+      {
+        id: "progress-1",
+        type: "progress" as const,
+        progressItems: [{ kind: "shell", label: "Running", detail: "pnpm test", toolName: "Bash" }],
+      },
+    ];
+    const { container, rerender } = render(
+      <ChatThread
+        busy
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            timeline,
+          },
+        ]}
+      />,
+    );
+    const textEntry = container.querySelectorAll("[data-timeline-entry]")[2];
+
+    expect(container.querySelectorAll("[data-timeline-entry]")).toHaveLength(4);
+    expect(screen.getByText("Let me check the workspace.")).toBeInTheDocument();
+    expect(screen.getByText("I found the relevant note. Checking the tests next.")).toBeInTheDocument();
+    expect(screen.getByText("Reading").closest("[data-progress-item]")).toBeInTheDocument();
+    expect(screen.getByText("Running").closest("[data-progress-line]")).toHaveClass("sketch-shimmer-progress");
+    expect(screen.getByText("Reading").closest("[data-progress-line]")).not.toHaveClass("sketch-shimmer-progress");
+
+    rerender(
+      <ChatThread
+        busy
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            timeline: [
+              ...timeline.slice(0, 2),
+              {
+                id: "text-2",
+                type: "text",
+                text: "I found the relevant note. Checking the tests next. Almost done.",
+              },
+              timeline[3],
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll("[data-timeline-entry]")[2]).toBe(textEntry);
+  });
+
+  it("renders integration connection cards with progress and completion states", () => {
+    const onConnect = vi.fn();
+    const connection = {
+      requestId: "integration-req-1",
+      appId: "github",
+      appName: "GitHub",
+      reason: "Connect GitHub so Sketch can inspect repository issues.",
+    };
+    const { rerender } = render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            text: "Connect GitHub first.",
+            integrationConnections: [connection],
+          },
+        ]}
+        onConnectIntegration={onConnect}
+      />,
+    );
+
+    expect(screen.getByText("Connect GitHub").closest("[data-integration-connection-card]")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(onConnect).toHaveBeenCalledWith(connection);
+
+    rerender(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            text: "Connect GitHub first.",
+            integrationConnections: [connection],
+          },
+        ]}
+        integrationConnectionStatuses={{ "integration-req-1": "connecting" }}
+        onConnectIntegration={onConnect}
+      />,
+    );
+
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connecting" })).toBeDisabled();
+
+    rerender(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            text: "Connect GitHub first.",
+            integrationConnections: [connection],
+          },
+        ]}
+        integrationConnectionStatuses={{ "integration-req-1": "connected" }}
+        onConnectIntegration={onConnect}
+      />,
+    );
+
+    expect(screen.getAllByText("Connected").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Connected" })).toBeDisabled();
+  });
+
+  it("renders integration connection cards while icons are still loading", () => {
+    const iconUrl = "https://cdn.example.com/github.png";
+
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            text: "Connect GitHub first.",
+            integrationConnections: [
+              {
+                requestId: "integration-req-1",
+                appId: "github",
+                appName: "GitHub",
+                icon: iconUrl,
+              },
+            ],
+          },
+        ]}
+        onConnectIntegration={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Connect GitHub")).toBeInTheDocument();
+    const icon = document.querySelector("[data-integration-connection-card] img");
+    expect(icon).toHaveAttribute("src", iconUrl);
+    expect(icon?.parentElement).toHaveClass("bg-transparent");
+  });
+
+  it("renders connected integration account cards without a connect action", () => {
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            integrationConnections: [
+              {
+                requestId: "integration-connected-github",
+                appId: "github",
+                appName: "GitHub",
+                state: "connected",
+                accountName: "Alice GitHub",
+              },
+            ],
+          },
+        ]}
+        onConnectIntegration={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("GitHub connected")).toBeInTheDocument();
+    expect(screen.getByText("Alice GitHub is connected and available to Sketch.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connected" })).toBeDisabled();
+  });
+
+  it("starts a new scrolling progress window after assistant text", () => {
+    const { container } = render(
+      <ChatThread
+        busy
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            timeline: [
+              {
+                id: "progress-0",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Reading old notes", toolName: "Read" }],
+              },
+              { id: "text-1", type: "text", text: "Finished the old check." },
+              {
+                id: "progress-1",
+                type: "progress",
+                progressItems: [{ kind: "search", label: "Searching files", toolName: "Grep" }],
+              },
+              {
+                id: "progress-2",
+                type: "progress",
+                progressItems: [{ kind: "shell", label: "Running tests", toolName: "Bash" }],
+              },
+              {
+                id: "progress-3",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Editing summary", toolName: "Edit" }],
+              },
+              {
+                id: "progress-4",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Writing response", toolName: "Write" }],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll("[data-progress-item]")).toHaveLength(4);
+    expect(screen.getByText("Reading old notes")).toBeInTheDocument();
+    expect(screen.getByText("Finished the old check.")).toBeInTheDocument();
+    expect(screen.queryByText("Searching files")).not.toBeInTheDocument();
+    expect(screen.getByText("Running tests")).toBeInTheDocument();
+    expect(screen.getByText("Editing summary")).toBeInTheDocument();
+    expect(screen.getByText("Writing response").closest("[data-progress-line]")).toHaveClass("sketch-shimmer-progress");
+  });
+
+  it("collapses completed timeline activity and reopens a scrollable full history", () => {
+    const { container } = render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            timeline: [
+              {
+                id: "progress-0",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Reading notes", toolName: "Read" }],
+              },
+              { id: "text-1", type: "text", text: "I found the relevant note. Checking the tests next." },
+              {
+                id: "progress-2",
+                type: "progress",
+                progressItems: [{ kind: "search", label: "Searching files", toolName: "Grep" }],
+              },
+              {
+                id: "progress-3",
+                type: "progress",
+                progressItems: [{ kind: "shell", label: "Running tests", toolName: "Bash" }],
+              },
+              {
+                id: "progress-4",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Editing summary", toolName: "Edit" }],
+              },
+              { id: "text-5", type: "text", text: "Final answer is ready." },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Final answer is ready.")).toBeInTheDocument();
+    expect(screen.queryByText("Reading notes")).not.toBeInTheDocument();
+    expect(screen.queryByText("I found the relevant note. Checking the tests next.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Searching files")).not.toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: /Activity timeline 4 tool calls, 1 update/ });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(button);
+
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    expect(container.querySelector("[data-timeline-history]")).toHaveClass("max-h-[260px]", "overflow-y-auto");
+    expect(container.querySelectorAll("[data-progress-item]")).toHaveLength(4);
+    expect(screen.getByText("Reading notes")).toBeInTheDocument();
+    expect(screen.getByText("I found the relevant note. Checking the tests next.")).toBeInTheDocument();
+    expect(screen.getByText("Searching files")).toBeInTheDocument();
+    expect(screen.getByText("Running tests")).toBeInTheDocument();
+    expect(screen.getByText("Editing summary")).toBeInTheDocument();
+    expect(screen.getAllByText("Final answer is ready.")).toHaveLength(1);
   });
 
   it("shows generated files as downloadable attachments", () => {
@@ -73,6 +435,97 @@ describe("ChatThread", () => {
     expect(link).toHaveAttribute("href", "https://example.com/docs");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noreferrer noopener");
+  });
+
+  it("copies a complete assistant response from the message footer", async () => {
+    const writeText = stubClipboardWriteText();
+
+    render(<ChatThread messages={[{ id: "a1", role: "assistant", text: "Final answer.\n\nSecond paragraph." }]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy response" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Final answer.\n\nSecond paragraph."));
+    expect(screen.getByRole("button", { name: "Response copied" })).toBeInTheDocument();
+  });
+
+  it("does not show response copy while an assistant response is still active", () => {
+    render(<ChatThread busy messages={[{ id: "a1", role: "assistant", text: "Partial answer" }]} />);
+
+    expect(screen.queryByRole("button", { name: "Copy response" })).not.toBeInTheDocument();
+  });
+
+  it("copies only final timeline text from the assistant response footer", async () => {
+    const writeText = stubClipboardWriteText();
+
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            timeline: [
+              {
+                id: "progress-0",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Reading notes", toolName: "Read" }],
+              },
+              { id: "text-1", type: "text", text: "Final answer is ready." },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy response" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Final answer is ready."));
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("Reading notes"));
+  });
+
+  it("does not show response copy for assistant activity without final text", () => {
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            timeline: [
+              {
+                id: "progress-0",
+                type: "progress",
+                progressItems: [{ kind: "file", label: "Reading notes", toolName: "Read" }],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Copy response" })).not.toBeInTheDocument();
+  });
+
+  it("copies assistant paragraph and code blocks separately", async () => {
+    const writeText = stubClipboardWriteText();
+
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "a1",
+            role: "assistant",
+            text: "Intro paragraph.\n\n```ts\nconst answer = 42;\n```\n\nSecond paragraph.",
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Copy text block" })[0]);
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("Intro paragraph."));
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy code block" }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("const answer = 42;"));
+
+    expect(screen.getByText("const answer = 42;").tagName.toLowerCase()).toBe("code");
   });
 
   it("renders user message URLs as links without breaking the chat bubble", () => {

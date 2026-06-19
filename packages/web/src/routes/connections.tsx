@@ -55,6 +55,8 @@ export const connectionsCallbackRoute = createRoute({
 
 function ConnectionsCallback() {
   useEffect(() => {
+    window.parent?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
+    window.opener?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
     window.close();
   }, []);
 
@@ -70,6 +72,29 @@ function ConnectionsCallback() {
 // ---------------------------------------------------------------------------
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
+const INTEGRATION_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+
+export function integrationAppSearchFromSearch(value: string | null): string | null {
+  const app = value?.trim();
+  return app && INTEGRATION_APP_ID_RE.test(app) ? app : null;
+}
+
+export function integrationAppConnectFromSearch(value: string | null): string | null {
+  return integrationAppSearchFromSearch(value);
+}
+
+function removeSearchParams(paramsToRemove: string[]): void {
+  const params = new URLSearchParams(window.location.search);
+  let changed = false;
+  for (const param of paramsToRemove) {
+    if (!params.has(param)) continue;
+    params.delete(param);
+    changed = true;
+  }
+  if (!changed) return;
+  const query = params.toString();
+  window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+}
 
 export function getPersonallyConnectedAppIds(connections: IntegrationConnection[]): Set<string> {
   return new Set(
@@ -88,9 +113,20 @@ function ConnectionsPage() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
     if (typeof window === "undefined") return "applications";
-    const tab = new URLSearchParams(window.location.search).get("tab");
+    const params = new URLSearchParams(window.location.search);
+    if (integrationAppConnectFromSearch(params.get("connect"))) return "applications";
+    if (integrationAppSearchFromSearch(params.get("app"))) return "applications";
+    const tab = params.get("tab");
     if (tab === "mcps" || tab === "environment") return tab;
     return "applications";
+  });
+  const [requestedAppSearch, setRequestedAppSearch] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return integrationAppSearchFromSearch(new URLSearchParams(window.location.search).get("app"));
+  });
+  const [requestedAppConnect, setRequestedAppConnect] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return integrationAppConnectFromSearch(new URLSearchParams(window.location.search).get("connect"));
   });
 
   const serversQuery = useQuery({
@@ -152,6 +188,21 @@ function ConnectionsPage() {
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
 
+  useEffect(() => {
+    if (requestedAppConnect) {
+      setActiveTab("applications");
+      if (!provider) return;
+      setShowAddIntegrationDialog(true);
+      removeSearchParams(["connect"]);
+      return;
+    }
+    if (!requestedAppSearch) return;
+    setActiveTab("applications");
+    if (!provider) return;
+    setShowAddIntegrationDialog(true);
+    removeSearchParams(["app"]);
+  }, [provider, requestedAppConnect, requestedAppSearch]);
+
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
     queryClient.invalidateQueries({ queryKey: ["connections"] });
@@ -198,7 +249,11 @@ function ConnectionsPage() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => setShowAddIntegrationDialog(true)}
+                      onClick={() => {
+                        setRequestedAppConnect(null);
+                        setRequestedAppSearch(null);
+                        setShowAddIntegrationDialog(true);
+                      }}
                       className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                     >
                       <PlusIcon size={12} weight="bold" />
@@ -209,7 +264,11 @@ function ConnectionsPage() {
                 <IntegrationsSection
                   connections={connections}
                   isLoadingConnections={connectionsQuery.isLoading}
-                  onAdd={() => setShowAddIntegrationDialog(true)}
+                  onAdd={() => {
+                    setRequestedAppConnect(null);
+                    setRequestedAppSearch(null);
+                    setShowAddIntegrationDialog(true);
+                  }}
                   providerId={provider.id}
                   orgName={setupStatusQuery.data?.orgName ?? undefined}
                   onDisconnect={invalidateAll}
@@ -319,9 +378,17 @@ function ConnectionsPage() {
       {provider && (
         <AddIntegrationDialog
           open={showAddIntegrationDialog}
-          onOpenChange={setShowAddIntegrationDialog}
+          onOpenChange={(open) => {
+            setShowAddIntegrationDialog(open);
+            if (!open) {
+              setRequestedAppConnect(null);
+              setRequestedAppSearch(null);
+            }
+          }}
           providerId={provider.id}
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
+          initialAppId={requestedAppConnect}
+          initialSearch={requestedAppConnect ? null : requestedAppSearch}
           onSuccess={invalidateAll}
         />
       )}

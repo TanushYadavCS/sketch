@@ -19,6 +19,9 @@ export interface IntegrationApp {
   description: string;
   icon?: string;
   category?: string;
+  connected?: boolean;
+  connectionStatus?: string;
+  connectionId?: string | null;
 }
 
 /** A user's connection to an app via an integration provider. */

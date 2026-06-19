@@ -1,3 +1,10 @@
+import type {
+  WebChatProgressData,
+  WebChatProgressRendererMode,
+  WebProgressIcon,
+  WebProgressItem,
+  WebProgressItemKind,
+} from "@sketch/shared";
 import type { ProgressDisplaySettings } from "../progress-settings";
 import type { ProgressEvent } from "./runner";
 
@@ -15,6 +22,12 @@ interface FriendlyTargetLine {
 interface CanvasInvocation {
   subcommand: string | null;
   target: string | null;
+  componentKey: string | null;
+}
+
+interface McpToolName {
+  serverName: string;
+  toolName: string;
 }
 
 const TOOL_EMOJI: Record<string, string> = {
@@ -38,9 +51,46 @@ const TOOL_EMOJI: Record<string, string> = {
   SearchChatHistory: "🔎",
   local_run_command: "💻",
   local_claude_session: "💻",
+  GetTeamDirectory: "👥",
+  SearchUsers: "🔎",
+  SendMessageToUser: "💬",
+  SendMessageToUsers: "💬",
+  UpdateInboxWorkflow: "📥",
+  ResolveInboxWorkflow: "📥",
+  getProviderConfig: "🔌",
 };
 
 const FALLBACK_EMOJI = "⚙️";
+
+const TOOL_KIND: Record<string, WebProgressItemKind> = {
+  Read: "file",
+  Write: "file",
+  Edit: "file",
+  Bash: "shell",
+  Glob: "search",
+  Grep: "search",
+  WebSearch: "web",
+  WebFetch: "web",
+  Skill: "skill",
+  SendFileToChat: "attachment",
+  TranscribeAudio: "audio",
+  VisualAnalysis: "image",
+  ManageScheduledTasks: "schedule",
+  SearchDeliveryTargets: "delivery",
+  SearchEntities: "entity",
+  GetEntityContext: "entity",
+  ReadChatHistory: "chat",
+  SearchChatHistory: "chat",
+  local_run_command: "local",
+  local_claude_session: "local",
+  GetTeamDirectory: "chat",
+  SearchUsers: "search",
+  SendMessageToUser: "delivery",
+  SendMessageToUsers: "delivery",
+  UpdateInboxWorkflow: "tool",
+  ResolveInboxWorkflow: "tool",
+  getProviderConfig: "integration",
+};
 
 const PRIMARY_ARG: Record<string, string> = {
   Read: "file_path",
@@ -60,6 +110,7 @@ const PRIMARY_ARG: Record<string, string> = {
   SearchEntities: "queries",
   local_claude_session: "action",
   SearchChatHistory: "query",
+  SearchUsers: "query",
 };
 
 const EXTRA_FALLBACK_ARG_KEYS = ["path", "folder"];
@@ -103,6 +154,34 @@ const FRIENDLY_STATIC_LINES: Record<string, string> = {
   ReadChatHistory: "Reading Chat History",
   local_run_command: "Running local Mac command",
   local_claude_session: "Supervising local Claude Code",
+  GetTeamDirectory: "Reading team directory",
+  SearchUsers: "Finding teammates",
+  SendMessageToUser: "Sending a message",
+  SendMessageToUsers: "Sending messages",
+  UpdateInboxWorkflow: "Updating inbox item",
+  ResolveInboxWorkflow: "Resolving inbox item",
+  getProviderConfig: "Checking integration",
+};
+
+const FRIENDLY_WEB_LABELS: Record<string, string> = {
+  SendFileToChat: "Sending file",
+  TranscribeAudio: "Transcribing audio",
+  VisualAnalysis: "Analyzing image",
+  ManageScheduledTasks: "Managing scheduled tasks",
+  SearchDeliveryTargets: "Finding recipients",
+  SearchEntities: "Searching connected knowledge",
+  GetEntityContext: "Reading connected knowledge",
+  ReadChatHistory: "Reading chat history",
+  SearchChatHistory: "Searching chat history",
+  local_run_command: "Using local device",
+  local_claude_session: "Using local Claude Code",
+  GetTeamDirectory: "Reading team directory",
+  SearchUsers: "Finding teammates",
+  SendMessageToUser: "Sending message",
+  SendMessageToUsers: "Sending messages",
+  UpdateInboxWorkflow: "Updating inbox item",
+  ResolveInboxWorkflow: "Resolving inbox item",
+  getProviderConfig: "Checking integration",
 };
 
 const CANVAS_FRIENDLY_TARGET_PREFIX: Record<string, string> = {
@@ -118,7 +197,38 @@ const CANVAS_FRIENDLY_FALLBACK: Record<string, string> = {
 };
 
 function stripMcpPrefix(toolName: string): string {
-  return toolName.replace(/^mcp__.+?__/, "");
+  return parseMcpToolName(toolName)?.toolName ?? toolName;
+}
+
+function parseMcpToolName(toolName: string): McpToolName | null {
+  const match = toolName.match(/^mcp__(.+?)__(.+)$/);
+  const serverName = match?.[1];
+  const name = match?.[2];
+  return serverName && name ? { serverName, toolName: name } : null;
+}
+
+function humanizeIdentifier(value: string): string {
+  return value
+    .replace(/^plugin_/, "")
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function isInternalIntegrationName(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/^plugin[_-]/, "");
+  return normalized === "canvas" || normalized === "sketch";
+}
+
+function friendlyIntegrationLabel(serverName?: string): string {
+  if (!serverName || isInternalIntegrationName(serverName)) return "Running integration";
+  const integrationName = humanizeIdentifier(serverName);
+  return integrationName ? `Running ${integrationName} integration` : "Running integration";
+}
+
+function isIntegrationSkillName(value: string): boolean {
+  return /\bintegration\b/i.test(value.replace(/[-_]+/g, " "));
 }
 
 function stringifyValue(value: unknown): string | null {
@@ -136,10 +246,13 @@ function stringifyValue(value: unknown): string | null {
   }
 }
 
-function quoteValue(value: string): string {
+function clipValue(value: string): string {
   const chars = Array.from(value);
-  const clipped = chars.length > MAX_ARG_LENGTH ? `${chars.slice(0, MAX_ARG_LENGTH).join("")}...` : value;
-  return JSON.stringify(clipped);
+  return chars.length > MAX_ARG_LENGTH ? `${chars.slice(0, MAX_ARG_LENGTH).join("")}...` : value;
+}
+
+function quoteValue(value: string): string {
+  return JSON.stringify(clipValue(value));
 }
 
 function findInputValue(input: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -171,6 +284,7 @@ function parseCanvasInvocation(command: string): CanvasInvocation | null {
   const afterCli = normalized.match(/\$CANVAS_CLI\s+([\s\S]+)/)?.[1] ?? "";
   const segment = afterCli.split(/[|;&\n]/)[0]?.trim() ?? "";
   const subcommand = segment.match(/^([^\s]+)/)?.[1] ?? null;
+  const componentKey = findCanvasFlag(segment, ["--component-key", "--componentKey"]);
   const target = findCanvasFlag(segment, [
     "--component-key",
     "--componentKey",
@@ -186,7 +300,9 @@ function parseCanvasInvocation(command: string): CanvasInvocation | null {
     "--searchQuery",
   ]);
 
-  return subcommand || target ? { subcommand, target } : { subcommand: null, target: null };
+  return subcommand || target || componentKey
+    ? { subcommand, target: target ?? null, componentKey }
+    : { subcommand: null, target: null, componentKey: null };
 }
 
 function getCanvasFriendlyLine(invocation: CanvasInvocation): string {
@@ -202,6 +318,210 @@ function getCanvasTechnicalLine(invocation: CanvasInvocation): string {
   if (!invocation.subcommand) return "🧩 Canvas...";
   const target = invocation.target ? `${invocation.subcommand} ${invocation.target}` : invocation.subcommand;
   return `🧩 Canvas: ${quoteValue(target)}`;
+}
+
+function progressItem(
+  kind: WebProgressItemKind,
+  label: string,
+  icon: WebProgressIcon,
+  detail: string | null,
+  toolName?: string,
+): WebProgressItem {
+  return {
+    kind,
+    label,
+    icon,
+    ...(detail ? { detail: clipValue(detail) } : {}),
+    ...(toolName ? { toolName } : {}),
+  };
+}
+
+function toolIcon(toolName: string): WebProgressIcon {
+  return {
+    type: toolName === "Skill" ? "skill" : "tool",
+    name: toolName,
+  };
+}
+
+function genericIcon(name: string): WebProgressIcon {
+  return { type: "generic", name };
+}
+
+function canvasIcon(_invocation: CanvasInvocation): WebProgressIcon {
+  return { type: "canvas", name: "Canvas" };
+}
+
+function genericThinkingItem(): WebProgressItem {
+  return progressItem("reasoning", "Thinking…", { type: "generic", name: "reasoning" }, null);
+}
+
+function genericToolItem(): WebProgressItem {
+  return progressItem("tool", "Using tool", { type: "tool" }, null);
+}
+
+function friendlyLabelFromPrefix(prefix: string): string {
+  return prefix.replace(/:\s*$/, "").replace(/\s+(for|matching)$/, "");
+}
+
+function getCanvasStructuredItem(invocation: CanvasInvocation, technical: boolean): WebProgressItem {
+  const target = invocation.target ?? null;
+  const detail =
+    technical && invocation.subcommand ? [invocation.subcommand, target].filter(Boolean).join(" ") : target;
+
+  if (technical) {
+    return progressItem("canvas", "Canvas", canvasIcon(invocation), detail || invocation.subcommand, "Bash");
+  }
+
+  if (!invocation.subcommand) {
+    return progressItem("canvas", "Running Canvas", canvasIcon(invocation), null, "Bash");
+  }
+
+  const prefix = CANVAS_FRIENDLY_TARGET_PREFIX[invocation.subcommand] ?? `Canvas ${invocation.subcommand}:`;
+  const fallback = CANVAS_FRIENDLY_FALLBACK[invocation.subcommand] ?? `Canvas ${invocation.subcommand}`;
+  return progressItem(
+    "canvas",
+    target ? prefix.replace(/:\s*$/, "") : fallback,
+    canvasIcon(invocation),
+    target,
+    "Bash",
+  );
+}
+
+function getFriendlyWebCanvasItem(invocation: CanvasInvocation): WebProgressItem {
+  return progressItem("integration", "Running integration", canvasIcon(invocation), null);
+}
+
+function getTechnicalProgressItem(toolName: string, input: Record<string, unknown>): WebProgressItem {
+  const display = stripMcpPrefix(toolName);
+
+  if (display === "Bash") {
+    const command = findInputValue(input, ["command"]);
+    const canvasInvocation = command ? parseCanvasInvocation(command) : null;
+    if (canvasInvocation) return getCanvasStructuredItem(canvasInvocation, true);
+  }
+
+  const argKey = PRIMARY_ARG[display];
+  const rawValue = argKey ? stringifyValue(input[argKey]) : findFallbackInputValue(input);
+  return progressItem(
+    TOOL_KIND[display] ?? "tool",
+    display,
+    TOOL_EMOJI[display] ? toolIcon(display) : genericIcon(display),
+    rawValue,
+    display,
+  );
+}
+
+function getFriendlyProgressItem(toolName: string, input: Record<string, unknown>): WebProgressItem {
+  const display = stripMcpPrefix(toolName);
+
+  if (display === "Bash") {
+    const command = findInputValue(input, ["command"]);
+    const canvasInvocation = command ? parseCanvasInvocation(command) : null;
+    if (canvasInvocation) return getCanvasStructuredItem(canvasInvocation, false);
+    return progressItem("shell", command ? "Running" : "Running a shell command", toolIcon(display), command, display);
+  }
+
+  const targetLine = FRIENDLY_TARGET_LINES[display];
+  if (targetLine) {
+    const value = findInputValue(input, targetLine.keys);
+    return progressItem(
+      TOOL_KIND[display] ?? "tool",
+      value ? friendlyLabelFromPrefix(targetLine.prefix) : targetLine.fallback,
+      TOOL_EMOJI[display] ? toolIcon(display) : genericIcon(display),
+      value,
+      display,
+    );
+  }
+
+  const staticLine = FRIENDLY_STATIC_LINES[display];
+  if (staticLine) {
+    return progressItem(
+      TOOL_KIND[display] ?? "tool",
+      staticLine,
+      TOOL_EMOJI[display] ? toolIcon(display) : genericIcon(display),
+      null,
+      display,
+    );
+  }
+
+  const fallback = findFallbackInputValue(input);
+  return progressItem(TOOL_KIND[display] ?? "tool", display, genericIcon(display), fallback, display);
+}
+
+function isDetailedWebProgressMode(mode: WebChatProgressRendererMode): boolean {
+  return mode === "technical";
+}
+
+function webProgressModeFromSettings(settings: ProgressDisplaySettings): WebChatProgressRendererMode {
+  return settings.toolProgress;
+}
+
+function getFriendlyWebProgressItem(toolName: string, input: Record<string, unknown>): WebProgressItem {
+  const mcpTool = parseMcpToolName(toolName);
+  const display = mcpTool?.toolName ?? toolName;
+
+  if (display === "Skill") {
+    const skillName = findInputValue(input, ["skill", "name"]);
+    if (skillName && isIntegrationSkillName(skillName)) {
+      return progressItem("integration", "Running integration", genericIcon("integration"), null);
+    }
+    return progressItem("skill", "Running skill", { type: "skill", name: "Skill" }, null);
+  }
+
+  if (display === "Bash") {
+    const command = findInputValue(input, ["command"]);
+    const canvasInvocation = command ? parseCanvasInvocation(command) : null;
+    return canvasInvocation ? getFriendlyWebCanvasItem(canvasInvocation) : genericToolItem();
+  }
+
+  const label = FRIENDLY_WEB_LABELS[display];
+  if (label) {
+    return progressItem(
+      TOOL_KIND[display] ?? "tool",
+      label,
+      TOOL_EMOJI[display] ? toolIcon(display) : genericIcon(display),
+      null,
+    );
+  }
+
+  if (mcpTool) {
+    return progressItem("integration", friendlyIntegrationLabel(mcpTool.serverName), genericIcon("integration"), null);
+  }
+
+  return genericToolItem();
+}
+
+function progressLineFromItem(item: WebProgressItem): string {
+  return item.detail ? `${item.label} ${item.detail}` : item.label;
+}
+
+export function createWebProgressItem(
+  event: ProgressEvent,
+  settings: ProgressDisplaySettings,
+  mode: WebChatProgressRendererMode = webProgressModeFromSettings(settings),
+): WebProgressItem | null {
+  if (event.kind === "intermediate_text") {
+    if (!settings.reasoningText && mode !== "off") return null;
+    if (!isDetailedWebProgressMode(mode)) return genericThinkingItem();
+    return progressItem("reasoning", "Thinking", { type: "generic", name: "reasoning" }, event.text);
+  }
+
+  if (mode === "off") return genericThinkingItem();
+  if (isDetailedWebProgressMode(mode)) return getTechnicalProgressItem(event.toolName, event.input);
+  return getFriendlyWebProgressItem(event.toolName, event.input);
+}
+
+export function createWebProgressData(
+  event: ProgressEvent,
+  settings: ProgressDisplaySettings,
+  mode: WebChatProgressRendererMode,
+  renderedLines: string[] = [],
+): WebChatProgressData | null {
+  const item = createWebProgressItem(event, settings, mode);
+  if (!item) return null;
+  const lines =
+    isDetailedWebProgressMode(mode) && renderedLines.length > 0 ? renderedLines : [progressLineFromItem(item)];
+  return { lines, items: [item] };
 }
 
 function buildTechnicalLine(toolName: string, input: Record<string, unknown>): string {
@@ -242,7 +562,7 @@ function getFriendlyLine(toolName: string, input: Record<string, unknown>): stri
   }
 
   const fallback = findFallbackInputValue(input);
-  return fallback ? `${emoji} Using ${display}: ${quoteValue(fallback)}` : `${emoji} Using ${display}`;
+  return fallback ? `${emoji} ${display}: ${quoteValue(fallback)}` : `${emoji} ${display}`;
 }
 
 export function getProgressTransportStrategy(settings: ProgressDisplaySettings): "accumulate" | "replace" | "none" {

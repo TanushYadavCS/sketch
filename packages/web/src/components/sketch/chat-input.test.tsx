@@ -30,6 +30,73 @@ describe("ChatInput", () => {
     expect(screen.getByLabelText("Message Sketch")).toBeInTheDocument();
   });
 
+  it("uses the light-mode text color as the enabled send button background", () => {
+    render(<ChatInput initialValue="Hello" onSubmit={() => undefined} />);
+
+    const sendButton = screen.getByLabelText("Send message");
+    expect(sendButton).toBeEnabled();
+    expect(sendButton).toHaveClass("bg-foreground", "text-background");
+    expect(sendButton.className).toContain("shadow-[0_2px_8px_rgba(0,0,0,0.16),0_0_18px_rgba(0,0,0,0.08)]");
+    expect(sendButton.className).toContain("dark:bg-brand-accent");
+    expect(sendButton.className).toContain("dark:text-black");
+    expect(sendButton.className).toContain("dark:shadow-[0_2px_8px_rgba(254,237,1,0.5)");
+  });
+
+  it("changes the activity detail mode from the prompt input menu", async () => {
+    const user = userEvent.setup();
+    const onRendererChange = vi.fn();
+
+    render(
+      <ChatInput
+        rendererValue="friendly"
+        rendererOptions={[
+          { value: "off", label: "Off" },
+          { value: "friendly", label: "Friendly" },
+          { value: "technical", label: "Technical" },
+        ]}
+        onRendererChange={onRendererChange}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Progress updates: Friendly"));
+    expect(screen.getByText("Progress updates")).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitemradio", { name: /Technical/ }));
+
+    expect(onRendererChange).toHaveBeenCalledWith("technical");
+  });
+
+  it("shows a neutral pause control while the prompt is unavailable during a run", async () => {
+    const user = userEvent.setup();
+    const onStop = vi.fn();
+    const onSubmit = vi.fn();
+
+    render(
+      <ChatInput
+        running
+        rendererValue="friendly"
+        rendererOptions={[
+          { value: "off", label: "Off" },
+          { value: "friendly", label: "Friendly" },
+          { value: "technical", label: "Technical" },
+        ]}
+        onRendererChange={() => undefined}
+        onStop={onStop}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("Sketch is working...")).toBeDisabled();
+    expect(screen.getByLabelText("Progress updates: Friendly")).toBeDisabled();
+    const pauseButton = screen.getByLabelText("Pause Sketch");
+    expect(pauseButton).toHaveClass("bg-muted/80", "text-muted-foreground");
+    expect(pauseButton.className).not.toContain("dark:bg-brand-accent");
+
+    await user.click(pauseButton);
+
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("shows recording and transcription state while appending transcribed text", async () => {
     const user = userEvent.setup();
     const stopTrack = vi.fn();

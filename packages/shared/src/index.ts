@@ -4,4 +4,5 @@ export * from "./llm-provider";
 export * from "./mcp-servers";
 export * from "./skills";
 export * from "./validation";
+export * from "./web-chat";
 export * from "./workspace";

@@ -12,7 +12,7 @@ import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
-import { type SketchMcpDeps, UploadCollector } from "./tools/types";
+import { IntegrationConnectionCollector, type SketchMcpDeps, UploadCollector } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
 
@@ -21,6 +21,7 @@ export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } 
 export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
 export { UploadCollector };
+export { IntegrationConnectionCollector };
 export type { SketchMcpDeps };
 
 export function createSketchMcpServer(deps: SketchMcpDeps) {

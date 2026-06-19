@@ -69,13 +69,13 @@
 
   .markdown-body a {
     @apply break-words underline underline-offset-4 transition-colors;
-    color: var(--brand-accent);
-    text-decoration-color: color-mix(in oklch, var(--brand-accent) 64%, transparent);
+    color: var(--accent-foreground);
+    text-decoration-color: color-mix(in oklch, var(--accent-foreground) 52%, transparent);
   }
 
   .markdown-body a:hover {
-    color: var(--brand-accent);
-    text-decoration-color: var(--brand-accent);
+    color: var(--accent-foreground);
+    text-decoration-color: var(--accent-foreground);
   }
 
   .markdown-body blockquote {
@@ -209,13 +209,59 @@
   }
 }
 
-@keyframes sketch-text-thinking {
+@keyframes sketch-progress-change {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-shimmer-text {
+  0% {
+    background-position: 240px center;
+  }
+  100% {
+    background-position: 0 center;
+  }
+}
+
+@keyframes sketch-response-fading {
   0%,
   100% {
     opacity: 1;
   }
   50% {
-    opacity: 0.55;
+    opacity: 0.78;
+  }
+}
+
+@keyframes sketch-collapsible-timeline-open {
+  from {
+    height: 0;
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-collapsible-timeline-close {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    height: 0;
+    opacity: 0;
+    transform: translateY(-2px);
   }
 }
 
@@ -224,14 +270,81 @@
   transform-origin: center;
 }
 
-.sketch-text-thinking {
-  animation: sketch-text-thinking 1.4s ease-in-out infinite;
+.sketch-progress-change {
+  animation: sketch-progress-change 180ms ease-out both;
+}
+
+.sketch-timeline-window {
+  transition: height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sketch-timeline-window-track {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.sketch-timeline-entry {
+  transition: opacity 220ms ease-out;
+}
+
+.sketch-timeline-entry-exiting {
+  opacity: 0;
+}
+
+.sketch-collapsible-timeline-content {
+  overflow: hidden;
+  contain: layout paint;
+  transform-origin: top;
+  will-change: height, opacity, transform;
+}
+
+.sketch-collapsible-timeline-content[data-state="open"] {
+  animation: sketch-collapsible-timeline-open 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sketch-collapsible-timeline-content[data-state="closed"] {
+  animation: sketch-collapsible-timeline-close 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sketch-shimmer-text,
+.sketch-shimmer-progress {
+  will-change: background-position;
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 0%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 36%,
+    var(--foreground) 50%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 64%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 100%
+  );
+  background-size: 240px 100%;
+  background-repeat: repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: sketch-shimmer-text 2.2s linear infinite;
+}
+
+.sketch-shimmer-text {
+  display: inline-block;
+}
+
+.sketch-shimmer-progress {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.sketch-response-fading {
+  animation: sketch-response-fading 2s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sketch-icon-thinking,
-  .sketch-text-thinking {
+  .sketch-timeline-window,
+  .sketch-timeline-window-track,
+  .sketch-timeline-entry,
+  .sketch-collapsible-timeline-content {
     animation: none !important;
-    opacity: 0.7;
+    transition: none;
   }
 }
