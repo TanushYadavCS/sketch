@@ -309,6 +309,7 @@ export async function runConnectorSync(
         }
 
         await emitFactsForSyncedItem({
+          db,
           factRepo,
           connector,
           connectorType,

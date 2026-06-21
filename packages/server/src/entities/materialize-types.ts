@@ -69,6 +69,7 @@ export type MaterializeResult =
       relationshipsWritten: number;
     }
   | { kind: "task_materialized"; taskId: string; created: boolean }
+  | { kind: "commitment_materialized" }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
