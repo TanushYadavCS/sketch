@@ -51,6 +51,8 @@ export interface MaterializeDeps {
   onEntityResolved: (entity: Entity) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
   llmPromotionThreshold: number;
+  birthGateTypes: Set<ProposeEntityType>;
+  birthGateDryRun: boolean;
 }
 
 export type MaterializeResult =
@@ -72,6 +74,8 @@ export type MaterializeResult =
 
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
 }
 
 export interface MaterializeProgress {
@@ -82,6 +86,8 @@ export interface MaterializeProgress {
 
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
   factTypes?: IndexedFileFactType[];
   /**
    * Fires before processing each fact with `completed = index, total = facts.length`

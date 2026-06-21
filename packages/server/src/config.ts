@@ -27,6 +27,10 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("false")
     .transform((v) => v === "true" || v === "1"),
+  BIRTH_GATE_DRY_RUN: z
+    .enum(["true", "false", "1", "0"])
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
   VISION_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")

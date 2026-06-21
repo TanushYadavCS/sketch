@@ -163,6 +163,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     MAX_FILE_SIZE_MB: 20,
     MAX_UPLOAD_SIZE_MB: 50,
     EXPERIMENTAL_FLAG: false,
+    BIRTH_GATE_DRY_RUN: true,
     LLM_PROMOTION_THRESHOLD: 2,
     CO_MENTION_CONTRIBUTES_TO_THRESHOLD: 3,
     FLOOR_RETRY_MAX_FILES_PER_DOMAIN: 5000,

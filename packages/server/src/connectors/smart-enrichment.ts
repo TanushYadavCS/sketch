@@ -78,7 +78,11 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
 const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v8";
-const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
+const BASE_PROPOSABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team"];
+
+function proposableEntityTypes(experimentalFlag = false): Set<ProposeEntityType> {
+  return new Set(BASE_PROPOSABLE_ENTITY_TYPES.filter((type) => !(experimentalFlag && type === "team")));
+}
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -137,6 +141,7 @@ interface SmartEnrichmentDeps {
    * attendee metadata. Caller (enrichment.ts) builds via `buildParticipantBlock`.
    */
   participantBlock?: string;
+  experimentalFlag?: boolean;
   /**
    * When set, every LLM call inside this run writes a dump file (prompt + raw
    * response + token usage) under this directory. Set only by the per-file
@@ -247,6 +252,7 @@ export async function extractEntities(
   }>,
   participantBlock?: string,
   dumpDir?: string,
+  experimentalFlag = false,
 ): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
@@ -281,6 +287,33 @@ export async function extractEntities(
   const threadSection = file.threadContext
     ? `\nEmail thread context for resolving references only. Do not emit entities or relationships that appear only in this context; emitted mentions and relationships must be supported by the current message content below.\n${file.threadContext}\n`
     : "";
+  const validTypes = [...proposableEntityTypes(experimentalFlag)];
+  const validTypesPrompt = validTypes.map((type) => `"${type}"`).join(", ");
+  const teamFocusLine = experimentalFlag
+    ? ""
+    : '- **Teams**: named organizational teams (e.g., "QC team", "Content Team")\n';
+  const relationshipTypesPrompt = experimentalFlag
+    ? `Valid relationship types:
+- "works_at": person -> company (the person is employed by the company)
+- "engaged_with": person -> company (the person is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
+- "leads": person -> project | product
+- "contributes_to": person -> project | product
+- "builds": company -> product
+- "part_of": project -> project, project -> product, product -> product
+- "engagement_for": project -> company (the project is a client engagement delivered for that company)
+- "partner_of": company -> company`
+    : `Valid relationship types:
+- "works_at": person -> company (the person is employed by the company)
+- "engaged_with": person | team -> company (the person/team is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
+- "leads": person -> project | product | team
+- "contributes_to": person | team -> project | product
+- "builds": company -> product
+- "part_of": project -> project, project -> product, product -> product, team -> company
+- "engagement_for": project -> company (the project is a client engagement delivered for that company)
+- "partner_of": company -> company`;
+  const engagementHint = experimentalFlag
+    ? 'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON working with a company.'
+    : 'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON or TEAM working with a company.';
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
 ${orgSection}${knownSection}${participantSection}${threadSection}
@@ -293,7 +326,7 @@ Extract entities that a business team would want to track and reference across d
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
 - **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
-- **Teams**: named organizational teams (e.g., "QC team", "Content Team")
+${teamFocusLine}
 
 DO NOT extract:
 - Email addresses, phone numbers, URLs, or other system identifiers — these are stored separately. If a person is identifiable by name, use the name (e.g., "Sarah Chen"); never use an email address as the mention.
@@ -331,22 +364,14 @@ For each entity, provide the primary name, type, name variations, and a confiden
 
 If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
 
-Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People and Teams** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
+Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People${experimentalFlag ? "" : " and Teams"}** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
 
 Also extract direct relationships only when the text explicitly supports them.
 
-Valid relationship types:
-- "works_at": person -> company (the person is employed by the company)
-- "engaged_with": person | team -> company (the person/team is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
-- "leads": person -> project | product | team
-- "contributes_to": person | team -> project | product
-- "builds": company -> product
-- "part_of": project -> project, project -> product, product -> product, team -> company
-- "engagement_for": project -> company (the project is a client engagement delivered for that company)
-- "partner_of": company -> company
+${relationshipTypesPrompt}
 
 Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
-Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON or TEAM working with a company.
+${engagementHint}
 Do not extract "member_of", "deal_for", or "primary_contact" from prose; those are connector-sourced relationships.
 
 When a "Meeting participants" block is present above and lists attendees from multiple companies, the cross-company link is itself relationship evidence even when the prose never names the external company. Emit \`engaged_with\` edges from home-company participants who are marked \`[action-item owner]\` to each external company present in the participants block. Treat silent external attendees (no action items) with caution — only emit when the prose corroborates it. Use the participant name and the external company name exactly as they appear in the block as the relation endpoints.
@@ -368,7 +393,7 @@ Return one JSON object:
   ]
 }
 
-Valid types: "person", "project", "company", "product", "team"
+Valid types: ${validTypesPrompt}
 
 If no notable entities or relations are found, return { "mentions": [], "relations": [] }.
 
@@ -471,7 +496,7 @@ export async function handleCandidates(
   const promoted: MatchedEntity[] = [];
 
   for (const mention of unmatched) {
-    if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) continue;
+    if (!proposableEntityTypes(deps.experimentalFlag).has(mention.type as ProposeEntityType)) continue;
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
 
     // Check if candidate already exists (case-insensitive name match)
@@ -519,6 +544,9 @@ export async function handleCandidates(
             reviewRepo: materializeDeps.reviewRepo,
             domainsRepo: materializeDeps.domainsRepo,
             lookup: materializeDeps.lookup,
+            logger: materializeDeps.logger,
+            birthGateTypes: materializeDeps.birthGateTypes,
+            birthGateDryRun: materializeDeps.birthGateDryRun,
             readEmail: materializeDeps.readEmail,
           },
           {
@@ -755,6 +783,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       deps.knownEntities,
       deps.participantBlock,
       deps.debugDumpDir,
+      deps.experimentalFlag,
     );
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
@@ -933,7 +962,7 @@ async function reconcileLlmExtractionFacts(
 
   try {
     for (const mention of extraction.mentions) {
-      if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) {
+      if (!proposableEntityTypes(deps.experimentalFlag).has(mention.type as ProposeEntityType)) {
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, entityType: mention.type },
           "Dropped LLM mention with unsupported type",
@@ -993,6 +1022,7 @@ async function reconcileLlmExtractionFacts(
         contentHash,
         relation,
         mentions: extraction.mentions,
+        experimentalFlag: deps.experimentalFlag,
       });
       if (!input) continue;
       const factKey = buildIndexedFileFactKey(input);
@@ -1077,6 +1107,7 @@ function buildRelationFactInput(input: {
   contentHash: string;
   relation: ExtractedRelation;
   mentions: ExtractedMention[];
+  experimentalFlag?: boolean;
 }): UpsertIndexedFileFactInput | null {
   const relationType = normalizeRelationType(input.relation.type);
   if (!relationType || !isHighConfidenceRelation(input.relation.confidence)) return null;
@@ -1087,8 +1118,8 @@ function buildRelationFactInput(input: {
   const targetType = normalizeMentionType(input.relation.target.type);
   if (!sourceType || !targetType) return null;
   if (
-    !PROPOSABLE_ENTITY_TYPES.has(sourceType as ProposeEntityType) ||
-    !PROPOSABLE_ENTITY_TYPES.has(targetType as ProposeEntityType)
+    !proposableEntityTypes(input.experimentalFlag).has(sourceType as ProposeEntityType) ||
+    !proposableEntityTypes(input.experimentalFlag).has(targetType as ProposeEntityType)
   ) {
     return null;
   }

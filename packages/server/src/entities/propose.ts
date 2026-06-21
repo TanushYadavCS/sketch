@@ -19,6 +19,7 @@
  * preserves duplicates.
  */
 import type { Selectable } from "kysely";
+import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
 import type { UpsertPersonEntityData, createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -124,6 +125,9 @@ export interface ProposeDeps {
   reviewRepo: EntityReviewRepository;
   domainsRepo?: EntityDomainsRepository;
   lookup: EntityLookup;
+  logger?: Logger;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
   /** Read an entity's email from its metadata JSON. */
   readEmail: (entity: Entity) => string | null;
   onEntityResolved?: (entity: Entity) => void | Promise<void>;
@@ -409,6 +413,27 @@ async function queueProposal(
   };
 }
 
+async function birthGateOrCreate(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  branch: "skipFuzzy" | "ranked_empty",
+): Promise<ProposeResult> {
+  if (deps.birthGateTypes?.has(input.entityType)) {
+    if (deps.birthGateDryRun ?? true) {
+      deps.logger?.info(
+        { event: "would_birth_gate", type: input.entityType, name: input.name, path: input.source, branch },
+        "would_birth_gate",
+      );
+    } else {
+      return queueProposal(deps, input, normalized, [], "birth-gated");
+    }
+  }
+  if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
+  const { entity } = await persistEntity(deps, input);
+  return { kind: "created", entity };
+}
+
 async function decideScopedPersonCandidates(
   deps: ProposeDeps,
   input: ProposeInput,
@@ -625,9 +650,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.skipFuzzy) {
-    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
-    const { entity } = await persistEntity(deps, input);
-    return { kind: "created", entity };
+    return birthGateOrCreate(deps, input, normalized, "skipFuzzy");
   }
 
   // 4) Fuzzy-rank against same-type entities.
@@ -646,9 +669,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 6) Decide.
   if (ranked.length === 0) {
-    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
-    const { entity } = await persistEntity(deps, input);
-    return { kind: "created", entity };
+    return birthGateOrCreate(deps, input, normalized, "ranked_empty");
   }
   if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
   return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
