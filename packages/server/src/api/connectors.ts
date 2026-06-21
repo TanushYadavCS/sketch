@@ -60,6 +60,7 @@ import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -1088,6 +1089,7 @@ export function connectorRoutes(
         "entity_mentions.context_snippet",
       ])
       .where("entity_mentions.indexed_file_id", "=", fileId)
+      .where("entities.source_type", "not in", Array.from(HIDDEN_ENTITY_SOURCE_TYPES))
       .where(whereLiveEntity())
       .execute();
 

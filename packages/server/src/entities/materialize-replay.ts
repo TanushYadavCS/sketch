@@ -127,6 +127,7 @@ export async function replaySourceFacts(
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateDryRun: opts.birthGateDryRun,
+    experimentalFlag: opts.experimentalFlag,
   });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
@@ -196,6 +197,7 @@ async function materializeUnmaterializedFactsInner(
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateDryRun: opts.birthGateDryRun,
+    experimentalFlag: opts.experimentalFlag,
   });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   let factsQuery = db

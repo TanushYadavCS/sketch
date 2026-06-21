@@ -1,4 +1,4 @@
-import { type MentionType, type NonPersonMentionType, normalizeMentionType } from "./graph";
+import { type NonPersonMentionType, coerceMentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
@@ -14,7 +14,9 @@ export async function materializeLlmExtractedFact(
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
   const raw = readJsonObject(fact.raw);
-  const mentionType = normalizeMentionType(raw.type);
+  const mentionType = normalizeMentionType(
+    coerceMentionType(fact.subject_name, String(raw.type ?? ""), deps.experimentalFlag),
+  );
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }

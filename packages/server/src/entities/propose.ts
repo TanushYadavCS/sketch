@@ -29,7 +29,7 @@ import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./aff
 
 export type Entity = Selectable<EntitiesTable>;
 
-export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal";
+export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal" | "tool";
 export type CandidateReason =
   | "token-superset"
   | "prefix"

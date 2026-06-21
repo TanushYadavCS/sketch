@@ -1,10 +1,11 @@
 import {
   type EntityGraphRelationEndpoint,
+  coerceMentionType,
   isHighConfidenceEndpoint,
   isHighConfidenceRelation,
   normalizeMentionType,
+  normalizeRelationEndpointType,
   normalizeRelationType,
-  readRelationEndpoint,
   relationDirectionAllowed,
 } from "./graph";
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
@@ -26,8 +27,8 @@ export async function materializeLlmRelationFact(
 ): Promise<MaterializeResult> {
   const raw = readJsonObject(fact.raw);
   const relationType = normalizeRelationType(raw.relationType ?? fact.relation);
-  const source = readRelationEndpoint(raw, "source");
-  const target = readRelationEndpoint(raw, "target");
+  const source = readCoercedRelationEndpoint(raw, "source", deps.experimentalFlag);
+  const target = readCoercedRelationEndpoint(raw, "target", deps.experimentalFlag);
   const confidenceScore = typeof raw.confidence === "number" ? raw.confidence : 0;
   const sourceConfidence = typeof raw.sourceConfidence === "number" ? raw.sourceConfidence : 0;
   const targetConfidence = typeof raw.targetConfidence === "number" ? raw.targetConfidence : 0;
@@ -192,9 +193,27 @@ function readCrmRelationEndpoint(raw: Record<string, unknown>, key: "source" | "
   if (typeof record.source !== "string" || typeof record.sourceId !== "string" || typeof record.name !== "string") {
     return null;
   }
-  const type = normalizeMentionType(record.type);
+  const type = normalizeRelationEndpointType(record.type);
   if (!type) return null;
   return { source: record.source, sourceId: record.sourceId, name: record.name, type };
+}
+
+function readCoercedRelationEndpoint(
+  raw: Record<string, unknown>,
+  key: "source" | "target",
+  experimentalFlag: boolean,
+): EntityGraphRelationEndpoint | null {
+  const endpoint = raw[key];
+  if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) return null;
+  const record = endpoint as Record<string, unknown>;
+  if (typeof record.name !== "string") return null;
+  const coercedType = coerceMentionType(record.name, String(record.type ?? ""), experimentalFlag);
+  const type = normalizeRelationEndpointType(coercedType);
+  if (!type) return null;
+  const variations = Array.isArray(record.variations)
+    ? record.variations.filter((value): value is string => typeof value === "string")
+    : [];
+  return { name: record.name, type, variations };
 }
 
 async function resolveCrmEndpoint(deps: MaterializeDeps, endpoint: CrmRelationEndpoint): Promise<EntityRow | null> {
@@ -221,6 +240,8 @@ async function materializeRelationEndpoint(
   | { kind: "suppressed_endpoint" }
 > {
   const raw = readJsonObject(fact.raw);
+  const coercedType = normalizeMentionType(coerceMentionType(endpoint.name, endpoint.type, deps.experimentalFlag));
+  if (coercedType === "tool") return { kind: "suppressed_endpoint" };
   const normalized = normalizeEntityMatchName(endpoint.type, endpoint.name);
   if (await deps.suppressionRepo.isSuppressed(normalized, endpoint.type)) {
     return { kind: "suppressed_endpoint" };

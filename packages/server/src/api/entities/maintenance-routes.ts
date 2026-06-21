@@ -54,7 +54,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
   const routes = new Hono();
   const { logger, config } = deps;
 
-  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
+  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project", "tool"];
 
   /**
    * GET /api/entities/resets/jobs
