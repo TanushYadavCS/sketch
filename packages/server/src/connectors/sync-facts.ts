@@ -18,6 +18,7 @@ interface EmitFactsForSyncedItemParams {
   item: SyncedItem;
   indexedFileId: string;
   emitCorrespondentFacts?: boolean;
+  experimentalFlag?: boolean;
 }
 
 export async function emitFactsForSyncedItem({
@@ -28,6 +29,7 @@ export async function emitFactsForSyncedItem({
   item,
   indexedFileId,
   emitCorrespondentFacts = false,
+  experimentalFlag = false,
 }: EmitFactsForSyncedItemParams): Promise<void> {
   if (item.entitySeeds && item.entitySeeds.length > 0) {
     for (const seed of item.entitySeeds) {
@@ -188,6 +190,22 @@ export async function emitFactsForSyncedItem({
         contentHash: item.contentHash,
       });
     }
+  }
+
+  if (experimentalFlag && item.task) {
+    await factRepo.upsertFact({
+      ...factContext,
+      indexedFileId,
+      contentHash: item.contentHash,
+      source: connectorType,
+      factType: "structural_task",
+      relation: "mentioned",
+      subjectName: item.task.title,
+      subjectSource: connectorType,
+      subjectSourceId: item.task.sourceTaskId,
+      contextSnippet: item.sourcePath,
+      raw: { indexedFileId, task: item.task },
+    });
   }
 
   if (item.authorEmail || item.authorName) {

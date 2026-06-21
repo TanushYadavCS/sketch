@@ -202,6 +202,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
+      experimentalFlag: params.experimentalFlag ?? config.EXPERIMENTAL_FLAG,
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

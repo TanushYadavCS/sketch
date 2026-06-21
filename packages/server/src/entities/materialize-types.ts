@@ -70,6 +70,7 @@ export type MaterializeResult =
       mentionsWritten: number;
       relationshipsWritten: number;
     }
+  | { kind: "task_materialized"; taskId: string; created: boolean }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }

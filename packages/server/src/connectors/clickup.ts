@@ -257,6 +257,13 @@ function taskToSyncedItem(
       contextSnippet: `In list: ${listProjectParent.name}`,
     });
   }
+  const taskProject =
+    folderId && folderName
+      ? { name: folderName, source: "clickup", sourceId: folderId }
+      : listProjectParent
+        ? { name: listProjectParent.name, source: "clickup", sourceId: listProjectParent.id }
+        : undefined;
+  const primaryAssignee = task.assignees.find((assignee) => assignee.username);
 
   return {
     providerFileId: task.id,
@@ -271,6 +278,24 @@ function taskToSyncedItem(
     sourceUpdatedAt: parseClickUpTimestamp(task.date_updated ?? null),
     accessScope,
     assignees: task.assignees.filter((a) => a.username).map((a) => ({ name: a.username })),
+    task: {
+      sourceTaskId: task.id,
+      externalRef: task.id,
+      title: task.name,
+      statusType: task.status.type,
+      statusRaw: task.status.status,
+      priority: task.priority?.priority,
+      dueAt: parseClickUpTimestamp(task.due_date) ?? undefined,
+      project: taskProject,
+      assignee: primaryAssignee
+        ? {
+            name: primaryAssignee.username,
+            email: primaryAssignee.email,
+            source: "clickup",
+            sourceId: `assignee:${primaryAssignee.username}`,
+          }
+        : undefined,
+    },
     authorEmail: task.creator?.email,
     authorName: task.creator?.username,
     authorSourceId: task.creator?.id === undefined ? undefined : `user:${String(task.creator.id)}`,

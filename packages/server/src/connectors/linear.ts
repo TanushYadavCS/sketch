@@ -218,6 +218,17 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
     sourceCreatedAt: issue.createdAt,
     sourceUpdatedAt: issue.updatedAt,
     assignees: issue.assignee ? [{ name: issue.assignee.displayName }] : [],
+    task: {
+      sourceTaskId: issue.id,
+      externalRef: issue.identifier,
+      title: issue.title,
+      statusType: issue.state?.type ?? "unstarted",
+      statusRaw: issue.state?.name,
+      priority: issue.priorityLabel || PRIORITY_LABELS[issue.priority] || undefined,
+      dueAt: issue.dueDate ?? undefined,
+      project: issue.project ? { name: issue.project.name, source: "linear", sourceId: issue.project.id } : undefined,
+      assignee: issue.assignee ? { name: issue.assignee.displayName } : undefined,
+    },
     parentEntities: [
       ...(issue.team
         ? [{ source: "linear", sourceId: issue.team.id, contextSnippet: `Linear issue in team: ${issue.team.name}` }]
