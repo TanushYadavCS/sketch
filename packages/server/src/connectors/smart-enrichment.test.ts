@@ -17,6 +17,26 @@ import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 import { extractEntities, handleCandidates, smartEnrichFile } from "./smart-enrichment";
 
+const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+
+async function countEntitiesBySourceType(db: Kysely<DB>, sourceType: string): Promise<number> {
+  const row = await db
+    .selectFrom("entities")
+    .select((eb) => eb.fn.count<number>("id").as("count"))
+    .where("source_type", "=", sourceType)
+    .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
+async function countReviewQueueRows(db: Kysely<DB>): Promise<number> {
+  const row = await db
+    .selectFrom("entity_review_queue")
+    .select((eb) => eb.fn.count<number>("id").as("count"))
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
 async function seedFile(
   db: Kysely<DB>,
   fileId: string,
@@ -179,6 +199,27 @@ describe("handleCandidates — stale seen_file_ids", () => {
     expect(storedIds).not.toContain(ghostFileId);
     expect(storedIds).toContain(liveFileId);
     expect(storedIds).toContain(secondLiveFileId);
+  });
+
+  it("A0 documents current legacy candidate promotion path creating product and project entities with no review rows until A1 flips it", async () => {
+    const firstFileId = randomUUID();
+    const secondFileId = randomUUID();
+    await seedFile(db, firstFileId);
+    await seedFile(db, secondFileId);
+
+    await handleCandidates(makeDeps(db), firstFileId, [
+      { mention: "Sketch Product", type: "product", variations: ["Sketch"] },
+      { mention: "Apollo Project", type: "project", variations: ["Apollo"] },
+    ]);
+    const promoted = await handleCandidates(makeDeps(db), secondFileId, [
+      { mention: "Sketch Product", type: "product", variations: ["Sketch"] },
+      { mention: "Apollo Project", type: "project", variations: ["Apollo"] },
+    ]);
+
+    expect(promoted).toHaveLength(2);
+    expect(await countEntitiesBySourceType(db, "product")).toBe(1);
+    expect(await countEntitiesBySourceType(db, "project")).toBe(1);
+    expect(await countReviewQueueRows(db)).toBe(0);
   });
 });
 
