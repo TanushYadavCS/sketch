@@ -372,6 +372,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           missingFileIds: resolved.missingFileIds,
           runAfter,
           lockAlreadyHeld,
+          experimentalFlag: config.EXPERIMENTAL_FLAG,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           geminiMaxRpm: config.GEMINI_MAX_RPM,
