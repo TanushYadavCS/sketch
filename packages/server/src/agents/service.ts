@@ -481,6 +481,7 @@ export class AgentRunService {
     const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
     const writer = this.createWriter(def, {
       outputId,
+      userId: user.id,
       enabledSections: new Set(enabledSections),
       expectedOutputDate: output.output_date,
       expectedTimezone: output.timezone,
@@ -496,7 +497,7 @@ export class AgentRunService {
         this.getLatestForUser(def.key, user.id, addDays(output.output_date, -1)),
       ]);
       void settings;
-      const runtimeContext = {
+      const runtimeContext: Record<string, unknown> = {
         agentKey: def.key,
         agentVersion: def.version,
         outputId,
@@ -509,6 +510,19 @@ export class AgentRunService {
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
         previousDayOutput: this.formatOutputForContext(previousDay.output),
       };
+      if (def.augmentRuntimeContext) {
+        Object.assign(
+          runtimeContext,
+          await def.augmentRuntimeContext({
+            db: this.deps.db,
+            config: this.deps.config,
+            users: this.deps.users,
+            userId: user.id,
+            maxItemsPerSection: config.maxItemsPerSection,
+            baseContext: runtimeContext,
+          }),
+        );
+      }
       const userMessage = buildSketchContext({
         messages: [],
         currentUserName: user.name,
@@ -546,7 +560,7 @@ export class AgentRunService {
         currentUserId: user.id,
         userRepo: this.deps.users,
         maxTurns: 35,
-        agentInstructions: def.buildInstructions(),
+        agentInstructions: def.buildInstructions({ experimentalFlag: this.deps.config.EXPERIMENTAL_FLAG }),
         agentAllowedTools: def.allowedTools,
         agentOutputWriter: writer,
       });
@@ -570,6 +584,7 @@ export class AgentRunService {
     def: AgentDefinition,
     params: {
       outputId: string;
+      userId: string;
       enabledSections: Set<string>;
       expectedOutputDate: string;
       expectedTimezone: string;
@@ -602,6 +617,16 @@ export class AgentRunService {
           rawPayload: payload.rawPayload,
           items,
         });
+        if (def.onOutputSaved) {
+          await def.onOutputSaved({
+            db: this.deps.db,
+            config: this.deps.config,
+            logger: this.deps.logger,
+            userId: params.userId,
+            outputId: params.outputId,
+            items,
+          });
+        }
         params.onSaved();
       },
     };
