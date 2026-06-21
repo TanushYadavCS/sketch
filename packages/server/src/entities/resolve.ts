@@ -56,6 +56,7 @@ export type ResolveErrorCode =
   | "ALREADY_CONFIRMING"
   | "MULTIPLE_STALE_CANDIDATES"
   | "MULTIPLE_RE_RESOLVE_MATCHES"
+  | "TYPE_RECLASSIFY_COLLISION"
   | "ROW_NOT_FOUND";
 
 export class ResolveError extends Error {
@@ -119,6 +120,15 @@ export interface RejectResult {
   createdEntityId: string | null;
   /** True when the 200 is a no-op replay of an already-rejected row. */
   idempotent: boolean;
+}
+
+export type ReclassifyResultKind = "RECLASSIFY" | "TYPE_RECLASSIFY_COLLISION";
+
+export interface ReclassifyResult {
+  row: QueueRow;
+  result: ReclassifyResultKind;
+  collidingRow?: QueueRow;
+  mergedFromReviewId?: string | null;
 }
 
 /**
@@ -1007,5 +1017,42 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     const refreshedRow = await markResolvedOrThrow(trxCtx, row, "rejected", target.id);
 
     return { row: refreshedRow, targetEntityId: target.id, reResolvedToExisting, createdEntityId, idempotent: false };
+  });
+}
+
+export async function reclassifyReview(
+  ctx: ResolveCtx,
+  reviewId: string,
+  opts: { newEntityType: string; candidateGeneratedAt: string },
+): Promise<ReclassifyResult> {
+  return ctx.db.transaction().execute(async (trx) => {
+    const repo = createEntityReviewRepo(trx);
+    const row = await repo.getById(reviewId);
+    if (!row) throw new ResolveError("ROW_NOT_FOUND", `queue row ${reviewId} not found`);
+    if (row.status !== "pending" || row.candidate_generated_at !== opts.candidateGeneratedAt) {
+      throw new ResolveError("CANDIDATE_DRIFT", "candidate_generated_at mismatch", {
+        actual: row.candidate_generated_at,
+        provided: opts.candidateGeneratedAt,
+        currentRow: row,
+      });
+    }
+    const result = await repo.reclassifyType(reviewId, opts.newEntityType, opts.candidateGeneratedAt);
+    if (!result) throw new ResolveError("ROW_NOT_FOUND", `queue row ${reviewId} not found`);
+    if (result.kind === "drift") {
+      throw new ResolveError("CANDIDATE_DRIFT", "row changed before reclassify", { currentRow: result.row });
+    }
+    if (result.kind === "collision") {
+      return {
+        row: result.row,
+        result: "TYPE_RECLASSIFY_COLLISION",
+        collidingRow: result.collidingRow,
+        mergedFromReviewId: null,
+      };
+    }
+    return {
+      row: result.row,
+      result: "RECLASSIFY",
+      mergedFromReviewId: result.mergedFromReviewId,
+    };
   });
 }

@@ -381,7 +381,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/projects", createProjectRoutes(db));
-  app.route("/api/entity-review", entityReviewRoutes(db));
+  app.route("/api/entity-review", entityReviewRoutes(db, { config }));
   app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
   mountPublicMcpServer({
     app,
