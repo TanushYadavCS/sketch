@@ -348,7 +348,7 @@ export interface EntityListItem {
   updatedAt: string;
 }
 
-export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
+export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "tool" | "system" | "other";
 
 export interface EntityProfileSummary {
   identity: string;

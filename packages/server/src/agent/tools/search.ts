@@ -51,7 +51,7 @@ export const searchToolSchema = {
   limit: z.number().optional().describe("Max results (default 10; default 3 when sortBy=recency)."),
 };
 
-export const searchEntitiesToolDescription = `Search for entities (projects, people, teams, databases) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
+export const searchEntitiesToolDescription = `Search for entities (projects, people, teams, companies, products) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
 
 Use this when the user asks about a project, person, or any named thing tracked across the org's tools. Pass multiple name variations (e.g. ["Beetu", "B2", "beetu app"]) to maximize matches.`;
 

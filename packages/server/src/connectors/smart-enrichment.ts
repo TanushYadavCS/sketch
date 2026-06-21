@@ -27,9 +27,11 @@ export {
   sweepDomainPromotions,
 } from "../entities/domain-promotion";
 import {
+  coerceMentionType,
   isHighConfidenceEndpoint,
   isHighConfidenceRelation,
   normalizeMentionType,
+  normalizeRelationEndpointType,
   normalizeRelationType,
 } from "../entities/graph";
 import {
@@ -38,6 +40,7 @@ import {
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
 } from "../entities/materialize";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
 import { validateLearnedFact, validateLlmMention } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
@@ -79,9 +82,12 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
 const MIN_ENTITY_NAME_LENGTH = 3;
 const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v8";
 const BASE_PROPOSABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team"];
+const MATCHABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team", "deal"];
 
 function proposableEntityTypes(experimentalFlag = false): Set<ProposeEntityType> {
-  return new Set(BASE_PROPOSABLE_ENTITY_TYPES.filter((type) => !(experimentalFlag && type === "team")));
+  const types = BASE_PROPOSABLE_ENTITY_TYPES.filter((type) => !(experimentalFlag && type === "team"));
+  if (experimentalFlag) types.push("tool");
+  return new Set(types);
 }
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -292,6 +298,9 @@ export async function extractEntities(
   const teamFocusLine = experimentalFlag
     ? ""
     : '- **Teams**: named organizational teams (e.g., "QC team", "Content Team")\n';
+  const toolFocusLine = experimentalFlag
+    ? "- **Tools**: third-party SaaS apps/platforms the org uses (e.g., Slack, Notion, Zoom, Figma, GitHub)\n"
+    : "";
   const relationshipTypesPrompt = experimentalFlag
     ? `Valid relationship types:
 - "works_at": person -> company (the person is employed by the company)
@@ -327,6 +336,7 @@ Extract entities that a business team would want to track and reference across d
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
 - **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
 ${teamFocusLine}
+${toolFocusLine}
 
 DO NOT extract:
 - Email addresses, phone numbers, URLs, or other system identifiers — these are stored separately. If a person is identifiable by name, use the name (e.g., "Sarah Chen"); never use an email address as the mention.
@@ -437,7 +447,10 @@ export async function matchEntities(
     for (const name of allNames) {
       if (name.length < MIN_ENTITY_NAME_LENGTH) continue;
 
-      const results = await entityRepo.searchEntities(name, { limit: 5 });
+      const results = await entityRepo.searchEntities(name, {
+        sourceTypes: MATCHABLE_ENTITY_TYPES.filter((type) => !HIDDEN_ENTITY_SOURCE_TYPES.has(type)),
+        limit: 5,
+      });
       if (results.length > 0) {
         // Take the best match (first result from substring search)
         const entity = results[0];
@@ -495,7 +508,11 @@ export async function handleCandidates(
   const entityRepo = createEntityRepository(db);
   const promoted: MatchedEntity[] = [];
 
-  for (const mention of unmatched) {
+  for (const rawMention of unmatched) {
+    const mention = {
+      ...rawMention,
+      type: coerceMentionType(rawMention.mention, rawMention.type, deps.experimentalFlag),
+    };
     if (!proposableEntityTypes(deps.experimentalFlag).has(mention.type as ProposeEntityType)) continue;
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
 
@@ -961,7 +978,11 @@ async function reconcileLlmExtractionFacts(
   const writtenFactKeys: string[] = [];
 
   try {
-    for (const mention of extraction.mentions) {
+    for (const rawMention of extraction.mentions) {
+      const mention = {
+        ...rawMention,
+        type: coerceMentionType(rawMention.mention, rawMention.type, deps.experimentalFlag),
+      };
       if (!proposableEntityTypes(deps.experimentalFlag).has(mention.type as ProposeEntityType)) {
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, entityType: mention.type },
@@ -1057,7 +1078,7 @@ async function reconcileLlmExtractionFacts(
       .execute();
 
     await deps.ensureFresh?.();
-    await materializeUnmaterializedFacts(db, deps.logger);
+    await materializeUnmaterializedFacts(db, deps.logger, { experimentalFlag: deps.experimentalFlag });
     return writtenFactKeys;
   } catch (err) {
     if (isStaleEnrichmentError(err)) {
@@ -1114,9 +1135,14 @@ function buildRelationFactInput(input: {
   const sourceName = input.relation.source.name?.trim();
   const targetName = input.relation.target.name?.trim();
   if (!sourceName || !targetName) return null;
-  const sourceType = normalizeMentionType(input.relation.source.type);
-  const targetType = normalizeMentionType(input.relation.target.type);
+  const sourceType = normalizeMentionType(
+    coerceMentionType(sourceName, input.relation.source.type, input.experimentalFlag),
+  );
+  const targetType = normalizeMentionType(
+    coerceMentionType(targetName, input.relation.target.type, input.experimentalFlag),
+  );
   if (!sourceType || !targetType) return null;
+  if (!normalizeRelationEndpointType(sourceType) || !normalizeRelationEndpointType(targetType)) return null;
   if (
     !proposableEntityTypes(input.experimentalFlag).has(sourceType as ProposeEntityType) ||
     !proposableEntityTypes(input.experimentalFlag).has(targetType as ProposeEntityType)

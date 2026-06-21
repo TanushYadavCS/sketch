@@ -449,7 +449,8 @@ export function buildSystemContext(params: {
       "Tool chain:",
       "- **Search** — hybrid keyword + semantic search across all indexed sources. Supports filtering by source, content `kind` (meeting/doc/task/message), date range, and entity scope. Each result includes `sketchId` (for GetFileContent), `providerId` (the external ID integration tools expect), and `url` (when available).",
       "- **GetFileContent** — retrieve the full content of an indexed file by its `sketchId`. Use when you need the complete document, transcript, or task detail.",
-      "- **SearchEntities** — find projects, people, teams, and databases across connected sources. Pass multiple name variations to maximize matches. Returns entity IDs.",
+      "- **SearchEntities** — find projects, people, teams, companies, and products across connected sources. " +
+        "Pass multiple name variations to maximize matches. Returns entity IDs.",
       "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
       "",
       'Recency questions ("latest", "most recent", "last X"):',

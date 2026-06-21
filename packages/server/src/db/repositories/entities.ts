@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
 import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
@@ -346,8 +347,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    async getEntitiesByStatus(status: string) {
-      return db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity()).execute();
+    async getEntitiesByStatus(status: string, opts?: { excludeSourceTypes?: string[] }) {
+      let query = db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity());
+      if (opts?.excludeSourceTypes && opts.excludeSourceTypes.length > 0) {
+        query = query.where("source_type", "not in", opts.excludeSourceTypes);
+      }
+      return query.execute();
     },
 
     async updateEntity(
@@ -714,6 +719,9 @@ export function createEntityRepository(db: Kysely<DB>) {
 
       if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
         q = q.where("source_type", "in", opts.sourceTypes);
+      } else {
+        const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+        if (hiddenTypes.length > 0) q = q.where("source_type", "not in", hiddenTypes);
       }
 
       if (opts?.sortBy === "recency") {
@@ -749,11 +757,13 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Hotness ──
 
     async getHotEntities(limit: number) {
+      const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
       return db
         .selectFrom("entities")
         .selectAll()
         .where("status", "!=", "archived")
         .where(whereLiveEntity())
+        .where("source_type", "not in", hiddenTypes.length > 0 ? hiddenTypes : [""])
         .orderBy("hotness", "desc")
         .limit(limit)
         .execute();

@@ -91,6 +91,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       ? new Set<ProposeEntityType>(["project", "product", "team"])
       : new Set<ProposeEntityType>(),
     birthGateDryRun: config.BIRTH_GATE_DRY_RUN,
+    experimentalFlag: config.EXPERIMENTAL_FLAG,
   });
 
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.

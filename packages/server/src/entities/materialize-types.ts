@@ -53,6 +53,7 @@ export interface MaterializeDeps {
   llmPromotionThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
+  experimentalFlag: boolean;
 }
 
 export type MaterializeResult =
@@ -76,6 +77,7 @@ export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
+  experimentalFlag?: boolean;
 }
 
 export interface MaterializeProgress {
@@ -88,6 +90,7 @@ export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
+  experimentalFlag?: boolean;
   factTypes?: IndexedFileFactType[];
   /**
    * Fires before processing each fact with `completed = index, total = facts.length`

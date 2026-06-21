@@ -15,7 +15,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type LinkObject, type NodeObject } from "react-force-graph-2d";
 
-type CoarseType = "person" | "company" | "project" | "product" | "team" | "system" | "other";
+type CoarseType = "person" | "company" | "project" | "product" | "team" | "tool" | "system" | "other";
 
 function coarseType(sourceType: string): CoarseType {
   if (sourceType === "person") return "person";
@@ -23,6 +23,7 @@ function coarseType(sourceType: string): CoarseType {
   if (sourceType === "product") return "product";
   if (sourceType === "project" || sourceType === "linear_project") return "project";
   if (sourceType === "team") return "team";
+  if (sourceType === "tool") return "tool";
   if (sourceType.startsWith("clickup_") || sourceType.startsWith("notion_")) return "system";
   return "other";
 }
@@ -34,6 +35,7 @@ const NODE_COLOR: Record<CoarseType, string> = {
   project: "#b794f6",
   product: "#2dd4bf",
   team: "#9aa7b8",
+  tool: "#8b8f96",
   system: "#8b8f96",
   other: "#a8a29e",
 };
@@ -46,6 +48,7 @@ const TYPE_LABEL: Record<CoarseType, string> = {
   project: "Projects",
   product: "Products",
   team: "Teams",
+  tool: "Tools",
   system: "Spaces",
   other: "Other",
 };

@@ -24,6 +24,7 @@ const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
+let configuredExperimentalFlag = false;
 
 /**
  * Set the default `llmPromotionThreshold` used by entry points
@@ -35,12 +36,14 @@ export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
+  experimentalFlag?: boolean;
 }): void {
   if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
     configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
+  if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
 }
 
 export function normalizeEntityMatchName(entityType: string, name: string): string {
@@ -54,7 +57,7 @@ export function normalizeEntityMatchName(entityType: string, name: string): stri
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal", "tool"];
   const entities = await db
     .selectFrom("entities")
     .selectAll()
@@ -244,6 +247,7 @@ export interface BuildMaterializeDepsOptions {
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
+  experimentalFlag?: boolean;
 }
 
 export async function buildMaterializeDeps(
@@ -261,6 +265,7 @@ export async function buildMaterializeDeps(
       : configuredLlmPromotionThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
+  const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
 
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
@@ -320,6 +325,7 @@ export async function buildMaterializeDeps(
     llmPromotionThreshold,
     birthGateTypes,
     birthGateDryRun,
+    experimentalFlag,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
     resolveOwner: (fact: IndexedFileFactRow) => {

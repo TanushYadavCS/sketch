@@ -31,7 +31,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
-import { SYSTEM_SOURCE_TYPES } from "../entities/profile-facts";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 
 export const HALF_LIFE_DAYS = 60;
 export const MIN_SCORE = 0.5;
@@ -139,7 +139,7 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
  * source types are excluded. Sorted by score desc.
  */
 export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string): Promise<AdjacencyEntry[]> {
-  const systemTypes = Array.from(SYSTEM_SOURCE_TYPES);
+  const systemTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
   const rows = await deps.db
     .selectFrom("entity_mentions as em1")
     .innerJoin("entity_mentions as em2", (join) =>
