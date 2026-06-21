@@ -21,7 +21,9 @@ import {
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
+const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
+let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
 let configuredExperimentalFlag = false;
@@ -34,12 +36,16 @@ let configuredExperimentalFlag = false;
  */
 export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }): void {
   if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
     configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
+  }
+  if (typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1) {
+    configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
@@ -244,6 +250,7 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
 
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
@@ -263,6 +270,10 @@ export async function buildMaterializeDeps(
     typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
       ? Math.floor(opts.llmPromotionThreshold)
       : configuredLlmPromotionThreshold;
+  const llmTaskCorroborationThreshold =
+    typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
+      ? Math.floor(opts.llmTaskCorroborationThreshold)
+      : configuredLlmTaskCorroborationThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
   const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
@@ -323,6 +334,7 @@ export async function buildMaterializeDeps(
     lookup,
     index,
     llmPromotionThreshold,
+    llmTaskCorroborationThreshold,
     birthGateTypes,
     birthGateDryRun,
     experimentalFlag,

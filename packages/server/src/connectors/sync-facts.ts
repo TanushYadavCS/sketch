@@ -1,8 +1,10 @@
 import type { Kysely } from "kysely";
 import { upsertCommitmentFact } from "../db/repositories/commitments";
-import type { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import { type createIndexedFileFactRepository, upsertLlmTaskFact } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { normalizeRelationType } from "../entities/graph";
+import { LLM_TASK_PROMPT_VERSION, extractLlmTaskCandidates } from "./llm-task-extraction";
+import { normalizeName } from "./name-normalize";
 import type { Connector, ConnectorType, SyncedItem } from "./types";
 
 type IndexedFileFactRepository = ReturnType<typeof createIndexedFileFactRepository>;
@@ -23,6 +25,7 @@ interface EmitFactsForSyncedItemParams {
   indexedFileId: string;
   emitCorrespondentFacts?: boolean;
   experimentalFlag?: boolean;
+  contentChanged?: boolean;
 }
 
 export async function emitFactsForSyncedItem({
@@ -35,6 +38,7 @@ export async function emitFactsForSyncedItem({
   indexedFileId,
   emitCorrespondentFacts = false,
   experimentalFlag = false,
+  contentChanged = false,
 }: EmitFactsForSyncedItemParams): Promise<void> {
   if (item.entitySeeds && item.entitySeeds.length > 0) {
     for (const seed of item.entitySeeds) {
@@ -235,6 +239,40 @@ export async function emitFactsForSyncedItem({
     }
   }
 
+  if (experimentalFlag && db && contentChanged && item.contentCategory === "document" && item.content) {
+    const parentRef = item.parentEntities?.[0]
+      ? { source: item.parentEntities[0].source, sourceId: item.parentEntities[0].sourceId }
+      : undefined;
+    const candidates = await extractLlmTaskCandidates({
+      content: item.content,
+      attendees: item.attendees,
+      parentRefs: item.parentEntities?.map((parent) => ({ source: parent.source, sourceId: parent.sourceId })),
+      promptVersion: LLM_TASK_PROMPT_VERSION,
+    });
+    const emittedKeys = new Set<string>();
+    for (const candidate of candidates) {
+      const result = await upsertLlmTaskFact(db, {
+        experimentalFlag,
+        indexedFileId,
+        connectorConfigId: factContext.connectorConfigId,
+        createdByUserId: factContext.createdByUserId,
+        lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+        contentHash: item.contentHash,
+        source: connectorType,
+        candidate,
+        corroborationKey: buildLlmTaskCorroborationKey(candidate.title, parentRef),
+        parentRef,
+        evidence: { fileIds: [indexedFileId], entityIds: [] },
+        promptVersion: LLM_TASK_PROMPT_VERSION,
+      });
+      if (result.factKey) emittedKeys.add(result.factKey);
+    }
+    await factRepo.reconcileStaleFacts(
+      { kind: "file", indexedFileId, source: connectorType, factType: "llm_task" },
+      emittedKeys,
+    );
+  }
+
   if (item.authorEmail || item.authorName) {
     if (emitCorrespondentFacts) {
       await seedCorrespondentPerson({
@@ -258,6 +296,13 @@ export async function emitFactsForSyncedItem({
       });
     }
   }
+}
+
+function buildLlmTaskCorroborationKey(
+  title: string,
+  parentRef: { source: string; sourceId: string } | undefined,
+): string {
+  return [normalizeName(title), parentRef ? `${parentRef.source}:${parentRef.sourceId}` : "global"].join("|");
 }
 
 interface SeedAttendeePersonParams {

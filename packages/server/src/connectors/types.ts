@@ -201,6 +201,26 @@ export interface CommitmentSeed {
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
+export interface LlmTaskCandidate {
+  title: string;
+  owner?: { name?: string; email?: string };
+  hasOwnerVerbObject: boolean;
+  sourceExcerpt?: string;
+}
+
+export interface LlmTaskFactRaw {
+  candidateId: string;
+  title: string;
+  owner?: { name?: string; email?: string };
+  hasOwnerVerbObject: boolean;
+  corroborationKey: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  sourceExcerpt?: string;
+  promptVersion: string;
+}
+
 export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
@@ -219,6 +239,7 @@ export type IndexedFileFactRaw =
       task: NonNullable<SyncedItem["task"]>;
     }
   | CommitmentSeed
+  | LlmTaskFactRaw
   | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }

@@ -1,7 +1,10 @@
 import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { materializeUnmaterializedFacts } from "../../entities/materialize";
 import { getSharedPgDb } from "../../test-utils";
+import { createTestLogger } from "../../test-utils";
 import type { DB } from "../schema";
+import { upsertLlmTaskFact } from "./indexed-file-facts";
 import { createTaskRepository } from "./tasks";
 
 describe("createTaskRepository postgres", () => {
@@ -118,6 +121,103 @@ describe("createTaskRepository postgres", () => {
       { task_id: structural.taskId, kind: "file", ref_id: "pg-brief-file-1" },
     ]);
   });
+
+  it("materializes llm corroboration mint and structural collation on postgres", async () => {
+    await seedPgUser(db, "pg-llm-u1", "pg-llm-u1@example.com");
+    await seedPgProject(db, "pg-llm-project", "PG LLM Project");
+    await seedPgProjectRef(db, "pg-llm-project", "linear", "pg-llm-project");
+    await seedPgIndexedFileForUser(db, "pg-llm-file-1", "pg-llm-u1");
+    await seedPgIndexedFileForUser(db, "pg-llm-file-2", "pg-llm-u1");
+    await seedPgIndexedFileForUser(db, "pg-llm-file-3", "pg-llm-u1");
+
+    await seedPgLlmFact({
+      db,
+      fileId: "pg-llm-file-1",
+      connectorConfigId: "connector-pg-llm-file-1",
+      ownerUserId: "pg-llm-u1",
+      candidateId: "pg-corroborate-1",
+      title: "Send pricing deck",
+      hasOwnerVerbObject: false,
+      corroborationKey: "send pricing deck|global",
+    });
+    await seedPgLlmFact({
+      db,
+      fileId: "pg-llm-file-2",
+      connectorConfigId: "connector-pg-llm-file-2",
+      ownerUserId: "pg-llm-u1",
+      candidateId: "pg-corroborate-2",
+      title: "Send pricing deck",
+      hasOwnerVerbObject: false,
+      corroborationKey: "send pricing deck|global",
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      experimentalFlag: true,
+      llmTaskCorroborationThreshold: 2,
+    });
+
+    const minted = await db.selectFrom("tasks").selectAll().where("provenance", "=", "llm").execute();
+    const mintedEvidence = await db
+      .selectFrom("task_evidence")
+      .selectAll()
+      .where("kind", "=", "file")
+      .orderBy("ref_id", "asc")
+      .execute();
+    expect(minted).toHaveLength(1);
+    expect(minted[0]).toMatchObject({
+      source: "llm",
+      status_authority: "local",
+      created_by_user_id: "pg-llm-u1",
+    });
+    expect(mintedEvidence.map((row) => row.ref_id)).toEqual(["pg-llm-file-1", "pg-llm-file-2"]);
+
+    const repo = createTaskRepository(db);
+    const structural = await repo.upsertTask({
+      parentEntityId: "pg-llm-project",
+      parentSourceRef: "linear:pg-llm-project",
+      parentName: "PG LLM Project",
+      source: "linear",
+      externalRef: "SKE-PG-LLM",
+      title: "Ship Slack capture",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: null,
+      priority: null,
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "pg-llm-structural",
+    });
+    await seedPgLlmFact({
+      db,
+      fileId: "pg-llm-file-3",
+      connectorConfigId: "connector-pg-llm-file-3",
+      ownerUserId: "pg-llm-u1",
+      candidateId: "pg-collate-1",
+      title: "Ship Slack capture",
+      hasOwnerVerbObject: false,
+      corroborationKey: "ship slack capture|linear:pg-llm-project",
+      parentRef: { source: "linear", sourceId: "pg-llm-project" },
+      entityIds: ["pg-llm-project"],
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      experimentalFlag: true,
+      llmTaskCorroborationThreshold: 2,
+    });
+
+    const rows = await db.selectFrom("tasks").selectAll().orderBy("source", "asc").execute();
+    const structuralEvidence = await db
+      .selectFrom("task_evidence")
+      .selectAll()
+      .where("task_id", "=", structural.taskId)
+      .orderBy("kind", "asc")
+      .execute();
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.id === structural.taskId)).toMatchObject({
+      provenance: "structural",
+      status_authority: "external",
+    });
+    expect(structuralEvidence.map((row) => row.kind).sort()).toEqual(["entity", "fact", "file"]);
+  });
 });
 
 async function seedPgUser(db: Kysely<DB>, id: string, email: string): Promise<void> {
@@ -146,7 +246,25 @@ async function seedPgProject(db: Kysely<DB>, id: string, name: string): Promise<
     .execute();
 }
 
+async function seedPgProjectRef(db: Kysely<DB>, entityId: string, source: string, sourceId: string): Promise<void> {
+  await db
+    .insertInto("entity_source_refs")
+    .values({
+      id: `${source}-${sourceId}`,
+      entity_id: entityId,
+      source,
+      source_id: sourceId,
+      source_url: null,
+      last_seen_at: new Date().toISOString(),
+    })
+    .execute();
+}
+
 async function seedPgIndexedFile(db: Kysely<DB>, id: string): Promise<void> {
+  await seedPgIndexedFileForUser(db, id, "pg-brief-u1");
+}
+
+async function seedPgIndexedFileForUser(db: Kysely<DB>, id: string, userId: string): Promise<void> {
   await db
     .insertInto("connector_configs")
     .values({
@@ -154,7 +272,7 @@ async function seedPgIndexedFile(db: Kysely<DB>, id: string): Promise<void> {
       connector_type: "google-drive",
       auth_type: "oauth",
       credentials: "{}",
-      created_by: "pg-brief-u1",
+      created_by: userId,
     })
     .execute();
   await db
@@ -180,6 +298,33 @@ async function seedPgIndexedFile(db: Kysely<DB>, id: string): Promise<void> {
       embedding_status: "pending",
     })
     .execute();
+}
+
+async function seedPgLlmFact(input: {
+  db: Kysely<DB>;
+  fileId: string;
+  connectorConfigId: string;
+  ownerUserId: string;
+  candidateId: string;
+  title: string;
+  hasOwnerVerbObject: boolean;
+  corroborationKey: string;
+  parentRef?: { source: string; sourceId: string };
+  entityIds?: string[];
+}): Promise<void> {
+  await upsertLlmTaskFact(input.db, {
+    experimentalFlag: true,
+    indexedFileId: input.fileId,
+    connectorConfigId: input.connectorConfigId,
+    createdByUserId: input.ownerUserId,
+    source: "gmail",
+    candidateId: input.candidateId,
+    candidate: { title: input.title, hasOwnerVerbObject: input.hasOwnerVerbObject },
+    corroborationKey: input.corroborationKey,
+    parentRef: input.parentRef,
+    evidence: { fileIds: [input.fileId], entityIds: input.entityIds ?? [] },
+    promptVersion: "llm-task-v1",
+  });
 }
 
 type PgBriefTodo = Parameters<ReturnType<typeof createTaskRepository>["promoteBriefTask"]>[0]["todo"];

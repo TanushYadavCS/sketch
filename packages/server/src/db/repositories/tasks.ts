@@ -10,6 +10,7 @@ import { whereLiveEntity } from "./entities";
 
 export const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const BRIEF_TASK_ID_SEPARATOR = "\u001f";
+const LLM_TASK_ID_SEPARATOR = "\u001f";
 
 export type TaskStatus = "open" | "in_progress" | "done" | "dropped";
 
@@ -26,8 +27,9 @@ export interface UpsertTaskInput {
   assigneeEntityId: string | null;
   priority: string | null;
   dueAt: string | null;
-  provenance: "structural" | "brief";
+  provenance: "structural" | "brief" | "llm";
   sourceTaskId: string;
+  createdByUserId?: string | null;
 }
 
 export interface TaskListOptions {
@@ -51,6 +53,14 @@ export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
   userEmails: string[];
   limit?: number;
+}
+
+export interface UpsertLlmTaskInput {
+  candidate: { title: string };
+  ownerUserId: string;
+  parentEntityId: string | null;
+  parentKey: string;
+  evidence: { fileIds: string[]; entityIds: string[]; factIds: string[] };
 }
 
 export function createTaskRepository(db: Kysely<DB>) {
@@ -86,6 +96,7 @@ export function createTaskRepository(db: Kysely<DB>) {
         due_at: input.dueAt,
         provenance: input.provenance,
         source_task_id: input.sourceTaskId,
+        created_by_user_id: input.createdByUserId ?? null,
         status_changed_at: statusChanged ? now : (existing?.status_changed_at ?? null),
         completed_at: completedAt,
         valid_from: existing?.valid_from ?? now,
@@ -243,6 +254,54 @@ export function createTaskRepository(db: Kysely<DB>) {
         .execute();
     },
   };
+}
+
+export async function upsertLlmTask(
+  db: Kysely<DB>,
+  input: UpsertLlmTaskInput,
+): Promise<{ taskId: string; created: boolean }> {
+  const normalizedTitle = normalizeName(input.candidate.title);
+  const sourceTaskId = createHash("sha256")
+    .update(["llm", input.ownerUserId, input.parentKey, normalizedTitle].join(LLM_TASK_ID_SEPARATOR))
+    .digest("hex");
+  const result = await createTaskRepository(db).upsertTask({
+    parentEntityId: input.parentEntityId,
+    parentSourceRef: null,
+    parentName: null,
+    source: "llm",
+    externalRef: null,
+    title: input.candidate.title,
+    status: "open",
+    statusRaw: null,
+    statusAuthority: "local",
+    assigneeEntityId: null,
+    priority: null,
+    dueAt: null,
+    provenance: "llm",
+    sourceTaskId,
+    createdByUserId: input.ownerUserId,
+  });
+  await promoteLlmTaskEvidence(db, result.taskId, input.evidence);
+  return result;
+}
+
+async function promoteLlmTaskEvidence(
+  db: Kysely<DB>,
+  taskId: string,
+  refs: UpsertLlmTaskInput["evidence"],
+): Promise<void> {
+  const edges = [
+    ...refs.fileIds.map((refId) => ({ kind: "file", refId })),
+    ...refs.entityIds.map((refId) => ({ kind: "entity", refId })),
+    ...refs.factIds.map((refId) => ({ kind: "fact", refId })),
+  ];
+  for (const edge of edges) {
+    await db
+      .insertInto("task_evidence")
+      .values({ task_id: taskId, kind: edge.kind, ref_id: edge.refId })
+      .onConflict((oc) => oc.columns(["task_id", "kind", "ref_id"]).doNothing())
+      .execute();
+  }
 }
 
 function briefStatusFromLabel(label: string): TaskStatus {

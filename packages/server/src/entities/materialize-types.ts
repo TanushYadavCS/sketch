@@ -51,6 +51,7 @@ export interface MaterializeDeps {
   onEntityResolved: (entity: Entity) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
   llmPromotionThreshold: number;
+  llmTaskCorroborationThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
   experimentalFlag: boolean;
@@ -77,6 +78,7 @@ export type MaterializeResult =
 
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
@@ -90,6 +92,7 @@ export interface MaterializeProgress {
 
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
