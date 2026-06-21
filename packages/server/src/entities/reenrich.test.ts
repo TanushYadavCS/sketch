@@ -317,6 +317,34 @@ describe("entity re-enrich", () => {
     expect(newEntity?.name).toBe("New Person");
   });
 
+  it("threads experimentalFlag into the re-enrich extraction phase", async () => {
+    const seenFlags: Array<boolean | undefined> = [];
+    const capture = async (deps: EnrichmentDeps) => {
+      seenFlags.push(deps.experimentalFlag);
+      return { filesProcessed: 1, filesSkipped: 0, filesFailed: 0, errors: [] };
+    };
+
+    await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      runAfter: false,
+      experimentalFlag: true,
+      runEnrichmentImpl: capture,
+    });
+    await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      runAfter: false,
+      runEnrichmentImpl: capture,
+    });
+
+    expect(seenFlags).toEqual([true, undefined]);
+  });
+
   it("uses caller-provided fact types for the rebuild replay", async () => {
     let capturedFactTypes: string[] | undefined;
 
