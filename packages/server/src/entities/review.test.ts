@@ -10,7 +10,9 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
+import { normalizeName } from "../connectors/name-normalize";
 import { createSettingsRepository } from "../db/repositories/settings";
+import { createTaskRepository } from "../db/repositories/tasks";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
@@ -143,6 +145,62 @@ async function seedPendingRow(
       .execute();
   }
   return id;
+}
+
+async function seedReviewRow(
+  db: Kysely<DB>,
+  opts: {
+    proposedName: string;
+    entityType: string;
+    triggeredBy: string;
+    evidenceFileIds?: string[];
+    source?: string | null;
+    sourceId?: string | null;
+    seedSource?: string | null;
+    seedSourceId?: string | null;
+    candidateReason?: string | null;
+    candidateEntityId?: string | null;
+    occurrenceCount?: number;
+  },
+): Promise<{ id: string; candidateGeneratedAt: string }> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entity_review_queue")
+    .values({
+      id,
+      proposed_name: opts.proposedName,
+      normalized_name: normalizeName(opts.proposedName),
+      entity_type: opts.entityType,
+      source: opts.source ?? null,
+      source_id: opts.sourceId ?? null,
+      seed_source: opts.seedSource ?? null,
+      seed_source_id: opts.seedSourceId ?? null,
+      candidate_entity_id: opts.candidateEntityId ?? null,
+      candidate_score: opts.candidateEntityId ? 1 : null,
+      candidate_reason: opts.candidateReason ?? null,
+      candidate_generated_at: now,
+      first_seen_at: now,
+      last_seen_at: now,
+      occurrence_count: opts.occurrenceCount ?? 1,
+      status: "pending",
+      triggered_by_user_id: opts.triggeredBy,
+    })
+    .execute();
+  for (const fileId of opts.evidenceFileIds ?? []) {
+    await db
+      .insertInto("entity_review_evidence")
+      .values({
+        id: randomUUID(),
+        review_id: id,
+        indexed_file_id: fileId,
+        source: opts.source ?? "fireflies",
+        note: null,
+        seen_at: now,
+      })
+      .execute();
+  }
+  return { id, candidateGeneratedAt: now };
 }
 
 describe("entity-review routes — mounting", () => {
@@ -420,5 +478,450 @@ describe("entity-review routes — list endpoint shape", () => {
     const body = (await res.json()) as { rows: unknown[]; total: number };
     expect(body.total).toBe(2);
     expect(body.rows).toHaveLength(2);
+  });
+});
+
+describe("entity-review A4 backend", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let ownerId: string;
+  let otherId: string;
+  let ownerCookie: string;
+  let offApp: ReturnType<typeof createApp>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    ownerId = await userIdByEmail(db, OWNER_EMAIL);
+    otherId = await userIdByEmail(db, OTHER_EMAIL);
+    await seedConnectorConfig(db, "config-owner", ownerId);
+    await seedConnectorConfig(db, "config-other", otherId);
+    await seedIndexedFile(db, "a4-owner-file", "config-owner");
+    await seedIndexedFile(db, "a4-other-file", "config-other");
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+      logger: createTestLogger(),
+    });
+    offApp = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: false }), {
+      logger: createTestLogger(),
+    });
+    ownerCookie = await login(app, OWNER_EMAIL);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("bulk confirm/reject creates and clears rows idempotently with isolated drift and owner failures", async () => {
+    const okOne = await seedReviewRow(db, {
+      proposedName: "A4 Project One",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "project-one",
+      candidateReason: "birth-gated",
+    });
+    const okTwo = await seedReviewRow(db, {
+      proposedName: "A4 Project Two",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "project-two",
+      candidateReason: "birth-gated",
+    });
+    const stale = await seedReviewRow(db, {
+      proposedName: "A4 Project Stale",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "project-stale",
+      candidateReason: "birth-gated",
+    });
+    const denied = await seedReviewRow(db, {
+      proposedName: "A4 Project Denied",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file", "a4-other-file"],
+      source: "linear",
+      sourceId: "project-denied",
+      candidateReason: "birth-gated",
+    });
+    await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: "linear:project-one",
+      parentName: "A4 Project One",
+      source: "linear",
+      externalRef: null,
+      title: "Task waiting for A4 Project One",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "external",
+      assigneeEntityId: null,
+      priority: null,
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "task-a4-project-one",
+    });
+
+    const confirmRes = await app.request("/api/entity-review/confirm-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        items: [
+          { reviewId: okOne.id, candidateGeneratedAt: okOne.candidateGeneratedAt },
+          { reviewId: okTwo.id, candidateGeneratedAt: okTwo.candidateGeneratedAt },
+          { reviewId: stale.id, candidateGeneratedAt: "2020-01-01T00:00:00.000Z" },
+          { reviewId: denied.id, candidateGeneratedAt: denied.candidateGeneratedAt },
+        ],
+      }),
+    });
+    expect(confirmRes.status).toBe(200);
+    const confirmBody = (await confirmRes.json()) as {
+      results: Array<{ reviewId: string; ok: boolean; targetEntityId?: string; error?: { code: string } }>;
+    };
+    expect(
+      confirmBody.results
+        .filter((result) => result.ok)
+        .map((result) => result.reviewId)
+        .sort(),
+    ).toEqual([okOne.id, okTwo.id].sort());
+    expect(confirmBody.results.find((result) => result.reviewId === stale.id)?.error?.code).toBe("CANDIDATE_DRIFT");
+    expect(confirmBody.results.find((result) => result.reviewId === denied.id)?.error?.code).toBe("OWNER_SCOPE_DENIED");
+    const createdProjectIds = confirmBody.results
+      .filter((result) => result.ok)
+      .map((result) => result.targetEntityId)
+      .filter((id): id is string => !!id);
+    const task = await db
+      .selectFrom("tasks")
+      .select(["parent_entity_id"])
+      .where("source_task_id", "=", "task-a4-project-one")
+      .executeTakeFirstOrThrow();
+    expect(task.parent_entity_id).toBe(createdProjectIds[0]);
+
+    const replayRes = await app.request("/api/entity-review/confirm-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        items: [
+          { reviewId: okOne.id, candidateGeneratedAt: okOne.candidateGeneratedAt },
+          { reviewId: okTwo.id, candidateGeneratedAt: okTwo.candidateGeneratedAt },
+        ],
+      }),
+    });
+    expect(replayRes.status).toBe(200);
+    const replayBody = (await replayRes.json()) as { results: Array<{ ok: boolean; targetEntityId?: string }> };
+    expect(replayBody.results.every((result) => result.ok)).toBe(true);
+    expect(replayBody.results.map((result) => result.targetEntityId).sort()).toEqual(createdProjectIds.sort());
+    const projectCount = await db
+      .selectFrom("entities")
+      .select(db.fn.countAll<number>().as("c"))
+      .where("source_type", "=", "project")
+      .executeTakeFirstOrThrow();
+    expect(Number(projectCount.c)).toBe(2);
+
+    const rejectOne = await seedReviewRow(db, {
+      proposedName: "A4 Reject One",
+      entityType: "person",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+    });
+    const rejectTwo = await seedReviewRow(db, {
+      proposedName: "A4 Reject Two",
+      entityType: "person",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+    });
+    const rejectDenied = await seedReviewRow(db, {
+      proposedName: "A4 Reject Denied",
+      entityType: "person",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file", "a4-other-file"],
+    });
+    const rejectRes = await app.request("/api/entity-review/reject-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        items: [
+          { reviewId: rejectOne.id, candidateGeneratedAt: rejectOne.candidateGeneratedAt },
+          { reviewId: rejectTwo.id, candidateGeneratedAt: rejectTwo.candidateGeneratedAt },
+          { reviewId: rejectDenied.id, candidateGeneratedAt: rejectDenied.candidateGeneratedAt },
+          { reviewId: stale.id, candidateGeneratedAt: "2020-01-01T00:00:00.000Z" },
+        ],
+      }),
+    });
+    expect(rejectRes.status).toBe(200);
+    const rejectBody = (await rejectRes.json()) as {
+      results: Array<{ reviewId: string; ok: boolean; error?: { code: string } }>;
+    };
+    expect(
+      rejectBody.results
+        .filter((result) => result.ok)
+        .map((result) => result.reviewId)
+        .sort(),
+    ).toEqual([rejectOne.id, rejectTwo.id].sort());
+    expect(rejectBody.results.find((result) => result.reviewId === rejectDenied.id)?.error?.code).toBe(
+      "OWNER_SCOPE_DENIED",
+    );
+    expect(rejectBody.results.find((result) => result.reviewId === stale.id)?.error?.code).toBe("CANDIDATE_DRIFT");
+
+    const rejectReplay = await app.request("/api/entity-review/reject-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        items: [
+          { reviewId: rejectOne.id, candidateGeneratedAt: rejectOne.candidateGeneratedAt },
+          { reviewId: rejectTwo.id, candidateGeneratedAt: rejectTwo.candidateGeneratedAt },
+        ],
+      }),
+    });
+    expect(rejectReplay.status).toBe(200);
+    const rejectReplayBody = (await rejectReplay.json()) as { results: Array<{ ok: boolean }> };
+    expect(rejectReplayBody.results.every((result) => result.ok)).toBe(true);
+  });
+
+  it("reclassify changes type, merges compatible collisions, and refuses incompatible source or seed refs", async () => {
+    const product = await seedReviewRow(db, {
+      proposedName: "A4 Solo Foo",
+      entityType: "product",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "solo-foo",
+      candidateReason: "birth-gated",
+    });
+    const reclassifyRes = await app.request(`/api/entity-review/${product.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ newEntityType: "project", candidateGeneratedAt: product.candidateGeneratedAt }),
+    });
+    expect(reclassifyRes.status).toBe(200);
+    const reclassified = (await reclassifyRes.json()) as {
+      row: { id: string; entity_type: string; candidate_generated_at: string };
+    };
+    expect(reclassified.row.id).toBe(product.id);
+    expect(reclassified.row.entity_type).toBe("project");
+    const confirmRes = await app.request(`/api/entity-review/${product.id}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ candidateGeneratedAt: reclassified.row.candidate_generated_at }),
+    });
+    expect(confirmRes.status).toBe(200);
+    const confirmed = (await confirmRes.json()) as { targetEntityId: string };
+    const entity = await db
+      .selectFrom("entities")
+      .select(["source_type"])
+      .where("id", "=", confirmed.targetEntityId)
+      .executeTakeFirstOrThrow();
+    expect(entity.source_type).toBe("project");
+
+    const target = await seedReviewRow(db, {
+      proposedName: "A4 Merge Foo",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      occurrenceCount: 2,
+    });
+    const source = await seedReviewRow(db, {
+      proposedName: "A4 Merge Foo",
+      entityType: "product",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "clickup",
+      sourceId: "merge-foo",
+      seedSource: "linear",
+      seedSourceId: "seed-merge-foo",
+      candidateReason: "birth-gated",
+      occurrenceCount: 3,
+    });
+    const mergeRes = await app.request(`/api/entity-review/${source.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ newEntityType: "project", candidateGeneratedAt: source.candidateGeneratedAt }),
+    });
+    expect(mergeRes.status).toBe(200);
+    const merged = (await mergeRes.json()) as { result: string; row: { id: string } };
+    expect(merged.result).toBe("RECLASSIFY");
+    expect(merged.row.id).toBe(target.id);
+    await expect(
+      db.selectFrom("entity_review_queue").select("id").where("id", "=", source.id).executeTakeFirst(),
+    ).resolves.toBeUndefined();
+    const targetAfter = await db
+      .selectFrom("entity_review_queue")
+      .select(["source", "source_id", "seed_source", "seed_source_id", "occurrence_count"])
+      .where("id", "=", target.id)
+      .executeTakeFirstOrThrow();
+    expect(targetAfter).toMatchObject({
+      source: "clickup",
+      source_id: "merge-foo",
+      seed_source: "linear",
+      seed_source_id: "seed-merge-foo",
+      occurrence_count: 5,
+    });
+    const evidenceCount = await db
+      .selectFrom("entity_review_evidence")
+      .select(db.fn.countAll<number>().as("c"))
+      .where("review_id", "=", target.id)
+      .executeTakeFirstOrThrow();
+    expect(Number(evidenceCount.c)).toBe(2);
+
+    const sourceConflictProduct = await seedReviewRow(db, {
+      proposedName: "A4 Source Conflict",
+      entityType: "product",
+      triggeredBy: ownerId,
+      source: "linear",
+      sourceId: "source-conflict-product",
+    });
+    const sourceConflictTarget = await seedReviewRow(db, {
+      proposedName: "A4 Source Conflict",
+      entityType: "project",
+      triggeredBy: ownerId,
+      source: "linear",
+      sourceId: "source-conflict-project",
+    });
+    const sourceConflictRes = await app.request(`/api/entity-review/${sourceConflictProduct.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        newEntityType: "project",
+        candidateGeneratedAt: sourceConflictProduct.candidateGeneratedAt,
+      }),
+    });
+    expect(sourceConflictRes.status).toBe(200);
+    const sourceConflict = (await sourceConflictRes.json()) as { result: string };
+    expect(sourceConflict.result).toBe("TYPE_RECLASSIFY_COLLISION");
+
+    const seedConflictProduct = await seedReviewRow(db, {
+      proposedName: "A4 Seed Conflict",
+      entityType: "product",
+      triggeredBy: ownerId,
+      seedSource: "linear",
+      seedSourceId: "seed-conflict-product",
+    });
+    const seedConflictTarget = await seedReviewRow(db, {
+      proposedName: "A4 Seed Conflict",
+      entityType: "project",
+      triggeredBy: ownerId,
+      seedSource: "linear",
+      seedSourceId: "seed-conflict-project",
+    });
+    const seedConflictRes = await app.request(`/api/entity-review/${seedConflictProduct.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        newEntityType: "project",
+        candidateGeneratedAt: seedConflictProduct.candidateGeneratedAt,
+      }),
+    });
+    expect(seedConflictRes.status).toBe(200);
+    const seedConflict = (await seedConflictRes.json()) as { result: string };
+    expect(seedConflict.result).toBe("TYPE_RECLASSIFY_COLLISION");
+    const intactRows = await db
+      .selectFrom("entity_review_queue")
+      .select(["id"])
+      .where("id", "in", [
+        sourceConflictProduct.id,
+        sourceConflictTarget.id,
+        seedConflictProduct.id,
+        seedConflictTarget.id,
+      ])
+      .execute();
+    expect(intactRows.map((row) => row.id).sort()).toEqual(
+      [sourceConflictProduct.id, sourceConflictTarget.id, seedConflictProduct.id, seedConflictTarget.id].sort(),
+    );
+
+    const invalidTypeRes = await app.request(`/api/entity-review/${target.id}/reclassify-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ newEntityType: "tool", candidateGeneratedAt: target.candidateGeneratedAt }),
+    });
+    expect(invalidTypeRes.status).toBe(400);
+  });
+
+  it("separates tracker and inferred bulk accept paths and keeps A4 routes absent when flag is off", async () => {
+    const tracker = await seedReviewRow(db, {
+      proposedName: "A4 Tracker Project",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "tracker-project",
+      candidateReason: "birth-gated",
+    });
+    const inferred = await seedReviewRow(db, {
+      proposedName: "A4 Inferred Project",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+    });
+
+    const summaryRes = await app.request("/api/entity-review/summary", { headers: { Cookie: ownerCookie } });
+    expect(summaryRes.status).toBe(200);
+    const summary = (await summaryRes.json()) as {
+      groups: Array<{ entityType: string; origin: string; count: number }>;
+      total: number;
+    };
+    expect(summary.groups).toEqual(
+      expect.arrayContaining([
+        { entityType: "project", origin: "tracker", count: 1 },
+        { entityType: "project", origin: "inferred", count: 1 },
+      ]),
+    );
+    expect(summary.total).toBeGreaterThanOrEqual(2);
+
+    const batchRes = await app.request("/api/entity-review/confirm-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        items: [
+          { reviewId: tracker.id, candidateGeneratedAt: tracker.candidateGeneratedAt },
+          { reviewId: inferred.id, candidateGeneratedAt: inferred.candidateGeneratedAt },
+        ],
+      }),
+    });
+    expect(batchRes.status).toBe(200);
+    const batch = (await batchRes.json()) as {
+      results: Array<{ reviewId: string; ok: boolean; error?: { code: string } }>;
+    };
+    expect(batch.results.find((result) => result.reviewId === tracker.id)?.ok).toBe(true);
+    expect(batch.results.find((result) => result.reviewId === inferred.id)?.error?.code).toBe("CANDIDATE_MISSING");
+
+    const offCookie = await login(offApp, OWNER_EMAIL);
+    for (const path of [
+      "/api/entity-review/summary",
+      "/api/entity-review/confirm-batch",
+      "/api/entity-review/reject-batch",
+      `/api/entity-review/${inferred.id}/reclassify-type`,
+    ]) {
+      const res = await offApp.request(path, {
+        method: path.includes("summary") ? "GET" : "POST",
+        headers: { "Content-Type": "application/json", Cookie: offCookie },
+        body: path.includes("summary")
+          ? undefined
+          : JSON.stringify({
+              items: [],
+              newEntityType: "project",
+              candidateGeneratedAt: inferred.candidateGeneratedAt,
+            }),
+      });
+      expect(res.status).toBe(404);
+    }
+
+    const single = await seedReviewRow(db, {
+      proposedName: "A4 Flag Off Single",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "flag-off-single",
+      candidateReason: "birth-gated",
+    });
+    const singleRes = await offApp.request(`/api/entity-review/${single.id}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: offCookie },
+      body: JSON.stringify({ candidateGeneratedAt: single.candidateGeneratedAt }),
+    });
+    expect(singleRes.status).toBe(200);
   });
 });
