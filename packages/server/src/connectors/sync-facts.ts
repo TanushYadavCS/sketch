@@ -1,4 +1,7 @@
+import type { Kysely } from "kysely";
+import { upsertCommitmentFact } from "../db/repositories/commitments";
 import type { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import type { DB } from "../db/schema";
 import { normalizeRelationType } from "../entities/graph";
 import type { Connector, ConnectorType, SyncedItem } from "./types";
 
@@ -12,6 +15,7 @@ export interface SyncFactContext {
 
 interface EmitFactsForSyncedItemParams {
   factRepo: IndexedFileFactRepository;
+  db?: Kysely<DB>;
   connector: Connector;
   connectorType: ConnectorType;
   factContext: SyncFactContext;
@@ -22,6 +26,7 @@ interface EmitFactsForSyncedItemParams {
 }
 
 export async function emitFactsForSyncedItem({
+  db,
   factRepo,
   connector,
   connectorType,
@@ -206,6 +211,28 @@ export async function emitFactsForSyncedItem({
       contextSnippet: item.sourcePath,
       raw: { indexedFileId, task: item.task },
     });
+  }
+
+  if (item.commitments && item.commitments.length > 0 && db) {
+    for (const commitment of item.commitments) {
+      await upsertCommitmentFact(db, {
+        experimentalFlag,
+        indexedFileId,
+        connectorConfigId: factContext.connectorConfigId,
+        createdByUserId: factContext.createdByUserId,
+        lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+        contentHash: item.contentHash,
+        source: connectorType,
+        commitmentId: commitment.commitmentId,
+        parentRef: commitment.parentRef,
+        parentEntityId: commitment.parentEntityId,
+        title: commitment.title,
+        status: commitment.status,
+        dueAt: commitment.dueAt,
+        evidence: commitment.evidence,
+        contextSnippet: item.sourcePath,
+      });
+    }
   }
 
   if (item.authorEmail || item.authorName) {

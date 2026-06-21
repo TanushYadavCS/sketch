@@ -1,0 +1,103 @@
+import { TEST_ACCOUNT_ENTITY_ID } from "../db/repositories/tasks";
+import { readJsonObject } from "./materialize-json";
+import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+
+export async function materializeCommitment(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+): Promise<MaterializeResult> {
+  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
+  const raw = readJsonObject(fact.raw);
+  const commitment = readCommitment(raw);
+  if (!commitment) return { kind: "skipped", reason: "invalid_commitment" };
+
+  const parent = resolveParent(deps, commitment);
+  await deps.db
+    .updateTable("indexed_file_facts")
+    .set({
+      raw: JSON.stringify({
+        ...raw,
+        status: commitment.status,
+        parentEntityId: parent?.id ?? null,
+        parent_entity_id: parent?.id ?? null,
+      }),
+      updated_at: new Date().toISOString(),
+    })
+    .where("id", "=", fact.id)
+    .execute();
+  return { kind: "commitment_materialized" };
+}
+
+function resolveParent(deps: MaterializeDeps, commitment: CommitmentInput): EntityRow | null {
+  if (commitment.parentRef) {
+    const byRef = deps.index.bySourceRef.get(`${commitment.parentRef.source}:${commitment.parentRef.sourceId}`);
+    if (isAllowedParent(byRef)) return byRef;
+  }
+  if (commitment.parentEntityId) {
+    const byId = findEntityById(deps, commitment.parentEntityId);
+    if (isAllowedParent(byId)) return byId;
+  }
+  for (const entityId of commitment.evidence.entityIds) {
+    const byId = findEntityById(deps, entityId);
+    if (isAllowedParent(byId)) return byId;
+  }
+  return null;
+}
+
+function findEntityById(deps: MaterializeDeps, entityId: string): EntityRow | undefined {
+  for (const type of ["project", "person"] as const) {
+    const found = deps.index.entitiesByType.get(type)?.find((entity) => entity.id === entityId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function isAllowedParent(entity: EntityRow | undefined): entity is EntityRow {
+  return Boolean(
+    entity &&
+      entity.id !== TEST_ACCOUNT_ENTITY_ID &&
+      (entity.source_type === "project" || entity.source_type === "person"),
+  );
+}
+
+interface CommitmentInput {
+  commitmentId: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  status: "open" | "done" | "dropped";
+  evidence: { entityIds: string[] };
+}
+
+function readCommitment(raw: Record<string, unknown>): CommitmentInput | null {
+  if (
+    typeof raw.commitmentId !== "string" ||
+    (raw.status !== "open" && raw.status !== "done" && raw.status !== "dropped") ||
+    !isEvidence(raw.evidence)
+  ) {
+    return null;
+  }
+  return {
+    commitmentId: raw.commitmentId,
+    parentRef: readParentRef(raw.parentRef),
+    parentEntityId: readOptionalString(raw.parentEntityId),
+    status: raw.status,
+    evidence: { entityIds: raw.evidence.entityIds },
+  };
+}
+
+function readParentRef(value: unknown): { source: string; sourceId: string } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.source !== "string" || typeof record.sourceId !== "string") return undefined;
+  return { source: record.source, sourceId: record.sourceId };
+}
+
+function isEvidence(value: unknown): value is { entityIds: string[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Array.isArray(record.entityIds) && record.entityIds.every((id) => typeof id === "string");
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
