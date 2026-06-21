@@ -219,6 +219,7 @@ export interface RunAgentParams {
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
   agentOutputWriter?: AgentOutputWriter;
+  experimentalFlag?: boolean;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
@@ -315,6 +316,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
+    experimentalFlag: params.experimentalFlag,
   });
 
   const sdkBuiltInTools = params.agentAllowedTools
@@ -416,6 +418,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     agentInstructions: params.agentInstructions,
     agentAllowedTools: params.agentAllowedTools,
     agentOutputWriter: params.agentOutputWriter,
+    experimentalFlag: params.experimentalFlag,
     originOrgContextEnabled: params.claudeConfigDir !== undefined,
   });
 

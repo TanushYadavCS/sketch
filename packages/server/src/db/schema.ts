@@ -855,6 +855,37 @@ export interface IndexedFileFactsTable {
   updated_at: Generated<string>;
 }
 
+export interface TasksTable {
+  id: string;
+  parent_entity_id: string | null;
+  parent_source_ref: string | null;
+  parent_name: string | null;
+  source: string;
+  external_ref: string | null;
+  title: string;
+  normalized_title: string;
+  status: string;
+  status_raw: string | null;
+  status_authority: string;
+  assignee_entity_id: string | null;
+  priority: string | null;
+  due_at: string | null;
+  provenance: string;
+  source_task_id: string;
+  status_changed_at: string | null;
+  completed_at: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskEvidenceTable {
+  task_id: string;
+  kind: string;
+  ref_id: string;
+}
+
 export interface DB {
   users: UsersTable;
   channels: ChannelsTable;
@@ -916,6 +947,8 @@ export interface DB {
   entity_review_domain_candidates: EntityReviewDomainCandidatesTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
+  tasks: TasksTable;
+  task_evidence: TaskEvidenceTable;
   entity_domains: EntityDomainsTable;
   entity_project_bindings: EntityProjectBindingsTable;
   entity_project_member_overrides: EntityProjectMemberOverridesTable;

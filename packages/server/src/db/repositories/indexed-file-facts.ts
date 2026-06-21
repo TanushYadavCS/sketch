@@ -11,6 +11,7 @@ export type IndexedFileFactType =
   | "parent_entity"
   | "contact_point"
   | "structural_seed"
+  | "structural_task"
   | "person_seed"
   | "llm_extracted"
   | "llm_relation"
@@ -124,6 +125,14 @@ function rawEndpointIdentity(
 }
 
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
+  if (input.factType === "structural_task") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const task = isRecord(raw?.task) ? raw.task : undefined;
+    const sourceTaskId = typeof task?.sourceTaskId === "string" ? task.sourceTaskId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, sourceTaskId].join("|"))
+      .digest("hex");
+  }
   const parts = [
     input.connectorConfigId ?? "",
     input.source,
@@ -231,6 +240,14 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   } else if (input.factType === "structural_seed") {
     if (!hasString(raw, "sourceType") && (!hasString(raw, "providerFileId") || !hasString(raw, "fileType"))) {
       throw new Error("structural_seed facts require raw.sourceType or raw provider file metadata");
+    }
+  } else if (input.factType === "structural_task") {
+    if (!isRecord(raw.task) || !hasString(raw, "indexedFileId")) {
+      throw new Error("structural_task facts require raw.task and raw.indexedFileId");
+    }
+    const task = raw.task as Record<string, unknown>;
+    if (!hasString(task, "sourceTaskId") || !hasString(task, "title") || !hasString(task, "statusType")) {
+      throw new Error("structural_task facts require sourceTaskId, title, and statusType");
     }
   } else if (input.factType === "person_seed") {
     if (!hasString(raw, "source") && !hasString(raw, "subtype")) {

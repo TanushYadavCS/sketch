@@ -4,6 +4,7 @@ import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
+import { createListTasksTool } from "./tools/list-tasks";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
 import { createMessagingTools } from "./tools/messaging";
@@ -70,6 +71,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         ]
       : []),
     ...createSearchTools(deps),
+    ...(deps.experimentalFlag ? [createListTasksTool(deps)] : []),
   ];
 
   return createSdkMcpServer({ name: "sketch", tools });
