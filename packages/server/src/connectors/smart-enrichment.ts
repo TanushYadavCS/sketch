@@ -80,7 +80,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v8";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v9";
 const BASE_PROPOSABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team"];
 const MATCHABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team", "deal"];
 

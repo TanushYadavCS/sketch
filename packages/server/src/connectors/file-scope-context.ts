@@ -26,7 +26,7 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { whereLiveEntity } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
@@ -42,12 +42,18 @@ export const RECENTLY_ACTIVE_WINDOW_DAYS = 14;
 export const BASELINE_RELEVANCE_CAP = 15;
 export const BASELINE_RECENCY_WINDOW_DAYS = 30;
 export const MIN_VERBATIM_NAME_LENGTH = 4;
+export const MAX_PERSON_ANCHORS = 5;
+export const HUB_PERSON_DEGREE_CAP = 30;
+export const BASELINE_ALWAYS_INCLUDE_CAP = 50;
+const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface FileScopeDeps {
   db: Kysely<DB>;
   logger?: Logger;
   now?: () => number;
+  experimentalFlag?: boolean;
+  loadAdjacencyForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<AdjacencyEntry[]>;
 }
 
 export interface AnchorEntity {
@@ -59,6 +65,7 @@ export interface AnchorEntity {
 
 export interface FileAnchors {
   companies: AnchorEntity[];
+  persons: AnchorEntity[];
 }
 
 export interface AdjacencyEntry {
@@ -109,9 +116,11 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
     .execute();
 
   const companyMap = new Map<string, AnchorEntity>();
+  const participantEmails: string[] = [];
   for (const row of attendees) {
     const email = row.subject_email;
     if (!email) continue;
+    participantEmails.push(email);
     const domain = domainsRepo.normalizeEmailDomain(email);
     if (!domain) continue;
     if (isRoleAccountEmail(email)) continue;
@@ -130,7 +139,42 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
   const companies = Array.from(companyMap.values())
     .sort((a, b) => b.hotness - a.hotness)
     .slice(0, MAX_ANCHORS_PER_SIDE);
-  return { companies };
+  if (!deps.experimentalFlag) return { companies, persons: [] };
+
+  const entityRepo = createEntityRepository(deps.db);
+  const personsByEmail = await entityRepo.getPersonEntitiesByEmails(participantEmails);
+  const personMap = new Map<string, AnchorEntity>();
+  for (const matches of personsByEmail.values()) {
+    const candidates = matches.filter((person) => person.id !== TEST_ACCOUNT_ENTITY_ID);
+    if (candidates.length !== 1) continue;
+    const person = candidates[0];
+    if (personMap.has(person.id)) continue;
+    personMap.set(person.id, {
+      id: person.id,
+      name: person.name,
+      sourceType: person.source_type,
+      hotness: Number(person.hotness ?? 0),
+    });
+  }
+
+  const nonHubIds = await loadNonHubPersonIds(deps, [...personMap.keys()]);
+  const persons = Array.from(personMap.values())
+    .filter((person) => nonHubIds.has(person.id))
+    .sort((a, b) => b.hotness - a.hotness)
+    .slice(0, MAX_PERSON_ANCHORS);
+  return { companies, persons };
+}
+
+async function loadNonHubPersonIds(deps: FileScopeDeps, personIds: string[]): Promise<Set<string>> {
+  if (personIds.length === 0) return new Set();
+  const rows = await deps.db
+    .selectFrom("entity_mentions")
+    .select(["entity_id", deps.db.fn.count<number>("indexed_file_id").distinct().as("file_degree")])
+    .where("entity_id", "in", personIds)
+    .groupBy("entity_id")
+    .execute();
+  const degreeById = new Map(rows.map((row) => [row.entity_id, Number(row.file_degree)]));
+  return new Set(personIds.filter((id) => (degreeById.get(id) ?? 0) <= HUB_PERSON_DEGREE_CAP));
 }
 
 /**
@@ -212,8 +256,8 @@ export async function buildFileScopedKnownEntities(
     if (!byKey.has(k)) byKey.set(k, { name: a.name, type: a.sourceType });
   }
 
-  for (const anchor of anchors.companies) {
-    const adj = await adjacencyForAnchor(deps, anchor.id);
+  for (const anchor of [...anchors.companies, ...anchors.persons]) {
+    const adj = await (deps.loadAdjacencyForAnchor ?? adjacencyForAnchor)(deps, anchor.id);
     const initiatives = adj
       .filter((x) => x.sourceType === "project" || x.sourceType === "product")
       .slice(0, PER_ANCHOR_INITIATIVE_CAP);
@@ -316,11 +360,19 @@ async function rankBaselineKnownEntities(
   if (scoredCandidates.length === 0) return legacy;
 
   const cap = opts.baselineRelevanceCap ?? BASELINE_RELEVANCE_CAP;
-  const alwaysInclude = scoredCandidates.filter((entity) => hasVerbatimMention(fileContent, entity));
+  const alwaysInclude = deps.experimentalFlag
+    ? scoredCandidates
+        .filter((entity) => hasVerbatimMention(fileContent, entity))
+        .sort((a, b) => {
+          const hotness = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
+          return hotness !== 0 ? hotness : a.name.localeCompare(b.name);
+        })
+        .slice(0, BASELINE_ALWAYS_INCLUDE_CAP)
+    : scoredCandidates.filter((entity) => hasVerbatimMention(fileContent, entity));
   const alwaysIds = new Set(alwaysInclude.map((entity) => entity.id));
   const candidates = scoredCandidates.filter((entity) => !alwaysIds.has(entity.id));
   const candidateIds = candidates.flatMap((entity) => (entity.id ? [entity.id] : []));
-  const anchorIds = anchors.companies.map((anchor) => anchor.id);
+  const anchorIds = [...anchors.companies.map((anchor) => anchor.id), ...anchors.persons.map((anchor) => anchor.id)];
   const [lastSeenById, overlapIds] = await Promise.all([
     loadBaselineLastSeen(deps, candidateIds),
     loadBaselineAnchorOverlap(deps, candidateIds, anchorIds),

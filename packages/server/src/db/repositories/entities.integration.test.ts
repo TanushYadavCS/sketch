@@ -93,4 +93,19 @@ describe("createEntityRepository deleteEntitiesForFiles postgres", () => {
     await expect(repo.deleteEntitiesForFiles(["pg-file-1"])).resolves.toBe(2);
     await expect(repo.getEntity(target.id)).resolves.toBeUndefined();
   });
+
+  it("finds batched people by metadata email fallback in postgres", async () => {
+    const repo = createEntityRepository(db);
+    const metadataOnly = await repo.upsertPersonEntity({
+      name: "PG Metadata Person",
+      email: "pg-metadata@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "pg-seed:metadata",
+    });
+
+    const matches = await repo.getPersonEntitiesByEmails(["PG-METADATA@example.com"]);
+
+    expect(matches.get("pg-metadata@example.com")).toMatchObject([{ id: metadataOnly.id }]);
+  });
 });

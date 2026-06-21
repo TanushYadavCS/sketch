@@ -641,5 +641,11 @@ describe("createEntityRepository contact points", () => {
       { id: metadataOnly.id },
     ]);
     await expect(repo.getPersonEntitiesByEmail("CONTACT@example.com")).resolves.toMatchObject([{ id: contactOnly.id }]);
+    await expect(repo.getPersonEntitiesByEmails(["METADATA@example.com", "CONTACT@example.com"])).resolves.toEqual(
+      new Map([
+        ["metadata@example.com", [expect.objectContaining({ id: metadataOnly.id })]],
+        ["contact@example.com", [expect.objectContaining({ id: contactOnly.id })]],
+      ]),
+    );
   });
 });
