@@ -326,6 +326,7 @@ export async function runConnectorSync(
           indexedFileId: itemResult.indexedFileId,
           emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
           experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
+          contentChanged: itemResult.kind !== "unchanged",
         });
 
         if (itemResult.kind === "unchanged") {

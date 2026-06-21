@@ -42,6 +42,7 @@ export const configSchema = z.object({
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
+  LLM_TASK_CORROBORATION_THRESHOLD: z.coerce.number().int().min(1).default(2),
   CO_MENTION_CONTRIBUTES_TO_THRESHOLD: z.coerce.number().int().min(2).default(3),
   FLOOR_RETRY_MAX_FILES_PER_DOMAIN: z.coerce.number().int().min(1).default(5000),
   FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),

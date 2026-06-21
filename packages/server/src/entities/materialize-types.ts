@@ -53,6 +53,7 @@ export interface MaterializeDeps {
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
   llmPromotionThreshold: number;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
+  llmTaskCorroborationThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
   experimentalFlag: boolean;
@@ -79,6 +80,7 @@ export type MaterializeResult =
 
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
@@ -92,6 +94,7 @@ export interface MaterializeProgress {
 
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;

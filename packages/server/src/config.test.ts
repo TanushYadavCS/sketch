@@ -105,6 +105,7 @@ describe("configSchema", () => {
         expect("VISION_API_KEY" in result.data).toBe(false);
         expect(result.data.SYNC_ALLOW_LARGE_RECONCILE).toBe(false);
         expect(result.data.SYNC_MAX_RECONCILE_RATIO).toBe(0.5);
+        expect(result.data.LLM_TASK_CORROBORATION_THRESHOLD).toBe(2);
         expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(3);
         expect(result.data.MICROSOFT_TENANT).toBe("common");
         expect(result.data.OUTLOOK_INITIAL_LOOKBACK_DAYS).toBe(365);
@@ -118,11 +119,13 @@ describe("configSchema", () => {
     it("parses entity graph heuristic thresholds", () => {
       const result = configSchema.safeParse({
         LLM_PROMOTION_THRESHOLD: "4",
+        LLM_TASK_CORROBORATION_THRESHOLD: "3",
         CO_MENTION_CONTRIBUTES_TO_THRESHOLD: "5",
       });
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.LLM_PROMOTION_THRESHOLD).toBe(4);
+        expect(result.data.LLM_TASK_CORROBORATION_THRESHOLD).toBe(3);
         expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(5);
       }
     });
