@@ -692,20 +692,30 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     let target: Entity;
     if (!targetId) {
       if (!row.seed_source || !row.seed_source_id) {
-        throw new ResolveError(
-          "CANDIDATE_MISSING",
-          "row has no candidate_entity_id and no mergeIntoEntityId provided",
-          {
-            currentRow: row,
-          },
-        );
+        if (row.candidate_reason === "birth-gated" && row.source && row.source_id) {
+          target = await trxCtx.entityRepo.upsertEntityFromTool({
+            name: row.proposed_name,
+            sourceType: row.entity_type,
+            source: row.source,
+            sourceId: row.source_id,
+          });
+        } else {
+          throw new ResolveError(
+            "CANDIDATE_MISSING",
+            "row has no candidate_entity_id and no mergeIntoEntityId provided",
+            {
+              currentRow: row,
+            },
+          );
+        }
+      } else {
+        target = await trxCtx.entityRepo.upsertEntityFromTool({
+          name: row.proposed_name,
+          sourceType: row.entity_type,
+          source: row.seed_source,
+          sourceId: row.seed_source_id,
+        });
       }
-      target = await trxCtx.entityRepo.upsertEntityFromTool({
-        name: row.proposed_name,
-        sourceType: row.entity_type,
-        source: row.seed_source,
-        sourceId: row.seed_source_id,
-      });
     } else {
       const fetchedTarget = await fetchEntity(trxCtx, targetId);
       if (!fetchedTarget) {

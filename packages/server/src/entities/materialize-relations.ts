@@ -32,6 +32,9 @@ export async function materializeLlmRelationFact(
   const sourceConfidence = typeof raw.sourceConfidence === "number" ? raw.sourceConfidence : 0;
   const targetConfidence = typeof raw.targetConfidence === "number" ? raw.targetConfidence : 0;
   if (!relationType || !source || !target) return { kind: "skipped", reason: "invalid_llm_relation" };
+  if (deps.birthGateTypes.has("team") && (source.type === "team" || target.type === "team")) {
+    return { kind: "skipped", reason: "team_conversational_birth_gated" };
+  }
   if (!isHighConfidenceRelation(confidenceScore)) return { kind: "skipped", reason: "low_confidence_relation" };
   if (!isHighConfidenceEndpoint(sourceConfidence) || !isHighConfidenceEndpoint(targetConfidence)) {
     return { kind: "skipped", reason: "low_endpoint_confidence" };
@@ -228,6 +231,9 @@ async function materializeRelationEndpoint(
       reviewRepo: deps.reviewRepo,
       domainsRepo: deps.domainsRepo,
       lookup: deps.lookup,
+      logger: deps.logger,
+      birthGateTypes: deps.birthGateTypes,
+      birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
     },

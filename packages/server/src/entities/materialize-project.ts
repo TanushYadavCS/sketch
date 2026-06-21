@@ -1,5 +1,6 @@
 import { registerEntity } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
+import { materializeSpineCandidate } from "./materialize-spine-candidate";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
 
@@ -17,12 +18,25 @@ export async function materializeProjectSeed(
   const metadata =
     raw.metadata && typeof raw.metadata === "object" ? (raw.metadata as Record<string, unknown>) : undefined;
 
+  if (deps.birthGateTypes.has("project")) {
+    return materializeSpineCandidate(deps, fact, {
+      subjectSource,
+      subjectSourceId,
+      sourceType: "project",
+      raw,
+      metadata,
+    });
+  }
+
   const result = await proposeEntity(
     {
       entityRepo: deps.entityRepo,
       reviewRepo: deps.reviewRepo,
       domainsRepo: deps.domainsRepo,
       lookup: deps.lookup,
+      logger: deps.logger,
+      birthGateTypes: deps.birthGateTypes,
+      birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
     },

@@ -258,6 +258,7 @@ export interface EnrichmentDeps {
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
+  experimentalFlag?: boolean;
   /** Download image from Google Drive by provider file ID. Returns buffer + mime type. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
   /** If set, only enrich these specific file IDs (ignoring pending status). */
@@ -778,6 +779,7 @@ async function enrichTextDocument(
           participantBlock,
           debugDumpDir: deps.debugDumpDir,
           ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
+          experimentalFlag: deps.experimentalFlag,
         },
         {
           id: file.id,

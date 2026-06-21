@@ -18,6 +18,9 @@ export async function materializeLlmExtractedFact(
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }
+  if (mentionType === "team" && deps.birthGateTypes.has("team")) {
+    return { kind: "skipped", reason: "team_conversational_birth_gated" };
+  }
   const normalized = normalizeEntityMatchName(mentionType, fact.subject_name);
   if (!normalized) {
     return { kind: "skipped", reason: "missing_llm_subject" };
@@ -56,6 +59,9 @@ export async function materializeNonPersonLlmEntity(
       reviewRepo: deps.reviewRepo,
       domainsRepo: deps.domainsRepo,
       lookup: deps.lookup,
+      logger: deps.logger,
+      birthGateTypes: deps.birthGateTypes,
+      birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
     },
