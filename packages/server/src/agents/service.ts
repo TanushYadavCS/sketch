@@ -1669,7 +1669,7 @@ export class AgentRunService {
             })
           : Promise.resolve({}),
       ]);
-      const runtimeContext = {
+      const runtimeContext: Record<string, unknown> = {
         agentKey: def.key,
         agentVersion: def.version,
         outputId,
@@ -1684,8 +1684,22 @@ export class AgentRunService {
         previousDayOutput: this.formatOutputForContext(previousDay),
         ...definitionContext,
       };
+      if (def.augmentRuntimeContext) {
+        Object.assign(
+          runtimeContext,
+          await def.augmentRuntimeContext({
+            db: this.deps.db,
+            config: this.deps.config,
+            userId: user.id,
+            users: this.deps.users,
+            maxItemsPerSection: config.maxItemsPerSection,
+            baseContext: runtimeContext,
+          }),
+        );
+      }
       const writer = this.createWriter(def, {
         outputId,
+        userId: user.id,
         enabledSections: new Set(enabledSections),
         expectedOutputDate: output.output_date,
         expectedTimezone: output.timezone,
@@ -1731,7 +1745,7 @@ export class AgentRunService {
         currentUserId: user.id,
         userRepo: this.deps.users,
         maxTurns: 35,
-        agentInstructions: def.buildInstructions(),
+        agentInstructions: def.buildInstructions({ experimentalFlag: this.deps.config.EXPERIMENTAL_FLAG }),
         agentAllowedTools: def.allowedTools,
         agentOutputWriter: writer,
       });
@@ -1888,6 +1902,7 @@ export class AgentRunService {
     def: AgentDefinition,
     params: {
       outputId: string;
+      userId: string;
       enabledSections: Set<string>;
       expectedOutputDate: string;
       expectedTimezone: string;
@@ -1924,6 +1939,16 @@ export class AgentRunService {
           rawPayload: rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext),
           items,
         });
+        if (def.onOutputSaved) {
+          await def.onOutputSaved({
+            db: this.deps.db,
+            config: this.deps.config,
+            logger: this.deps.logger,
+            userId: params.userId,
+            outputId: params.outputId,
+            items,
+          });
+        }
         params.onSaved();
       },
     };

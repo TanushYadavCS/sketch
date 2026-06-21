@@ -58,7 +58,7 @@ export interface SearchOptions {
   userEmails?: string[];
 }
 
-function fileAccessFilterSql(emailList: string[]) {
+export function fileAccessFilterSql(emailList: string[]) {
   const emailSql = sql.join(
     emailList.map((e) => sql`${e}`),
     sql`,`,
