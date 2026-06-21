@@ -704,6 +704,52 @@ export function createEntityRepository(db: Kysely<DB>) {
       return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
     },
 
+    async getPersonEntitiesByEmails(rawEmails: string[]): Promise<Map<string, Selectable<EntitiesTable>[]>> {
+      const emails = Array.from(new Set(rawEmails.map((email) => normalizeContactPointValue("email", email))));
+      const out = new Map<string, Selectable<EntitiesTable>[]>();
+      if (emails.length === 0) return out;
+
+      const byContactPoint = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .select("entity_contact_points.value as matched_email")
+        .where("entity_contact_points.kind", "=", "email")
+        .where("entity_contact_points.value", "in", emails)
+        .where("entities.source_type", "=", "person")
+        .where(whereLiveEntity())
+        .execute();
+      const byMetadata = await db
+        .selectFrom("entities")
+        .selectAll()
+        .select(
+          (isPg(db) ? sql<string>`(metadata::jsonb ->> 'email')` : sql<string>`json_extract(metadata, '$.email')`).as(
+            "matched_email",
+          ),
+        )
+        .where("source_type", "=", "person")
+        .where(whereLiveEntity())
+        .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "in", emails)
+        .execute();
+
+      const byEmailAndId = new Map<string, Map<string, Selectable<EntitiesTable>>>();
+      for (const row of [...byContactPoint, ...byMetadata]) {
+        const matchedEmail = row.matched_email;
+        if (!matchedEmail) continue;
+        const normalized = normalizeContactPointValue("email", matchedEmail);
+        const entities = byEmailAndId.get(normalized) ?? new Map<string, Selectable<EntitiesTable>>();
+        entities.set(row.id, row);
+        byEmailAndId.set(normalized, entities);
+      }
+      for (const [email, entities] of byEmailAndId) {
+        out.set(
+          email,
+          [...entities.values()].sort((a, b) => a.id.localeCompare(b.id)),
+        );
+      }
+      return out;
+    },
+
     // ── Search ──
 
     async searchEntities(

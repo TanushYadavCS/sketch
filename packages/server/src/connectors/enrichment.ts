@@ -41,6 +41,7 @@ export const SCHEDULED_ENRICHMENT_TIME_BUDGET_MS = 5 * 60 * 1000;
 const MIN_ENTITY_NAME_LENGTH = 3;
 
 const DETERMINISTIC_LINK_BATCH_SIZE = 500;
+const PROJECT_BASELINE_LIMIT = 200;
 const ENRICHMENT_BACKOFF_MS = [
   30 * 60 * 1000,
   60 * 60 * 1000,
@@ -226,14 +227,30 @@ async function markEmbeddingFailure(
   await query.execute();
 }
 
-export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
-  const entities = await db
+export async function loadBaselineKnownEntities(
+  db: Kysely<DB>,
+  opts: { experimentalFlag?: boolean } = {},
+): Promise<KnownEntityForPrompt[]> {
+  const baseEntities = await db
     .selectFrom("entities")
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
     .where(whereLiveEntity())
     .execute();
+  const projectEntities = opts.experimentalFlag
+    ? await db
+        .selectFrom("entities")
+        .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
+        .where("source_type", "=", "project")
+        .where("status", "=", "confirmed")
+        .where(whereLiveEntity())
+        .orderBy("hotness", "desc")
+        .orderBy("name", "asc")
+        .limit(PROJECT_BASELINE_LIMIT)
+        .execute()
+    : [];
+  const entities = [...baseEntities, ...projectEntities];
   return entities.map((entity) => ({
     id: entity.id,
     name: entity.name,
@@ -261,7 +278,7 @@ export interface EnrichmentDeps {
   /** Org context for enrichment prompts. Populated at start of enrichment run. */
   orgContext?: { orgName?: string; description?: string; industry?: string } | null;
   /**
-   * Org-wide baseline of confirmed entities (products + teams) used as a
+   * Org-wide baseline of confirmed entities used as a
    * fallback when a file has no resolvable anchors. The per-file scoped list
    * is built on top of this by `buildFileScopedKnownEntities`.
    */
@@ -337,7 +354,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   }
 
   try {
-    deps.knownEntities = await loadBaselineKnownEntities(db);
+    deps.knownEntities = await loadBaselineKnownEntities(db, { experimentalFlag: deps.experimentalFlag });
   } catch {
     // entities table may not exist yet — ignore
   }
@@ -466,7 +483,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               const generator = getGenerator();
               if (!generator) throw new Error("Enrichment generator unavailable");
               const knownEntities = await buildFileScopedKnownEntities(
-                { db, logger },
+                { db, logger, experimentalFlag: deps.experimentalFlag },
                 file.id,
                 deps.knownEntities ?? [],
                 file.content,
@@ -759,7 +776,7 @@ async function enrichTextDocument(
   if (!summaryAlreadyResolved && generator && wordCount >= minWordsForSummary) {
     try {
       const knownEntities = await buildFileScopedKnownEntities(
-        { db, logger },
+        { db, logger, experimentalFlag: deps.experimentalFlag },
         file.id,
         deps.knownEntities ?? [],
         file.content,
