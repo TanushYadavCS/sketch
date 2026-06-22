@@ -277,7 +277,9 @@ function taskToSyncedItem(
     sourceCreatedAt: parseClickUpTimestamp(task.date_created ?? null),
     sourceUpdatedAt: parseClickUpTimestamp(task.date_updated ?? null),
     accessScope,
-    assignees: task.assignees.filter((a) => a.username).map((a) => ({ name: a.username })),
+    assignees: task.assignees
+      .filter((a) => a.username)
+      .map((a) => ({ name: a.username, email: a.email, source: "clickup", sourceId: `assignee:${a.username}` })),
     task: {
       sourceTaskId: task.id,
       externalRef: task.id,
