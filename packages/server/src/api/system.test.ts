@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
+import type { createEntityRepository } from "../db/repositories/entities";
 import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -40,6 +41,7 @@ function createTestSystemApp(
     onSlackTokensUpdated?: ReturnType<typeof vi.fn>;
     onLlmSettingsUpdated?: ReturnType<typeof vi.fn>;
     userRepo?: ReturnType<typeof createUserRepository>;
+    entityRepo?: ReturnType<typeof createEntityRepository>;
     inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
     mcpServers?: ReturnType<typeof createMcpServerRepository>;
     sendSlackDmToSlackUser?: (params: {
@@ -269,6 +271,76 @@ describe("PUT /api/system/api-key", () => {
     const res = await app.request("/api/system/api-key", { method: "PUT" });
 
     expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /api/system/entities/graph/hotness-recomputations", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("runs a hotness recomputation batch with cursor and limit", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const entityRepo = {
+      recomputeHotnessBatch: vi.fn().mockResolvedValue({ processed: 25, nextCursor: "entity-25", done: false }),
+    } as unknown as ReturnType<typeof createEntityRepository>;
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, entityRepo });
+
+    const res = await app.request("/api/system/entities/graph/hotness-recomputations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ cursor: "entity-0", limit: 25 }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ processed: 25, nextCursor: "entity-25", done: false });
+    expect(entityRepo.recomputeHotnessBatch).toHaveBeenCalledWith({ cursor: "entity-0", limit: 25 });
+  });
+
+  it("defaults the batch request body", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const entityRepo = {
+      recomputeHotnessBatch: vi.fn().mockResolvedValue({ processed: 0, nextCursor: null, done: true }),
+    } as unknown as ReturnType<typeof createEntityRepository>;
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, entityRepo });
+
+    const res = await app.request("/api/system/entities/graph/hotness-recomputations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ processed: 0, nextCursor: null, done: true });
+    expect(entityRepo.recomputeHotnessBatch).toHaveBeenCalledWith({ limit: 500 });
+  });
+
+  it("rejects invalid batch limits", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const entityRepo = {
+      recomputeHotnessBatch: vi.fn(),
+    } as unknown as ReturnType<typeof createEntityRepository>;
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, entityRepo });
+
+    const res = await app.request("/api/system/entities/graph/hotness-recomputations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ limit: 0 }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(entityRepo.recomputeHotnessBatch).not.toHaveBeenCalled();
   });
 });
 

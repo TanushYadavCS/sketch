@@ -1,14 +1,71 @@
 import { randomUUID } from "node:crypto";
-import type { Kysely, Selectable } from "kysely";
+import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
+import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
 const PROTECTED_ENTITY_SOURCES = ["team", "team_directory"];
+const HOTNESS_WINDOW_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CANONICAL_TIMESTAMP_LIKE = "____-__-__T__:__:__.___Z";
+const TIMESTAMP_DIGIT_POSITIONS = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22, 23];
+
+type MentionActivityRow = {
+  mentioned_at: string;
+  source_updated_at: string | null;
+  source_created_at: string | null;
+};
+
+function mentionActivityMs(row: MentionActivityRow): number | null {
+  return (
+    parseTimestampMs(row.source_updated_at) ??
+    parseTimestampMs(row.source_created_at) ??
+    parseTimestampMs(row.mentioned_at)
+  );
+}
+
+function canonicalHotnessActivityExpr() {
+  return sql<string>`COALESCE(indexed_files.source_updated_at, indexed_files.source_created_at, entity_mentions.mentioned_at)`;
+}
+
+function timestampDigitPredicate(expr: RawBuilder<string | null>) {
+  return sql.join(
+    TIMESTAMP_DIGIT_POSITIONS.map((position) => sql<boolean>`SUBSTR(${expr}, ${position}, 1) BETWEEN '0' AND '9'`),
+    sql` AND `,
+  );
+}
+
+function canonicalTimestampPredicate(expr: RawBuilder<string | null>) {
+  return sql<boolean>`(
+    ${expr} LIKE ${CANONICAL_TIMESTAMP_LIKE}
+    AND ${timestampDigitPredicate(expr)}
+    AND SUBSTR(${expr}, 6, 2) BETWEEN '01' AND '12'
+    AND SUBSTR(${expr}, 9, 2) BETWEEN '01' AND '31'
+    AND SUBSTR(${expr}, 12, 2) BETWEEN '00' AND '23'
+    AND SUBSTR(${expr}, 15, 2) BETWEEN '00' AND '59'
+    AND SUBSTR(${expr}, 18, 2) BETWEEN '00' AND '59'
+  )`;
+}
+
+function nullableCanonicalTimestampPredicate(expr: RawBuilder<string | null>) {
+  return sql<boolean>`(${expr} IS NULL OR ${canonicalTimestampPredicate(expr)})`;
+}
+
+function canonicalHotnessActivityPredicate() {
+  const sourceUpdatedAt = sql<string | null>`indexed_files.source_updated_at`;
+  const sourceCreatedAt = sql<string | null>`indexed_files.source_created_at`;
+  const mentionedAt = sql<string | null>`entity_mentions.mentioned_at`;
+  return sql<boolean>`(
+    ${nullableCanonicalTimestampPredicate(sourceUpdatedAt)}
+    AND ${nullableCanonicalTimestampPredicate(sourceCreatedAt)}
+    AND ${canonicalTimestampPredicate(mentionedAt)}
+  )`;
+}
 
 /**
  * Predicate matching entities visible to `viewer`. Composed into queries via `.where(...)`.
@@ -703,27 +760,37 @@ export function createEntityRepository(db: Kysely<DB>) {
     },
 
     async updateHotness(entityId: string) {
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-
-      const mentionCount = await db
+      const thirtyDaysAgoMs = Date.now() - HOTNESS_WINDOW_DAYS * DAY_MS;
+      const thirtyDaysAgo = new Date(thirtyDaysAgoMs).toISOString();
+      const canonicalActivity = await db
         .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
         .where("entity_id", "=", entityId)
-        .where("mentioned_at", ">=", thirtyDaysAgo)
-        .select(db.fn.count("id").as("count"))
+        .where(canonicalHotnessActivityPredicate())
+        .select([
+          sql<number>`SUM(CASE WHEN ${canonicalHotnessActivityExpr()} >= ${thirtyDaysAgo} THEN 1 ELSE 0 END)`.as(
+            "active_count",
+          ),
+          sql<string | null>`MAX(${canonicalHotnessActivityExpr()})`.as("latest_activity_at"),
+        ])
         .executeTakeFirst();
-
-      const lastMention = await db
+      const fallbackMentions = await db
         .selectFrom("entity_mentions")
+        .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
         .where("entity_id", "=", entityId)
-        .orderBy("mentioned_at", "desc")
-        .select("mentioned_at")
-        .limit(1)
-        .executeTakeFirst();
+        .where(sql<boolean>`NOT ${canonicalHotnessActivityPredicate()}`)
+        .select(["entity_mentions.mentioned_at", "indexed_files.source_updated_at", "indexed_files.source_created_at"])
+        .execute();
 
-      const count = Number(mentionCount?.count ?? 0);
-      const daysSince = lastMention
-        ? (Date.now() - new Date(lastMention.mentioned_at).getTime()) / (24 * 60 * 60 * 1000)
-        : 30;
+      let count = Number(canonicalActivity?.active_count ?? 0);
+      let latestActivityMs = parseTimestampMs(canonicalActivity?.latest_activity_at);
+      for (const mention of fallbackMentions) {
+        const activityMs = mentionActivityMs(mention);
+        if (activityMs === null) continue;
+        if (activityMs >= thirtyDaysAgoMs) count++;
+        if (latestActivityMs === null || activityMs > latestActivityMs) latestActivityMs = activityMs;
+      }
+      const daysSince = latestActivityMs === null ? HOTNESS_WINDOW_DAYS : (Date.now() - latestActivityMs) / DAY_MS;
 
       const hotness = (1 / (1 + Math.exp(-Math.log1p(count)))) * Math.exp(-0.1 * daysSince);
 
@@ -745,6 +812,27 @@ export function createEntityRepository(db: Kysely<DB>) {
         await this.updateHotness(entity.id);
       }
       return entities.length;
+    },
+
+    async recomputeHotnessBatch(opts: { cursor?: string | null; limit: number }) {
+      const rows = await db
+        .selectFrom("entities")
+        .select("id")
+        .where("status", "!=", "archived")
+        .where(whereLiveEntity())
+        .$if(Boolean(opts.cursor), (qb) => qb.where("id", ">", opts.cursor as string))
+        .orderBy("id", "asc")
+        .limit(opts.limit + 1)
+        .execute();
+      const batch = rows.slice(0, opts.limit);
+      for (const entity of batch) {
+        await this.updateHotness(entity.id);
+      }
+      return {
+        processed: batch.length,
+        nextCursor: rows.length > opts.limit ? (batch.at(-1)?.id ?? null) : null,
+        done: rows.length <= opts.limit,
+      };
     },
 
     // ── Profile aggregates (entity drawer) ──

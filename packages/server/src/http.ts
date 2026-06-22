@@ -49,6 +49,7 @@ import {
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConnectorRepository } from "./db/repositories/connectors";
 import { createConversationRepository } from "./db/repositories/conversations";
+import { createEntityRepository } from "./db/repositories/entities";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
@@ -109,6 +110,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const conversations = createConversationRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
+  const entityRepo = createEntityRepository(db);
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
@@ -425,6 +427,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         onSlackTokensUpdated: onSlackTokensUpdated ? () => onSlackTokensUpdated() : undefined,
         onLlmSettingsUpdated: onLlmSettingsUpdated ? () => onLlmSettingsUpdated() : undefined,
         userRepo: users,
+        entityRepo,
         inboxMessagesRepo: inboxMessages,
         mcpServers,
         sendSlackDmToSlackUser: deps?.getSlack

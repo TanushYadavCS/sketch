@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 100;
+const EXPECTED_MIGRATION_COUNT = 101;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -133,6 +133,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[97]).toBe("102-entity-creation-suppressions");
     expect(names[98]).toBe("103-daily-briefs");
     expect(names[99]).toBe("104-daily-brief-item-metadata");
+    expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
   });
 
   it("running migrations twice is idempotent", async () => {

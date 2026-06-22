@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 100;
+const EXPECTED_MIGRATION_COUNT = 101;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -156,6 +156,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[97]).toBe("102-entity-creation-suppressions");
     expect(names[98]).toBe("103-daily-briefs");
     expect(names[99]).toBe("104-daily-brief-item-metadata");
+    expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {

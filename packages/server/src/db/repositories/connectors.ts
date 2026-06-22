@@ -13,6 +13,7 @@ import { sql } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
+import { normalizeSourceTimestampForStorage } from "../../timestamps";
 import type { DB } from "../schema";
 
 /**
@@ -383,6 +384,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       rollupGroupId?: string | null;
     }) {
       const now = new Date().toISOString();
+      const sourceCreatedAt = normalizeSourceTimestampForStorage(data.sourceCreatedAt);
+      const sourceUpdatedAt = normalizeSourceTimestampForStorage(data.sourceUpdatedAt);
 
       const existing = data.providerMessageId
         ? await db
@@ -423,8 +426,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           source_path: data.sourcePath,
           content_hash: data.contentHash,
           is_archived: 0,
-          source_created_at: data.sourceCreatedAt,
-          source_updated_at: data.sourceUpdatedAt,
+          source_created_at: sourceCreatedAt,
+          source_updated_at: sourceUpdatedAt,
           rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
         };
@@ -460,8 +463,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           source: data.source,
           source_path: data.sourcePath,
           content_hash: data.contentHash,
-          source_created_at: data.sourceCreatedAt,
-          source_updated_at: data.sourceUpdatedAt,
+          source_created_at: sourceCreatedAt,
+          source_updated_at: sourceUpdatedAt,
           rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
           mime_type: data.mimeType ?? null,
