@@ -154,6 +154,22 @@ describe("managed login redirect", () => {
     expect(res.headers.get("location")).toBe("https://app.getsketch.ai/login");
   });
 
+  it("preserves integration setup links when redirecting to managed login", async () => {
+    const app = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://app.getsketch.ai",
+        MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
+      }),
+    );
+
+    const res = await app.request("/integrations?connect=github");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      `https://app.getsketch.ai/login?return_to=${encodeURIComponent("/integrations?connect=github")}`,
+    );
+  });
+
   it("does not affect API routes", async () => {
     const app = createApp(
       db,

@@ -635,7 +635,7 @@ describe("MCP Servers API", () => {
       expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
         "member@test.com",
         "github",
-        "https://sketch.example.com/integrations/callback",
+        "https://sketch.example.com/integrations/callback?app=github",
         "Test Member",
         "member",
       );
@@ -774,14 +774,17 @@ describe("MCP Servers API", () => {
       const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ appId: "google-calendar" }),
+        body: JSON.stringify({
+          appId: "google-calendar",
+          callbackUrl: "https://sketch.example.com/integrations/callback?app=google-calendar",
+        }),
       });
       expect(res.status).toBe(200);
 
       expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
         "member@test.com",
         "google-calendar-oauth",
-        "",
+        "https://sketch.example.com/integrations/callback?app=google-calendar-oauth",
         "Test Member",
         "member",
       );

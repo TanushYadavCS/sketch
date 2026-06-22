@@ -270,6 +270,13 @@ function resolveConnectionIntentApp(
   return { ok: false, status: 404, code: "NOT_FOUND", message: "App not found" };
 }
 
+function connectionIntentCallbackUrl(callbackUrl: string | undefined, appId: string): string {
+  if (!callbackUrl) return "";
+  const url = new URL(callbackUrl);
+  url.searchParams.set("app", appId);
+  return url.toString();
+}
+
 function extractEmails(value?: string): string[] {
   return value?.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? [];
 }
@@ -560,7 +567,7 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     const result = await provider.initiateConnection(
       userResult.email,
       appResult.app.id,
-      parsed.data.callbackUrl ?? "",
+      connectionIntentCallbackUrl(parsed.data.callbackUrl, appResult.app.id),
       userResult.name,
       c.get("role"),
     );

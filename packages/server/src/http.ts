@@ -515,8 +515,14 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
       if (!isValidPlatformSession) {
         const loginUrl = new URL("/login", config.MANAGED_URL);
-        const returnTo = new URL(c.req.url).searchParams.get("return_to");
-        if (path === "/login" && returnTo) {
+        const requestUrl = new URL(c.req.url);
+        const returnTo =
+          path === "/login"
+            ? requestUrl.searchParams.get("return_to")
+            : path === "/integrations" || path.startsWith("/integrations/")
+              ? `${requestUrl.pathname}${requestUrl.search}`
+              : null;
+        if (returnTo) {
           loginUrl.searchParams.set("return_to", returnTo);
         }
         return c.redirect(loginUrl.toString());
