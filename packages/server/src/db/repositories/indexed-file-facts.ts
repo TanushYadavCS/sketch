@@ -13,6 +13,7 @@ export type IndexedFileFactType =
   | "structural_seed"
   | "structural_task"
   | "commitment"
+  | "decision"
   | "llm_task"
   | "person_seed"
   | "llm_extracted"
@@ -144,6 +145,13 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
       .update([input.connectorConfigId ?? "", input.factType, input.source, commitmentId].join("|"))
       .digest("hex");
   }
+  if (input.factType === "decision") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const decisionId = typeof raw?.decisionId === "string" ? raw.decisionId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, decisionId].join("|"))
+      .digest("hex");
+  }
   if (input.factType === "llm_task") {
     const raw = input.raw as Record<string, unknown> | undefined;
     const candidateId = typeof raw?.candidateId === "string" ? raw.candidateId.trim().toLowerCase() : "";
@@ -209,6 +217,9 @@ function hasString(value: Record<string, unknown>, key: string): boolean {
 }
 
 function validateRaw(input: UpsertIndexedFileFactInput): string | null {
+  if (!input.raw && input.factType === "decision") {
+    throw new Error("decision facts require raw decision data");
+  }
   if (!input.raw) return null;
   if (!isRecord(input.raw)) {
     throw new Error("indexed_file_facts.raw must be an object");
@@ -289,6 +300,39 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     const parentRef = raw.parentRef as Record<string, unknown> | undefined;
     if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
       throw new Error("commitment parentRef requires source and sourceId");
+    }
+  } else if (input.factType === "decision") {
+    if (
+      !input.connectorConfigId?.trim() ||
+      !input.source.trim() ||
+      !hasString(raw, "decisionId") ||
+      !hasString(raw, "topic") ||
+      !hasString(raw, "statement") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error("decision facts require connectorConfigId, source, decisionId, topic, statement, and evidence");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("decision evidence requires fileIds and entityIds arrays");
+    }
+    if (
+      !evidence.fileIds.every((id) => typeof id === "string") ||
+      !evidence.entityIds.every((id) => typeof id === "string")
+    ) {
+      throw new Error("decision evidence ids must be strings");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("decision parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("decision parentRef requires source and sourceId");
+    }
+    for (const key of ["parentEntityId", "decidedBy", "decidedAt", "rationale", "promptVersion"]) {
+      if (raw[key] !== undefined && typeof raw[key] !== "string") {
+        throw new Error(`decision ${key} must be a string`);
+      }
     }
   } else if (input.factType === "llm_task") {
     if (

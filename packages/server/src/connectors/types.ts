@@ -117,6 +117,7 @@ export interface SyncedItem {
     assignee?: { name: string; email?: string; source?: string; sourceId?: string };
   };
   commitments?: CommitmentSeed[];
+  decisions?: DecisionSeed[];
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present; entries
@@ -201,6 +202,19 @@ export interface CommitmentSeed {
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
+export interface DecisionSeed {
+  decisionId?: string;
+  topic: string;
+  statement: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  rationale?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  promptVersion?: string;
+}
+
 export interface LlmTaskCandidate {
   title: string;
   owner?: { name?: string; email?: string };
@@ -239,6 +253,7 @@ export type IndexedFileFactRaw =
       task: NonNullable<SyncedItem["task"]>;
     }
   | CommitmentSeed
+  | DecisionSeed
   | LlmTaskFactRaw
   | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }

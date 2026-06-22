@@ -50,6 +50,11 @@ export interface MaterializeDeps {
   readEmail: (entity: Entity) => string | null;
   onEntityResolved: (entity: Entity) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
+  getIndexedFileSourceTime: (indexedFileId: string) => Promise<{
+    source_created_at: string | null;
+    source_updated_at: string | null;
+    synced_at: string;
+  } | null>;
   llmPromotionThreshold: number;
   llmTaskCorroborationThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
@@ -71,6 +76,7 @@ export type MaterializeResult =
     }
   | { kind: "task_materialized"; taskId: string; created: boolean }
   | { kind: "commitment_materialized" }
+  | { kind: "decision_materialized" }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }

@@ -340,6 +340,13 @@ export async function buildMaterializeDeps(
     experimentalFlag,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
+    getIndexedFileSourceTime: (indexedFileId: string) =>
+      db
+        .selectFrom("indexed_files")
+        .select(["source_created_at", "source_updated_at", "synced_at"])
+        .where("id", "=", indexedFileId)
+        .executeTakeFirst()
+        .then((row) => row ?? null),
     resolveOwner: (fact: IndexedFileFactRow) => {
       if (fact.created_by_user_id) return fact.created_by_user_id;
       const indexedFileId = fact.indexed_file_id;

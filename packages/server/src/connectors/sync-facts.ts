@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { upsertCommitmentFact } from "../db/repositories/commitments";
+import { upsertDecisionFactsForFile } from "../db/repositories/decisions";
 import { type createIndexedFileFactRepository, upsertLlmTaskFact } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { normalizeRelationType } from "../entities/graph";
@@ -237,6 +238,20 @@ export async function emitFactsForSyncedItem({
         contextSnippet: item.sourcePath,
       });
     }
+  }
+
+  if (item.decisions && db) {
+    await upsertDecisionFactsForFile(db, {
+      experimentalFlag,
+      indexedFileId,
+      connectorConfigId: factContext.connectorConfigId,
+      createdByUserId: factContext.createdByUserId,
+      lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+      contentHash: item.contentHash,
+      source: connectorType,
+      decisions: item.decisions,
+      contextSnippet: item.sourcePath,
+    });
   }
 
   if (experimentalFlag && db && contentChanged && item.contentCategory === "document" && item.content) {
