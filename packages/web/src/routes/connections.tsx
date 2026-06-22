@@ -58,12 +58,32 @@ function ConnectionsCallback() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const appId = integrationAppConnectFromSearch(params.get("app"));
-    const connectedPath = `/integrations${appId ? `?connected=${encodeURIComponent(appId)}` : "?connected=1"}`;
+    const error = params.get("error") ?? params.get("connect_error") ?? params.get("error_code");
+    const errorMessage = error ? "Connection was not completed. Please try again." : null;
+    const connectedPath = appId ? `/integrations?verify_connected=${encodeURIComponent(appId)}` : "/integrations";
+    const errorPath = `/integrations?connect_error=1${appId ? `&app=${encodeURIComponent(appId)}` : ""}`;
     const embedded = window.parent && window.parent !== window;
     const popup = Boolean(window.opener);
 
-    window.parent?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
-    window.opener?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
+    if (errorMessage) {
+      window.parent?.postMessage(
+        { type: "sketch-integration-connect-error", appId, message: errorMessage },
+        window.location.origin,
+      );
+      window.opener?.postMessage(
+        { type: "sketch-integration-connect-error", appId, message: errorMessage },
+        window.location.origin,
+      );
+      if (embedded || popup) {
+        window.close();
+        return;
+      }
+      window.location.replace(errorPath);
+      return;
+    }
+
+    window.parent?.postMessage({ type: "sketch-integration-connected", appId }, window.location.origin);
+    window.opener?.postMessage({ type: "sketch-integration-connected", appId }, window.location.origin);
     if (embedded || popup) {
       window.close();
       return;
@@ -85,14 +105,20 @@ function ConnectionsCallback() {
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
 const INTEGRATION_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+const APP_NAME_OVERRIDES: Record<string, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  gmail: "Gmail",
+};
 
 type DirectConnectState =
   | { kind: "idle" }
   | { kind: "starting"; appId: string }
+  | { kind: "verifying"; appId: string }
   | { kind: "redirecting"; appId: string; appName: string }
   | { kind: "provider_missing"; appId: string }
   | { kind: "already_connected"; appId: string; appName: string }
-  | { kind: "connected"; appId: string }
+  | { kind: "connected"; appId: string; appName?: string }
   | { kind: "error"; appId: string; message: string };
 
 export function integrationAppSearchFromSearch(value: string | null): string | null {
@@ -105,10 +131,28 @@ export function integrationAppConnectFromSearch(value: string | null): string | 
 }
 
 export function appNameFromId(appId: string): string {
+  const override = APP_NAME_OVERRIDES[appId.trim().toLowerCase()];
+  if (override) return override;
   return appId
     .replaceAll(/[_-]+/g, " ")
     .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
     .trim();
+}
+
+function verificationAppFromSearch(params: URLSearchParams): string | null {
+  const app = integrationAppConnectFromSearch(params.get("verify_connected"));
+  if (app) return app;
+  const legacyApp = params.get("connected");
+  if (!legacyApp || legacyApp === "1") return null;
+  return integrationAppConnectFromSearch(legacyApp);
+}
+
+function connectErrorFromSearch(params: URLSearchParams): { appId: string; message: string } | null {
+  if (!params.has("connect_error")) return null;
+  return {
+    appId: integrationAppConnectFromSearch(params.get("app")) ?? "integration",
+    message: "Connection was not completed. Please try again.",
+  };
 }
 
 function removeSearchParams(paramsToRemove: string[]): void {
@@ -150,29 +194,35 @@ function DirectConnectPanel({
   if (state.kind === "idle") return null;
 
   const label =
-    state.kind === "redirecting" || state.kind === "already_connected" ? state.appName : appNameFromId(state.appId);
-  const isWorking = state.kind === "starting" || state.kind === "redirecting";
+    state.kind === "redirecting" || state.kind === "already_connected" || (state.kind === "connected" && state.appName)
+      ? state.appName
+      : appNameFromId(state.appId);
+  const isWorking = state.kind === "starting" || state.kind === "verifying" || state.kind === "redirecting";
   const isSuccess = state.kind === "connected" || state.kind === "already_connected";
   const title =
     state.kind === "starting"
       ? `Preparing ${label}`
-      : state.kind === "redirecting"
-        ? `Opening ${label}`
-        : state.kind === "provider_missing"
-          ? "Set up integrations first"
-          : state.kind === "already_connected" || state.kind === "connected"
-            ? `${label} is connected`
-            : `Could not connect ${label}`;
+      : state.kind === "verifying"
+        ? `Checking ${label}`
+        : state.kind === "redirecting"
+          ? `Opening ${label}`
+          : state.kind === "provider_missing"
+            ? "Set up integrations first"
+            : state.kind === "already_connected" || state.kind === "connected"
+              ? `${label} is connected`
+              : `Could not connect ${label}`;
   const description =
     state.kind === "starting"
       ? "Checking the exact app and preparing authorization."
-      : state.kind === "redirecting"
-        ? "Taking you to the authorization screen."
-        : state.kind === "provider_missing"
-          ? "Connect an integration provider before adding apps."
-          : state.kind === "already_connected" || state.kind === "connected"
-            ? "You can return to the conversation and try again."
-            : state.message;
+      : state.kind === "verifying"
+        ? "Confirming the connection."
+        : state.kind === "redirecting"
+          ? "Taking you to the authorization screen."
+          : state.kind === "provider_missing"
+            ? "Connect an integration provider before adding apps."
+            : state.kind === "already_connected" || state.kind === "connected"
+              ? "You can return to the conversation and try again."
+              : state.message;
 
   return (
     <section className="flex items-start justify-between gap-4 rounded-lg border border-border bg-muted/30 p-4">
@@ -231,15 +281,21 @@ export function ConnectionsPage() {
   });
   const [requestedAppSearch, setRequestedAppSearch] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
-    return integrationAppSearchFromSearch(new URLSearchParams(window.location.search).get("app"));
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("connect_error")) return null;
+    return integrationAppSearchFromSearch(params.get("app"));
   });
   const [requestedAppConnect, setRequestedAppConnect] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
     return integrationAppConnectFromSearch(new URLSearchParams(window.location.search).get("connect"));
   });
-  const [connectedAppId, setConnectedAppId] = useState<string | null>(() => {
+  const [verifyConnectedAppId, setVerifyConnectedAppId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
-    return integrationAppConnectFromSearch(new URLSearchParams(window.location.search).get("connected"));
+    return verificationAppFromSearch(new URLSearchParams(window.location.search));
+  });
+  const [connectError, setConnectError] = useState<{ appId: string; message: string } | null>(() => {
+    if (typeof window === "undefined") return null;
+    return connectErrorFromSearch(new URLSearchParams(window.location.search));
   });
   const [directConnectState, setDirectConnectState] = useState<DirectConnectState>({ kind: "idle" });
   const directConnectRequestRef = useRef<string | null>(null);
@@ -308,13 +364,48 @@ export function ConnectionsPage() {
   }, [queryClient]);
 
   useEffect(() => {
-    if (connectedAppId) {
+    if (connectError) {
       setActiveTab("applications");
-      setDirectConnectState({ kind: "connected", appId: connectedAppId });
-      toast.success(`${appNameFromId(connectedAppId)} connected`);
-      invalidateConnections();
-      removeSearchParams(["connected"]);
-      setConnectedAppId(null);
+      setDirectConnectState({ kind: "error", appId: connectError.appId, message: connectError.message });
+      removeSearchParams(["connect_error", "app"]);
+      setConnectError(null);
+      setRequestedAppSearch(null);
+      return;
+    }
+
+    if (verifyConnectedAppId) {
+      setActiveTab("applications");
+
+      if (serversQuery.isLoading || (provider && connectionsQuery.isLoading)) {
+        setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
+        return;
+      }
+
+      removeSearchParams(["verify_connected", "connected"]);
+      setVerifyConnectedAppId(null);
+
+      if (!provider) {
+        setDirectConnectState({
+          kind: "error",
+          appId: verifyConnectedAppId,
+          message: "Sketch could not verify the connection. Set up an integration provider and try again.",
+        });
+        return;
+      }
+
+      const connection = connectionsQuery.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
+      if (connection && isOwnedOrPersonalAppConnection(connection)) {
+        setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
+        toast.success(`${connection.appName} connected`);
+        invalidateConnections();
+        return;
+      }
+
+      setDirectConnectState({
+        kind: "error",
+        appId: verifyConnectedAppId,
+        message: "Sketch could not verify the connection. Please try connecting again.",
+      });
       return;
     }
 
@@ -323,7 +414,16 @@ export function ConnectionsPage() {
     if (!provider) return;
     setShowAddIntegrationDialog(true);
     removeSearchParams(["app"]);
-  }, [provider, connectedAppId, requestedAppSearch, invalidateConnections]);
+  }, [
+    provider,
+    connectError,
+    verifyConnectedAppId,
+    requestedAppSearch,
+    serversQuery.isLoading,
+    connectionsQuery.isLoading,
+    connectionsQuery.data,
+    invalidateConnections,
+  ]);
 
   useEffect(() => {
     if (!requestedAppConnect) return;

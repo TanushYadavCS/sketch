@@ -407,26 +407,64 @@ function extractMcpIntegrationLookups(
   return { queries: [], listConnected: false };
 }
 
+const TOOL_RESULT_TEXT_LIMIT = 30_000;
+
 function toolResultText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return value.map(toolResultText).filter(Boolean).join("\n");
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const parts = [record.text, record.message, record.error, record.code, record.content, record.data]
-      .map(toolResultText)
-      .filter(Boolean);
-    try {
-      parts.push(JSON.stringify(value));
-    } catch {}
-    return parts.join("\n");
-  }
-  return "";
+  const parts: string[] = [];
+  const seen = new WeakSet<object>();
+  let remaining = TOOL_RESULT_TEXT_LIMIT;
+
+  const append = (text: string) => {
+    if (remaining <= 0 || !text) return;
+    const chunk = text.slice(0, remaining);
+    parts.push(chunk);
+    remaining -= chunk.length;
+  };
+
+  const visit = (item: unknown, depth: number) => {
+    if (remaining <= 0 || item === null || item === undefined || depth > 6) return;
+    if (typeof item === "string") {
+      append(item);
+      return;
+    }
+    if (typeof item === "number" || typeof item === "boolean") {
+      append(String(item));
+      return;
+    }
+    if (Array.isArray(item)) {
+      for (const child of item) {
+        visit(child, depth + 1);
+      }
+      return;
+    }
+    if (typeof item !== "object") return;
+    if (seen.has(item)) return;
+    seen.add(item);
+
+    const record = item as Record<string, unknown>;
+    const entries = Object.entries(record);
+    const priorityKeys = new Set(["text", "message", "error", "code", "connectionStatus", "status", "content", "data"]);
+    const orderedEntries = [
+      ...entries.filter(([key]) => priorityKeys.has(key)),
+      ...entries.filter(([key]) => !priorityKeys.has(key)),
+    ];
+
+    for (const [key, child] of orderedEntries) {
+      if (remaining <= 0) return;
+      if (typeof child === "string" || typeof child === "number" || typeof child === "boolean") {
+        append(`${key}: ${String(child)}`);
+        continue;
+      }
+      visit(child, depth + 1);
+    }
+  };
+
+  visit(value, 0);
+  return parts.join("\n");
 }
 
 function toolResultIndicatesConnectionIssue(output: unknown): boolean {
-  const text = toolResultText(output).slice(0, 30_000);
+  const text = toolResultText(output);
   if (!text.trim()) return false;
   return (
     /\bCONNECTION_NOT_CONNECTED\b/i.test(text) ||

@@ -243,6 +243,8 @@ describe("agent invoke API", () => {
     expect(sseData(text, "progress")).toEqual({ kind: "tool_use", toolName: "Read", input: { file_path: "x" } });
     const completed = sseData(text, "completed");
     expect(completed.finalText).toBe("agent response");
+    expect(completed.displayText).toBe("agent response");
+    expect(completed.pendingIntegrationConnections).toEqual([]);
     expect(completed.delivery).toEqual({ mode: "silent", platform: "slack" });
 
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
@@ -372,7 +374,12 @@ describe("agent invoke API", () => {
       }),
     });
     expect(res.status).toBe(200);
-    await readSse(res);
+    const completed = sseData(await readSse(res), "completed");
+    expect(completed.finalText).toBe("GitHub needs connection");
+    expect(completed.displayText).toBe(
+      "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+    );
+    expect(completed.pendingIntegrationConnections).toMatchObject([{ appId: "github", state: "connect" }]);
 
     expect(sendDm).toHaveBeenNthCalledWith(2, {
       userId: target.id,
@@ -380,6 +387,46 @@ describe("agent invoke API", () => {
       message:
         "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
     });
+  });
+
+  it("exposes display text and connection cards for silent runs", async () => {
+    const { requester, target } = await seedTenant(db);
+    const runAgent = vi.fn().mockResolvedValue(
+      makeAgentResult({
+        trace: { progressEvents: [], finalText: "GitHub needs connection" },
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+          },
+        ],
+      }),
+    );
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, BASE_URL: "https://sketch.test" }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+
+    const res = await app.request("/api/agent-runs", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        requesterUserId: requester.id,
+        message: "run in target workspace",
+        target: { type: "user", userId: target.id, platform: "slack" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const completed = sseData(await readSse(res), "completed");
+
+    expect(completed.finalText).toBe("GitHub needs connection");
+    expect(completed.displayText).toBe(
+      "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+    );
+    expect(completed.pendingIntegrationConnections).toMatchObject([{ appId: "github", state: "connect" }]);
   });
 
   it("creates a Slack thread when no threadId is provided", async () => {

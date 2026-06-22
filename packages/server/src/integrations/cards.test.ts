@@ -151,6 +151,14 @@ describe("integration cards", () => {
         output: "Rate limit exceeded",
       }),
     ).toEqual({ queries: [], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_result",
+        toolName: "mcp__plugin_pipedream__github_create_issue",
+        input: {},
+        output: { filler: "x".repeat(100_000), connectionStatus: "not_connected" },
+      }),
+    ).toEqual({ queries: ["github"], listConnected: false });
   });
 
   it("resolves exactly matched apps to connect or connected cards from provider state", async () => {

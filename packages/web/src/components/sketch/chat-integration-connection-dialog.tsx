@@ -137,7 +137,11 @@ export function ChatIntegrationConnectionFrame({
 
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
-      const data = event.data as { type?: unknown } | null;
+      const data = event.data as { type?: unknown; message?: unknown } | null;
+      if (data?.type === "sketch-integration-connect-error") {
+        fail(typeof data.message === "string" ? data.message : "Connection was not completed. Please try again.");
+        return;
+      }
       if (data?.type !== "sketch-integration-connected") return;
       const current = activeAppRef.current ?? fallbackApp(connection);
       void verifyConnected(current)

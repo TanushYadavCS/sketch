@@ -51,6 +51,12 @@ describe("integration connection links", () => {
     ).toBe("To continue, connect GitHub: https://sketch.example.com/integrations?connect=github");
   });
 
+  it("uses plain setup copy when BASE_URL is not configured", () => {
+    expect(formatIntegrationConnectionLinks([githubCard], "slack", { PORT: 3000 })).toBe(
+      "To continue, open Integrations in Sketch to connect GitHub.",
+    );
+  });
+
   it("appends link text and ignores connected cards", () => {
     expect(
       appendIntegrationConnectionLinks(

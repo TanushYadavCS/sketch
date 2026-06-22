@@ -148,4 +148,53 @@ describe("ConnectionsPage direct connect", () => {
     expect(await screen.findByText("GitHub is connected")).toBeInTheDocument();
     expect(intent).not.toHaveBeenCalled();
   });
+
+  it("verifies callback connections before showing success", async () => {
+    const intent = vi.fn();
+    setupCommonHandlers([
+      {
+        id: "secrets:user-1:github:github",
+        providerId: "provider-1",
+        source: "canvas_user_secrets",
+        appId: "github",
+        appName: "GitHub",
+        status: "active",
+        accessLevel: "personal",
+        isOwnedByViewer: true,
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    window.history.replaceState({}, "", "/integrations?verify_connected=github");
+
+    server.use(
+      http.post("/api/mcp-servers/provider-1/connections/intents", () => {
+        intent();
+        return HttpResponse.json({ app: { id: "github", name: "GitHub", description: "" }, redirectUrl: "#oauth" });
+      }),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+
+    expect(await screen.findByText("GitHub is connected")).toBeInTheDocument();
+    expect(intent).not.toHaveBeenCalled();
+  });
+
+  it("shows callback errors without starting a new intent", async () => {
+    const intent = vi.fn();
+    setupCommonHandlers();
+    window.history.replaceState({}, "", "/integrations?connect_error=1&app=github");
+
+    server.use(
+      http.post("/api/mcp-servers/provider-1/connections/intents", () => {
+        intent();
+        return HttpResponse.json({ app: { id: "github", name: "GitHub", description: "" }, redirectUrl: "#oauth" });
+      }),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+
+    expect(await screen.findByText("Could not connect GitHub")).toBeInTheDocument();
+    expect(screen.getByText("Connection was not completed. Please try again.")).toBeInTheDocument();
+    expect(intent).not.toHaveBeenCalled();
+  });
 });

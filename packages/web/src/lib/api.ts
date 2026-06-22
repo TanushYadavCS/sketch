@@ -1174,10 +1174,10 @@ export const api = {
       return request<SessionResponse>("/api/auth/session");
     },
     magicLink: {
-      request(email: string) {
+      request(email: string, returnTo?: string | null) {
         return request<{ success: boolean; channels: string[] }>("/api/auth/magic-link", {
           method: "POST",
-          body: JSON.stringify({ email }),
+          body: JSON.stringify({ email, ...(returnTo ? { returnTo } : {}) }),
         });
       },
     },

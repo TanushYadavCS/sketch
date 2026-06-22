@@ -86,14 +86,16 @@ function badRequest(code: string, message: string) {
   return { error: { code, message } };
 }
 
-function runResultBody(result: RunAgentResult, extra: Record<string, unknown>) {
+function runResultBody(result: RunAgentResult, extra: Record<string, unknown>, displayText?: string | null) {
   return {
     ok: true,
     status: "completed",
     messageSent: result.messageSent,
     sessionId: result.sessionId,
     finalText: result.trace.finalText,
+    displayText: displayText ?? result.trace.finalText,
     pendingUploads: result.pendingUploads,
+    pendingIntegrationConnections: result.pendingIntegrationConnections ?? [],
     usage: {
       costUsd: result.costUsd,
       auxCostUsd: result.auxCostUsd,
@@ -269,10 +271,14 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
           await writeEvent(
             "completed",
-            runResultBody(result, {
-              target: { type: "user", userId: target.id, platform: parsed.data.target.platform },
-              delivery,
-            }),
+            runResultBody(
+              result,
+              {
+                target: { type: "user", userId: target.id, platform: parsed.data.target.platform },
+                delivery,
+              },
+              finalText,
+            ),
           );
           return;
         }
@@ -376,10 +382,14 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
           await writeEvent(
             "completed",
-            runResultBody(result, {
-              target: { type: "slack_channel", channelId: parsed.data.target.channelId },
-              delivery,
-            }),
+            runResultBody(
+              result,
+              {
+                target: { type: "slack_channel", channelId: parsed.data.target.channelId },
+                delivery,
+              },
+              finalText,
+            ),
           );
           return;
         }
@@ -450,10 +460,14 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
         await writeEvent(
           "completed",
-          runResultBody(result, {
-            target: { type: "whatsapp_group", groupJid },
-            delivery,
-          }),
+          runResultBody(
+            result,
+            {
+              target: { type: "whatsapp_group", groupJid },
+              delivery,
+            },
+            finalText,
+          ),
         );
       } catch (err) {
         if (abortController.signal.aborted || stream.aborted) return;
