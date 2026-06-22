@@ -187,13 +187,18 @@ describe("integration cards", () => {
 
   it("collects missing app cards from observed Canvas CLI progress", async () => {
     const cards: unknown[] = [];
+    let initiateArgs: unknown[] | null = null;
     const provider = {
       listConnections: async () => [],
       listApps: async () => ({
         apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
         pageInfo: { endCursor: null, hasMore: false },
       }),
-    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+      initiateConnection: async (...args: unknown[]) => {
+        initiateArgs = args;
+        return { redirectUrl: "https://canvas.example.com/connect/secrets?token=abc" };
+      },
+    } as Pick<IntegrationProvider, "listApps" | "listConnections" | "initiateConnection"> as IntegrationProvider;
 
     await collectIntegrationCardsFromProgressEvents({
       events: [
@@ -209,10 +214,25 @@ describe("integration cards", () => {
       loadIntegrationProvider: async () => provider,
       userEmail: "alice@example.com",
       userName: "Alice",
+      connectionCallbackUrl: "https://sketch.example.com/integrations/callback",
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
+    expect(initiateArgs).toEqual([
+      "alice@example.com",
+      "slack",
+      "https://sketch.example.com/integrations/callback",
+      "Alice",
+      undefined,
+    ]);
+    expect(cards).toMatchObject([
+      {
+        appId: "slack",
+        appName: "Slack",
+        state: "connect",
+        connectUrl: "https://canvas.example.com/connect/secrets?token=abc",
+      },
+    ]);
   });
 
   it("collects missing cards for hyphenated Canvas app slugs", async () => {

@@ -357,11 +357,11 @@ export function buildSystemContext(params: {
     "Call search-apps without queries when the user asks what integration accounts are connected. It returns connected accounts from provider state.",
     "If the app identity is ambiguous or maps to multiple provider apps, ask one concise clarification only for the missing product/app identity, such as 'Which Zoho product should I use?'",
     "Never ask whether to show, pull up, open, or display a connection card or link. Forbidden examples: 'Should I pull up the connection card?', 'I can pull up the right card for you', 'Want me to show the connector card?', 'I'll open the connection card'.",
-    "When an app is not connected, say that app needs to be connected and continue only with task-relevant guidance if needed. Sketch will add an app-specific connection form card or link when it can detect the missing app.",
-    "Do not send users to Settings -> Integrations unless no connection card/link is available or they explicitly ask for settings.",
+    "When an app is not connected, say that app needs to be connected and continue only with task-relevant guidance if needed. If Sketch can detect the missing app, it will add an app-specific setup option automatically after your response; do not mention that rendering step.",
+    "Do not send users to Settings -> Integrations unless no setup card/link is available or they explicitly ask for settings.",
     params.platform === "web"
       ? "When a connection card is available in the current chat, tell the user to use the Connect button on that card."
-      : "When a connection form link is available in the current chat, tell the user to use that link.",
+      : "When a setup link is available in the current chat, tell the user to use that link.",
     "Do not describe card or link rendering mechanics. Answer from the returned app/account status.",
   );
 

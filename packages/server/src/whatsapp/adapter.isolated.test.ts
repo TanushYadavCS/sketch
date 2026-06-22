@@ -502,7 +502,13 @@ describe("whatsapp/adapter", () => {
           makeAgentResult({
             trace: { progressEvents: [], finalText: "GitHub needs connection" },
             pendingIntegrationConnections: [
-              { requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" },
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
             ],
           }),
         ),
@@ -524,7 +530,7 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith(
         "1234567890@s.whatsapp.net",
-        "GitHub needs connection\n\nConnection form for GitHub: https://sketch.test/integrations?connect=github",
+        "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
       );
     });
 
@@ -540,7 +546,13 @@ describe("whatsapp/adapter", () => {
           makeAgentResult({
             trace: { progressEvents: [], finalText: null },
             pendingIntegrationConnections: [
-              { requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" },
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
             ],
           }),
         ),
@@ -562,7 +574,7 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith(
         "1234567890@s.whatsapp.net",
-        "Connection form for GitHub: https://sketch.test/integrations?connect=github",
+        "To continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
       );
     });
 
@@ -1506,7 +1518,13 @@ describe("whatsapp/adapter", () => {
           makeAgentResult({
             trace: { progressEvents: [], finalText: "GitHub needs connection" },
             pendingIntegrationConnections: [
-              { requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" },
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
             ],
           }),
         ),
@@ -1531,7 +1549,7 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith(
         "group@g.us",
-        "GitHub needs connection\n\nConnection form for GitHub: https://sketch.test/integrations?connect=github",
+        "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
         { quoted: rawMessage },
       );
     });

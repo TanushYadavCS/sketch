@@ -339,7 +339,15 @@ describe("agent invoke API", () => {
     const runAgent = vi.fn().mockResolvedValue(
       makeAgentResult({
         trace: { progressEvents: [], finalText: "GitHub needs connection" },
-        pendingIntegrationConnections: [{ requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" }],
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+            connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+          },
+        ],
       }),
     );
     const sendDm = vi
@@ -370,7 +378,7 @@ describe("agent invoke API", () => {
       userId: target.id,
       platform: "slack",
       message:
-        "GitHub needs connection\n\nConnection form: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+        "GitHub needs connection\n\nTo continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>",
     });
   });
 
@@ -418,7 +426,15 @@ describe("agent invoke API", () => {
     const runAgent = vi.fn().mockResolvedValue(
       makeAgentResult({
         trace: { progressEvents: [], finalText: "GitHub needs connection" },
-        pendingIntegrationConnections: [{ requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" }],
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+            connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+          },
+        ],
       }),
     );
     const slack = {
@@ -452,7 +468,7 @@ describe("agent invoke API", () => {
     expect(slack.postThreadReply).toHaveBeenCalledWith(
       "C123",
       "1712345678.000000",
-      "GitHub needs connection\n\nConnection form: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+      "GitHub needs connection\n\nTo continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>",
     );
   });
 
@@ -540,7 +556,15 @@ describe("agent invoke API", () => {
     const runAgent = vi.fn().mockResolvedValue(
       makeAgentResult({
         trace: { progressEvents: [], finalText: "GitHub needs connection" },
-        pendingIntegrationConnections: [{ requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" }],
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+            connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+          },
+        ],
       }),
     );
     const whatsapp = {
@@ -571,7 +595,7 @@ describe("agent invoke API", () => {
 
     expect(whatsapp.sendText).toHaveBeenCalledWith(
       "123@g.us",
-      "GitHub needs connection\n\nConnection form for GitHub: https://sketch.test/integrations?connect=github",
+      "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
     );
   });
 

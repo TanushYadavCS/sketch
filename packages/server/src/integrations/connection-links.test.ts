@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendIntegrationConnectionLinks,
   formatIntegrationConnectionLinks,
+  integrationConnectionCallbackUrl,
   integrationConnectionUrl,
 } from "./connection-links";
 
@@ -17,15 +18,28 @@ describe("integration connection links", () => {
     expect(integrationConnectionUrl(githubCard, { BASE_URL: "https://sketch.example.com/", PORT: 3000 })).toBe(
       "https://sketch.example.com/integrations?connect=github",
     );
+    expect(integrationConnectionCallbackUrl({ BASE_URL: "https://sketch.example.com/", PORT: 3000 })).toBe(
+      "https://sketch.example.com/integrations/callback",
+    );
   });
 
-  it("formats Slack links and escapes labels", () => {
+  it("formats Slack links with user-friendly setup copy and escaped labels", () => {
     const text = formatIntegrationConnectionLinks([{ ...githubCard, appName: "GitHub | CI" }], "slack", {
       BASE_URL: "https://sketch.example.com",
       PORT: 3000,
     });
 
-    expect(text).toBe("Connection form: <https://sketch.example.com/integrations?connect=github|Connect GitHub  CI>");
+    expect(text).toBe("To continue: <https://sketch.example.com/integrations?connect=github|Connect GitHub  CI>");
+  });
+
+  it("prefers provider direct connection URLs", () => {
+    const text = formatIntegrationConnectionLinks(
+      [{ ...githubCard, connectUrl: "https://canvas.example.com/connect/secrets?token=abc" }],
+      "slack",
+      { BASE_URL: "https://sketch.example.com", PORT: 3000 },
+    );
+
+    expect(text).toBe("To continue: <https://canvas.example.com/connect/secrets?token=abc|Connect GitHub>");
   });
 
   it("formats WhatsApp links as inline URLs", () => {
@@ -34,7 +48,7 @@ describe("integration connection links", () => {
         BASE_URL: "https://sketch.example.com",
         PORT: 3000,
       }),
-    ).toBe("Connection form for GitHub: https://sketch.example.com/integrations?connect=github");
+    ).toBe("To continue, connect GitHub: https://sketch.example.com/integrations?connect=github");
   });
 
   it("appends link text and ignores connected cards", () => {
@@ -46,7 +60,7 @@ describe("integration connection links", () => {
         { BASE_URL: "https://sketch.example.com", PORT: 3000 },
       ),
     ).toBe(
-      "GitHub is not connected.\n\nConnection form for GitHub: https://sketch.example.com/integrations?connect=github",
+      "GitHub is not connected.\n\nTo continue, connect GitHub: https://sketch.example.com/integrations?connect=github",
     );
   });
 

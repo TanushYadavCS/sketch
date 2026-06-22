@@ -21,6 +21,7 @@ import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
 import { type IntegrationProgressEventLike, collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
+import { integrationConnectionCallbackUrl } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
@@ -710,12 +711,17 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   const responseSurface = params.responseSurface ?? params.platform;
   if (params.contextType !== "scheduled_task") {
     try {
+      const callbackUrl =
+        responseSurface === "web" || !params.toolConfig
+          ? undefined
+          : integrationConnectionCallbackUrl(params.toolConfig);
       await collectIntegrationCardsFromProgressEvents({
         events: integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
         collector: integrationConnectionCollector,
         userEmail: params.userEmail ?? null,
         userName: params.userName,
+        connectionCallbackUrl: callbackUrl,
       });
     } catch (err) {
       logger.warn({ err }, "Failed to resolve integration cards from agent progress");

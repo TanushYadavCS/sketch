@@ -786,12 +786,16 @@ describe("runAgent", () => {
         apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
         pageInfo: { endCursor: null, hasMore: false },
       }),
+      initiateConnection: vi.fn().mockResolvedValue({
+        redirectUrl: "https://canvas.example.com/connect/secrets?token=slack",
+      }),
     };
 
     const result = await runAgent(
       makeBaseParams({
         contextType: "dm",
         userEmail: "alice@example.com",
+        toolConfig: { BASE_URL: "https://sketch.example.com", PORT: 3000 },
         loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
       }),
     );
@@ -799,8 +803,20 @@ describe("runAgent", () => {
     expect(result.trace.progressEvents).toEqual([
       { kind: "tool_use", toolName: "mcp__plugin_pipedream__slack_send_message", input: { app: "slack" } },
     ]);
+    expect(provider.initiateConnection).toHaveBeenCalledWith(
+      "alice@example.com",
+      "slack",
+      "https://sketch.example.com/integrations/callback",
+      "TestUser",
+      undefined,
+    );
     expect(result.pendingIntegrationConnections).toMatchObject([
-      { appId: "slack", appName: "Slack", state: "connect" },
+      {
+        appId: "slack",
+        appName: "Slack",
+        state: "connect",
+        connectUrl: "https://canvas.example.com/connect/secrets?token=slack",
+      },
     ]);
   });
 
