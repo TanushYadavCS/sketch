@@ -108,6 +108,7 @@ import * as m105 from "./migrations/105-normalize-indexed-file-source-timestamps
 import * as m106 from "./migrations/106-agents";
 import * as m107 from "./migrations/107-tasks";
 import * as m108 from "./migrations/108-tasks-owner";
+import * as m109 from "./migrations/109-sub-entities";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -220,6 +221,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "106-agents": m106,
           "107-tasks": m107,
           "108-tasks-owner": m108,
+          "109-sub-entities": m109,
         };
       },
     },

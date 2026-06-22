@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 102;
+const EXPECTED_MIGRATION_COUNT = 105;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -135,6 +135,83 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[99]).toBe("104-daily-brief-item-metadata");
     expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
     expect(names[101]).toBe("106-agents");
+    expect(names[102]).toBe("107-tasks");
+    expect(names[103]).toBe("108-tasks-owner");
+    expect(names[104]).toBe("109-sub-entities");
+  });
+
+  it("creates the sub-entities table and current-row partial unique index", async () => {
+    const columns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'sub_entities'
+    `.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "parent_entity_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "parent_scope_key", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "kind", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "normalized_name", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "source_fact_id", data_type: "text", is_nullable: "YES" }),
+      ]),
+    );
+
+    const indexes = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'sub_entities'
+    `.execute(db);
+    const currentIndex = indexes.rows.find((row) => row.indexname === "idx_sub_entities_current_scope_kind_name");
+    expect(currentIndex?.indexdef).toContain("UNIQUE INDEX");
+    expect(currentIndex?.indexdef).toContain("parent_scope_key");
+    expect(currentIndex?.indexdef).toContain("kind");
+    expect(currentIndex?.indexdef).toContain("normalized_name");
+    expect(currentIndex?.indexdef).toContain("WHERE (valid_to IS NULL)");
+
+    const foreignKeys = await sql<{
+      column_name: string;
+      foreign_table_name: string;
+      foreign_column_name: string;
+      delete_rule: string;
+    }>`
+      SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, rc.delete_rule
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+       AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name = tc.constraint_name
+       AND ccu.table_schema = tc.table_schema
+      JOIN information_schema.referential_constraints rc
+        ON rc.constraint_name = tc.constraint_name
+       AND rc.constraint_schema = tc.table_schema
+      WHERE tc.table_schema = 'public'
+        AND tc.table_name = 'sub_entities'
+        AND tc.constraint_type = 'FOREIGN KEY'
+    `.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          column_name: "parent_entity_id",
+          foreign_table_name: "entities",
+          foreign_column_name: "id",
+          delete_rule: "SET NULL",
+        }),
+        expect.objectContaining({
+          column_name: "created_by_user_id",
+          foreign_table_name: "users",
+          foreign_column_name: "id",
+        }),
+      ]),
+    );
+    expect(foreignKeys.rows.some((row) => row.column_name === "source_fact_id")).toBe(false);
   });
 
   it("running migrations twice is idempotent", async () => {
