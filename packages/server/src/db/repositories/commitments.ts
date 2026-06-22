@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
 import type { CommitmentSeed, IndexedFileFactRaw } from "../../connectors/types";
 import type { DB, IndexedFileFactsTable } from "../schema";
 import {
@@ -6,6 +7,7 @@ import {
   type IndexedFileFactType,
   createIndexedFileFactRepository,
 } from "./indexed-file-facts";
+import { type SubEntityRow, createSubEntityRepository } from "./sub-entities";
 
 export type CommitmentStatus = "open" | "done" | "dropped";
 
@@ -88,37 +90,34 @@ export async function markCommitmentDone(db: Kysely<DB>, commitmentId: string): 
   if (!fact) return false;
   const raw = readCommitmentRaw(fact.raw);
   if (!raw) return false;
-  await db
-    .updateTable("indexed_file_facts")
-    .set({ raw: JSON.stringify({ ...raw, status: "done" }), updated_at: new Date().toISOString() })
-    .where("id", "=", fact.id)
-    .execute();
-  return true;
+  const repo = createSubEntityRepository(db);
+  const subEntityId = await findCommitmentSubEntityIdByFact(db, fact.id);
+  if (subEntityId) return repo.markSubEntityStatus(subEntityId, "done");
+  const fallback = await findCommitmentSubEntityByScopeAndName(db, readParentEntityId(raw), raw.title);
+  if (!fallback) return false;
+  return repo.markSubEntityStatus(fallback.id, "done");
 }
 
 export async function listOpenCommitments(
   db: Kysely<DB>,
   opts: { parentEntityId?: string | null } = {},
 ): Promise<OpenCommitment[]> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .selectAll()
-    .where("fact_type", "=", "commitment")
-    .where("deleted_at", "is", null)
-    .execute();
+  const rows = await createSubEntityRepository(db).listOpenSubEntities({
+    parentEntityId: opts.parentEntityId,
+    kind: "commitment",
+  });
   const out: OpenCommitment[] = [];
   for (const row of rows) {
-    const raw = readCommitmentRaw(row.raw);
-    if (!raw || raw.status === "done" || raw.status === "dropped") continue;
-    const parentEntityId = readParentEntityId(raw);
-    if (opts.parentEntityId && parentEntityId !== opts.parentEntityId) continue;
+    const fact = await findSubEntityCommitmentFact(db, row.id);
+    const raw = readCommitmentRaw(fact?.raw ?? null);
+    if (!fact || !raw) continue;
     out.push({
-      factId: row.id,
+      factId: fact.id,
       commitmentId: raw.commitmentId,
-      parentEntityId,
+      parentEntityId: row.parent_entity_id,
       title: raw.title,
       status: "open",
-      dueAt: raw.dueAt ?? null,
+      dueAt: row.due_at,
       evidence: raw.evidence,
       raw,
     });
@@ -247,6 +246,47 @@ async function findActiveCommitmentFact(db: Kysely<DB>, commitmentId: string) {
     .where("fact_type", "=", "commitment")
     .where("subject_source_id", "=", commitmentId)
     .where("deleted_at", "is", null)
+    .executeTakeFirst();
+}
+
+async function findCommitmentSubEntityIdByFact(db: Kysely<DB>, factId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("sub_entity_evidence")
+    .innerJoin("sub_entities", "sub_entities.id", "sub_entity_evidence.sub_entity_id")
+    .select("sub_entities.id")
+    .where("sub_entity_evidence.kind", "=", "fact")
+    .where("sub_entity_evidence.ref_id", "=", factId)
+    .where("sub_entities.kind", "=", "commitment")
+    .where("sub_entities.valid_to", "is", null)
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
+async function findCommitmentSubEntityByScopeAndName(
+  db: Kysely<DB>,
+  parentEntityId: string | null,
+  title: string,
+): Promise<SubEntityRow | undefined> {
+  return db
+    .selectFrom("sub_entities")
+    .selectAll()
+    .where("parent_scope_key", "=", parentEntityId ?? "global")
+    .where("kind", "=", "commitment")
+    .where("normalized_name", "=", normalizeName(title))
+    .where("valid_to", "is", null)
+    .executeTakeFirst();
+}
+
+async function findSubEntityCommitmentFact(db: Kysely<DB>, subEntityId: string) {
+  return db
+    .selectFrom("sub_entity_evidence")
+    .innerJoin("indexed_file_facts", "indexed_file_facts.id", "sub_entity_evidence.ref_id")
+    .selectAll("indexed_file_facts")
+    .where("sub_entity_evidence.sub_entity_id", "=", subEntityId)
+    .where("sub_entity_evidence.kind", "=", "fact")
+    .where("indexed_file_facts.fact_type", "=", "commitment")
+    .where("indexed_file_facts.deleted_at", "is", null)
+    .orderBy("indexed_file_facts.updated_at", "desc")
     .executeTakeFirst();
 }
 

@@ -954,6 +954,32 @@ export interface TaskEvidenceTable {
   ref_id: string;
 }
 
+export interface SubEntitiesTable {
+  id: string;
+  parent_entity_id: string | null;
+  parent_scope_key: string;
+  kind: string;
+  normalized_name: string;
+  display_name: string;
+  status: string;
+  status_authority: Generated<string>;
+  valid_from: Generated<string>;
+  valid_to: string | null;
+  provenance: string;
+  due_at: string | null;
+  created_by_user_id: string | null;
+  source_fact_id: string | null;
+  metadata_json: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface SubEntityEvidenceTable {
+  sub_entity_id: string;
+  kind: string;
+  ref_id: string;
+}
+
 export interface DB {
   users: UsersTable;
   channels: ChannelsTable;
@@ -1021,6 +1047,8 @@ export interface DB {
   indexed_file_facts: IndexedFileFactsTable;
   tasks: TasksTable;
   task_evidence: TaskEvidenceTable;
+  sub_entities: SubEntitiesTable;
+  sub_entity_evidence: SubEntityEvidenceTable;
   entity_domains: EntityDomainsTable;
   entity_project_bindings: EntityProjectBindingsTable;
   entity_project_member_overrides: EntityProjectMemberOverridesTable;

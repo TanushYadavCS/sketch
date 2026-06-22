@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 116;
+const EXPECTED_MIGRATION_COUNT = 119;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -172,6 +172,59 @@ describe("runMigrations — full sequence", () => {
     expect(names[113]).toBe("118-whatsapp-window-keepalives");
     expect(names[114]).toBe("119-agent-outputs-source-scope");
     expect(names[115]).toBe("120-agent-output-period-key");
+    expect(names[116]).toBe("121-tasks");
+    expect(names[117]).toBe("122-tasks-owner");
+    expect(names[118]).toBe("123-sub-entities");
+  });
+
+  it("creates the sub-entities table and current-row partial unique index", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>`PRAGMA table_info(sub_entities)`.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "parent_entity_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "parent_scope_key", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "kind", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "normalized_name", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "status_authority", type: "TEXT", notnull: 1, dflt_value: "'local'" }),
+        expect.objectContaining({ name: "source_fact_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    const indexes = await sql<{
+      name: string;
+      unique: number;
+      partial: number;
+    }>`PRAGMA index_list(sub_entities)`.execute(db);
+    expect(indexes.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "idx_sub_entities_current_scope_kind_name",
+          unique: 1,
+          partial: 1,
+        }),
+      ]),
+    );
+
+    const foreignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(sub_entities)`.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "entities", from: "parent_entity_id", to: "id", on_delete: "SET NULL" }),
+        expect.objectContaining({ table: "users", from: "created_by_user_id", to: "id" }),
+      ]),
+    );
+    expect(foreignKeys.rows.some((row) => row.from === "source_fact_id")).toBe(false);
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
