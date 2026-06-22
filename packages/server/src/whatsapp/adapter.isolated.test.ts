@@ -530,7 +530,7 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith(
         "1234567890@s.whatsapp.net",
-        "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
+        "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
       );
     });
 
@@ -574,7 +574,7 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith(
         "1234567890@s.whatsapp.net",
-        "To continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
+        "To continue, connect GitHub: https://sketch.test/integrations?connect=github",
       );
     });
 
@@ -1549,7 +1549,7 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith(
         "group@g.us",
-        "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
+        "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
         { quoted: rawMessage },
       );
     });

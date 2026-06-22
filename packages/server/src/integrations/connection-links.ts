@@ -40,23 +40,13 @@ export function integrationConnectionCallbackUrl(config: IntegrationConnectionLi
   return new URL("/integrations/callback", `${baseUrl(config)}/`).toString();
 }
 
-function safeConnectionUrl(value: string | undefined): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
-  } catch {
-    return null;
-  }
-}
-
 export function formatIntegrationConnectionLinks(
   cards: WebChatIntegrationConnectionData[] | undefined,
   platform: IntegrationConnectionLinkPlatform,
   config: IntegrationConnectionLinkConfig,
 ): string | null {
   const rows = missingConnectionCards(cards)
-    .map((card) => ({ card, url: safeConnectionUrl(card.connectUrl) ?? integrationConnectionUrl(card, config) }))
+    .map((card) => ({ card, url: integrationConnectionUrl(card, config) }))
     .filter((row): row is { card: WebChatIntegrationConnectionData; url: string } => row.url !== null);
   if (rows.length === 0) return null;
 

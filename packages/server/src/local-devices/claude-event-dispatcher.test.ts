@@ -141,7 +141,7 @@ describe("createLocalClaudeEventDispatcher", () => {
   it("appends integration connection links when replaying WhatsApp results", async () => {
     const queued: Promise<void>[] = [];
     const finalText =
-      "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github";
+      "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github";
     const runAgent = vi.fn().mockResolvedValue({
       trace: { finalText: "GitHub needs connection" },
       pendingUploads: [],

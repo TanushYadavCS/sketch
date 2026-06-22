@@ -26,13 +26,14 @@ import { McpServersSection } from "@/components/connections/mcp-servers-section"
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
-import { PlusIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, MagnifyingGlassIcon, PlusIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
 import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
+import { Button } from "@sketch/ui/components/button";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 import { useDashboardAuth } from "./dashboard";
@@ -55,9 +56,20 @@ export const connectionsCallbackRoute = createRoute({
 
 function ConnectionsCallback() {
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const appId = integrationAppConnectFromSearch(params.get("app"));
+    const connectedPath = `/integrations${appId ? `?connected=${encodeURIComponent(appId)}` : "?connected=1"}`;
+    const embedded = window.parent && window.parent !== window;
+    const popup = Boolean(window.opener);
+
     window.parent?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
     window.opener?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
-    window.close();
+    if (embedded || popup) {
+      window.close();
+      return;
+    }
+
+    window.location.replace(connectedPath);
   }, []);
 
   return (
@@ -74,6 +86,15 @@ function ConnectionsCallback() {
 type IntegrationsTab = "applications" | "mcps" | "environment";
 const INTEGRATION_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 
+type DirectConnectState =
+  | { kind: "idle" }
+  | { kind: "starting"; appId: string }
+  | { kind: "redirecting"; appId: string; appName: string }
+  | { kind: "provider_missing"; appId: string }
+  | { kind: "already_connected"; appId: string; appName: string }
+  | { kind: "connected"; appId: string }
+  | { kind: "error"; appId: string; message: string };
+
 export function integrationAppSearchFromSearch(value: string | null): string | null {
   const app = value?.trim();
   return app && INTEGRATION_APP_ID_RE.test(app) ? app : null;
@@ -81,6 +102,13 @@ export function integrationAppSearchFromSearch(value: string | null): string | n
 
 export function integrationAppConnectFromSearch(value: string | null): string | null {
   return integrationAppSearchFromSearch(value);
+}
+
+export function appNameFromId(appId: string): string {
+  return appId
+    .replaceAll(/[_-]+/g, " ")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
+    .trim();
 }
 
 function removeSearchParams(paramsToRemove: string[]): void {
@@ -104,11 +132,92 @@ export function getPersonallyConnectedAppIds(connections: IntegrationConnection[
   );
 }
 
+function connectionMatchesApp(connection: IntegrationConnection, appId: string): boolean {
+  return connection.appId.trim().toLowerCase() === appId.trim().toLowerCase();
+}
+
+function DirectConnectPanel({
+  state,
+  onSearch,
+  onSetupProvider,
+  onDismiss,
+}: {
+  state: DirectConnectState;
+  onSearch: (appId: string) => void;
+  onSetupProvider: () => void;
+  onDismiss: () => void;
+}) {
+  if (state.kind === "idle") return null;
+
+  const label =
+    state.kind === "redirecting" || state.kind === "already_connected" ? state.appName : appNameFromId(state.appId);
+  const isWorking = state.kind === "starting" || state.kind === "redirecting";
+  const isSuccess = state.kind === "connected" || state.kind === "already_connected";
+  const title =
+    state.kind === "starting"
+      ? `Preparing ${label}`
+      : state.kind === "redirecting"
+        ? `Opening ${label}`
+        : state.kind === "provider_missing"
+          ? "Set up integrations first"
+          : state.kind === "already_connected" || state.kind === "connected"
+            ? `${label} is connected`
+            : `Could not connect ${label}`;
+  const description =
+    state.kind === "starting"
+      ? "Checking the exact app and preparing authorization."
+      : state.kind === "redirecting"
+        ? "Taking you to the authorization screen."
+        : state.kind === "provider_missing"
+          ? "Connect an integration provider before adding apps."
+          : state.kind === "already_connected" || state.kind === "connected"
+            ? "You can return to the conversation and try again."
+            : state.message;
+
+  return (
+    <section className="flex items-start justify-between gap-4 rounded-lg border border-border bg-muted/30 p-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background">
+          {isWorking ? (
+            <SpinnerGapIcon size={18} className="animate-spin text-muted-foreground" aria-hidden />
+          ) : isSuccess ? (
+            <CheckCircleIcon size={18} className="text-green-600" weight="fill" aria-hidden />
+          ) : (
+            <WarningIcon size={18} className="text-amber-600" weight="fill" aria-hidden />
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">{title}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+        </div>
+      </div>
+
+      {!isWorking && (
+        <div className="flex shrink-0 items-center gap-2">
+          {state.kind === "provider_missing" ? (
+            <Button size="sm" onClick={onSetupProvider}>
+              Set up provider
+            </Button>
+          ) : state.kind === "error" ? (
+            <Button size="sm" variant="outline" onClick={() => onSearch(state.appId)}>
+              <MagnifyingGlassIcon size={14} aria-hidden />
+              Search
+            </Button>
+          ) : null}
+          <Button size="sm" variant="outline" onClick={onDismiss}>
+            Done
+          </Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
-function ConnectionsPage() {
+export function ConnectionsPage() {
   const auth = useDashboardAuth();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
@@ -128,6 +237,12 @@ function ConnectionsPage() {
     if (typeof window === "undefined") return null;
     return integrationAppConnectFromSearch(new URLSearchParams(window.location.search).get("connect"));
   });
+  const [connectedAppId, setConnectedAppId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return integrationAppConnectFromSearch(new URLSearchParams(window.location.search).get("connected"));
+  });
+  const [directConnectState, setDirectConnectState] = useState<DirectConnectState>({ kind: "idle" });
+  const directConnectRequestRef = useRef<string | null>(null);
 
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],
@@ -188,20 +303,95 @@ function ConnectionsPage() {
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
 
+  const invalidateConnections = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["connections"] });
+  }, [queryClient]);
+
   useEffect(() => {
-    if (requestedAppConnect) {
+    if (connectedAppId) {
       setActiveTab("applications");
-      if (!provider) return;
-      setShowAddIntegrationDialog(true);
-      removeSearchParams(["connect"]);
+      setDirectConnectState({ kind: "connected", appId: connectedAppId });
+      toast.success(`${appNameFromId(connectedAppId)} connected`);
+      invalidateConnections();
+      removeSearchParams(["connected"]);
+      setConnectedAppId(null);
       return;
     }
+
     if (!requestedAppSearch) return;
     setActiveTab("applications");
     if (!provider) return;
     setShowAddIntegrationDialog(true);
     removeSearchParams(["app"]);
-  }, [provider, requestedAppConnect, requestedAppSearch]);
+  }, [provider, connectedAppId, requestedAppSearch, invalidateConnections]);
+
+  useEffect(() => {
+    if (!requestedAppConnect) return;
+    setActiveTab("applications");
+
+    if (serversQuery.isLoading) {
+      setDirectConnectState({ kind: "starting", appId: requestedAppConnect });
+      return;
+    }
+
+    if (!provider) {
+      removeSearchParams(["connect"]);
+      setRequestedAppConnect(null);
+      setDirectConnectState({ kind: "provider_missing", appId: requestedAppConnect });
+      return;
+    }
+
+    if (connectionsQuery.isLoading) {
+      setDirectConnectState({ kind: "starting", appId: requestedAppConnect });
+      return;
+    }
+
+    const requestKey = `${provider.id}:${requestedAppConnect}`;
+    if (directConnectRequestRef.current === requestKey) return;
+    directConnectRequestRef.current = requestKey;
+    removeSearchParams(["connect"]);
+
+    const existingConnection = connectionsQuery.data?.find((connection) =>
+      connectionMatchesApp(connection, requestedAppConnect),
+    );
+    if (existingConnection && isOwnedOrPersonalAppConnection(existingConnection)) {
+      setRequestedAppConnect(null);
+      setDirectConnectState({
+        kind: "already_connected",
+        appId: requestedAppConnect,
+        appName: existingConnection.appName,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    const appId = requestedAppConnect;
+    const providerId = provider.id;
+    setDirectConnectState({ kind: "starting", appId });
+
+    async function startConnection() {
+      try {
+        const callbackUrl = `${window.location.origin}/integrations/callback?app=${encodeURIComponent(appId)}`;
+        const result = await api.mcpServers.createConnectionIntent(providerId, appId, callbackUrl);
+        if (cancelled) return;
+        setDirectConnectState({ kind: "redirecting", appId: result.app.id, appName: result.app.name });
+        window.location.assign(result.redirectUrl);
+      } catch (err) {
+        if (cancelled) return;
+        setRequestedAppConnect(null);
+        setDirectConnectState({
+          kind: "error",
+          appId,
+          message: err instanceof Error ? err.message : "Sketch could not prepare this integration.",
+        });
+      }
+    }
+
+    void startConnection();
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, requestedAppConnect, serversQuery.isLoading, connectionsQuery.isLoading, connectionsQuery.data]);
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
@@ -237,6 +427,17 @@ function ConnectionsPage() {
           <LoadingSkeleton />
         ) : activeTab === "applications" ? (
           <>
+            <DirectConnectPanel
+              state={directConnectState}
+              onSearch={(appId) => {
+                setDirectConnectState({ kind: "idle" });
+                setRequestedAppConnect(null);
+                setRequestedAppSearch(appId);
+                setShowAddIntegrationDialog(true);
+              }}
+              onSetupProvider={() => setShowProviderSelector(true)}
+              onDismiss={() => setDirectConnectState({ kind: "idle" })}
+            />
             {!provider ? (
               <ConnectionsBanner onConnect={() => setShowProviderSelector(true)} />
             ) : (
@@ -387,8 +588,8 @@ function ConnectionsPage() {
           }}
           providerId={provider.id}
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
-          initialAppId={requestedAppConnect}
-          initialSearch={requestedAppConnect ? null : requestedAppSearch}
+          initialAppId={null}
+          initialSearch={requestedAppSearch}
           onSuccess={invalidateAll}
         />
       )}

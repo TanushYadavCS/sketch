@@ -386,7 +386,7 @@ describe("slack/adapter", () => {
       await flush();
 
       const expected =
-        "GitHub needs connection\n\nTo continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>";
+        "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>";
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", expected);
       expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expected }));
     });
@@ -420,7 +420,7 @@ describe("slack/adapter", () => {
       await dm({ text: "create issue", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      const expected = "To continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>";
+      const expected = "To continue: <https://sketch.test/integrations?connect=github|Connect GitHub>";
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", expected);
       expect(mockBotInstance.postMessage).not.toHaveBeenCalledWith("D1", "_No response_");
     });
@@ -953,7 +953,7 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
         "C1",
         "1",
-        "GitHub needs connection\n\nTo continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>",
+        "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
       );
     });
 

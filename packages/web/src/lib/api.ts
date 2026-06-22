@@ -1861,6 +1861,15 @@ export const api = {
         body: JSON.stringify({ appId, callbackUrl }),
       });
     },
+    createConnectionIntent(providerId: string, appId: string, callbackUrl?: string) {
+      return request<{ app: IntegrationApp; redirectUrl: string }>(
+        `/api/mcp-servers/${providerId}/connections/intents`,
+        {
+          method: "POST",
+          body: JSON.stringify({ appId, callbackUrl }),
+        },
+      );
+    },
     async listConnections(providerId: string) {
       const res = await request<{ connections: IntegrationConnection[] }>(`/api/mcp-servers/${providerId}/connections`);
       return res.connections;

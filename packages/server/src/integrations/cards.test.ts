@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   collectIntegrationCardsFromProgressEvents,
   extractCanvasIntegrationLookups,
@@ -187,17 +187,16 @@ describe("integration cards", () => {
 
   it("collects missing app cards from observed Canvas CLI progress", async () => {
     const cards: unknown[] = [];
-    let initiateArgs: unknown[] | null = null;
+    const initiateConnection = vi.fn().mockResolvedValue({
+      redirectUrl: "https://canvas.example.com/connect/secrets?token=abc",
+    });
     const provider = {
       listConnections: async () => [],
       listApps: async () => ({
         apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
         pageInfo: { endCursor: null, hasMore: false },
       }),
-      initiateConnection: async (...args: unknown[]) => {
-        initiateArgs = args;
-        return { redirectUrl: "https://canvas.example.com/connect/secrets?token=abc" };
-      },
+      initiateConnection,
     } as Pick<IntegrationProvider, "listApps" | "listConnections" | "initiateConnection"> as IntegrationProvider;
 
     await collectIntegrationCardsFromProgressEvents({
@@ -214,23 +213,15 @@ describe("integration cards", () => {
       loadIntegrationProvider: async () => provider,
       userEmail: "alice@example.com",
       userName: "Alice",
-      connectionCallbackUrl: "https://sketch.example.com/integrations/callback",
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(initiateArgs).toEqual([
-      "alice@example.com",
-      "slack",
-      "https://sketch.example.com/integrations/callback",
-      "Alice",
-      undefined,
-    ]);
+    expect(initiateConnection).not.toHaveBeenCalled();
     expect(cards).toMatchObject([
       {
         appId: "slack",
         appName: "Slack",
         state: "connect",
-        connectUrl: "https://canvas.example.com/connect/secrets?token=abc",
       },
     ]);
   });

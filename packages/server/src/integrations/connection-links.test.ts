@@ -32,14 +32,14 @@ describe("integration connection links", () => {
     expect(text).toBe("To continue: <https://sketch.example.com/integrations?connect=github|Connect GitHub  CI>");
   });
 
-  it("prefers provider direct connection URLs", () => {
+  it("ignores provider direct connection URLs", () => {
     const text = formatIntegrationConnectionLinks(
       [{ ...githubCard, connectUrl: "https://canvas.example.com/connect/secrets?token=abc" }],
       "slack",
       { BASE_URL: "https://sketch.example.com", PORT: 3000 },
     );
 
-    expect(text).toBe("To continue: <https://canvas.example.com/connect/secrets?token=abc|Connect GitHub>");
+    expect(text).toBe("To continue: <https://sketch.example.com/integrations?connect=github|Connect GitHub>");
   });
 
   it("formats WhatsApp links as inline URLs", () => {

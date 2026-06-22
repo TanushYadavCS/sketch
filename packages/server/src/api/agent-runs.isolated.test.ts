@@ -378,7 +378,7 @@ describe("agent invoke API", () => {
       userId: target.id,
       platform: "slack",
       message:
-        "GitHub needs connection\n\nTo continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>",
+        "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
     });
   });
 
@@ -468,7 +468,7 @@ describe("agent invoke API", () => {
     expect(slack.postThreadReply).toHaveBeenCalledWith(
       "C123",
       "1712345678.000000",
-      "GitHub needs connection\n\nTo continue: <https://canvas.example.com/connect/secrets?token=github|Connect GitHub>",
+      "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
     );
   });
 
@@ -595,7 +595,7 @@ describe("agent invoke API", () => {
 
     expect(whatsapp.sendText).toHaveBeenCalledWith(
       "123@g.us",
-      "GitHub needs connection\n\nTo continue, connect GitHub: https://canvas.example.com/connect/secrets?token=github",
+      "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
     );
   });
 

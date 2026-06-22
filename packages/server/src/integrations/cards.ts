@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WebChatIntegrationConnectionData } from "@sketch/shared";
-import type { IntegrationApp, IntegrationConnection, IntegrationProvider, IntegrationUserOrgRole } from "./types";
+import type { IntegrationApp, IntegrationConnection, IntegrationProvider } from "./types";
 
 export interface IntegrationCardCollector {
   collect(card: WebChatIntegrationConnectionData): void;
@@ -503,8 +503,6 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
   collector?: IntegrationCardCollector;
   userEmail?: string | null;
   userName?: string | null;
-  connectionCallbackUrl?: string;
-  userOrgRole?: IntegrationUserOrgRole;
 }): Promise<void> {
   if (!params.loadIntegrationProvider || !params.collector || !params.userEmail) return;
 
@@ -529,27 +527,7 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
     const result = await resolveIntegrationLookup(provider, connections, { query });
     cards.push(...result.cards.filter((card) => (card.state ?? "connect") === "connect"));
   }
-  const deduped = dedupeIntegrationCards(cards);
-  const cardsWithUrls = params.connectionCallbackUrl
-    ? await Promise.all(
-        deduped.map(async (card) => {
-          if ((card.state ?? "connect") !== "connect") return card;
-          try {
-            const result = await provider.initiateConnection(
-              userEmail,
-              card.appId,
-              params.connectionCallbackUrl ?? "",
-              params.userName ?? undefined,
-              params.userOrgRole,
-            );
-            return { ...card, connectUrl: result.redirectUrl };
-          } catch {
-            return card;
-          }
-        }),
-      )
-    : deduped;
-  for (const card of cardsWithUrls) {
+  for (const card of dedupeIntegrationCards(cards)) {
     params.collector.collect(card);
   }
 }
