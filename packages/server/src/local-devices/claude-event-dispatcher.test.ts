@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createLocalClaudeEventDispatcher } from "./claude-event-dispatcher";
 import type { LocalClaudeEventDelivery } from "./claude-sessions";
 
-function createDelivery(originOrgContextEnabled: number | null): LocalClaudeEventDelivery {
+function createDelivery(
+  originOrgContextEnabled: number | null,
+  sessionOverrides: Partial<LocalClaudeEventDelivery["session"]> = {},
+): LocalClaudeEventDelivery {
   return {
     session: {
       id: "session-1",
@@ -30,6 +33,7 @@ function createDelivery(originOrgContextEnabled: number | null): LocalClaudeEven
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
       ended_at: null,
+      ...sessionOverrides,
     },
     event: {
       id: "event-1",
@@ -132,5 +136,64 @@ describe("createLocalClaudeEventDispatcher", () => {
     const call = runAgent.mock.calls[0]?.[0];
     expect(call.claudeConfigDir).toBe("/data/.claude");
     expect(call.userMessage).toContain("org: /data/.claude");
+  });
+
+  it("appends integration connection links when replaying WhatsApp results", async () => {
+    const queued: Promise<void>[] = [];
+    const finalText =
+      "GitHub needs connection\n\nConnection form for GitHub: https://sketch.test/integrations?connect=github";
+    const runAgent = vi.fn().mockResolvedValue({
+      trace: { finalText: "GitHub needs connection" },
+      pendingUploads: [],
+      pendingIntegrationConnections: [{ requestId: "req-1", appId: "github", appName: "GitHub", state: "connect" }],
+    });
+    const conversations = { insertMessage: vi.fn() };
+    const whatsapp = {
+      isConnected: true,
+      sendText: vi.fn().mockResolvedValue({
+        key: { id: "sent-1" },
+        messageTimestamp: 1767225600,
+      }),
+      sendFile: vi.fn().mockResolvedValue(undefined),
+    };
+    const dispatcher = createLocalClaudeEventDispatcher({
+      db: {} as never,
+      config: {
+        DATA_DIR: "/data",
+        CLAUDE_CONFIG_DIR: "/data/.claude",
+        BASE_URL: "https://sketch.test",
+        PORT: 3000,
+      } as never,
+      logger: { warn: vi.fn(), info: vi.fn(), debug: vi.fn() } as never,
+      settingsRepo: {
+        get: vi.fn().mockResolvedValue({ org_name: "Acme", org_context: null, bot_name: "Sketch" }),
+      } as never,
+      users: {
+        findById: vi.fn().mockResolvedValue({
+          id: "user-1",
+          name: "A User",
+          email: "user@example.com",
+          whatsapp_number: "15551234567",
+          timezone: "Asia/Kolkata",
+        }),
+      } as never,
+      conversations: conversations as never,
+      queueManager: {
+        getQueue: vi.fn().mockReturnValue({
+          enqueue: (fn: () => Promise<void>) => {
+            queued.push(fn());
+          },
+        }),
+      } as never,
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      whatsapp: whatsapp as never,
+    });
+
+    dispatcher.enqueue(createDelivery(0));
+    await queued[0];
+
+    expect(whatsapp.sendText).toHaveBeenCalledWith("15551234567@s.whatsapp.net", finalText);
+    expect(conversations.insertMessage).toHaveBeenCalledWith(expect.objectContaining({ text: finalText }));
   });
 });

@@ -27,6 +27,8 @@ export interface IntegrationProgressEventLike {
   kind: string;
   toolName?: string;
   input?: Record<string, unknown>;
+  output?: unknown;
+  isError?: boolean;
 }
 
 const CONNECTED_ACCOUNTS_INQUIRY_PATTERNS = [
@@ -184,6 +186,19 @@ function splitQueryList(value: string | null): string[] {
     .filter(Boolean);
 }
 
+function uniqueQueries(queries: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const query of queries) {
+    const trimmed = query.trim();
+    const key = normalizeIntegrationLookup(trimmed);
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
 const COMPONENT_ACTION_START_SEGMENTS = new Set([
   "accept",
   "add",
@@ -246,6 +261,15 @@ function appFromComponentKey(componentKey: string | null): string[] {
   return app ? [app] : [];
 }
 
+function firstStringValue(record: Record<string, unknown> | undefined, keys: string[]): string | null {
+  if (!record) return null;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
 function parseRawJson(command: string): unknown {
   const value = shellFlagValue(command, "--raw");
   if (!value) return null;
@@ -298,6 +322,14 @@ export function extractCanvasIntegrationLookups(command: string): {
     return { queries: rawQueryApps(raw?.queries), listConnected: false };
   }
 
+  if (/\bget-component-definition\b/.test(command) || /\bget_component_definition\b/.test(command)) {
+    const componentKey =
+      typeof raw?.key === "string"
+        ? raw.key
+        : shellFlagValueAny(command, ["--key", "--component-key", "--componentKey"]);
+    return { queries: appFromComponentKey(componentKey), listConnected: false };
+  }
+
   if (/\bdirect-execute-action\b/.test(command) || /\bdirect_execute_action\b/.test(command)) {
     const componentKey =
       typeof raw?.componentKey === "string"
@@ -318,7 +350,12 @@ export function extractCanvasIntegrationLookups(command: string): {
     const rawSlug = raw?.triggerAppSlug;
     const triggerAppSlug =
       typeof rawSlug === "string" ? rawSlug : shellFlagValueAny(command, ["--trigger-app-slug", "--triggerAppSlug"]);
-    return { queries: triggerAppSlug ? [triggerAppSlug] : [], listConnected: false };
+    if (triggerAppSlug) return { queries: [triggerAppSlug], listConnected: false };
+    const triggerComponentKey =
+      typeof raw?.triggerComponentKey === "string"
+        ? raw.triggerComponentKey
+        : shellFlagValueAny(command, ["--trigger-component-key", "--triggerComponentKey"]);
+    return { queries: appFromComponentKey(triggerComponentKey), listConnected: false };
   }
 
   return { queries: [], listConnected: false };
@@ -350,29 +387,114 @@ function extractMcpIntegrationLookups(
     return { queries: rawQueryApps(input?.queries), listConnected: false };
   }
 
+  if (normalizedToolName === "get-component-definition") {
+    const componentKey = firstStringValue(input, ["key", "componentKey"]);
+    return { queries: appFromComponentKey(componentKey), listConnected: false };
+  }
+
   if (normalizedToolName === "direct-execute-action" || normalizedToolName === "fetch-remote-options") {
-    const componentKey = typeof input?.componentKey === "string" ? input.componentKey : null;
+    const componentKey = firstStringValue(input, ["componentKey", "key"]);
     return { queries: appFromComponentKey(componentKey), listConnected: false };
   }
 
   if (normalizedToolName === "create-sketch-trigger-workflow") {
     const triggerAppSlug = typeof input?.triggerAppSlug === "string" ? input.triggerAppSlug : null;
-    return { queries: triggerAppSlug ? [triggerAppSlug] : [], listConnected: false };
+    if (triggerAppSlug) return { queries: [triggerAppSlug], listConnected: false };
+    const triggerComponentKey = typeof input?.triggerComponentKey === "string" ? input.triggerComponentKey : null;
+    return { queries: appFromComponentKey(triggerComponentKey), listConnected: false };
   }
 
   return { queries: [], listConnected: false };
+}
+
+function toolResultText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(toolResultText).filter(Boolean).join("\n");
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const parts = [record.text, record.message, record.error, record.code, record.content, record.data]
+      .map(toolResultText)
+      .filter(Boolean);
+    try {
+      parts.push(JSON.stringify(value));
+    } catch {}
+    return parts.join("\n");
+  }
+  return "";
+}
+
+function toolResultIndicatesConnectionIssue(output: unknown): boolean {
+  const text = toolResultText(output).slice(0, 30_000);
+  if (!text.trim()) return false;
+  return (
+    /\bCONNECTION_NOT_CONNECTED\b/i.test(text) ||
+    /\bconnectionStatus\b[^a-z0-9]+not[_\s-]?connected\b/i.test(text) ||
+    (/\bnot[_\s-]?connected\b/i.test(text) &&
+      /\b(app|account|auth|authorization|connect|connection|integration)\b/i.test(text)) ||
+    (/\b(expired|revoked|invalid)\b/i.test(text) &&
+      /\b(auth|authorization|token|credential|connect|connection|account)\b/i.test(text)) ||
+    (/\b(401|403)\b/i.test(text) && /\b(auth|authorization|forbidden|unauthorized|credential|permission)\b/i.test(text))
+  );
+}
+
+function normalizedMcpToolParts(toolName: string | undefined): { server: string | null; operation: string } {
+  const match = toolName?.match(/^mcp__(.+?)__(.+)$/);
+  const normalize = (value: string | undefined) =>
+    (value ?? "")
+      .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+      .replace(/_/g, "-")
+      .toLowerCase();
+  return {
+    server: match?.[1] ? normalize(match[1]) : null,
+    operation: normalize(match?.[2] ?? toolName),
+  };
+}
+
+function genericFailureQueries(toolName: string | undefined, input: Record<string, unknown> | undefined): string[] {
+  const queries: string[] = [];
+  const directApp = firstStringValue(input, ["app", "appSlug", "appId", "nameSlug", "triggerAppSlug"]);
+  if (directApp) queries.push(directApp);
+  const componentKey = firstStringValue(input, ["componentKey", "key", "triggerComponentKey"]);
+  queries.push(...appFromComponentKey(componentKey));
+
+  const { server, operation } = normalizedMcpToolParts(toolName);
+  if (server && !["canvas", "sketch", "plugin-pipedream", "pipedream"].includes(server)) {
+    queries.push(server);
+  }
+  if (server?.includes("pipedream")) {
+    queries.push(...appFromComponentKey(operation));
+  }
+
+  return uniqueQueries(queries);
 }
 
 export function extractIntegrationLookupsFromProgressEvent(event: IntegrationProgressEventLike): {
   queries: string[];
   listConnected: boolean;
 } {
-  if (event.kind !== "tool_use") return { queries: [], listConnected: false };
+  if (event.kind === "tool_result" && !toolResultIndicatesConnectionIssue(event.output)) {
+    return { queries: [], listConnected: false };
+  }
+  if (event.kind !== "tool_use" && event.kind !== "tool_result") return { queries: [], listConnected: false };
+
+  let lookup: { queries: string[]; listConnected: boolean };
   if (event.toolName === "Bash") {
     const command = typeof event.input?.command === "string" ? event.input.command : "";
-    return extractCanvasIntegrationLookups(command);
+    lookup = extractCanvasIntegrationLookups(command);
+  } else {
+    lookup = extractMcpIntegrationLookups(event.toolName, event.input);
   }
-  return extractMcpIntegrationLookups(event.toolName, event.input);
+
+  if (event.kind === "tool_result") {
+    return {
+      queries: uniqueQueries([...lookup.queries, ...genericFailureQueries(event.toolName, event.input)]),
+      listConnected: false,
+    };
+  }
+
+  return lookup;
 }
 
 export async function collectIntegrationCardsFromProgressEvents(params: {

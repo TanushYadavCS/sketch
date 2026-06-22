@@ -20,7 +20,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
-import { collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
+import { type IntegrationProgressEventLike, collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
@@ -466,6 +466,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   }
 
   let pendingToolCalls: ToolCallRecord[] = [];
+  const integrationProgressEvents: IntegrationProgressEventLike[] = [];
+  const toolUsesById = new Map<string, { toolName: string; input: Record<string, unknown> }>();
 
   const flushIntermediateText = async () => {
     if (currentTextSuffix.length === 0) return;
@@ -570,8 +572,9 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
             }
             for (const block of content) {
               if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-                const name = (block as { name: string }).name;
-                const input = (block as { input?: Record<string, unknown> }).input ?? {};
+                const toolBlock = block as { id?: unknown; name: string; input?: Record<string, unknown> };
+                const name = toolBlock.name;
+                const input = toolBlock.input ?? {};
                 const tc: ToolCallRecord = {
                   toolName: name,
                   skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
@@ -581,6 +584,10 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
                 toolCalls.push(tc);
                 pendingToolCalls.push(tc);
                 const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
+                integrationProgressEvents.push(event);
+                if (typeof toolBlock.id === "string") {
+                  toolUsesById.set(toolBlock.id, { toolName: name, input });
+                }
                 progressEvents.push(event);
                 try {
                   await params.onProgressEvent(event);
@@ -594,6 +601,27 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
             if (text) {
               currentTextSuffix.push(text);
             }
+          }
+        }
+      }
+
+      if (message.type === "user") {
+        const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
+        const content = inner?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (!block || typeof block !== "object" || !("type" in block) || block.type !== "tool_result") continue;
+            const toolResult = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
+            const toolUse =
+              typeof toolResult.tool_use_id === "string" ? toolUsesById.get(toolResult.tool_use_id) : null;
+            if (!toolUse) continue;
+            integrationProgressEvents.push({
+              kind: "tool_result",
+              toolName: toolUse.toolName,
+              input: toolUse.input,
+              output: toolResult.content,
+              isError: toolResult.is_error === true,
+            });
           }
         }
       }
@@ -679,10 +707,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     }
   }
 
-  if (params.responseSurface === "web" && params.contextType !== "scheduled_task") {
+  const responseSurface = params.responseSurface ?? params.platform;
+  if (params.contextType !== "scheduled_task") {
     try {
       await collectIntegrationCardsFromProgressEvents({
-        events: progressEvents,
+        events: integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
         collector: integrationConnectionCollector,
         userEmail: params.userEmail ?? null,
@@ -694,7 +723,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   }
 
   const pendingUploads = uploadCollector.drain();
-  const pendingIntegrationConnections = integrationConnectionCollector.drain();
+  const drainedIntegrationConnections = integrationConnectionCollector.drain();
+  const pendingIntegrationConnections =
+    responseSurface === "web"
+      ? drainedIntegrationConnections
+      : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
   const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
   const auxCostUsd = sumAuxCost(auxLlmCalls);
   logger.info(

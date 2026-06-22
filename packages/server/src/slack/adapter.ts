@@ -46,6 +46,7 @@ import { type createSettingsRepository, parseOrgContext } from "../db/repositori
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -686,8 +687,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
         });
 
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const finalText = appendIntegrationConnectionLinks(
+          result.trace.finalText,
+          result.pendingIntegrationConnections,
+          "slack",
+          toolConfig,
+        );
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureSlackBotReplies({
             conversationId: capture.conversation.id,
             sent,
@@ -712,7 +719,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         if (result.messageSent || result.pendingUploads.length > 0) {
           await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
         }
-        if (!result.trace.finalText) {
+        if (!finalText) {
           await replyToUser("_No response_");
         }
       } catch (err) {
@@ -1015,8 +1022,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           },
         });
 
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const finalText = appendIntegrationConnectionLinks(
+          result.trace.finalText,
+          result.pendingIntegrationConnections,
+          "slack",
+          toolConfig,
+        );
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureSlackBotReplies({
             conversationId: capture.conversation.id,
             sent,
@@ -1043,7 +1056,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             messageId: capture.captured.id,
           });
         }
-        if (!result.trace.finalText) {
+        if (!finalText) {
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
       } catch (err) {

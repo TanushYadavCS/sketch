@@ -16,6 +16,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
@@ -252,11 +253,17 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             },
           } as RunAgentParams);
 
-          if (parsed.data.deliveryMode === "target" && result.trace.finalText && deps.sendDm) {
+          const finalText = appendIntegrationConnectionLinks(
+            result.trace.finalText,
+            result.pendingIntegrationConnections,
+            parsed.data.target.platform,
+            toolConfig,
+          );
+          if (parsed.data.deliveryMode === "target" && finalText && deps.sendDm) {
             delivery.response = await deps.sendDm({
               userId: target.id,
               platform: parsed.data.target.platform,
-              message: result.trace.finalText,
+              message: finalText,
             });
           }
 
@@ -351,9 +358,15 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             },
           } as RunAgentParams);
 
-          if (parsed.data.deliveryMode === "target" && threadId && result.trace.finalText) {
+          const finalText = appendIntegrationConnectionLinks(
+            result.trace.finalText,
+            result.pendingIntegrationConnections,
+            "slack",
+            toolConfig,
+          );
+          if (parsed.data.deliveryMode === "target" && threadId && finalText) {
             const onFinalMessage = createSlackMessageHandler(slack, parsed.data.target.channelId, threadId);
-            await onFinalMessage(result.trace.finalText);
+            await onFinalMessage(finalText);
           }
           if (parsed.data.deliveryMode === "target" && threadId) {
             for (const filePath of result.pendingUploads) {
@@ -418,9 +431,15 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           },
         } as RunAgentParams);
 
-        if (parsed.data.deliveryMode === "target" && result.trace.finalText) {
+        const finalText = appendIntegrationConnectionLinks(
+          result.trace.finalText,
+          result.pendingIntegrationConnections,
+          "whatsapp",
+          toolConfig,
+        );
+        if (parsed.data.deliveryMode === "target" && finalText) {
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid);
-          await onFinalMessage(result.trace.finalText);
+          await onFinalMessage(finalText);
         }
         if (parsed.data.deliveryMode === "target") {
           for (const filePath of result.pendingUploads) {

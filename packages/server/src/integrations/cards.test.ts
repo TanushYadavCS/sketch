@@ -66,6 +66,12 @@ describe("integration cards", () => {
       queries: ["linear"],
       listConnected: false,
     });
+    expect(
+      extractCanvasIntegrationLookups("$CANVAS_CLI get-component-definition --key github-create-issue --output json"),
+    ).toEqual({
+      queries: ["github"],
+      listConnected: false,
+    });
   });
 
   it("extracts app lookups from Canvas MCP tool events", () => {
@@ -111,6 +117,40 @@ describe("integration cards", () => {
         input: { queries: [{ app: "linear", query: "create issue" }] },
       }),
     ).toEqual({ queries: ["linear"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__get_component_definition",
+        input: { key: "slack-send-message" },
+      }),
+    ).toEqual({ queries: ["slack"], listConnected: false });
+  });
+
+  it("extracts app lookups from missing-connection tool results only", () => {
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_result",
+        toolName: "mcp__plugin_pipedream__slack_send_message",
+        input: { app: "slack" },
+        output: { code: "CONNECTION_NOT_CONNECTED", message: "Slack is not connected" },
+      }),
+    ).toEqual({ queries: ["slack"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_result",
+        toolName: "mcp__plugin_pipedream__github_create_issue",
+        input: {},
+        output: [{ type: "text", text: "CONNECTION_NOT_CONNECTED" }],
+      }),
+    ).toEqual({ queries: ["github"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_result",
+        toolName: "mcp__plugin_pipedream__slack_send_message",
+        input: { app: "slack" },
+        output: "Rate limit exceeded",
+      }),
+    ).toEqual({ queries: [], listConnected: false });
   });
 
   it("resolves exactly matched apps to connect or connected cards from provider state", async () => {
@@ -245,6 +285,34 @@ describe("integration cards", () => {
           kind: "tool_use",
           toolName: "mcp__canvas__search_apps",
           input: { queries: ["slack"] },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "slack", appName: "Slack", state: "connect" }]);
+  });
+
+  it("collects missing app cards from connection failure tool results", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async () => ({
+        apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_result",
+          toolName: "mcp__plugin_pipedream__action",
+          input: { appSlug: "slack" },
+          output: JSON.stringify({ error: { code: "CONNECTION_NOT_CONNECTED" } }),
         },
       ],
       loadIntegrationProvider: async () => provider,

@@ -39,6 +39,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -521,12 +522,18 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
-          if (result.trace.finalText) {
-            const sent = await onFinalMessage(result.trace.finalText);
+          const finalText = appendIntegrationConnectionLinks(
+            result.trace.finalText,
+            result.pendingIntegrationConnections,
+            "whatsapp",
+            toolConfig,
+          );
+          if (finalText) {
+            const sent = await onFinalMessage(finalText);
             await captureBotReply({
               conversationId: capture.conversation.id,
               sent,
-              text: result.trace.finalText,
+              text: finalText,
               botName: settingsRow?.bot_name,
             });
           }
@@ -813,12 +820,18 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const finalText = appendIntegrationConnectionLinks(
+          result.trace.finalText,
+          result.pendingIntegrationConnections,
+          "whatsapp",
+          toolConfig,
+        );
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureBotReply({
             conversationId: capture.conversation.id,
             sent,
-            text: result.trace.finalText,
+            text: finalText,
             botName: settingsRow?.bot_name,
           });
         }
