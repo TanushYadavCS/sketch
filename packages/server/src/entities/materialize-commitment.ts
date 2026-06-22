@@ -34,16 +34,22 @@ export async function materializeCommitment(
   return { kind: "commitment_materialized" };
 }
 
-function resolveParent(deps: MaterializeDeps, commitment: CommitmentInput): EntityRow | null {
-  if (commitment.parentRef) {
-    const byRef = deps.index.bySourceRef.get(`${commitment.parentRef.source}:${commitment.parentRef.sourceId}`);
+export interface SubEntityParentInput {
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  evidence: { entityIds: string[] };
+}
+
+export function resolveParent(deps: MaterializeDeps, input: SubEntityParentInput): EntityRow | null {
+  if (input.parentRef) {
+    const byRef = deps.index.bySourceRef.get(`${input.parentRef.source}:${input.parentRef.sourceId}`);
     if (isAllowedParent(byRef)) return byRef;
   }
-  if (commitment.parentEntityId) {
-    const byId = findEntityById(deps, commitment.parentEntityId);
+  if (input.parentEntityId) {
+    const byId = findEntityById(deps, input.parentEntityId);
     if (isAllowedParent(byId)) return byId;
   }
-  for (const entityId of commitment.evidence.entityIds) {
+  for (const entityId of input.evidence.entityIds) {
     const byId = findEntityById(deps, entityId);
     if (isAllowedParent(byId)) return byId;
   }
@@ -66,10 +72,8 @@ function isAllowedParent(entity: EntityRow | undefined): entity is EntityRow {
   );
 }
 
-interface CommitmentInput {
+interface CommitmentInput extends SubEntityParentInput {
   commitmentId: string;
-  parentRef?: { source: string; sourceId: string };
-  parentEntityId?: string;
   title: string;
   status: "open" | "done" | "dropped";
   dueAt?: string;

@@ -9,6 +9,7 @@ export type SubEntityStatusAuthority = "external" | "local";
 export interface UpsertSubEntityInput {
   parentEntityId?: string | null;
   kind: string;
+  dedupName?: string | null;
   displayName: string;
   status: SubEntityStatus;
   provenance: string;
@@ -23,10 +24,33 @@ export interface ListOpenSubEntitiesOptions {
   kind: string;
 }
 
+export interface SupersedeSubEntityInput {
+  parentEntityId: string;
+  kind: string;
+  dedupName: string;
+  displayName: string;
+  provenance: string;
+  metadata?: Record<string, unknown> | null;
+  sourceFactId?: string | null;
+  effectiveAt: string;
+}
+
+export interface ListCurrentByKindOptions {
+  parentEntityId: string;
+  kind: string;
+}
+
+export interface GetSubEntitiesAsOfOptions {
+  parentEntityId: string;
+  kind: string;
+  at: string;
+}
+
 export type SubEntityRow = Selectable<SubEntitiesTable>;
 
-const GLOBAL_PARENT_SCOPE_KEY = "global";
+export const GLOBAL_PARENT_SCOPE_KEY = "global";
 const TERMINAL_STATUSES = ["done", "dropped"];
+const MAX_SUPERSESSION_ATTEMPTS = 3;
 
 export function createSubEntityRepository(db: Kysely<DB>) {
   return {
@@ -47,6 +71,45 @@ export function createSubEntityRepository(db: Kysely<DB>) {
         .where("valid_to", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows ?? 0) > 0;
+    },
+
+    async supersedeSubEntity(
+      input: SupersedeSubEntityInput,
+    ): Promise<{ subEntityId: string; created: boolean; superseded: boolean }> {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < MAX_SUPERSESSION_ATTEMPTS; attempt++) {
+        try {
+          return await supersedeInTransaction(db, input);
+        } catch (err) {
+          if (!isUniqueConstraintError(err) && !(err instanceof SupersessionRetryError)) throw err;
+          lastError = err;
+        }
+      }
+      throw lastError;
+    },
+
+    async listCurrentByKind(opts: ListCurrentByKindOptions): Promise<SubEntityRow[]> {
+      return db
+        .selectFrom("sub_entities")
+        .selectAll()
+        .where("parent_entity_id", "=", opts.parentEntityId)
+        .where("kind", "=", opts.kind)
+        .where("valid_to", "is", null)
+        .orderBy("updated_at", "desc")
+        .execute();
+    },
+
+    async getSubEntitiesAsOf(opts: GetSubEntitiesAsOfOptions): Promise<SubEntityRow[]> {
+      const at = new Date(opts.at).toISOString();
+      return db
+        .selectFrom("sub_entities")
+        .selectAll()
+        .where("parent_entity_id", "=", opts.parentEntityId)
+        .where("kind", "=", opts.kind)
+        .where("valid_from", "<=", at)
+        .where((eb) => eb.or([eb("valid_to", "is", null), eb("valid_to", ">", at)]))
+        .orderBy("valid_from", "desc")
+        .execute();
     },
 
     async listOpenSubEntities(opts: ListOpenSubEntitiesOptions): Promise<SubEntityRow[]> {
@@ -82,7 +145,7 @@ async function upsertInTransaction(
 ): Promise<{ subEntityId: string; created: boolean }> {
   return db.transaction().execute(async (trx) => {
     const parentScopeKey = input.parentEntityId ?? GLOBAL_PARENT_SCOPE_KEY;
-    const normalized = normalizeName(input.displayName);
+    const normalized = normalizeName(input.dedupName ?? input.displayName);
     const existing = await selectCurrent(trx, parentScopeKey, input.kind, normalized);
     const now = new Date().toISOString();
     if (!existing) {
@@ -113,6 +176,96 @@ async function upsertInTransaction(
     await updateExisting(trx, existing, input, now);
     return { subEntityId: existing.id, created: false };
   });
+}
+
+async function supersedeInTransaction(
+  db: Kysely<DB>,
+  input: SupersedeSubEntityInput,
+): Promise<{ subEntityId: string; created: boolean; superseded: boolean }> {
+  return db.transaction().execute(async (trx) => {
+    const parentScopeKey = input.parentEntityId;
+    const normalized = normalizeName(input.dedupName);
+    const displayNormalized = normalizeName(input.displayName);
+    const effectiveAt = new Date(input.effectiveAt).toISOString();
+    const now = new Date().toISOString();
+    const rows = await trx
+      .selectFrom("sub_entities")
+      .selectAll()
+      .where("parent_scope_key", "=", parentScopeKey)
+      .where("kind", "=", input.kind)
+      .where("normalized_name", "=", normalized)
+      .orderBy("valid_from", "asc")
+      .execute();
+    const existingAtTime = rows.find(
+      (row) => row.valid_from === effectiveAt && normalizeName(row.display_name) === displayNormalized,
+    );
+    if (existingAtTime) {
+      await refreshSupersededRow(trx, existingAtTime.id, input, now);
+      return { subEntityId: existingAtTime.id, created: false, superseded: false };
+    }
+
+    const predecessor = [...rows].reverse().find((row) => row.valid_from <= effectiveAt);
+    const successor = rows.find((row) => row.valid_from > effectiveAt);
+    if (predecessor && normalizeName(predecessor.display_name) === displayNormalized) {
+      return { subEntityId: predecessor.id, created: false, superseded: false };
+    }
+
+    if (predecessor && (predecessor.valid_to === null || predecessor.valid_to > effectiveAt)) {
+      const update = trx
+        .updateTable("sub_entities")
+        .set({ valid_to: effectiveAt, status: "superseded", updated_at: now })
+        .where("id", "=", predecessor.id);
+      const result =
+        predecessor.valid_to === null
+          ? await update.where("valid_to", "is", null).executeTakeFirst()
+          : await update.where("valid_to", "=", predecessor.valid_to).executeTakeFirst();
+      if (Number(result.numUpdatedRows ?? 0) !== 1) throw new SupersessionRetryError();
+    }
+
+    const id = randomUUID();
+    const validTo = successor?.valid_from ?? null;
+    await trx
+      .insertInto("sub_entities")
+      .values({
+        id,
+        parent_entity_id: input.parentEntityId,
+        parent_scope_key: parentScopeKey,
+        kind: input.kind,
+        normalized_name: normalized,
+        display_name: input.displayName,
+        status: validTo === null ? "active" : "superseded",
+        status_authority: "external",
+        valid_from: effectiveAt,
+        valid_to: validTo,
+        provenance: input.provenance,
+        due_at: null,
+        created_by_user_id: null,
+        source_fact_id: input.sourceFactId ?? null,
+        metadata_json: input.metadata ? JSON.stringify(input.metadata) : null,
+        updated_at: now,
+      })
+      .execute();
+    return { subEntityId: id, created: true, superseded: Boolean(predecessor) };
+  });
+}
+
+async function refreshSupersededRow(
+  db: Kysely<DB>,
+  subEntityId: string,
+  input: SupersedeSubEntityInput,
+  now: string,
+): Promise<void> {
+  await db
+    .updateTable("sub_entities")
+    .set({
+      display_name: input.displayName,
+      provenance: input.provenance,
+      source_fact_id: input.sourceFactId ?? null,
+      metadata_json: input.metadata ? JSON.stringify(input.metadata) : null,
+      updated_at: now,
+    })
+    .where("id", "=", subEntityId)
+    .execute();
 }
 
 async function selectCurrent(
@@ -151,10 +304,12 @@ async function updateExisting(
     .execute();
 }
 
-function isUniqueConstraintError(error: unknown): boolean {
+export function isUniqueConstraintError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const code = "code" in error ? String(error.code) : "";
   if (code === "23505" || code === "SQLITE_CONSTRAINT_UNIQUE") return true;
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   return message.includes("unique constraint") || message.includes("duplicate key");
 }
+
+class SupersessionRetryError extends Error {}
