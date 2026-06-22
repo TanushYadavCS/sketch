@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 101;
+const EXPECTED_MIGRATION_COUNT = 102;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -157,6 +157,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[98]).toBe("103-daily-briefs");
     expect(names[99]).toBe("104-daily-brief-item-metadata");
     expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
+    expect(names[101]).toBe("106-agents");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -416,22 +417,37 @@ describe("runMigrations — full sequence", () => {
     expect(row?.gemini_api_key).toBeNull();
   });
 
-  it("creates daily brief tables with default config values", async () => {
+  it("migration 106 replaces the daily brief tables with generic agent tables", async () => {
     await runMigrations(db, { quiet: true });
 
-    for (const table of ["daily_briefs", "daily_brief_items", "daily_brief_configs"]) {
+    for (const table of ["agent_outputs", "agent_output_items", "agent_user_configs"]) {
       const result = await sql<{ name: string }>`
         SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
       `.execute(db);
       expect(result.rows).toHaveLength(1);
     }
 
+    for (const table of ["daily_briefs", "daily_brief_items", "daily_brief_configs"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(0);
+    }
+  });
+
+  it("creates agent_user_configs with default config values", async () => {
+    await runMigrations(db, { quiet: true });
+
     await db.insertInto("users").values({ id: "user-daily-brief", name: "Daily Brief User" }).execute();
-    await db.insertInto("daily_brief_configs").values({ user_id: "user-daily-brief" }).execute();
+    await db
+      .insertInto("agent_user_configs")
+      .values({ agent_key: "daily_brief", user_id: "user-daily-brief" })
+      .execute();
 
     const config = await db
-      .selectFrom("daily_brief_configs")
+      .selectFrom("agent_user_configs")
       .select(["enabled", "schedule_hour", "schedule_minute", "max_items_per_section"])
+      .where("agent_key", "=", "daily_brief")
       .where("user_id", "=", "user-daily-brief")
       .executeTakeFirstOrThrow();
 

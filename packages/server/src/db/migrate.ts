@@ -105,6 +105,7 @@ import * as m102 from "./migrations/102-entity-creation-suppressions";
 import * as m103 from "./migrations/103-daily-briefs";
 import * as m104 from "./migrations/104-daily-brief-item-metadata";
 import * as m105 from "./migrations/105-normalize-indexed-file-source-timestamps";
+import * as m106 from "./migrations/106-agents";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -214,6 +215,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "103-daily-briefs": m103,
           "104-daily-brief-item-metadata": m104,
           "105-normalize-indexed-file-source-timestamps": m105,
+          "106-agents": m106,
         };
       },
     },

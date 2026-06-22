@@ -56,9 +56,9 @@ import { createProviderIdentityRepository } from "./db/repositories/provider-ide
 import { createSettingsRepository } from "./db/repositories/settings";
 
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
+import { agentRoutes, dailyBriefRoutes } from "./agents/routes";
+import type { AgentRunService } from "./agents/service";
 import { getSmtpConfig } from "./api/shared";
-import { dailyBriefRoutes } from "./daily-brief/routes";
-import type { DailyBriefService } from "./daily-brief/service";
 import type { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
 import { createUserRepository } from "./db/repositories/users";
@@ -98,7 +98,7 @@ interface AppDeps {
   }>;
   localDeviceGateway?: LocalDeviceGateway;
   localClaudeSessionService?: LocalClaudeSessionService;
-  dailyBriefService?: DailyBriefService;
+  agentRunService?: AgentRunService;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -348,8 +348,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
-  if (deps?.dailyBriefService) {
-    app.route("/api/daily-briefs", dailyBriefRoutes(deps.dailyBriefService));
+  if (deps?.agentRunService) {
+    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService));
+    app.route("/api/agents", agentRoutes(deps.agentRunService));
   }
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {

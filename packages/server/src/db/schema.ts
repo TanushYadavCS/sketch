@@ -513,14 +513,14 @@ export interface AutomationStepContentTable {
   updated_at: Generated<string>;
 }
 
-export interface DailyBriefsTable {
+export interface AgentOutputsTable {
   id: string;
+  agent_key: string;
   user_id: string;
-  brief_date: string;
+  output_date: string;
   timezone: string;
   status: string;
   trigger_type: string;
-  agent_key: string;
   agent_version: string;
   agent_run_id: string | null;
   masthead_json: string | null;
@@ -531,9 +531,9 @@ export interface DailyBriefsTable {
   updated_at: Generated<string>;
 }
 
-export interface DailyBriefItemsTable {
+export interface AgentOutputItemsTable {
   id: string;
-  daily_brief_id: string;
+  agent_output_id: string;
   section_key: string;
   title: string;
   summary: string;
@@ -549,13 +549,15 @@ export interface DailyBriefItemsTable {
   created_at: Generated<string>;
 }
 
-export interface DailyBriefConfigsTable {
+export interface AgentUserConfigsTable {
+  agent_key: string;
   user_id: string;
   enabled: Generated<number>;
   schedule_hour: Generated<number>;
   schedule_minute: Generated<number>;
   timezone: string | null;
   max_items_per_section: Generated<number>;
+  prefs_json: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -896,9 +898,9 @@ export interface DB {
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
-  daily_briefs: DailyBriefsTable;
-  daily_brief_items: DailyBriefItemsTable;
-  daily_brief_configs: DailyBriefConfigsTable;
+  agent_outputs: AgentOutputsTable;
+  agent_output_items: AgentOutputItemsTable;
+  agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
   entity_merges: EntityMergesTable;

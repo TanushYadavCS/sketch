@@ -968,6 +968,91 @@ export interface DailyBriefResponse {
   running: boolean;
   briefDate: string;
   timezone: string;
+  /** Section keys currently enabled in the user's config. Disabled sections are hidden on Home. */
+  enabledSections?: string[];
+}
+
+export interface AgentSummary {
+  key: string;
+  title: string;
+  tagline: string;
+  description: string;
+  category: string;
+  version: string;
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+}
+
+export interface AgentSectionConfig {
+  key: string;
+  title: string;
+  enabled: boolean;
+}
+
+export interface AgentConfig {
+  agentKey: string;
+  title: string;
+  tagline: string;
+  description: string;
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+  timezone: string | null;
+  maxItemsPerSection: number;
+  itemsPerSectionRange: { min: number; max: number };
+  focus: string | null;
+  sections: AgentSectionConfig[];
+}
+
+/** Generic output item for any prebuilt agent. `sectionKey` is whatever the agent defines. */
+export interface AgentOutputItem {
+  id: string;
+  sectionKey: string;
+  title: string;
+  summary: string;
+  priority: "high" | "medium" | "low";
+  label: string;
+  displayRef: string | null;
+  actionType: string | null;
+  actionLabel: string | null;
+  actionPrompt: string | null;
+  sourceUrl: string | null;
+  knowledgeRefs: DailyBriefKnowledgeRefs;
+  sortOrder: number;
+}
+
+export interface AgentOutput {
+  id: string;
+  agentKey: string;
+  userId: string;
+  outputDate: string;
+  timezone: string;
+  status: string;
+  generatedAt: string | null;
+  masthead: {
+    title: string;
+    summary: string;
+    generatedFor?: string;
+  } | null;
+  sections: Record<string, AgentOutputItem[]>;
+}
+
+export interface AgentDetailResponse {
+  agent: AgentConfig;
+  output: AgentOutput | null;
+  running: boolean;
+  outputDate: string;
+  timezone: string;
+}
+
+export interface AgentConfigPatch {
+  enabled?: boolean;
+  scheduleHour?: number;
+  scheduleMinute?: number;
+  maxItemsPerSection?: number;
+  sections?: Record<string, boolean>;
+  focus?: string | null;
 }
 
 export type WebChatMessagePart =
@@ -1056,6 +1141,26 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body ?? {}),
       });
+    },
+  },
+  agents: {
+    list() {
+      return request<{ agents: AgentSummary[] }>("/api/agents");
+    },
+    get(agentKey: string) {
+      return request<AgentDetailResponse>(`/api/agents/${agentKey}`);
+    },
+    updateConfig(agentKey: string, patch: AgentConfigPatch) {
+      return request<{ agent: AgentConfig }>(`/api/agents/${agentKey}/config`, {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      });
+    },
+    run(agentKey: string) {
+      return request<{ generation: { id: string; status: string; outputDate: string } | null }>(
+        `/api/agents/${agentKey}/runs`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
     },
   },
   webChat: {
