@@ -231,6 +231,7 @@ export interface DecisionSeed {
 export interface LlmTaskCandidate {
   title: string;
   owner?: { name?: string; email?: string };
+  dueDate?: string;
   hasOwnerVerbObject: boolean;
   sourceExcerpt?: string;
 }
@@ -239,6 +240,7 @@ export interface LlmTaskFactRaw {
   candidateId: string;
   title: string;
   owner?: { name?: string; email?: string };
+  dueDate?: string;
   hasOwnerVerbObject: boolean;
   corroborationKey: string;
   parentRef?: { source: string; sourceId: string };

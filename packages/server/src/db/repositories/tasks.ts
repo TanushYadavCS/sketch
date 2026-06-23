@@ -25,6 +25,7 @@ export interface UpsertTaskInput {
   statusRaw: string | null;
   statusAuthority: "external" | "local";
   assigneeEntityId: string | null;
+  assigneeName?: string | null;
   priority: string | null;
   dueAt: string | null;
   provenance: "structural" | "brief" | "llm";
@@ -57,7 +58,7 @@ export interface LoadOpenDurableTasksForBriefOptions {
 }
 
 export interface UpsertLlmTaskInput {
-  candidate: { title: string };
+  candidate: { title: string; dueAt?: string | null; assigneeEntityId?: string | null; assigneeName?: string | null };
   ownerUserId: string;
   parentEntityId: string | null;
   parentKey: string;
@@ -93,6 +94,7 @@ export function createTaskRepository(db: Kysely<DB>) {
         status_raw: input.statusRaw,
         status_authority: input.statusAuthority,
         assignee_entity_id: input.assigneeEntityId,
+        assignee_name: input.assigneeName ?? null,
         priority: input.priority,
         due_at: input.dueAt,
         provenance: input.provenance,
@@ -275,15 +277,53 @@ export async function upsertLlmTask(
     status: "open",
     statusRaw: null,
     statusAuthority: "local",
-    assigneeEntityId: null,
+    assigneeEntityId: input.candidate.assigneeEntityId ?? null,
+    assigneeName: input.candidate.assigneeName ?? null,
     priority: null,
-    dueAt: null,
+    dueAt: input.candidate.dueAt ?? null,
     provenance: "llm",
     sourceTaskId,
     createdByUserId: input.ownerUserId,
   });
   await promoteLlmTaskEvidence(db, result.taskId, input.evidence);
   return result;
+}
+
+export async function retireLlmTasksForTombstonedFacts(db: Kysely<DB>, factIds: string[]): Promise<number> {
+  if (factIds.length === 0) return 0;
+  const now = new Date().toISOString();
+  const result = await db
+    .updateTable("tasks")
+    .set({ valid_to: now, updated_at: now })
+    .where("valid_to", "is", null)
+    .where("provenance", "=", "llm")
+    .where("source", "=", "llm")
+    .where((eb) =>
+      eb.exists(
+        eb
+          .selectFrom("task_evidence as tombstoned_evidence")
+          .select(sql`1`.as("x"))
+          .whereRef("tombstoned_evidence.task_id", "=", "tasks.id")
+          .where("tombstoned_evidence.kind", "=", "fact")
+          .where("tombstoned_evidence.ref_id", "in", factIds),
+      ),
+    )
+    .where((eb) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom("task_evidence as active_evidence")
+            .innerJoin("indexed_file_facts as active_fact", "active_fact.id", "active_evidence.ref_id")
+            .select(sql`1`.as("x"))
+            .whereRef("active_evidence.task_id", "=", "tasks.id")
+            .where("active_evidence.kind", "=", "fact")
+            .where("active_fact.fact_type", "=", "llm_task")
+            .where("active_fact.deleted_at", "is", null),
+        ),
+      ),
+    )
+    .executeTakeFirst();
+  return Number(result.numUpdatedRows ?? 0);
 }
 
 async function promoteLlmTaskEvidence(

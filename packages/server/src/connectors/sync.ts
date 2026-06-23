@@ -237,6 +237,14 @@ export async function runConnectorSync(
       createdByUserId: config.created_by,
       lastSeenSyncRunId: syncRunId,
     };
+    const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+    const llmTaskGenerator =
+      settings?.gemini_api_key && settings.enrichment_enabled !== 0
+        ? createGeminiGenerator(settings.gemini_api_key, {
+            maxRpm: appConfig?.GEMINI_MAX_RPM,
+            maxRetries: appConfig?.GEMINI_MAX_RETRIES,
+          })
+        : undefined;
 
     for await (const item of connector.sync({
       connectorConfigId: config.id,
@@ -327,6 +335,7 @@ export async function runConnectorSync(
           emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
           experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
           contentChanged: itemResult.kind !== "unchanged",
+          generator: llmTaskGenerator,
         });
 
         if (itemResult.kind === "unchanged") {
