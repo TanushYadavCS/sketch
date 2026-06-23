@@ -1,5 +1,6 @@
 import { normalizeName } from "../connectors/name-normalize";
 import { TEST_ACCOUNT_ENTITY_ID, type TaskStatus, createTaskRepository } from "../db/repositories/tasks";
+import { assignMembership, upsertWorkCycle } from "../db/repositories/work-cycles";
 import { readJsonObject } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
@@ -51,6 +52,26 @@ export async function materializeStructuralTask(
     sourceTaskId: task.sourceTaskId,
   });
   await repo.upsertEvidence(result.taskId, "file", indexedFileId);
+  if (deps.experimentalFlag && task.cycle?.isSprint) {
+    const scopeEntityId = resolveCycleScope(deps, task.cycle.scopeRef)?.id ?? null;
+    const cycle = await upsertWorkCycle(deps.db, {
+      scopeEntityId,
+      source: fact.source,
+      externalRef: task.cycle.externalRef,
+      name: task.cycle.name,
+      sequence: task.cycle.sequence ?? deriveSprintSequence(task.cycle.name),
+      startsAt: task.cycle.startsAt ?? null,
+      endsAt: task.cycle.endsAt ?? null,
+      state: "active",
+      lastSeenSyncRunId: fact.last_seen_sync_run_id,
+    });
+    await assignMembership(deps.db, {
+      taskId: result.taskId,
+      cycleId: cycle.cycleId,
+      sourceFactId: fact.id,
+      at: new Date().toISOString(),
+    });
+  }
   return { kind: "task_materialized", taskId: result.taskId, created: result.created };
 }
 
@@ -82,6 +103,20 @@ function resolveAssignee(
   return matches.find((entity) => entity.source_type === "person" && entity.id !== TEST_ACCOUNT_ENTITY_ID) ?? null;
 }
 
+function resolveCycleScope(
+  deps: MaterializeDeps,
+  scopeRef: { source: string; sourceId: string } | undefined,
+): EntityRow | null {
+  if (!scopeRef) return null;
+  return deps.index.bySourceRef.get(`${scopeRef.source}:${scopeRef.sourceId}`) ?? null;
+}
+
+function deriveSprintSequence(name: string): number | undefined {
+  const match = /\bSprint\s+(\d+)\b/i.exec(name);
+  if (!match) return undefined;
+  return Number(match[1]);
+}
+
 function readTask(value: unknown): {
   sourceTaskId: string;
   externalRef?: string;
@@ -92,6 +127,16 @@ function readTask(value: unknown): {
   dueAt?: string;
   project?: { name: string; source: string; sourceId: string };
   assignee?: { name: string; email?: string; source?: string; sourceId?: string };
+  cycle?: {
+    source: string;
+    externalRef: string;
+    name: string;
+    scopeRef?: { source: string; sourceId: string };
+    startsAt?: string;
+    endsAt?: string;
+    sequence?: number;
+    isSprint: boolean;
+  };
 } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -112,6 +157,7 @@ function readTask(value: unknown): {
     dueAt: readOptionalString(record.dueAt),
     project: readProject(record.project),
     assignee: readAssignee(record.assignee),
+    cycle: readCycle(record.cycle),
   };
 }
 
@@ -136,6 +182,47 @@ function readAssignee(
     source: readOptionalString(record.source),
     sourceId: readOptionalString(record.sourceId),
   };
+}
+
+function readCycle(value: unknown):
+  | {
+      source: string;
+      externalRef: string;
+      name: string;
+      scopeRef?: { source: string; sourceId: string };
+      startsAt?: string;
+      endsAt?: string;
+      sequence?: number;
+      isSprint: boolean;
+    }
+  | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.source !== "string" ||
+    typeof record.externalRef !== "string" ||
+    typeof record.name !== "string" ||
+    typeof record.isSprint !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    source: record.source,
+    externalRef: record.externalRef,
+    name: record.name,
+    scopeRef: readScopeRef(record.scopeRef),
+    startsAt: readOptionalString(record.startsAt),
+    endsAt: readOptionalString(record.endsAt),
+    sequence: typeof record.sequence === "number" ? record.sequence : undefined,
+    isSprint: record.isSprint,
+  };
+}
+
+function readScopeRef(value: unknown): { source: string; sourceId: string } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.source !== "string" || typeof record.sourceId !== "string") return undefined;
+  return { source: record.source, sourceId: record.sourceId };
 }
 
 function readOptionalString(value: unknown): string | undefined {
