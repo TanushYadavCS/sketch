@@ -369,6 +369,9 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
       throw new Error("llm_task parentRef requires source and sourceId");
     }
+    if (raw.dueDate !== undefined && typeof raw.dueDate !== "string") {
+      throw new Error("llm_task dueDate must be a string");
+    }
   } else if (input.factType === "person_seed") {
     if (!hasString(raw, "source") && !hasString(raw, "subtype")) {
       throw new Error("person_seed facts require raw source identity or subtype metadata");
@@ -460,6 +463,7 @@ export async function upsertLlmTaskFact(
     candidateId,
     title: input.candidate.title,
     owner: input.candidate.owner,
+    dueDate: readOptionalDueDate(input.candidate.dueDate),
     hasOwnerVerbObject: input.candidate.hasOwnerVerbObject,
     corroborationKey: input.corroborationKey,
     parentRef: input.parentRef,
@@ -485,6 +489,10 @@ export async function upsertLlmTaskFact(
   };
   await createIndexedFileFactRepository(db).upsertFact(factInput);
   return { emitted: true, factKey: buildIndexedFileFactKey(factInput), candidateId };
+}
+
+function readOptionalDueDate(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
 }
 
 export function buildLlmTaskCandidateId(indexedFileId: string, title: string): string {
