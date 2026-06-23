@@ -1,75 +1,74 @@
 import { createSubEntityRepository } from "../db/repositories/sub-entities";
-import { resolveParent } from "./materialize-commitment";
+import { type SubEntityParentInput, resolveParent } from "./materialize-commitment";
 import { resolveEffectiveAt } from "./materialize-effective-time";
 import { readJsonObject } from "./materialize-json";
 import type { IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import { valueSignatureForParts } from "./sub-entity-signatures";
 
-export async function materializeDecision(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
+export async function materializeMilestone(
+  deps: MaterializeDeps,
+  fact: IndexedFileFactRow,
+): Promise<MaterializeResult> {
   if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
-  const decision = readDecision(raw);
-  if (!decision) return { kind: "skipped", reason: "invalid_decision" };
+  const milestone = readMilestone(raw);
+  if (!milestone) return { kind: "skipped", reason: "invalid_milestone" };
 
-  const parent = resolveParent(deps, decision, ["project", "person"]);
-  if (!parent) return { kind: "skipped", reason: "missing_decision_parent" };
-  const effectiveAt = await resolveEffectiveAt(deps, fact, decision.decidedAt);
-  if (!effectiveAt) return { kind: "skipped", reason: "missing_decision_effective_time" };
+  const parent = resolveParent(deps, milestone, ["project"]);
+  if (!parent) return { kind: "skipped", reason: "missing_milestone_parent" };
+  const effectiveAt = await resolveEffectiveAt(deps, fact, milestone.observedAt);
+  if (!effectiveAt) return { kind: "skipped", reason: "missing_milestone_effective_time" };
 
   const repo = createSubEntityRepository(deps.db);
   const result = await repo.supersedeSubEntity({
     parentEntityId: parent.id,
-    kind: "decision",
-    dedupName: decision.topic,
-    displayName: decision.statement,
+    kind: "milestone",
+    dedupName: milestone.milestoneName,
+    displayName: milestone.milestoneName,
+    status: milestone.status,
+    dueAt: milestone.dueAt,
+    valueSignature: valueSignatureForParts([milestone.status, milestone.dueAt]),
     provenance: fact.source === "llm" ? "corroborated_llm" : "structural",
-    metadata: {
-      decidedBy: decision.decidedBy,
-      decidedAt: decision.decidedAt,
-      rationale: decision.rationale,
-    },
     sourceFactId: fact.id,
     effectiveAt,
   });
   await repo.upsertSubEntityEvidence(result.subEntityId, "fact", fact.id);
-  for (const fileId of decision.evidence.fileIds) {
+  for (const fileId of milestone.evidence.fileIds) {
     await repo.upsertSubEntityEvidence(result.subEntityId, "file", fileId);
   }
-  for (const entityId of decision.evidence.entityIds) {
+  for (const entityId of milestone.evidence.entityIds) {
     await repo.upsertSubEntityEvidence(result.subEntityId, "entity", entityId);
   }
-  return { kind: "decision_materialized" };
+  return { kind: "milestone_materialized" };
 }
 
-interface DecisionInput {
-  decisionId: string;
-  parentRef?: { source: string; sourceId: string };
-  parentEntityId?: string;
-  topic: string;
-  statement: string;
-  decidedBy?: string;
-  decidedAt?: string;
-  rationale?: string;
+interface MilestoneInput extends SubEntityParentInput {
+  milestoneId: string;
+  milestoneName: string;
+  status: "planned" | "hit" | "missed";
+  dueAt: string;
+  observedAt?: string;
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
-function readDecision(raw: Record<string, unknown>): DecisionInput | null {
+function readMilestone(raw: Record<string, unknown>): MilestoneInput | null {
   if (
-    typeof raw.decisionId !== "string" ||
-    typeof raw.topic !== "string" ||
-    typeof raw.statement !== "string" ||
+    typeof raw.milestoneId !== "string" ||
+    typeof raw.milestoneName !== "string" ||
+    (raw.status !== "planned" && raw.status !== "hit" && raw.status !== "missed") ||
+    typeof raw.dueAt !== "string" ||
     !isEvidence(raw.evidence)
   ) {
     return null;
   }
   return {
-    decisionId: raw.decisionId,
+    milestoneId: raw.milestoneId,
+    milestoneName: raw.milestoneName,
     parentRef: readParentRef(raw.parentRef),
     parentEntityId: readOptionalString(raw.parentEntityId),
-    topic: raw.topic,
-    statement: raw.statement,
-    decidedBy: readOptionalString(raw.decidedBy),
-    decidedAt: readOptionalString(raw.decidedAt),
-    rationale: readOptionalString(raw.rationale),
+    status: raw.status,
+    dueAt: raw.dueAt,
+    observedAt: readOptionalString(raw.observedAt),
     evidence: { fileIds: raw.evidence.fileIds, entityIds: raw.evidence.entityIds },
   };
 }

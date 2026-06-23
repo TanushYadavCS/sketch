@@ -124,6 +124,7 @@ import * as m121 from "./migrations/121-tasks";
 import * as m122 from "./migrations/122-tasks-owner";
 import * as m123 from "./migrations/123-sub-entities";
 import * as m124 from "./migrations/124-tasks-assignee-name";
+import * as m125 from "./migrations/125-milestone-series-and-value-signature";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -252,6 +253,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "122-tasks-owner": m122,
           "123-sub-entities": m123,
           "124-tasks-assignee-name": m124,
+          "125-milestone-series-and-value-signature": m125,
         };
       },
     },
