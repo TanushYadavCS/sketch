@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 105;
+const EXPECTED_MIGRATION_COUNT = 106;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -161,6 +161,15 @@ describe("runMigrations — full sequence", () => {
     expect(names[102]).toBe("107-tasks");
     expect(names[103]).toBe("108-tasks-owner");
     expect(names[104]).toBe("109-sub-entities");
+    expect(names[105]).toBe("110-tasks-assignee-name");
+  });
+
+  it("creates the task assignee_name column", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{ name: string; type: string }>`PRAGMA table_info('tasks')`.execute(db);
+
+    expect(columns.rows).toEqual(expect.arrayContaining([expect.objectContaining({ name: "assignee_name" })]));
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

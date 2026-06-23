@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 105;
+const EXPECTED_MIGRATION_COUNT = 106;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -138,6 +138,18 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[102]).toBe("107-tasks");
     expect(names[103]).toBe("108-tasks-owner");
     expect(names[104]).toBe("109-sub-entities");
+    expect(names[105]).toBe("110-tasks-assignee-name");
+  });
+
+  it("creates the task assignee_name column", async () => {
+    const columns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'tasks'
+    `.execute(db);
+
+    expect(columns.rows).toEqual(expect.arrayContaining([expect.objectContaining({ column_name: "assignee_name" })]));
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
