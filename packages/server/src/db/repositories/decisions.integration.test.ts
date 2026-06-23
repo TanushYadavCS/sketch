@@ -85,6 +85,7 @@ describe("decision sub-entity supersession postgres", () => {
       valid_from: "2026-06-22T09:00:00.000Z",
       valid_to: "2026-06-22T11:00:00.000Z",
     });
+    expect(rows.find((row) => row.display_name === "Use price A")?.status).toBe("superseded");
     expect(rows.find((row) => row.display_name === "Use price B")).toMatchObject({
       status: "active",
       valid_from: "2026-06-22T11:00:00.000Z",

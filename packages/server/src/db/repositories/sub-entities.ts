@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { defaultValueSignature, seriesKeyFor } from "../../entities/sub-entity-signatures";
 import type { DB, SubEntitiesTable } from "../schema";
 
 export type SubEntityStatus = "open" | "done" | "dropped" | string;
@@ -29,6 +30,9 @@ export interface SupersedeSubEntityInput {
   kind: string;
   dedupName: string;
   displayName: string;
+  status?: string;
+  dueAt?: string | null;
+  valueSignature?: string;
   provenance: string;
   metadata?: Record<string, unknown> | null;
   sourceFactId?: string | null;
@@ -146,6 +150,7 @@ async function upsertInTransaction(
   return db.transaction().execute(async (trx) => {
     const parentScopeKey = input.parentEntityId ?? GLOBAL_PARENT_SCOPE_KEY;
     const normalized = normalizeName(input.dedupName ?? input.displayName);
+    const valueSignature = defaultValueSignature(input.displayName);
     const existing = await selectCurrent(trx, parentScopeKey, input.kind, normalized);
     const now = new Date().toISOString();
     if (!existing) {
@@ -164,6 +169,8 @@ async function upsertInTransaction(
           valid_to: null,
           provenance: input.provenance,
           due_at: input.dueAt ?? null,
+          value_signature: valueSignature,
+          series_key: seriesKeyFor(parentScopeKey, input.kind, normalized),
           created_by_user_id: input.ownerUserId ?? null,
           source_fact_id: input.sourceFactId ?? null,
           metadata_json: input.metadata ? JSON.stringify(input.metadata) : null,
@@ -185,7 +192,8 @@ async function supersedeInTransaction(
   return db.transaction().execute(async (trx) => {
     const parentScopeKey = input.parentEntityId;
     const normalized = normalizeName(input.dedupName);
-    const displayNormalized = normalizeName(input.displayName);
+    const incomingSig = input.valueSignature ?? defaultValueSignature(input.displayName);
+    const hasDomainStatus = input.status !== undefined;
     const effectiveAt = new Date(input.effectiveAt).toISOString();
     const now = new Date().toISOString();
     const rows = await trx
@@ -196,9 +204,7 @@ async function supersedeInTransaction(
       .where("normalized_name", "=", normalized)
       .orderBy("valid_from", "asc")
       .execute();
-    const existingAtTime = rows.find(
-      (row) => row.valid_from === effectiveAt && normalizeName(row.display_name) === displayNormalized,
-    );
+    const existingAtTime = rows.find((row) => row.valid_from === effectiveAt && row.value_signature === incomingSig);
     if (existingAtTime) {
       await refreshSupersededRow(trx, existingAtTime.id, input, now);
       return { subEntityId: existingAtTime.id, created: false, superseded: false };
@@ -206,15 +212,15 @@ async function supersedeInTransaction(
 
     const predecessor = [...rows].reverse().find((row) => row.valid_from <= effectiveAt);
     const successor = rows.find((row) => row.valid_from > effectiveAt);
-    if (predecessor && normalizeName(predecessor.display_name) === displayNormalized) {
+    if (predecessor && predecessor.value_signature === incomingSig) {
       return { subEntityId: predecessor.id, created: false, superseded: false };
     }
 
     if (predecessor && (predecessor.valid_to === null || predecessor.valid_to > effectiveAt)) {
-      const update = trx
-        .updateTable("sub_entities")
-        .set({ valid_to: effectiveAt, status: "superseded", updated_at: now })
-        .where("id", "=", predecessor.id);
+      const closeValues = hasDomainStatus
+        ? { valid_to: effectiveAt, updated_at: now }
+        : { valid_to: effectiveAt, status: "superseded", updated_at: now };
+      const update = trx.updateTable("sub_entities").set(closeValues).where("id", "=", predecessor.id);
       const result =
         predecessor.valid_to === null
           ? await update.where("valid_to", "is", null).executeTakeFirst()
@@ -233,12 +239,14 @@ async function supersedeInTransaction(
         kind: input.kind,
         normalized_name: normalized,
         display_name: input.displayName,
-        status: validTo === null ? "active" : "superseded",
+        status: input.status ?? (validTo === null ? "active" : "superseded"),
         status_authority: "external",
         valid_from: effectiveAt,
         valid_to: validTo,
         provenance: input.provenance,
-        due_at: null,
+        due_at: input.dueAt ?? null,
+        value_signature: incomingSig,
+        series_key: seriesKeyFor(parentScopeKey, input.kind, normalized),
         created_by_user_id: null,
         source_fact_id: input.sourceFactId ?? null,
         metadata_json: input.metadata ? JSON.stringify(input.metadata) : null,
@@ -255,17 +263,17 @@ async function refreshSupersededRow(
   input: SupersedeSubEntityInput,
   now: string,
 ): Promise<void> {
-  await db
-    .updateTable("sub_entities")
-    .set({
-      display_name: input.displayName,
-      provenance: input.provenance,
-      source_fact_id: input.sourceFactId ?? null,
-      metadata_json: input.metadata ? JSON.stringify(input.metadata) : null,
-      updated_at: now,
-    })
-    .where("id", "=", subEntityId)
-    .execute();
+  const values = {
+    display_name: input.displayName,
+    provenance: input.provenance,
+    due_at: input.dueAt ?? null,
+    value_signature: input.valueSignature ?? defaultValueSignature(input.displayName),
+    source_fact_id: input.sourceFactId ?? null,
+    metadata_json: input.metadata ? JSON.stringify(input.metadata) : null,
+    updated_at: now,
+    ...(input.status !== undefined ? { status: input.status } : {}),
+  };
+  await db.updateTable("sub_entities").set(values).where("id", "=", subEntityId).execute();
 }
 
 async function selectCurrent(

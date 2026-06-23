@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 106;
+const EXPECTED_MIGRATION_COUNT = 107;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -139,6 +139,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[103]).toBe("108-tasks-owner");
     expect(names[104]).toBe("109-sub-entities");
     expect(names[105]).toBe("110-tasks-assignee-name");
+    expect(names[106]).toBe("111-milestone-series-and-value-signature");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -171,6 +172,8 @@ describe("runMigrations on Postgres — full sequence", () => {
         expect.objectContaining({ column_name: "kind", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "normalized_name", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "source_fact_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "value_signature", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "series_key", data_type: "text", is_nullable: "YES" }),
       ]),
     );
 
@@ -186,6 +189,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(currentIndex?.indexdef).toContain("kind");
     expect(currentIndex?.indexdef).toContain("normalized_name");
     expect(currentIndex?.indexdef).toContain("WHERE (valid_to IS NULL)");
+    expect(indexes.rows.map((row) => row.indexname)).toContain("idx_sub_entities_series_key");
 
     const foreignKeys = await sql<{
       column_name: string;
@@ -224,6 +228,28 @@ describe("runMigrations on Postgres — full sequence", () => {
       ]),
     );
     expect(foreignKeys.rows.some((row) => row.column_name === "source_fact_id")).toBe(false);
+  });
+
+  it("creates milestone series columns and indexes", async () => {
+    const taskColumns = await sql<{ column_name: string; data_type: string; is_nullable: string }>`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'tasks'
+    `.execute(db);
+    expect(taskColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "milestone_series_key", data_type: "text", is_nullable: "YES" }),
+      ]),
+    );
+
+    const taskIndexes = await sql<{ indexname: string }>`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'tasks'
+    `.execute(db);
+    expect(taskIndexes.rows.map((row) => row.indexname)).toContain("idx_tasks_milestone_series_key");
   });
 
   it("running migrations twice is idempotent", async () => {

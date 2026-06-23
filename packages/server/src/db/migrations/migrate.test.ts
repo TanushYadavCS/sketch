@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 106;
+const EXPECTED_MIGRATION_COUNT = 107;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -162,6 +162,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[103]).toBe("108-tasks-owner");
     expect(names[104]).toBe("109-sub-entities");
     expect(names[105]).toBe("110-tasks-assignee-name");
+    expect(names[106]).toBe("111-milestone-series-and-value-signature");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -189,6 +190,8 @@ describe("runMigrations — full sequence", () => {
         expect.objectContaining({ name: "normalized_name", type: "TEXT", notnull: 1 }),
         expect.objectContaining({ name: "status_authority", type: "TEXT", notnull: 1, dflt_value: "'local'" }),
         expect.objectContaining({ name: "source_fact_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "value_signature", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "series_key", type: "TEXT", notnull: 0 }),
       ]),
     );
 
@@ -203,6 +206,9 @@ describe("runMigrations — full sequence", () => {
           name: "idx_sub_entities_current_scope_kind_name",
           unique: 1,
           partial: 1,
+        }),
+        expect.objectContaining({
+          name: "idx_sub_entities_series_key",
         }),
       ]),
     );
@@ -220,6 +226,20 @@ describe("runMigrations — full sequence", () => {
       ]),
     );
     expect(foreignKeys.rows.some((row) => row.from === "source_fact_id")).toBe(false);
+  });
+
+  it("creates milestone series columns and indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const taskColumns = await sql<{ name: string; type: string; notnull: number }>`PRAGMA table_info(tasks)`.execute(
+      db,
+    );
+    expect(taskColumns.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "milestone_series_key", type: "TEXT", notnull: 0 })]),
+    );
+
+    const taskIndexes = await sql<{ name: string }>`PRAGMA index_list(tasks)`.execute(db);
+    expect(taskIndexes.rows.map((row) => row.name)).toContain("idx_tasks_milestone_series_key");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {

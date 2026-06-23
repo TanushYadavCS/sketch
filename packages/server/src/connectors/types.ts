@@ -212,6 +212,17 @@ export interface FeatureFactRaw {
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
+export interface MilestoneFactRaw {
+  milestoneId: string;
+  milestoneName: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  status: "planned" | "hit" | "missed";
+  dueAt: string;
+  observedAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+}
+
 export interface DecisionSeed {
   decisionId?: string;
   topic: string;
@@ -266,6 +277,7 @@ export type IndexedFileFactRaw =
     }
   | CommitmentSeed
   | FeatureFactRaw
+  | MilestoneFactRaw
   | DecisionSeed
   | LlmTaskFactRaw
   | { providerFileId: string; contactPoint: ContactPointSeed }

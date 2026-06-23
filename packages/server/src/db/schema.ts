@@ -878,6 +878,7 @@ export interface TasksTable {
   completed_at: string | null;
   valid_from: string | null;
   valid_to: string | null;
+  milestone_series_key: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -901,6 +902,8 @@ export interface SubEntitiesTable {
   valid_to: string | null;
   provenance: string;
   due_at: string | null;
+  value_signature: string | null;
+  series_key: string | null;
   created_by_user_id: string | null;
   source_fact_id: string | null;
   metadata_json: string | null;

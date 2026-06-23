@@ -78,6 +78,7 @@ export type MaterializeResult =
   | { kind: "commitment_materialized" }
   | { kind: "feature_materialized" }
   | { kind: "decision_materialized" }
+  | { kind: "milestone_materialized" }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
