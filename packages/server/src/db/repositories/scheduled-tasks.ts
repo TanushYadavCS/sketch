@@ -7,7 +7,8 @@
  * allowing callers to distinguish "no such task" from a no-op update.
  *
  * UpdatableFields covers only the columns that make sense to change post-creation.
- * Delivery target, platform, context type, and created_by are fixed at creation time.
+ * Delivery target, platform, context type, created_by, and origin chat are fixed
+ * at creation time.
  */
 import { randomUUID } from "node:crypto";
 import type { Insertable, Kysely, Selectable } from "kysely";
@@ -82,16 +83,19 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    async update(id: string, fields: Partial<UpdatableFields>): Promise<ScheduledTaskRow | undefined> {
+    async update(
+      id: string,
+      fields: Partial<UpdatableFields>,
+      options: { incrementRevision?: boolean } = {},
+    ): Promise<ScheduledTaskRow | undefined> {
       const existing = await db.selectFrom("scheduled_tasks").select("id").where("id", "=", id).executeTakeFirst();
       if (!existing) return undefined;
 
-      if (Object.keys(fields).length > 0) {
-        await db
-          .updateTable("scheduled_tasks")
-          .set({ ...fields, updated_at: sql`CURRENT_TIMESTAMP` })
-          .where("id", "=", id)
-          .execute();
+      if (Object.keys(fields).length > 0 || options.incrementRevision) {
+        const updateFields = options.incrementRevision
+          ? { ...fields, updated_at: sql<string>`CURRENT_TIMESTAMP`, revision: sql<number>`revision + 1` }
+          : { ...fields, updated_at: sql<string>`CURRENT_TIMESTAMP` };
+        await db.updateTable("scheduled_tasks").set(updateFields).where("id", "=", id).execute();
       }
 
       return db.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
@@ -105,12 +109,15 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    async updateStatus(id: string, status: "active" | "paused" | "completed"): Promise<void> {
-      await db
-        .updateTable("scheduled_tasks")
-        .set({ status, updated_at: sql`CURRENT_TIMESTAMP` })
-        .where("id", "=", id)
-        .execute();
+    async updateStatus(
+      id: string,
+      status: "active" | "paused" | "completed",
+      options: { incrementRevision?: boolean } = {},
+    ): Promise<void> {
+      const fields = options.incrementRevision
+        ? { status, updated_at: sql<string>`CURRENT_TIMESTAMP`, revision: sql<number>`revision + 1` }
+        : { status, updated_at: sql<string>`CURRENT_TIMESTAMP` };
+      await db.updateTable("scheduled_tasks").set(fields).where("id", "=", id).execute();
     },
 
     async remove(id: string): Promise<boolean> {

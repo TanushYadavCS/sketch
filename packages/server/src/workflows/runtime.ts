@@ -344,7 +344,7 @@ export async function testAutomationStep(
 
   try {
     const input = params.useLatestUpstreamOutput
-      ? await resolveLatestUpstreamOutput({ params, stepId, edges })
+      ? await resolveLatestUpstreamOutput({ params, stepId, edges, currentRunId: runId })
       : (params.input ?? null);
     const output = await executeWorkflowStep({
       params,
@@ -553,17 +553,19 @@ async function resolveLatestUpstreamOutput(params: {
   params: ExecuteAutomationParams;
   stepId: string;
   edges: WorkflowEdge[];
+  currentRunId: string;
 }): Promise<unknown> {
   const upstreamId = params.edges.find((edge) => edge.to === params.stepId)?.from;
   if (!upstreamId) return null;
-  const latest = await params.params.runsRepo.getLatest(params.params.task.id);
-  if (!latest?.step_outputs) return null;
-  try {
-    const outputs = JSON.parse(latest.step_outputs) as Record<string, StepOutput>;
-    return outputs[upstreamId]?.output ?? null;
-  } catch {
-    return null;
+  const runs = await params.params.runsRepo.list(params.params.task.id, 20);
+  for (const run of runs) {
+    if (run.id === params.currentRunId || run.status !== "completed" || !run.step_outputs) continue;
+    try {
+      const outputs = JSON.parse(run.step_outputs) as Record<string, StepOutput>;
+      if (outputs[upstreamId]?.status === "completed") return outputs[upstreamId]?.output ?? null;
+    } catch {}
   }
+  return null;
 }
 
 function buildTriggerSamplePayload(task: ScheduledTaskRow, step: WorkflowStep): unknown {

@@ -9,6 +9,7 @@ import {
   CopySimpleIcon,
   DotsThreeIcon,
   LightningIcon,
+  MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
   RobotIcon,
@@ -38,12 +39,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@sketch/ui/components/dropdown-menu";
+import { Input } from "@sketch/ui/components/input";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@sketch/ui/components/select";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@sketch/ui/components/tooltip";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate } from "@tanstack/react-router";
-import { type MouseEvent, useState } from "react";
+import { type MouseEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 
@@ -54,6 +57,27 @@ export const scheduledTasksRoute = createRoute({
 });
 
 const TASKS_QUERY_KEY = ["scheduled-tasks"];
+
+type OwnershipTab = "all" | "mine" | "system";
+type StatusFilter = "all" | "active" | "attention" | "paused";
+type TaskSort = "recent" | "next" | "name" | "attention";
+type CreatorOption = {
+  value: string;
+  label: string;
+  count: number;
+};
+
+const SORT_LABELS: Record<TaskSort, string> = {
+  recent: "Recent activity",
+  next: "Next run",
+  name: "Name",
+  attention: "Needs attention",
+};
+const ALL_CREATORS_FILTER = "all";
+const SYSTEM_CREATOR_FILTER = "system";
+const USER_CREATOR_PREFIX = "user:";
+const toolbarSelectTriggerClass =
+  "h-8 w-full rounded-full border-border/45 bg-muted/45 px-3 text-xs font-medium text-muted-foreground shadow-none transition-colors hover:border-border/70 hover:bg-muted/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring/35 lg:w-auto [&>svg]:ml-1.5 [&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:opacity-60";
 
 function formatDateTime(value: string | null) {
   if (!value) return "Never";
@@ -68,20 +92,6 @@ function formatDateTime(value: string | null) {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
-}
-
-function formatRelativeTime(value: string | null) {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  const diff = Date.now() - date.getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
 }
 
 function getSubtitle(role: "admin" | "member") {
@@ -106,18 +116,45 @@ function removeTaskFromCache(tasks: ScheduledTaskListItem[] | undefined, taskId:
   return (tasks ?? []).filter((task) => task.id !== taskId);
 }
 
-function isMultiStep(task: ScheduledTaskListItem): boolean {
-  if (!task.steps) return false;
+type CompactWorkflowStep = {
+  id: string;
+  type: string;
+  label: string;
+  icon?: string;
+};
+
+function parseWorkflowSteps(task: ScheduledTaskListItem): CompactWorkflowStep[] {
+  if (!task.steps) return [];
   try {
-    const steps = JSON.parse(task.steps) as Array<{ type: string }>;
-    return steps.filter((step) => step.type !== "trigger").length > 1;
+    const value = JSON.parse(task.steps) as unknown;
+    if (!Array.isArray(value)) return [];
+    const steps: CompactWorkflowStep[] = [];
+    for (const step of value) {
+      if (typeof step !== "object" || step === null) continue;
+      const record = step as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id : "";
+      const type = typeof record.type === "string" ? record.type : "";
+      const label = typeof record.label === "string" ? record.label : "";
+      const icon = typeof record.icon === "string" ? record.icon : undefined;
+      if (id && type && label) steps.push(icon ? { id, type, label, icon } : { id, type, label });
+    }
+    return steps;
   } catch {
-    return task.stepCount > 2;
+    return [];
   }
 }
 
 function hasWorkflowSteps(task: ScheduledTaskListItem): boolean {
   return Boolean(task.steps);
+}
+
+function isWorkflowTask(task: ScheduledTaskListItem): boolean {
+  return parseWorkflowSteps(task).some((step) => step.type !== "trigger");
+}
+
+function workflowStepCount(task: ScheduledTaskListItem): number {
+  const steps = parseWorkflowSteps(task);
+  return steps.length > 0 ? steps.length : task.stepCount;
 }
 
 function isCanvasManaged(task: ScheduledTaskListItem): boolean {
@@ -146,17 +183,103 @@ function getTaskScheduleLabel(task: ScheduledTaskListItem): string {
   return parts.join(" · ");
 }
 
-function getStepSummary(task: ScheduledTaskListItem): string | null {
-  if (!task.steps) return null;
-  try {
-    const steps = JSON.parse(task.steps) as Array<{ label: string; type: string }>;
-    return steps
-      .filter((s) => s.type !== "trigger")
-      .map((s) => `${s.label} (${s.type})`)
-      .join(" \u2192 ");
-  } catch {
-    return null;
+function formatClockTime(hourValue: string, minuteValue: string): string | null {
+  if (!/^\d+$/.test(hourValue) || !/^\d+$/.test(minuteValue)) return null;
+  const hour = Number.parseInt(hourValue, 10);
+  const minute = Number.parseInt(minuteValue, 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  const period = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
+function weekdayLabel(value: string): string | null {
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const pluralDayNames = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
+  const normalized = value.toUpperCase();
+  const namedDayMap = new Map(dayNames.map((day, index) => [day.toUpperCase(), index]));
+  const normalizeDay = (part: string): number | null => {
+    if (/^\d+$/.test(part)) {
+      const day = Number.parseInt(part, 10);
+      if (day === 7) return 0;
+      return day >= 0 && day <= 6 ? day : null;
+    }
+    return namedDayMap.get(part) ?? null;
+  };
+
+  if (normalized === "*") return "Daily";
+  if (normalized === "1-5" || normalized === "MON-FRI") return "Weekdays";
+  if (normalized === "0,6" || normalized === "6,0" || normalized === "SUN,SAT" || normalized === "SAT,SUN") {
+    return "Weekends";
   }
+
+  const singleDay = normalizeDay(normalized);
+  if (singleDay !== null) return pluralDayNames[singleDay];
+
+  const parts = normalized.split(",");
+  const days = parts.map(normalizeDay);
+  if (days.length > 0 && days.every((day): day is number => day !== null)) {
+    return days.map((day) => dayNames[day]).join(", ");
+  }
+
+  return null;
+}
+
+function ordinalDay(value: string): string | null {
+  if (!/^\d+$/.test(value)) return null;
+  const day = Number.parseInt(value, 10);
+  if (day < 1 || day > 31) return null;
+  const suffix =
+    day % 10 === 1 && day !== 11
+      ? "st"
+      : day % 10 === 2 && day !== 12
+        ? "nd"
+        : day % 10 === 3 && day !== 13
+          ? "rd"
+          : "th";
+  return `${day}${suffix}`;
+}
+
+function formatCronSchedule(value: string): string | null {
+  const parts = value.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+
+  if (/^\*\/\d+$/.test(minute) && hour === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    const minutes = Number.parseInt(minute.slice(2), 10);
+    if (Number.isFinite(minutes) && minutes > 0) return `Every ${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+
+  if (minute === "0" && hour === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    return "Every hour";
+  }
+
+  if (minute === "0" && /^\*\/\d+$/.test(hour) && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    const hours = Number.parseInt(hour.slice(2), 10);
+    if (Number.isFinite(hours) && hours > 0) return `Every ${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+
+  const time = formatClockTime(hour, minute);
+  if (!time) return null;
+
+  if (dayOfMonth === "*" && month === "*") {
+    const dayLabel = weekdayLabel(dayOfWeek);
+    if (dayLabel) return `${dayLabel} at ${time}`;
+  }
+
+  if (dayOfWeek === "*" && month === "*") {
+    const day = ordinalDay(dayOfMonth);
+    if (day) return `Monthly on the ${day} at ${time}`;
+  }
+
+  return null;
+}
+
+function getReminderScheduleLabel(task: ScheduledTaskListItem): string {
+  if (task.scheduleType === "cron") return formatCronSchedule(task.scheduleValue) ?? task.scheduleLabel;
+  if (task.scheduleType === "once") return `Once at ${formatDateTime(task.scheduleValue)}`;
+  return getTaskScheduleLabel(task);
 }
 
 function formatDelivery(task: ScheduledTaskListItem): string {
@@ -165,12 +288,120 @@ function formatDelivery(task: ScheduledTaskListItem): string {
   return `${platform} · ${task.delivery.label}`;
 }
 
+function taskTimestamp(value: string | null): number | null {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function getCreatorDisplayName(task: ScheduledTaskListItem): string {
+  if (!task.createdBy) return "System";
+  return task.creatorName ?? task.createdBy;
+}
+
+function getCreatorFilterValue(task: ScheduledTaskListItem): string {
+  return task.createdBy ? `${USER_CREATOR_PREFIX}${task.createdBy}` : SYSTEM_CREATOR_FILTER;
+}
+
+function creatorFilterMatchesTask(filter: string, task: ScheduledTaskListItem): boolean {
+  if (filter === ALL_CREATORS_FILTER) return true;
+  return getCreatorFilterValue(task) === filter;
+}
+
+function buildCreatorOptions(tasks: ScheduledTaskListItem[], currentUserId: string | undefined): CreatorOption[] {
+  const optionMap = new Map<string, CreatorOption>();
+
+  for (const task of tasks) {
+    const value = getCreatorFilterValue(task);
+    const existing = optionMap.get(value);
+    if (existing) {
+      optionMap.set(value, { ...existing, count: existing.count + 1 });
+      continue;
+    }
+
+    const baseLabel = getCreatorDisplayName(task);
+    optionMap.set(value, {
+      value,
+      label: task.createdBy && task.createdBy === currentUserId ? `${baseLabel} (you)` : baseLabel,
+      count: 1,
+    });
+  }
+
+  const userOptions = [...optionMap.values()]
+    .filter((option) => option.value !== SYSTEM_CREATOR_FILTER)
+    .sort((left, right) => left.label.localeCompare(right.label));
+  const systemOption = optionMap.get(SYSTEM_CREATOR_FILTER);
+
+  return [
+    { value: ALL_CREATORS_FILTER, label: "All creators", count: tasks.length },
+    ...userOptions,
+    ...(systemOption ? [systemOption] : []),
+  ];
+}
+
+function taskSearchText(task: ScheduledTaskListItem): string {
+  return [
+    task.title,
+    task.prompt,
+    task.description,
+    task.creatorName,
+    task.createdBy,
+    getCreatorDisplayName(task),
+    task.targetLabel,
+    task.targetKindLabel,
+    task.scheduleLabel,
+    task.delivery.label,
+    task.deliveryTarget,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+}
+
+function isSystemTask(task: ScheduledTaskListItem): boolean {
+  return !task.createdBy;
+}
+
+function isAttentionTask(task: ScheduledTaskListItem): boolean {
+  return task.lastRunStatus === "failed" || task.triggerConfig?.status === "error";
+}
+
+function sortTasks(tasks: ScheduledTaskListItem[], sort: TaskSort): ScheduledTaskListItem[] {
+  return [...tasks].sort((left, right) => {
+    if (sort === "name") {
+      return (left.title ?? left.prompt).localeCompare(right.title ?? right.prompt);
+    }
+    if (sort === "next") {
+      return (
+        (taskTimestamp(left.nextRunAt) ?? Number.POSITIVE_INFINITY) -
+        (taskTimestamp(right.nextRunAt) ?? Number.POSITIVE_INFINITY)
+      );
+    }
+    if (sort === "attention") {
+      return (
+        Number(isAttentionTask(right)) - Number(isAttentionTask(left)) ||
+        (taskTimestamp(right.lastRunAt) ?? Number.NEGATIVE_INFINITY) -
+          (taskTimestamp(left.lastRunAt) ?? Number.NEGATIVE_INFINITY)
+      );
+    }
+    return (
+      (taskTimestamp(right.lastRunAt) ?? taskTimestamp(right.createdAt) ?? Number.NEGATIVE_INFINITY) -
+      (taskTimestamp(left.lastRunAt) ?? taskTimestamp(left.createdAt) ?? Number.NEGATIVE_INFINITY)
+    );
+  });
+}
+
 export function ScheduledTasksPage() {
   const auth = useDashboardAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [deletingTask, setDeletingTask] = useState<ScheduledTaskListItem | null>(null);
+  const [query, setQuery] = useState("");
+  const [ownershipTab, setOwnershipTab] = useState<OwnershipTab>("all");
+  const [creatorFilter, setCreatorFilter] = useState(ALL_CREATORS_FILTER);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sort, setSort] = useState<TaskSort>("recent");
 
   const tasksQuery = useQuery({
     queryKey: TASKS_QUERY_KEY,
@@ -224,11 +455,65 @@ export function ScheduledTasksPage() {
 
   const tasks = tasksQuery.data ?? [];
   const isAdmin = auth.role === "admin";
+  const normalizedQuery = query.trim().toLowerCase();
+  const ownershipGroups = useMemo(
+    () => ({
+      all: tasks,
+      mine: auth.userId ? tasks.filter((task) => task.createdBy === auth.userId) : [],
+      system: tasks.filter(isSystemTask),
+    }),
+    [auth.userId, tasks],
+  );
+  const creatorOptions = useMemo(() => buildCreatorOptions(tasks, auth.userId), [auth.userId, tasks]);
+  const tabTasks = isAdmin ? ownershipGroups[ownershipTab] : tasks;
+  const creatorTasks = useMemo(
+    () =>
+      isAdmin && creatorFilter !== ALL_CREATORS_FILTER
+        ? tabTasks.filter((task) => creatorFilterMatchesTask(creatorFilter, task))
+        : tabTasks,
+    [creatorFilter, isAdmin, tabTasks],
+  );
+  const searchedTasks = useMemo(
+    () =>
+      normalizedQuery ? creatorTasks.filter((task) => taskSearchText(task).includes(normalizedQuery)) : creatorTasks,
+    [creatorTasks, normalizedQuery],
+  );
+  const statusCounts = useMemo(
+    () => ({
+      all: searchedTasks.length,
+      active: searchedTasks.filter((task) => task.status === "active").length,
+      attention: searchedTasks.filter(isAttentionTask).length,
+      paused: searchedTasks.filter((task) => task.status === "paused").length,
+    }),
+    [searchedTasks],
+  );
+  const filteredTasks = useMemo(() => {
+    const byStatus =
+      statusFilter === "all"
+        ? searchedTasks
+        : statusFilter === "attention"
+          ? searchedTasks.filter(isAttentionTask)
+          : searchedTasks.filter((task) => task.status === statusFilter);
+    return sortTasks(byStatus, sort);
+  }, [searchedTasks, sort, statusFilter]);
+  const hasFilters =
+    Boolean(normalizedQuery) ||
+    statusFilter !== "all" ||
+    (isAdmin && ownershipTab !== "all") ||
+    (isAdmin && creatorFilter !== ALL_CREATORS_FILTER);
+  const handleOwnershipTabChange = (value: OwnershipTab) => {
+    setOwnershipTab(value);
+    setCreatorFilter(ALL_CREATORS_FILTER);
+  };
+  const handleCreatorFilterChange = (value: string) => {
+    setCreatorFilter(value);
+    if (value !== ALL_CREATORS_FILTER) setOwnershipTab("all");
+  };
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div>
-        <h1 className="text-xl font-semibold text-foreground">Automations</h1>
+        <h1 className="text-xl font-semibold text-foreground">Scheduled tasks</h1>
         <p className="mt-2 text-sm text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
       </div>
 
@@ -241,33 +526,54 @@ export function ScheduledTasksPage() {
           <EmptyState />
         ) : (
           <>
-            <p className="mb-3 text-sm font-medium text-muted-foreground">
-              {isAdmin ? "All automations" : "Your automations"}
-            </p>
-            <div className="rounded-lg border border-border bg-card">
-              {tasks.map((task, index) => (
-                <TaskRow
-                  key={task.id}
-                  task={task}
-                  isAdmin={isAdmin}
-                  isExpanded={expandedTaskId === task.id}
-                  isLast={index === tasks.length - 1}
-                  isMutating={
-                    (pauseMutation.isPending && pauseMutation.variables === task.id) ||
-                    (resumeMutation.isPending && resumeMutation.variables === task.id) ||
-                    (deleteMutation.isPending && deleteMutation.variables === task.id) ||
-                    (triggerMutation.isPending && triggerMutation.variables === task.id)
-                  }
-                  onToggleExpanded={() => setExpandedTaskId((current) => (current === task.id ? null : task.id))}
-                  onPause={() => pauseMutation.mutate(task.id)}
-                  onResume={() => resumeMutation.mutate(task.id)}
-                  onDelete={() => setDeletingTask(task)}
-                  onTrigger={() => triggerMutation.mutate(task.id)}
-                  onOpenBuilder={() =>
-                    navigate({ to: "/scheduled-tasks/$taskId/edit", params: { taskId: task.id }, search: {} })
-                  }
-                />
-              ))}
+            <AutomationToolbar
+              query={query}
+              onQueryChange={setQuery}
+              sort={sort}
+              onSortChange={setSort}
+              isAdmin={isAdmin}
+              ownershipTab={ownershipTab}
+              onOwnershipTabChange={handleOwnershipTabChange}
+              ownershipCounts={{
+                all: ownershipGroups.all.length,
+                mine: ownershipGroups.mine.length,
+                system: ownershipGroups.system.length,
+              }}
+              creatorFilter={creatorFilter}
+              onCreatorFilterChange={handleCreatorFilterChange}
+              creatorOptions={creatorOptions}
+              statusFilter={statusFilter}
+              onStatusFilterChange={setStatusFilter}
+              statusCounts={statusCounts}
+            />
+            <div className="overflow-hidden rounded-[10px] border border-border bg-card shadow-sm">
+              {filteredTasks.length > 0 ? (
+                filteredTasks.map((task, index) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    isAdmin={isAdmin}
+                    isExpanded={expandedTaskId === task.id}
+                    isLast={index === filteredTasks.length - 1}
+                    isMutating={
+                      (pauseMutation.isPending && pauseMutation.variables === task.id) ||
+                      (resumeMutation.isPending && resumeMutation.variables === task.id) ||
+                      (deleteMutation.isPending && deleteMutation.variables === task.id) ||
+                      (triggerMutation.isPending && triggerMutation.variables === task.id)
+                    }
+                    onToggleExpanded={() => setExpandedTaskId((current) => (current === task.id ? null : task.id))}
+                    onPause={() => pauseMutation.mutate(task.id)}
+                    onResume={() => resumeMutation.mutate(task.id)}
+                    onDelete={() => setDeletingTask(task)}
+                    onTrigger={() => triggerMutation.mutate(task.id)}
+                    onOpenBuilder={() =>
+                      navigate({ to: "/scheduled-tasks/$taskId/edit", params: { taskId: task.id }, search: {} })
+                    }
+                  />
+                ))
+              ) : (
+                <FilteredEmptyState hasFilters={hasFilters} />
+              )}
             </div>
           </>
         )}
@@ -289,16 +595,326 @@ export function ScheduledTasksPage() {
   );
 }
 
-function PlatformIcon({ platform, multiStep }: { platform: "slack" | "whatsapp"; multiStep: boolean }) {
+function AutomationToolbar({
+  query,
+  onQueryChange,
+  sort,
+  onSortChange,
+  isAdmin,
+  ownershipTab,
+  onOwnershipTabChange,
+  ownershipCounts,
+  creatorFilter,
+  onCreatorFilterChange,
+  creatorOptions,
+  statusFilter,
+  onStatusFilterChange,
+  statusCounts,
+}: {
+  query: string;
+  onQueryChange: (value: string) => void;
+  sort: TaskSort;
+  onSortChange: (value: TaskSort) => void;
+  isAdmin: boolean;
+  ownershipTab: OwnershipTab;
+  onOwnershipTabChange: (value: OwnershipTab) => void;
+  ownershipCounts: Record<OwnershipTab, number>;
+  creatorFilter: string;
+  onCreatorFilterChange: (value: string) => void;
+  creatorOptions: CreatorOption[];
+  statusFilter: StatusFilter;
+  onStatusFilterChange: (value: StatusFilter) => void;
+  statusCounts: Record<StatusFilter, number>;
+}) {
+  const selectedCreatorLabel = creatorOptions.find((option) => option.value === creatorFilter)?.label ?? "All creators";
+
   return (
-    <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted">
-      {multiStep ? (
-        <LightningIcon size={18} className="text-muted-foreground" weight="fill" />
-      ) : platform === "slack" ? (
-        <SlackLogoIcon size={18} className="text-muted-foreground" />
-      ) : (
-        <WhatsappLogoIcon size={18} className="text-muted-foreground" />
+    <div className="mb-3 space-y-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+        <div className="relative min-w-0 flex-1">
+          <MagnifyingGlassIcon
+            size={16}
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Search tasks"
+            aria-label="Search tasks"
+            className="h-9 rounded-[8px] pl-8 text-sm"
+          />
+        </div>
+        {isAdmin ? (
+          <Select value={creatorFilter} onValueChange={onCreatorFilterChange}>
+            <SelectTrigger
+              className={cn(toolbarSelectTriggerClass, "lg:min-w-[148px]")}
+              aria-label="Filter by team member"
+            >
+              <span className="min-w-0 flex-1 truncate text-left">{selectedCreatorLabel}</span>
+            </SelectTrigger>
+            <SelectContent>
+              {creatorOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  <span className="flex min-w-0 items-center gap-3">
+                    <span className="truncate">{option.label}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">{option.count}</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : null}
+        <Select value={sort} onValueChange={(value) => onSortChange(value as TaskSort)}>
+          <SelectTrigger
+            className={cn(toolbarSelectTriggerClass, "lg:min-w-[136px]")}
+            aria-label="Sort scheduled tasks"
+          >
+            <span className="min-w-0 flex-1 truncate text-left">{SORT_LABELS[sort]}</span>
+          </SelectTrigger>
+          <SelectContent>
+            {(Object.keys(SORT_LABELS) as TaskSort[]).map((key) => (
+              <SelectItem key={key} value={key}>
+                {SORT_LABELS[key]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {isAdmin ? (
+        <div className="flex items-center gap-1 border-b border-border">
+          <OwnershipTabButton
+            label="All tasks"
+            count={ownershipCounts.all}
+            active={ownershipTab === "all"}
+            onClick={() => onOwnershipTabChange("all")}
+          />
+          <OwnershipTabButton
+            label="My tasks"
+            count={ownershipCounts.mine}
+            active={ownershipTab === "mine"}
+            onClick={() => onOwnershipTabChange("mine")}
+          />
+          <OwnershipTabButton
+            label="System tasks"
+            count={ownershipCounts.system}
+            active={ownershipTab === "system"}
+            onClick={() => onOwnershipTabChange("system")}
+          />
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StatusFilterChip
+          label="All"
+          count={statusCounts.all}
+          active={statusFilter === "all"}
+          onClick={() => onStatusFilterChange("all")}
+        />
+        <StatusFilterChip
+          label="Active"
+          count={statusCounts.active}
+          active={statusFilter === "active"}
+          onClick={() => onStatusFilterChange("active")}
+        />
+        <StatusFilterChip
+          label="Needs attention"
+          count={statusCounts.attention}
+          active={statusFilter === "attention"}
+          tone="attention"
+          onClick={() => onStatusFilterChange("attention")}
+        />
+        <StatusFilterChip
+          label="Paused"
+          count={statusCounts.paused}
+          active={statusFilter === "paused"}
+          onClick={() => onStatusFilterChange("paused")}
+        />
+      </div>
+    </div>
+  );
+}
+
+function OwnershipTabButton({
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+        active ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
       )}
+      onClick={onClick}
+      aria-pressed={active}
+    >
+      {label} <span className="ml-1 text-xs text-muted-foreground">{count}</span>
+    </button>
+  );
+}
+
+function StatusFilterChip({
+  label,
+  count,
+  active,
+  tone,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  tone?: "attention";
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "inline-flex h-7 items-center gap-2 rounded-full px-3 text-xs font-medium transition-colors",
+        active
+          ? "bg-foreground text-background"
+          : tone === "attention" && count > 0
+            ? "bg-destructive/10 text-destructive hover:bg-destructive/15"
+            : "bg-muted text-muted-foreground hover:bg-muted/70",
+      )}
+      onClick={onClick}
+      aria-pressed={active}
+    >
+      {label}
+      <span
+        className={cn(
+          "grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] tabular-nums",
+          active ? "bg-background/15 text-background/80" : "bg-background/50 text-muted-foreground",
+        )}
+      >
+        {count}
+      </span>
+    </button>
+  );
+}
+
+function PlatformIcon({
+  platform,
+  workflow,
+  status,
+}: {
+  platform: "slack" | "whatsapp";
+  workflow: boolean;
+  status: ScheduledTaskListItem["status"];
+}) {
+  const activeWorkflow = workflow && status === "active";
+  return (
+    <div
+      aria-label={workflow ? `${status} workflow icon` : `${platform} reminder icon`}
+      className={cn(
+        "grid size-7 shrink-0 place-items-center rounded-[8px]",
+        activeWorkflow ? "bg-brand-accent/12 text-brand-accent" : "bg-muted text-muted-foreground",
+      )}
+    >
+      {workflow ? (
+        <LightningIcon size={14} weight="fill" />
+      ) : platform === "slack" ? (
+        <SlackLogoIcon size={14} />
+      ) : (
+        <WhatsappLogoIcon size={14} />
+      )}
+    </div>
+  );
+}
+
+function StepChainIcon({ step }: { step: CompactWorkflowStep }) {
+  if (step.type === "trigger") return <LightningIcon size={11} weight="fill" />;
+  if (step.type === "agent") return <RobotIcon size={11} weight="bold" />;
+  if (step.type === "action" || step.icon === "code") return <CodeIcon size={11} weight="bold" />;
+  return <CheckCircleIcon size={11} weight="fill" />;
+}
+
+function WorkflowChain({ task }: { task: ScheduledTaskListItem }) {
+  const steps = parseWorkflowSteps(task);
+  const visibleSteps = steps.length > 0 ? steps.slice(0, 3) : [];
+  const hiddenStepCount = Math.max(0, steps.length - visibleSteps.length);
+  if (visibleSteps.length === 0) return null;
+
+  return (
+    <span
+      className="grid h-5 w-[92px] grid-flow-col auto-cols-[20px] items-center justify-start gap-1"
+      aria-label={`${workflowStepCount(task)} workflow steps`}
+    >
+      {visibleSteps.map((step) => (
+        <span key={step.id} className="inline-flex items-center gap-1">
+          <span
+            className="grid size-5 place-items-center rounded-[5px] border border-border/80 bg-muted/45 text-muted-foreground"
+            title={step.label}
+          >
+            <StepChainIcon step={step} />
+          </span>
+        </span>
+      ))}
+      {hiddenStepCount > 0 ? (
+        <span className="grid size-5 place-items-center rounded-[5px] border border-border/80 bg-muted text-[10px] font-medium text-muted-foreground">
+          +{hiddenStepCount}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function RunHealth({ task }: { task: ScheduledTaskListItem }) {
+  const hasRuns = task.runCount > 0 || Boolean(task.lastRunStatus);
+  const count = hasRuns ? Math.min(5, Math.max(1, task.runCount || 1)) : 0;
+  const dots = Array.from({ length: 5 }, (_, index) => {
+    const status =
+      index === 0 && task.lastRunStatus === "failed"
+        ? "failed"
+        : index === 0 && task.lastRunStatus === "running"
+          ? "running"
+          : "completed";
+    return { id: `${task.id}-run-health-${index + 1}`, status };
+  });
+
+  return (
+    <span
+      className="grid h-5 w-[46px] grid-cols-5 place-items-center gap-1"
+      title={`Last run: ${task.lastRunStatus ?? "unknown"}`}
+      aria-label={hasRuns ? `${count} recent run signals` : "No recent run signals"}
+    >
+      {dots.map((dot, index) => (
+        <span
+          key={dot.id}
+          className={cn(
+            "size-1.5 rounded-full",
+            index >= count && "invisible",
+            dot.status === "failed" ? "bg-destructive" : dot.status === "running" ? "bg-blue-500" : "bg-emerald-500",
+          )}
+        />
+      ))}
+    </span>
+  );
+}
+
+function RowMiddleSignal({ task, workflow }: { task: ScheduledTaskListItem; workflow: boolean }) {
+  if (workflow) {
+    return (
+      <div className="hidden h-5 w-[154px] shrink-0 items-center justify-start gap-4 md:flex">
+        <WorkflowChain task={task} />
+        <RunHealth task={task} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="hidden h-5 w-[154px] shrink-0 items-center justify-start md:flex">
+      <span className="truncate text-xs text-muted-foreground" title={getTaskScheduleLabel(task)}>
+        {getReminderScheduleLabel(task)}
+      </span>
     </div>
   );
 }
@@ -328,26 +944,23 @@ function TaskRow({
   onTrigger: () => void;
   onOpenBuilder: () => void;
 }) {
-  const multi = isMultiStep(task);
-  const canvasManaged = isCanvasManaged(task);
+  const workflow = isWorkflowTask(task);
   const displayName = task.title ?? task.prompt;
-  const stepSummary = multi ? getStepSummary(task) : null;
-  const lastRunLabel = formatRelativeTime(task.lastRunAt);
   const hasActions = true;
 
   return (
     <div className={cn(!isLast && "border-b border-border")}>
-      <div className="flex items-center gap-4 px-4 py-4 transition-colors hover:bg-muted/50">
-        <PlatformIcon platform={task.platform} multiStep={multi} />
+      <div className="flex min-h-[56px] items-center gap-3 px-3.5 py-2.5 transition-colors hover:bg-muted/35">
+        <PlatformIcon platform={task.platform} workflow={workflow} status={task.status} />
 
         <button
           type="button"
-          className="min-w-0 flex-1 text-left"
+          className="min-w-0 flex-[1.4] text-left"
           onClick={onToggleExpanded}
           aria-expanded={isExpanded}
           aria-label={isExpanded ? `Hide details for ${displayName}` : `Show details for ${displayName}`}
         >
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0">
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -359,33 +972,17 @@ function TaskRow({
               </Tooltip>
             </TooltipProvider>
 
-            {stepSummary ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{stepSummary}</p> : null}
-
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
-              {getTaskScheduleLabel(task)}
-              {lastRunLabel ? (
-                <>
-                  <span className="mx-1.5">&middot;</span>
-                  Last run: {lastRunLabel}
-                  {task.lastRunStatus === "completed" ? (
-                    <CheckCircleIcon size={12} className="ml-0.5 inline text-emerald-500" />
-                  ) : task.lastRunStatus === "failed" ? (
-                    <XCircleIcon size={12} className="ml-0.5 inline text-destructive" />
-                  ) : null}
-                </>
-              ) : null}
-              {task.runCount > 0 ? (
-                <>
-                  <span className="mx-1.5">&middot;</span>
-                  Runs: {task.runCount}
-                </>
-              ) : null}
+              {workflow ? `workflow · ${workflowStepCount(task)} steps` : "reminder"}
+              {isAdmin ? ` · by ${getCreatorDisplayName(task)}` : ""}
+              {task.lastRunStatus === "failed" ? <span className="text-destructive"> · failed</span> : null}
             </p>
           </div>
         </button>
 
-        <div className="flex shrink-0 items-center gap-2">
-          {canvasManaged ? <CanvasManagedBadge triggerConfig={task.triggerConfig} /> : null}
+        <RowMiddleSignal task={task} workflow={workflow} />
+
+        <div className="flex shrink-0 items-center justify-end md:w-[86px]">
           <TaskStatusBadge status={task.status} />
         </div>
 
@@ -806,46 +1403,27 @@ function DetailItem({ label, value }: { label: string; value: string }) {
 }
 
 function TaskStatusBadge({ status }: { status: ScheduledTaskListItem["status"] }) {
+  const label = `Task status: ${status}`;
+
   if (status === "active") {
-    return <Badge className="shrink-0 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Active</Badge>;
+    return (
+      <Badge aria-label={label} className="shrink-0 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+        Active
+      </Badge>
+    );
   }
 
   if (status === "paused") {
     return (
-      <Badge variant="secondary" className="shrink-0">
+      <Badge aria-label={label} variant="secondary" className="shrink-0">
         Paused
       </Badge>
     );
   }
 
   return (
-    <Badge variant="outline" className="shrink-0">
+    <Badge aria-label={label} variant="outline" className="shrink-0">
       Completed
-    </Badge>
-  );
-}
-
-function CanvasManagedBadge({ triggerConfig }: { triggerConfig: ScheduledTaskListItem["triggerConfig"] }) {
-  const status = triggerConfig?.status;
-  if (status === "active") {
-    return (
-      <Badge variant="outline" className="shrink-0 border-blue-500/30 text-blue-700 dark:text-blue-300">
-        Canvas
-      </Badge>
-    );
-  }
-
-  if (status === "error") {
-    return (
-      <Badge variant="outline" className="shrink-0 border-destructive/30 text-destructive">
-        Canvas error
-      </Badge>
-    );
-  }
-
-  return (
-    <Badge variant="outline" className="shrink-0">
-      Canvas
     </Badge>
   );
 }
@@ -909,6 +1487,22 @@ function ErrorState() {
         <ClockIcon size={24} className="text-muted-foreground" />
       </div>
       <p className="mt-4 text-sm font-medium text-destructive">Failed to load automations.</p>
+    </div>
+  );
+}
+
+function FilteredEmptyState({ hasFilters }: { hasFilters: boolean }) {
+  return (
+    <div className="flex min-h-[164px] flex-col items-center justify-center px-6 py-10 text-center">
+      <div className="flex size-10 items-center justify-center rounded-[8px] bg-muted">
+        <MagnifyingGlassIcon size={20} className="text-muted-foreground" />
+      </div>
+      <p className="mt-3 text-sm font-medium text-foreground">
+        {hasFilters ? "No tasks match these filters" : "No tasks here yet"}
+      </p>
+      <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+        {hasFilters ? "Try a different search, creator, status, or sort." : "Tasks will appear here once they exist."}
+      </p>
     </div>
   );
 }

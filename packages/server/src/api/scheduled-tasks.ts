@@ -11,6 +11,7 @@ import {
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
+import { type StoredConversationMessage, createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -66,6 +67,12 @@ interface ScheduledTaskListItem {
   canDelete: boolean;
   title: string | null;
   description: string | null;
+  originChat: {
+    platform: "web" | "slack" | "whatsapp";
+    conversationId: string;
+    providerThreadId: string | null;
+    currentMessageId: number | null;
+  } | null;
   steps: string | null;
   stepCount: number;
   triggerConfig: WorkflowTriggerConfig | null;
@@ -76,6 +83,14 @@ interface ScheduledTaskListItem {
   delivery: WorkflowDelivery & { label: string };
   lastRunStatus: string | null;
   runCount: number;
+}
+
+interface ScheduledTaskOriginChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  senderName: string;
+  text: string;
+  createdAt: string;
 }
 
 function compareNewestFirst(a: ScheduledTaskRow, b: ScheduledTaskRow): number {
@@ -145,6 +160,17 @@ function getTargetKindLabel(row: ScheduledTaskRow): ScheduledTaskListItem["targe
   if (row.platform === "slack") return "Slack DM";
   if (row.context_type === "group") return "WhatsApp group";
   return "WhatsApp DM";
+}
+
+function toOriginChatMessage(message: StoredConversationMessage): ScheduledTaskOriginChatMessage {
+  const text = message.text.trim() || (message.attachments.length > 0 ? "See attached files." : "");
+  return {
+    id: String(message.id),
+    role: message.isBot ? "assistant" : "user",
+    senderName: message.senderName,
+    text: message.isBot ? text : `${message.senderName}: ${text}`,
+    createdAt: message.receivedAt,
+  };
 }
 
 async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Promise<ScheduledTaskListItem[]> {
@@ -295,6 +321,16 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       canDelete: true,
       title: row.title,
       description: row.description,
+      originChat:
+        row.origin_conversation_id &&
+        (row.origin_platform === "web" || row.origin_platform === "slack" || row.origin_platform === "whatsapp")
+          ? {
+              platform: row.origin_platform,
+              conversationId: row.origin_conversation_id,
+              providerThreadId: row.origin_provider_thread_id,
+              currentMessageId: row.origin_message_id,
+            }
+          : null,
       steps: normalizedSteps ?? null,
       stepCount,
       triggerConfig,
@@ -390,6 +426,33 @@ export function scheduledTaskRoutes(
     return c.json({ tasks: await buildTaskListItems(db, rows) });
   });
 
+  routes.get("/:id/origin-chat/messages", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    const originPlatform = result.row.origin_platform;
+    const originConversationId = result.row.origin_conversation_id;
+    if (!originConversationId || (originPlatform !== "slack" && originPlatform !== "whatsapp")) {
+      return c.json({ messages: [] as ScheduledTaskOriginChatMessage[] });
+    }
+
+    const conversationId = Number(originConversationId);
+    if (!Number.isSafeInteger(conversationId) || conversationId <= 0) {
+      return c.json({ messages: [] as ScheduledTaskOriginChatMessage[] });
+    }
+
+    const conversations = createConversationRepository(db);
+    const resultMessages = await conversations.listMessages(conversationId, {
+      order: "desc",
+      limit: 50,
+      includeBotMessages: true,
+      beforeMessageId: result.row.origin_message_id ? result.row.origin_message_id + 1 : undefined,
+      providerThreadId: result.row.origin_provider_thread_id ?? undefined,
+    });
+    return c.json({ messages: resultMessages.messages.reverse().map(toOriginChatMessage) });
+  });
+
   routes.get("/:id", async (c) => {
     const id = c.req.param("id");
     const result = await loadAccessibleTask(c, id);
@@ -447,7 +510,7 @@ export function scheduledTaskRoutes(
       }
 
       const fields = scheduledTaskFieldsFromSaveRequest(request);
-      await trx
+      let update = trx
         .updateTable("scheduled_tasks")
         .set({
           ...fields,
@@ -455,8 +518,19 @@ export function scheduledTaskRoutes(
           updated_at: sql`CURRENT_TIMESTAMP`,
           last_edited_by: userId,
         })
-        .where("id", "=", id)
-        .execute();
+        .where("id", "=", id);
+      if (request.expectedRevision !== undefined) {
+        update = update.where("revision", "=", request.expectedRevision);
+      }
+      const updateResult = await update.executeTakeFirst();
+      if (Number(updateResult.numUpdatedRows ?? 0) === 0) {
+        const latest = await trx
+          .selectFrom("scheduled_tasks")
+          .select("revision")
+          .where("id", "=", id)
+          .executeTakeFirst();
+        return { kind: "revision_conflict" as const, currentRevision: latest?.revision ?? current.revision };
+      }
 
       const txStepContentRepo = createAutomationStepContentRepository(trx);
       await txStepContentRepo.deleteOrphanedSteps(

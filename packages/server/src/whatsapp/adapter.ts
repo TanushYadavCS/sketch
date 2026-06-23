@@ -19,6 +19,7 @@ import {
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
+import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   type ReasoningTextCommand,
   type ToolProgressCommand,
@@ -477,6 +478,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             deliveryTarget: deliveryJid,
             createdBy: user.id,
             creatorTimezone: user.timezone,
+            origin: {
+              platform: "whatsapp" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           };
 
           const result = await runAgent({
@@ -521,12 +528,16 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
-          if (result.trace.finalText) {
-            const sent = await onFinalMessage(result.trace.finalText);
+          const finalText = appendAutomationBuilderLinks(
+            result.trace.finalText,
+            result.trace.automationArtifacts ?? [],
+          );
+          if (finalText) {
+            const sent = await onFinalMessage(finalText);
             await captureBotReply({
               conversationId: capture.conversation.id,
               sent,
-              text: result.trace.finalText,
+              text: finalText,
               botName: settingsRow?.bot_name,
             });
           }
@@ -796,6 +807,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
             creatorTimezone: user?.timezone ?? null,
+            origin: {
+              platform: "whatsapp" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -813,12 +830,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const finalText = user
+          ? appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? [])
+          : result.trace.finalText;
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureBotReply({
             conversationId: capture.conversation.id,
             sent,
-            text: result.trace.finalText,
+            text: finalText,
             botName: settingsRow?.bot_name,
           });
         }

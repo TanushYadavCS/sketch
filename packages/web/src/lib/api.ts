@@ -119,6 +119,12 @@ export interface ScheduledTaskListItem {
   canDelete: boolean;
   title: string | null;
   description: string | null;
+  originChat: {
+    platform: "web" | "slack" | "whatsapp";
+    conversationId: string;
+    providerThreadId: string | null;
+    currentMessageId: number | null;
+  } | null;
   steps: string | null;
   stepCount: number;
   triggerConfig: WorkflowTriggerConfig | null;
@@ -136,6 +142,14 @@ export interface ScheduledTaskListItem {
   };
   lastRunStatus: string | null;
   runCount: number;
+}
+
+export interface ScheduledTaskOriginChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  senderName: string;
+  text: string;
+  createdAt: string;
 }
 
 export interface WorkflowTriggerConfig {
@@ -1024,6 +1038,14 @@ export type WebChatMessagePart =
       type: "data-integration-connection";
       id: string;
       data: WebChatIntegrationConnectionData;
+    }
+  | {
+      type: "data-interruption";
+      id: string;
+      data: {
+        label: string;
+        detail?: string;
+      };
     };
 
 export interface WebChatStoredMessage {
@@ -1781,6 +1803,11 @@ export const api = {
     async get(taskId: string) {
       const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`);
       return res.automation;
+    },
+    originChatMessages(taskId: string) {
+      return request<{ messages: ScheduledTaskOriginChatMessage[] }>(
+        `/api/scheduled-tasks/${taskId}/origin-chat/messages`,
+      );
     },
     async save(taskId: string, body: AutomationBuilderSaveRequest) {
       const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`, {

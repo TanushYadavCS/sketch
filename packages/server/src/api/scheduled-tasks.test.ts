@@ -5,6 +5,7 @@ import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import * as automationRunsModule from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -164,6 +165,9 @@ describe("Scheduled Tasks API", () => {
       status: "active",
       next_run_at: null,
       output_target: recipient.slack_user_id,
+      origin_platform: "web",
+      origin_conversation_id: "chat-alpha",
+      origin_provider_thread_id: null,
     });
     await tasks.add({
       id: "task-group",
@@ -204,8 +208,119 @@ describe("Scheduled Tasks API", () => {
     expect(slackTask.creatorName).toBe("Alice Member");
     expect(slackTask.targetKindLabel).toBe("Slack channel");
     expect(slackTask.delivery.label).toBe("Recipient Person");
+    expect(slackTask.originChat).toEqual({
+      platform: "web",
+      conversationId: "chat-alpha",
+      providerThreadId: null,
+      currentMessageId: null,
+    });
     expect(whatsappTask.targetKindLabel).toBe("WhatsApp group");
     expect(whatsappTask.canResume).toBe(true);
+    expect(whatsappTask.originChat).toBeNull();
+
+    const detail = await app.request("/api/scheduled-tasks/task-channel", { headers: { Cookie: cookie } });
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toMatchObject({
+      automation: {
+        id: "task-channel",
+        originChat: {
+          platform: "web",
+          conversationId: "chat-alpha",
+          providerThreadId: null,
+          currentMessageId: null,
+        },
+      },
+    });
+  });
+
+  it("returns the persisted Slack origin chat transcript for accessible automations", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const conversations = createConversationRepository(db);
+    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
+    const conversation = await conversations.getOrCreate(
+      { platform: "slack", kind: "channel", providerConversationId: "C123" },
+      "design-wins",
+    );
+    const originMessage = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.1",
+      senderName: "Alice",
+      text: "Create a Trustpilot wins automation",
+      providerThreadId: "1700.1",
+      receivedAt: "2026-06-01T00:00:00.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.2",
+      senderName: "Sketch",
+      isBot: true,
+      text: "All set - here's the draft.",
+      providerThreadId: "1700.1",
+      receivedAt: "2026-06-01T00:00:02.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.3",
+      senderName: "Bob",
+      text: "Unrelated top-level note",
+      providerThreadId: "1700.3",
+    });
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.4",
+      senderName: "Alice",
+      text: "Later note after creation",
+      providerThreadId: "1700.1",
+    });
+
+    await tasks.add({
+      id: "task-origin",
+      platform: "slack",
+      context_type: "channel",
+      delivery_target: "C123",
+      thread_ts: "1700.1",
+      prompt: "Post design wins",
+      schedule_type: "cron",
+      schedule_value: "0 9 * * 1",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: member.id,
+      status: "active",
+      next_run_at: null,
+      origin_platform: "slack",
+      origin_conversation_id: String(conversation.id),
+      origin_provider_thread_id: "1700.1",
+      origin_message_id: originMessage.row.id,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-origin/origin-chat/messages", {
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      messages: [
+        {
+          id: "1",
+          role: "user",
+          senderName: "Alice",
+          text: "Alice: Create a Trustpilot wins automation",
+          createdAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    });
   });
 
   it("returns Canvas-managed trigger metadata for external workflows", async () => {

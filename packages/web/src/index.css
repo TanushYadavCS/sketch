@@ -361,7 +361,7 @@
 }
 
 .automation-builder-flow .react-flow__edge:hover .react-flow__edge-path {
-  stroke: rgba(255, 255, 255, 0.36);
+  stroke: #7b86aa;
 }
 
 .automation-builder-flow .react-flow__edge.animated .react-flow__edge-path {
@@ -370,8 +370,8 @@
 }
 
 .automation-builder-handle.react-flow__handle {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: #101010;
   box-shadow: 0 0 0 2px #050505;
@@ -387,8 +387,8 @@
 
 .automation-builder-handle.react-flow__handle.connectingto,
 .automation-builder-handle.react-flow__handle.connectingfrom {
-  border-color: rgba(254, 237, 1, 0.7);
-  background: var(--brand-accent);
+  border-color: #6b7dfa;
+  background: #6b7dfa;
   opacity: 1;
 }
 

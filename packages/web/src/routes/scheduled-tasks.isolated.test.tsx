@@ -57,6 +57,7 @@ function buildTask(overrides: Partial<ScheduledTaskListItem> = {}): ScheduledTas
     canDelete: true,
     title: null,
     description: null,
+    originChat: null,
     steps: null,
     stepCount: 0,
     triggerConfig: null,
@@ -125,6 +126,7 @@ describe("ScheduledTasksPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Post the Monday revenue summary")).toBeInTheDocument();
     });
+    expect(screen.getByText("Mondays at 9:00 AM")).toBeInTheDocument();
   });
 
   it("shows the empty state when there are no tasks", async () => {
@@ -180,7 +182,7 @@ describe("ScheduledTasksPage", () => {
       expect(screen.getByText("Post the Monday revenue summary")).toBeInTheDocument();
     });
     expect(screen.getByText("Send a WhatsApp follow-up")).toBeInTheDocument();
-    expect(screen.queryAllByText(/Alice Admin/).length).toBeGreaterThanOrEqual(0);
+    expect(screen.getAllByText(/by Alice Admin/).length).toBeGreaterThanOrEqual(2);
 
     unmount();
 
@@ -206,6 +208,120 @@ describe("ScheduledTasksPage", () => {
     });
     expect(screen.queryByText("Send a WhatsApp follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText(/Alice Admin/)).not.toBeInTheDocument();
+  });
+
+  it("renders compact workflow row signals", async () => {
+    installTaskHandlers([
+      buildTask({
+        title: "Churn-risk alert -> notify CS",
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Churn threshold", icon: "clock" },
+          { id: "score", type: "agent", label: "Score account", icon: "robot" },
+          { id: "notify", type: "action", label: "Notify CS", icon: "slack" },
+          { id: "log", type: "action", label: "Log outcome", icon: "code" },
+        ]),
+        stepCount: 4,
+        runCount: 5,
+        lastRunStatus: "completed",
+      }),
+    ]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Churn-risk alert -> notify CS")).toBeInTheDocument();
+    });
+    expect(screen.getByText("workflow · 4 steps · by Alice Member")).toBeInTheDocument();
+    expect(screen.getByLabelText("4 workflow steps")).toBeInTheDocument();
+    expect(screen.getByText("+1")).toBeInTheDocument();
+    expect(screen.getByLabelText("5 recent run signals")).toBeInTheDocument();
+  });
+
+  it("filters admin tasks by owner, status, and search", async () => {
+    setMockAuth({ role: "admin", userId: "admin-1" });
+    installTaskHandlers([
+      buildTask({
+        id: "task-mine",
+        title: "Owned workflow",
+        createdBy: "admin-1",
+        creatorName: "Admin User",
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock" },
+          { id: "agent", type: "agent", label: "Analyze", icon: "robot" },
+        ]),
+        stepCount: 2,
+      }),
+      buildTask({
+        id: "task-system",
+        title: "System digest",
+        createdBy: null,
+        creatorName: null,
+        status: "paused",
+        canPause: false,
+        canResume: true,
+      }),
+      buildTask({
+        id: "task-attention",
+        title: "Failing campaign",
+        createdBy: "user-2",
+        creatorName: "Beta User",
+        lastRunStatus: "failed",
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Owned workflow")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: /All tasks 3/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /My tasks 1/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /System tasks 1/i })).toBeInTheDocument();
+    expect(screen.getByText(/by Admin User/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Filter by team member" }));
+    await user.click(screen.getByRole("option", { name: /Beta User/i }));
+    expect(screen.getByText("Failing campaign")).toBeInTheDocument();
+    expect(screen.queryByText("Owned workflow")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Needs attention 1/i }));
+    expect(screen.getByText("Failing campaign")).toBeInTheDocument();
+    expect(screen.queryByText("Owned workflow")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Filter by team member" }));
+    await user.click(screen.getByRole("option", { name: /All creators/i }));
+    await user.click(screen.getByRole("button", { name: /All 3/i }));
+    await user.click(screen.getByRole("button", { name: /System tasks 1/i }));
+    expect(screen.getByText("System digest")).toBeInTheDocument();
+    expect(screen.queryByText("Failing campaign")).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Search tasks"), "owned");
+    expect(screen.getByText("No tasks match these filters")).toBeInTheDocument();
+  });
+
+  it("mutes paused workflow icons", async () => {
+    installTaskHandlers([
+      buildTask({
+        title: "Paused workflow",
+        status: "paused",
+        canPause: false,
+        canResume: true,
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock" },
+          { id: "agent", type: "agent", label: "Analyze", icon: "robot" },
+        ]),
+        stepCount: 2,
+      }),
+    ]);
+
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Paused workflow")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("paused workflow icon")).toHaveClass("text-muted-foreground");
+    expect(screen.getByLabelText("paused workflow icon")).not.toHaveClass("text-brand-accent");
   });
 
   it("renders expanded task details for troubleshooting", async () => {
@@ -258,7 +374,6 @@ describe("ScheduledTasksPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Handle ClickUp issues")).toBeInTheDocument();
     });
-    expect(screen.getByText("Canvas")).toBeInTheDocument();
     expect(screen.getByText("Trigger · Canvas · ClickUp · new issue created")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Show details for Handle ClickUp issues/i }));
@@ -279,14 +394,14 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Active")).toBeInTheDocument();
+      expect(screen.getByLabelText("Task status: active")).toBeInTheDocument();
     });
 
     await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
     await user.click(screen.getByRole("menuitem", { name: /pause/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("Paused")).toBeInTheDocument();
+      expect(screen.getByLabelText("Task status: paused")).toBeInTheDocument();
     });
   });
 
@@ -323,14 +438,14 @@ describe("ScheduledTasksPage", () => {
     renderWithProviders(<ScheduledTasksPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Paused")).toBeInTheDocument();
+      expect(screen.getByLabelText("Task status: paused")).toBeInTheDocument();
     });
 
     await user.click(screen.getByRole("button", { name: /Actions for Post the Monday revenue summary/i }));
     await user.click(screen.getByRole("menuitem", { name: /resume/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("Active")).toBeInTheDocument();
+      expect(screen.getByLabelText("Task status: active")).toBeInTheDocument();
     });
   });
 

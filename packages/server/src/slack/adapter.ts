@@ -24,6 +24,7 @@ import {
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
+import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   REASONING_TEXT_OPTIONS,
   type ReasoningTextCommand,
@@ -671,6 +672,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             deliveryTarget: message.channelId,
             createdBy: user.id,
             creatorTimezone: user.timezone,
+            origin: {
+              platform: "slack" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -686,8 +693,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
         });
 
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const finalText = appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []);
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureSlackBotReplies({
             conversationId: capture.conversation.id,
             sent,
@@ -712,7 +720,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         if (result.messageSent || result.pendingUploads.length > 0) {
           await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
         }
-        if (!result.trace.finalText) {
+        if (!finalText) {
           await replyToUser("_No response_");
         }
       } catch (err) {
@@ -995,6 +1003,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             createdBy: user.id,
             creatorTimezone: user.timezone,
             threadTs: message.threadTs ? threadTs : undefined,
+            origin: {
+              platform: "slack" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: threadTs,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -1015,8 +1029,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           },
         });
 
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const finalText = appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []);
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureSlackBotReplies({
             conversationId: capture.conversation.id,
             sent,
@@ -1043,7 +1058,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             messageId: capture.captured.id,
           });
         }
-        if (!result.trace.finalText) {
+        if (!finalText) {
           await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
         }
       } catch (err) {

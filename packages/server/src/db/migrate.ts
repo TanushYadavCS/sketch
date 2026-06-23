@@ -105,6 +105,8 @@ import * as m102 from "./migrations/102-entity-creation-suppressions";
 import * as m103 from "./migrations/103-daily-briefs";
 import * as m104 from "./migrations/104-daily-brief-item-metadata";
 import * as m105 from "./migrations/105-scheduled-task-builder-revisions";
+import * as m106 from "./migrations/106-scheduled-task-origin-chat";
+import * as m107 from "./migrations/107-scheduled-task-origin-message-id";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -214,6 +216,8 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "103-daily-briefs": m103,
           "104-daily-brief-item-metadata": m104,
           "105-scheduled-task-builder-revisions": m105,
+          "106-scheduled-task-origin-chat": m106,
+          "107-scheduled-task-origin-message-id": m107,
         };
       },
     },

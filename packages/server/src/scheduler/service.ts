@@ -335,6 +335,10 @@ export class TaskScheduler {
     outputPlatform?: string | null;
     outputThreadTs?: string | null;
     outputMode?: "deliver" | "silent";
+    originPlatform?: "web" | "slack" | "whatsapp" | null;
+    originConversationId?: string | null;
+    originProviderThreadId?: string | null;
+    originMessageId?: number | null;
   }): Promise<ScheduledTask> {
     const row = await this.repo.add({
       id: randomUUID(),
@@ -358,6 +362,10 @@ export class TaskScheduler {
       output_platform: params.outputPlatform ?? null,
       output_thread_ts: params.outputThreadTs ?? null,
       output_mode: params.outputMode ?? "deliver",
+      origin_platform: params.originPlatform ?? null,
+      origin_conversation_id: params.originConversationId ?? null,
+      origin_provider_thread_id: params.originProviderThreadId ?? null,
+      origin_message_id: params.originMessageId ?? null,
     });
 
     try {
@@ -413,7 +421,7 @@ export class TaskScheduler {
     if (params.outputThreadTs !== undefined) fields.output_thread_ts = params.outputThreadTs;
     if (params.outputMode !== undefined) fields.output_mode = params.outputMode;
 
-    const row = await this.repo.update(id, fields);
+    const row = await this.repo.update(id, fields, { incrementRevision: true });
     if (!row) return null;
 
     const scheduleChanged =
@@ -484,15 +492,19 @@ export class TaskScheduler {
 
   async pauseTask(id: string): Promise<void> {
     this.unscheduleTask(id);
-    await this.repo.updateStatus(id, "paused");
+    await this.repo.updateStatus(id, "paused", { incrementRevision: true });
   }
 
   async resumeTask(id: string): Promise<void> {
-    await this.repo.updateStatus(id, "active");
+    await this.repo.updateStatus(id, "active", { incrementRevision: true });
     const row = await this.repo.getById(id);
     if (row) {
       await this.scheduleTask(row);
     }
+  }
+
+  async touchTaskRevision(id: string): Promise<void> {
+    await this.repo.update(id, {}, { incrementRevision: true });
   }
 
   async listTasks(filter: { deliveryTarget?: string; createdBy?: string }): Promise<ScheduledTask[]> {
@@ -526,6 +538,16 @@ export class TaskScheduler {
       createdAt: row.created_at,
       title: row.title,
       description: row.description,
+      originChat:
+        row.origin_conversation_id &&
+        (row.origin_platform === "web" || row.origin_platform === "slack" || row.origin_platform === "whatsapp")
+          ? {
+              platform: row.origin_platform,
+              conversationId: row.origin_conversation_id,
+              providerThreadId: row.origin_provider_thread_id,
+              currentMessageId: row.origin_message_id,
+            }
+          : null,
       steps: row.steps,
       edges: row.edges,
       outputTarget: row.output_target,

@@ -55,6 +55,15 @@ export const workflowDeliverySchema = z.object({
 
 export type WorkflowDelivery = z.infer<typeof workflowDeliverySchema>;
 
+export const automationOriginChatSchema = z.object({
+  platform: z.enum(["web", "slack", "whatsapp"]),
+  conversationId: z.string().trim().min(1),
+  providerThreadId: z.string().nullable(),
+  currentMessageId: z.number().int().positive().nullable(),
+});
+
+export type AutomationOriginChat = z.infer<typeof automationOriginChatSchema>;
+
 export const automationStepContentSchema = z.object({
   taskId: z.string(),
   stepId: z.string(),
@@ -108,6 +117,7 @@ export const automationDefinitionSchema = z.object({
   revision: z.number().int().nonnegative(),
   title: z.string().nullable(),
   description: z.string().nullable(),
+  originChat: automationOriginChatSchema.nullable(),
   delivery: workflowDeliverySchema,
   steps: z.array(workflowStepSchema),
   edges: z.array(workflowEdgeSchema),

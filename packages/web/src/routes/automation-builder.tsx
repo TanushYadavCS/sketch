@@ -1,7 +1,8 @@
 import { ChatInput } from "@/components/sketch/chat-input";
-import { ChatThread, type ChatThreadMessage } from "@/components/sketch/chat-thread";
+import { ChatThread, type ChatThreadInterruption, type ChatThreadMessage } from "@/components/sketch/chat-thread";
 import {
   type AutomationArtifact,
+  type AutomationBuilderSaveRequest,
   type AutomationDefinition,
   type AutomationStepContent,
   type StepOutput,
@@ -48,14 +49,16 @@ import { Input } from "@sketch/ui/components/input";
 import { Textarea } from "@sketch/ui/components/textarea";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { createRoute, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Background,
   BackgroundVariant,
   Controls,
   type Edge,
   Handle,
+  MarkerType,
   type Node,
+  type NodeChange,
   type NodeProps,
   Position,
   ReactFlow,
@@ -66,7 +69,16 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { type CSSProperties, type ComponentType, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ComponentType,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 
@@ -102,6 +114,7 @@ type BuilderWebChatDataParts = {
     sizeBytes?: number;
   };
   automation: AutomationArtifact;
+  interruption: ChatThreadInterruption;
 };
 
 type BuilderWebChatMetadata = {
@@ -127,9 +140,32 @@ const builderReadOnlyTextareaClass = cn(
   "cursor-default focus-visible:border-white/10 focus-visible:ring-0",
 );
 const flowEdgeStyle = {
-  stroke: "rgba(255, 255, 255, 0.22)",
-  strokeWidth: 1.6,
+  stroke: "#5A6587",
+  strokeWidth: 1.2,
+  opacity: 0.84,
 } satisfies CSSProperties;
+const connectionLineStyle = {
+  stroke: "#6B7DFA",
+  strokeWidth: 2,
+  strokeDasharray: "5 5",
+} satisfies CSSProperties;
+const builderChatSuggestions: Array<{ label: string; prompt: string; icon: ComponentType<IconProps> }> = [
+  {
+    label: "Change schedule",
+    prompt: "Change the schedule for this automation.",
+    icon: CalendarDotsIcon,
+  },
+  {
+    label: "Add a step",
+    prompt: "Add one useful step to this automation.",
+    icon: GitBranchIcon,
+  },
+  {
+    label: "Tighten criteria",
+    prompt: "Tighten the criteria this automation uses before it acts.",
+    icon: CheckCircleIcon,
+  },
+];
 
 export const automationBuilderRoute = createRoute({
   getParentRoute: () => dashboardRoute,
@@ -158,15 +194,35 @@ function draftFromDefinition(automation: AutomationDefinition): DraftAutomation 
   };
 }
 
+function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequest {
+  return {
+    expectedRevision: draft.revision,
+    title: draft.title,
+    description: draft.description,
+    prompt: draft.prompt,
+    scheduleType: draft.scheduleType,
+    scheduleValue: draft.scheduleValue,
+    timezone: draft.timezone,
+    status: draft.status,
+    delivery: draft.delivery,
+    steps: draft.steps,
+    edges: draft.edges,
+    stepContent: draft.stepContent,
+  };
+}
+
 export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
-  const search = useSearch({ from: automationBuilderRoute.id }) as BuilderSearch;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["scheduled-tasks", taskId, "builder"] as const, [taskId]);
+  const builderConversationId = useMemo(() => freshBuilderConversationId(taskId), [taskId]);
   const [draft, setDraft] = useState<DraftAutomation | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [savingPromptStepId, setSavingPromptStepId] = useState<string | null>(null);
+  const latestDraftRef = useRef<DraftAutomation | null>(null);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const automationQuery = useQuery({
     queryKey,
@@ -176,7 +232,9 @@ export function AutomationBuilderPage() {
 
   useEffect(() => {
     if (!automationQuery.data) return;
-    setDraft(draftFromDefinition(automationQuery.data));
+    const nextDraft = draftFromDefinition(automationQuery.data);
+    latestDraftRef.current = nextDraft;
+    setDraft(nextDraft);
   }, [automationQuery.data]);
 
   const runMutation = useMutation({
@@ -197,6 +255,89 @@ export function AutomationBuilderPage() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Node test failed"),
   });
 
+  const saveDraftPatch = useCallback(
+    (
+      patch: (current: DraftAutomation) => DraftAutomation,
+      options: { message?: string; promptStepId?: string } = {},
+    ) => {
+      if (options.promptStepId) setSavingPromptStepId(options.promptStepId);
+      const save = saveQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const currentDraft = latestDraftRef.current;
+          if (!currentDraft) return;
+
+          const nextDraft = patch(currentDraft);
+          latestDraftRef.current = nextDraft;
+          setDraft(nextDraft);
+          if (options.promptStepId) setSavingPromptStepId(options.promptStepId);
+
+          try {
+            const updatedAutomation = await api.scheduledTasks.save(taskId, saveRequestFromDraft(nextDraft));
+            const updatedDraft = draftFromDefinition(updatedAutomation);
+            latestDraftRef.current = updatedDraft;
+            queryClient.setQueryData(queryKey, updatedAutomation);
+            setDraft(updatedDraft);
+            if (options.message) toast.success(options.message);
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "Failed to save automation");
+            try {
+              const refreshed = await api.scheduledTasks.get(taskId);
+              const refreshedDraft = draftFromDefinition(refreshed);
+              latestDraftRef.current = refreshedDraft;
+              queryClient.setQueryData(queryKey, refreshed);
+              setDraft(refreshedDraft);
+            } catch {
+              await queryClient.invalidateQueries({ queryKey });
+            }
+            throw error;
+          } finally {
+            if (options.promptStepId) {
+              setSavingPromptStepId((current) => (current === options.promptStepId ? null : current));
+            }
+          }
+        });
+      saveQueueRef.current = save.catch(() => undefined);
+    },
+    [queryClient, queryKey, taskId],
+  );
+
+  const updateAgentPrompt = useCallback(
+    (stepId: string, content: string) => {
+      saveDraftPatch(
+        (current) => {
+          const existing = current.stepContent[stepId];
+          return {
+            ...current,
+            stepContent: {
+              ...current.stepContent,
+              [stepId]: {
+                taskId,
+                stepId,
+                contentType: "prompt",
+                content,
+                apps: existing?.apps ?? null,
+                updatedAt: existing?.updatedAt ?? null,
+              },
+            },
+          };
+        },
+        { message: "Prompt saved", promptStepId: stepId },
+      );
+    },
+    [saveDraftPatch, taskId],
+  );
+
+  const updateStepPositions = useCallback(
+    (positions: Record<string, { x: number; y: number }>) => {
+      saveDraftPatch((current) => ({
+        ...current,
+        steps: current.steps.map((step) => (positions[step.id] ? { ...step, position: positions[step.id] } : step)),
+      }));
+    },
+    [saveDraftPatch],
+  );
+
   if (automationQuery.isLoading || !draft || !automationQuery.data) {
     return (
       <div className="flex min-h-[calc(100vh-52px)] items-center justify-center text-sm text-muted-foreground">
@@ -216,37 +357,19 @@ export function AutomationBuilderPage() {
   const selectedStep = draft.steps.find((step) => step.id === selectedStepId) ?? null;
   const selectedOutput = selectedStep ? selectedRun?.stepOutputs[selectedStep.id] : undefined;
   const builderTitle = draft.title?.trim() || draft.prompt;
-  const hasSidecar = Boolean(search.conversationId);
-  const scheduleSummary = `${draft.scheduleType === "external" ? "trigger" : draft.scheduleType} · ${draft.scheduleValue}`;
-
   return (
     <div className="relative flex h-[calc(100vh-52px)] min-h-0 overflow-hidden bg-background">
-      {hasSidecar && search.conversationId ? (
-        <BuilderChatSidecar
-          conversationId={search.conversationId}
-          taskId={taskId}
-          title={builderTitle}
-          queryKey={queryKey}
-          className="hidden lg:flex"
-        />
-      ) : null}
+      <BuilderChatSidecar
+        conversationId={builderConversationId}
+        taskId={taskId}
+        title={builderTitle}
+        queryKey={queryKey}
+        className="hidden lg:flex"
+      />
 
       <div className="relative min-h-0 min-w-0 flex-1 bg-[#050505] text-white">
         <div className="pointer-events-none absolute top-4 left-4 right-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div
-            className={cn(
-              "pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-white/10 bg-[#0b0b0b]/88 p-1.5 shadow-[0_10px_34px_rgba(0,0,0,0.34)] backdrop-blur",
-              !hasSidecar && "max-w-[min(560px,calc(100vw-2rem))]",
-            )}
-          >
-            {!hasSidecar ? (
-              <div className="min-w-[160px] flex-1 px-1.5">
-                <p className="truncate text-[13px] font-semibold leading-5 text-white">{builderTitle}</p>
-                <p className="truncate font-mono text-[10px] uppercase tracking-[0.08em] text-white/42">
-                  {scheduleSummary}
-                </p>
-              </div>
-            ) : null}
+          <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-white/10 bg-[#0b0b0b]/88 p-1.5 shadow-[0_10px_34px_rgba(0,0,0,0.34)] backdrop-blur">
             <RunsMenu
               runs={automation.recentRuns}
               activeRunId={selectedRun?.id ?? null}
@@ -295,6 +418,7 @@ export function AutomationBuilderPage() {
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
           onSelectStep={setSelectedStepId}
+          onUpdateStepPositions={updateStepPositions}
         />
       </div>
 
@@ -306,6 +430,8 @@ export function AutomationBuilderPage() {
         onClose={() => setSelectedStepId(null)}
         onTest={(stepId) => testMutation.mutate(stepId)}
         testingStepId={testMutation.variables ?? null}
+        onUpdateAgentPrompt={updateAgentPrompt}
+        savingPromptStepId={savingPromptStepId}
       />
     </div>
   );
@@ -335,6 +461,11 @@ function automationsFromBuilderMessage(message: BuilderWebChatMessage): Automati
   return message.parts.filter((part) => part.type === "data-automation").map((part) => part.data);
 }
 
+function interruptionFromBuilderMessage(message: BuilderWebChatMessage): ChatThreadInterruption | undefined {
+  const part = message.parts.find((candidate) => candidate.type === "data-interruption");
+  return part?.data;
+}
+
 function createdAtFromBuilderMessage(message: BuilderWebChatMessage): string | undefined {
   const value = message.createdAt;
   if (typeof value === "string" && value.trim()) return value;
@@ -348,8 +479,9 @@ function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThrea
     const text = textFromBuilderMessage(message);
     const files = filesFromBuilderMessage(message);
     const automations = automationsFromBuilderMessage(message);
+    const interruption = interruptionFromBuilderMessage(message);
     const createdAt = createdAtFromBuilderMessage(message);
-    if (text || files.length > 0 || automations.length > 0) {
+    if (text || files.length > 0 || automations.length > 0 || interruption) {
       return [
         {
           id: message.id,
@@ -358,6 +490,7 @@ function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThrea
           createdAt,
           files: files.length > 0 ? files : undefined,
           automations: automations.length > 0 ? automations : undefined,
+          interruption,
         },
       ];
     }
@@ -375,6 +508,7 @@ function hasPendingBuilderAssistantProgress(messages: BuilderWebChatMessage[]): 
   return (
     progressLinesFromBuilderMessage(latestMessage).length > 0 &&
     !textFromBuilderMessage(latestMessage) &&
+    !interruptionFromBuilderMessage(latestMessage) &&
     filesFromBuilderMessage(latestMessage).length === 0 &&
     automationsFromBuilderMessage(latestMessage).length === 0
   );
@@ -413,6 +547,13 @@ function outgoingBuilderRequestOptions(taskId: string, attachments: WebChatUploa
   };
 }
 
+function freshBuilderConversationId(taskId: string): string {
+  const safeTaskId = taskId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "task";
+  const rawSuffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const suffix = rawSuffix.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 24) || String(Date.now());
+  return `builder-${safeTaskId}-${suffix}`;
+}
+
 function BuilderChatSidecar({
   conversationId,
   taskId,
@@ -428,6 +569,7 @@ function BuilderChatSidecar({
 }) {
   const queryClient = useQueryClient();
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const [stoppingRun, setStoppingRun] = useState(false);
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const wasBusyRef = useRef(false);
   const transport = useMemo(
@@ -455,7 +597,18 @@ function BuilderChatSidecar({
       ].join(":")
     : "";
   const hasBackgroundRun = hasPendingBuilderAssistantProgress(chat.messages);
-  const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun;
+  const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
+  const threadMessages = builderChatThreadMessages(chat.messages);
+  const showEmptyState = historyReady && threadMessages.length === 0 && !chatBusy && !chat.error;
+  const sendBuilderMessage = useCallback(
+    (value: string, attachments: WebChatUploadedAttachment[] = []) => {
+      void chat.sendMessage(
+        outgoingBuilderTextMessage(value, attachments),
+        outgoingBuilderRequestOptions(taskId, attachments),
+      );
+    },
+    [chat.sendMessage, taskId],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -517,6 +670,15 @@ function BuilderChatSidecar({
     void queryClient.invalidateQueries({ queryKey });
   }, [chat.status, historyReady, queryClient, queryKey]);
 
+  const handleStop = useCallback(() => {
+    if (stoppingRun) return;
+    setStoppingRun(true);
+    void api.webChat
+      .interrupt(conversationId)
+      .catch(() => undefined)
+      .finally(() => setStoppingRun(false));
+  }, [conversationId, stoppingRun]);
+
   return (
     <aside
       className={cn(
@@ -524,42 +686,179 @@ function BuilderChatSidecar({
         className,
       )}
     >
-      <div className="border-b border-white/10 px-4 py-3">
-        <p className="truncate text-[13px] font-semibold">{title}</p>
+      <div className="border-b border-white/10 bg-[#080808] px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-brand-accent text-[#141100]">
+            <RobotIcon size={17} weight="fill" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <p className="truncate text-[13px] font-semibold">Builder chat</p>
+              <Badge className="rounded-[5px] border border-white/10 bg-white/[0.06] px-1.5 py-0 font-mono text-[10px] text-white/58">
+                Fresh
+              </Badge>
+            </div>
+            <p className="truncate text-[12px] text-white/46">{title}</p>
+          </div>
+        </div>
       </div>
       <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5">
-        <ChatThread
-          className="gap-4"
-          messages={historyReady ? builderChatThreadMessages(chat.messages) : []}
-          busy={chatBusy}
-          error={chat.error?.message ?? null}
-          conversationId={conversationId}
-        />
+        {!historyReady ? (
+          <BuilderChatLoadingState />
+        ) : showEmptyState ? (
+          <BuilderChatEmptyState title={title} onPrompt={sendBuilderMessage} />
+        ) : (
+          <ChatThread
+            className="gap-4"
+            messages={threadMessages}
+            busy={chatBusy}
+            error={chat.error?.message ?? null}
+            conversationId={conversationId}
+          />
+        )}
       </div>
       <div className="shrink-0 border-t border-white/10 bg-[#050505] px-3 py-3">
         <ChatInput
           key={conversationId}
           disabled={!historyReady || chatBusy}
           disabledPlaceholder={historyReady ? "Sketch is thinking..." : "Loading conversation..."}
+          running={chatBusy}
+          runningPlaceholder="Sketch is thinking..."
+          stopping={stoppingRun}
+          onStop={handleStop}
           placeholder="Reply to Sketch..."
-          onSubmit={(value, attachments) => {
-            void chat.sendMessage(
-              outgoingBuilderTextMessage(value, attachments),
-              outgoingBuilderRequestOptions(taskId, attachments),
-            );
-          }}
+          onSubmit={sendBuilderMessage}
         />
       </div>
     </aside>
   );
 }
 
-function flowPosition(step: WorkflowStep, index: number) {
-  const position = step.position;
-  if (Math.abs(position.x) <= 10 && Math.abs(position.y) <= 10) {
-    return { x: index * 230, y: 0 };
+function BuilderChatLoadingState() {
+  return (
+    <div className="flex min-h-full items-center justify-center px-3 text-[13px] text-white/46">
+      <div className="flex items-center gap-2">
+        <SpinnerGapIcon size={15} className="animate-spin" />
+        Loading builder chat
+      </div>
+    </div>
+  );
+}
+
+function BuilderChatEmptyState({ title, onPrompt }: { title: string; onPrompt: (prompt: string) => void }) {
+  return (
+    <div className="flex min-h-full items-center justify-center px-1">
+      <div className="w-full max-w-[340px] rounded-[8px] border border-white/10 bg-white/[0.035] p-4">
+        <div className="flex items-start gap-3">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-[8px] border border-brand-accent/30 bg-brand-accent/12 text-brand-accent">
+            <RobotIcon size={18} weight="fill" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-[14px] font-semibold text-white">What should change?</p>
+            <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-white/50">{title}</p>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-2">
+          {builderChatSuggestions.map((suggestion) => {
+            const Icon = suggestion.icon;
+            return (
+              <button
+                key={suggestion.label}
+                type="button"
+                className="flex min-h-9 items-center gap-2 rounded-[7px] border border-white/10 bg-[#101010] px-3 text-left text-[12px] font-medium text-white/76 transition hover:border-brand-accent/35 hover:bg-brand-accent/10 hover:text-white"
+                onClick={() => onPrompt(suggestion.prompt)}
+              >
+                <Icon size={14} className="shrink-0 text-brand-accent" />
+                <span className="min-w-0 truncate">{suggestion.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function usesDefaultPosition(step: WorkflowStep): boolean {
+  return Math.abs(step.position.x) <= 10 && Math.abs(step.position.y) <= 10;
+}
+
+function usesGeneratedColumnPosition(step: WorkflowStep, index: number): boolean {
+  return Math.abs(step.position.x) <= 10 && Math.abs(step.position.y - index * 100) <= 10;
+}
+
+function shouldAutoLayoutWorkflow(steps: WorkflowStep[]): boolean {
+  if (steps.length === 0) return false;
+  return steps.every(usesDefaultPosition) || steps.every((step, index) => usesGeneratedColumnPosition(step, index));
+}
+
+function layoutWorkflowPositions(
+  steps: WorkflowStep[],
+  edges: WorkflowEdge[],
+): Record<string, { x: number; y: number }> {
+  const stepIds = new Set(steps.map((step) => step.id));
+  const indexById = new Map(steps.map((step, index) => [step.id, index]));
+  const outgoing = new Map<string, string[]>();
+  const incoming = new Map<string, number>();
+
+  for (const step of steps) incoming.set(step.id, 0);
+  for (const edge of edges) {
+    if (!stepIds.has(edge.from) || !stepIds.has(edge.to)) continue;
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+    incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
   }
-  return position;
+
+  const roots = steps
+    .filter((step) => (incoming.get(step.id) ?? 0) === 0)
+    .sort((left, right) => {
+      if (left.type === "trigger" && right.type !== "trigger") return -1;
+      if (right.type === "trigger" && left.type !== "trigger") return 1;
+      return (indexById.get(left.id) ?? 0) - (indexById.get(right.id) ?? 0);
+    });
+  const queue = roots.map((step) => step.id);
+  const levels = new Map<string, number>(queue.map((id) => [id, 0]));
+  const remainingIncoming = new Map(incoming);
+
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const id = queue[cursor];
+    const currentLevel = levels.get(id) ?? 0;
+    for (const next of outgoing.get(id) ?? []) {
+      levels.set(next, Math.max(levels.get(next) ?? 0, currentLevel + 1));
+      remainingIncoming.set(next, Math.max(0, (remainingIncoming.get(next) ?? 0) - 1));
+      if (remainingIncoming.get(next) === 0) queue.push(next);
+    }
+  }
+
+  for (const step of steps) {
+    if (!levels.has(step.id)) levels.set(step.id, Math.max(0, indexById.get(step.id) ?? 0));
+  }
+
+  const groups = new Map<number, WorkflowStep[]>();
+  for (const step of steps) {
+    const level = levels.get(step.id) ?? 0;
+    groups.set(level, [...(groups.get(level) ?? []), step]);
+  }
+
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const [level, group] of groups) {
+    const sorted = [...group].sort((left, right) => (indexById.get(left.id) ?? 0) - (indexById.get(right.id) ?? 0));
+    for (const [index, step] of sorted.entries()) {
+      positions[step.id] = {
+        x: level * 245,
+        y: (index - (sorted.length - 1) / 2) * 110,
+      };
+    }
+  }
+
+  return positions;
+}
+
+function flowPosition(
+  step: WorkflowStep,
+  layoutPositions: Record<string, { x: number; y: number }>,
+  shouldUseLayout: boolean,
+) {
+  return shouldUseLayout ? (layoutPositions[step.id] ?? step.position) : step.position;
 }
 
 function outputStatus(
@@ -723,12 +1022,14 @@ function AutomationCanvas({
   stepOutputs,
   runStatus,
   onSelectStep,
+  onUpdateStepPositions,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: "running" | "completed" | "failed";
   onSelectStep: (stepId: string | null) => void;
+  onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -738,6 +1039,7 @@ function AutomationCanvas({
         stepOutputs={stepOutputs}
         runStatus={runStatus}
         onSelectStep={onSelectStep}
+        onUpdateStepPositions={onUpdateStepPositions}
       />
     </ReactFlowProvider>
   );
@@ -749,20 +1051,24 @@ function AutomationCanvasFlow({
   stepOutputs,
   runStatus,
   onSelectStep,
+  onUpdateStepPositions,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: "running" | "completed" | "failed";
   onSelectStep: (stepId: string | null) => void;
+  onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
 }) {
   const { fitView } = useReactFlow<BuilderNode>();
+  const layoutPositions = useMemo(() => layoutWorkflowPositions(draft.steps, draft.edges), [draft.edges, draft.steps]);
+  const shouldUseLayout = useMemo(() => shouldAutoLayoutWorkflow(draft.steps), [draft.steps]);
   const initialNodes = useMemo<BuilderNode[]>(
     () =>
-      draft.steps.map((step, index) => ({
+      draft.steps.map((step) => ({
         id: step.id,
         type: step.type,
-        position: flowPosition(step, index),
+        position: flowPosition(step, layoutPositions, shouldUseLayout),
         data: {
           step,
           selected: step.id === selectedStepId,
@@ -770,7 +1076,7 @@ function AutomationCanvasFlow({
           visual: resolveStepVisual(step, draft.stepContent[step.id]),
         },
       })),
-    [draft.stepContent, draft.steps, runStatus, selectedStepId, stepOutputs],
+    [draft.stepContent, draft.steps, layoutPositions, runStatus, selectedStepId, shouldUseLayout, stepOutputs],
   );
   const initialEdges = useMemo<Edge[]>(
     () =>
@@ -778,16 +1084,27 @@ function AutomationCanvasFlow({
         id: edge.id,
         source: edge.from,
         target: edge.to,
-        type: "smoothstep",
         animated: runStatus === "running",
         className: "automation-builder-edge",
         interactionWidth: 22,
         style: flowEdgeStyle,
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: flowEdgeStyle.stroke,
+          width: 16,
+          height: 16,
+        },
       })),
     [draft.edges, runStatus],
   );
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<BuilderNode>(initialNodes);
   const [edges, setEdges] = useEdgesState(initialEdges);
+  const onNodesChange = useCallback(
+    (changes: NodeChange<BuilderNode>[]) => {
+      onNodesChangeBase(changes.filter((change) => change.type !== "remove" && change.type !== "add"));
+    },
+    [onNodesChangeBase],
+  );
 
   useEffect(() => setNodes(initialNodes), [initialNodes, setNodes]);
   useEffect(() => setEdges(initialEdges), [initialEdges, setEdges]);
@@ -803,10 +1120,20 @@ function AutomationCanvasFlow({
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
-      onNodesChange={onNodesChangeBase}
+      onNodesChange={onNodesChange}
       onNodeClick={(_, node) => onSelectStep(node.id)}
+      onNodeDragStop={(_, node) => {
+        onUpdateStepPositions(
+          Object.fromEntries(
+            nodes.map((currentNode) => [
+              currentNode.id,
+              currentNode.id === node.id ? node.position : currentNode.position,
+            ]),
+          ),
+        );
+      }}
       onPaneClick={() => onSelectStep(null)}
-      nodesDraggable={false}
+      nodesDraggable
       nodesConnectable={false}
       edgesReconnectable={false}
       nodesFocusable={false}
@@ -820,7 +1147,7 @@ function AutomationCanvasFlow({
       maxZoom={1.6}
       snapToGrid
       snapGrid={[18, 18]}
-      connectionLineStyle={flowEdgeStyle}
+      connectionLineStyle={connectionLineStyle}
       connectionRadius={28}
       proOptions={{ hideAttribution: true }}
       className="automation-builder-flow"
@@ -982,6 +1309,8 @@ function NodeDrawer({
   onClose,
   onTest,
   testingStepId,
+  onUpdateAgentPrompt,
+  savingPromptStepId,
 }: {
   draft: DraftAutomation;
   step: WorkflowStep | null;
@@ -989,6 +1318,8 @@ function NodeDrawer({
   onClose: () => void;
   onTest: (stepId: string) => void;
   testingStepId: string | null;
+  onUpdateAgentPrompt: (stepId: string, content: string) => void;
+  savingPromptStepId: string | null;
 }) {
   const [tab, setTab] = useState<"input" | "output">("input");
   useEffect(() => setTab(output?.status === "failed" ? "output" : "input"), [output?.status]);
@@ -1047,7 +1378,13 @@ function NodeDrawer({
 
       <div className="chat-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
         {tab === "input" ? (
-          <NodeInputPanel draft={draft} step={step} content={content} />
+          <NodeInputPanel
+            draft={draft}
+            step={step}
+            content={content}
+            onUpdateAgentPrompt={onUpdateAgentPrompt}
+            savingPrompt={savingPromptStepId === step.id}
+          />
         ) : (
           <OutputPanel output={output} />
         )}
@@ -1098,11 +1435,21 @@ function NodeInputPanel({
   draft,
   step,
   content,
+  onUpdateAgentPrompt,
+  savingPrompt,
 }: {
   draft: DraftAutomation;
   step: WorkflowStep;
   content?: AutomationStepContent;
+  onUpdateAgentPrompt: (stepId: string, content: string) => void;
+  savingPrompt: boolean;
 }) {
+  const [agentPrompt, setAgentPrompt] = useState(content?.content ?? "");
+  useEffect(() => {
+    setAgentPrompt(content?.content ?? "");
+  }, [content?.content]);
+  const agentPromptDirty = step.type === "agent" && agentPrompt !== (content?.content ?? "");
+
   return (
     <div className="flex min-h-full flex-col gap-5">
       <Field label="Label">
@@ -1123,12 +1470,27 @@ function NodeInputPanel({
           </Field>
           <Field label="Prompt" grow>
             <Textarea
-              value={content?.content ?? ""}
-              className={cn(builderReadOnlyTextareaClass, "min-h-[320px] flex-1 resize-none font-mono")}
-              readOnly
-              aria-readonly="true"
+              value={agentPrompt}
+              className={cn(builderTextareaClass, "min-h-[320px] flex-1 resize-none font-mono")}
+              onChange={(event) => setAgentPrompt(event.target.value)}
             />
           </Field>
+          <div className="flex justify-end">
+            <Button
+              type="button"
+              size="sm"
+              className="h-8 gap-1.5 rounded-[7px] bg-brand-accent px-3 font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-[#161300] shadow-none hover:bg-brand-accent/90"
+              disabled={!agentPromptDirty || !agentPrompt.trim() || savingPrompt}
+              onClick={() => onUpdateAgentPrompt(step.id, agentPrompt)}
+            >
+              {savingPrompt ? (
+                <SpinnerGapIcon size={13} className="animate-spin" />
+              ) : (
+                <CheckCircleIcon size={13} weight="fill" />
+              )}
+              Save prompt
+            </Button>
+          </div>
         </>
       ) : null}
 

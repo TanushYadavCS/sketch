@@ -1,5 +1,11 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
+import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { z } from "zod/v4";
+import {
+  AutomationValidationError,
+  validateAutomationBuilderSaveRequest,
+  validateWorkflowGraph,
+} from "../../automation/definition";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { IntegrationProvider } from "../../integrations/types";
@@ -12,7 +18,7 @@ import {
   normalizeScheduleTriggerStepsJson,
 } from "../../scheduler/trigger-metadata";
 import type { ScheduledTask, TaskContext } from "../../scheduler/types";
-import type { WorkflowStep } from "../../workflows/types";
+import type { WorkflowEdge, WorkflowStep } from "../../workflows/types";
 import type { AutomationArtifactCollector, SearchableUserRepo } from "./types";
 
 const workflowStepSchema = z.object({
@@ -181,6 +187,142 @@ function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
   return steps.map(({ script: _s, agentPrompt: _a, apps: _apps, ...step }) => step as WorkflowStep);
 }
 
+function defaultEdgesForSteps(steps: WorkflowStep[]): { id: string; from: string; to: string }[] {
+  return steps.slice(0, -1).map((step, index) => ({
+    id: `${step.id}-${steps[index + 1].id}`,
+    from: step.id,
+    to: steps[index + 1].id,
+  }));
+}
+
+function formatGraphValidationError(
+  steps: WorkflowStep[],
+  edges: { id: string; from: string; to: string }[],
+): string | null {
+  const issues = validateWorkflowGraph(steps, edges);
+  if (issues.length === 0) return null;
+  return `Error: automation graph is invalid:\n${issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`;
+}
+
+function parseWorkflowStepsJson(value: string | null | undefined): WorkflowStep[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? (parsed as WorkflowStep[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseWorkflowEdgesJson(value: string | null | undefined): WorkflowEdge[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? (parsed as WorkflowEdge[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseAppsJson(value: string | null | undefined): string[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+function stepContentForValidation(params: {
+  taskId: string;
+  steps: WorkflowStepInput[];
+  existingContent?: Awaited<ReturnType<NonNullable<ManageScheduledTasksDeps["stepContentRepo"]>["getByTask"]>>;
+}): AutomationBuilderSaveRequest["stepContent"] {
+  const content: AutomationBuilderSaveRequest["stepContent"] = {};
+  for (const existing of params.existingContent ?? []) {
+    content[existing.step_id] = {
+      taskId: existing.task_id,
+      stepId: existing.step_id,
+      contentType: existing.content_type === "script" ? "script" : "prompt",
+      content: existing.content,
+      apps: parseAppsJson(existing.apps),
+      updatedAt: existing.updated_at,
+    };
+  }
+  for (const step of params.steps) {
+    if (step.agentPrompt !== undefined) {
+      content[step.id] = {
+        taskId: params.taskId,
+        stepId: step.id,
+        contentType: "prompt",
+        content: step.agentPrompt,
+        apps: step.apps ?? null,
+      };
+    } else if (step.script !== undefined) {
+      content[step.id] = {
+        taskId: params.taskId,
+        stepId: step.id,
+        contentType: "script",
+        content: step.script,
+        apps: step.apps ?? null,
+      };
+    }
+  }
+  return content;
+}
+
+function validateBuilderLikeDefinition(params: {
+  title: string | null;
+  description: string | null;
+  prompt: string;
+  scheduleType: "cron" | "interval" | "once" | "external";
+  scheduleValue: string;
+  timezone: string;
+  status: "active" | "paused" | "completed";
+  steps: WorkflowStep[];
+  edges: WorkflowEdge[];
+  outputPlatform: "slack" | "whatsapp";
+  outputTarget: string;
+  outputThreadTs: string | null;
+  outputMode: "deliver" | "silent";
+  stepContent: AutomationBuilderSaveRequest["stepContent"];
+}): string | null {
+  try {
+    validateAutomationBuilderSaveRequest({
+      request: {
+        expectedRevision: undefined,
+        title: params.title,
+        description: params.description,
+        prompt: params.prompt,
+        scheduleType: params.scheduleType,
+        scheduleValue: params.scheduleValue,
+        timezone: params.timezone,
+        status: params.status,
+        delivery: {
+          platform: params.outputPlatform,
+          targetType: "dm",
+          targetId: params.outputTarget,
+          threadTs: params.outputThreadTs,
+          mode: params.outputMode,
+        },
+        steps: params.steps,
+        edges: params.edges,
+        stepContent: params.stepContent,
+      },
+      brokerCapable: true,
+    });
+    return null;
+  } catch (err) {
+    if (err instanceof AutomationValidationError) {
+      return `Error: automation definition is invalid:\n${err.issues
+        .map((issue) => `- ${issue.code}: ${issue.message}`)
+        .join("\n")}`;
+    }
+    throw err;
+  }
+}
+
 function isLocalScheduleType(value: unknown): value is "cron" | "interval" | "once" {
   return value === "cron" || value === "interval" || value === "once";
 }
@@ -298,8 +440,8 @@ function displayPlatform(value: string): string {
 
 function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["config"]): string {
   const path = `/scheduled-tasks/${encodeURIComponent(taskId)}/edit`;
-  const base = config?.BASE_URL?.replace(/\/$/, "");
-  return base ? `${base}${path}` : path;
+  const base = config?.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${config?.PORT ?? 3000}`;
+  return `${base}${path}`;
 }
 
 function buildArtifactTags(params: {
@@ -402,7 +544,7 @@ export async function handleManageScheduledTasks(
     if (!ctx.createdBy || !task) {
       return text("Error: task not found.");
     }
-    if (task.createdBy !== ctx.createdBy) {
+    if (!ctx.canManageAnyTask && task.createdBy !== ctx.createdBy) {
       return text(await taskPermissionError(task, action, deps.userRepo));
     }
     guardedTask = task;
@@ -556,6 +698,28 @@ export async function handleManageScheduledTasks(
           timezone: resolvedTimezone,
         });
       }
+      const edgesForDb = params.edges ?? defaultEdgesForSteps(stepsForDb);
+      const outputPlatform = deliveryFields.outputPlatform ?? ctx.platform;
+      const outputTarget = deliveryFields.outputTarget ?? ctx.deliveryTarget;
+      const outputThreadTs = deliveryFields.outputThreadTs ?? null;
+      const outputMode = deliveryFields.outputMode ?? "deliver";
+      const builderError = validateBuilderLikeDefinition({
+        title,
+        description: params.description ?? null,
+        prompt: title,
+        scheduleType,
+        scheduleValue,
+        timezone: resolvedTimezone,
+        status: "active",
+        steps: stepsForDb,
+        edges: edgesForDb,
+        outputPlatform,
+        outputTarget,
+        outputThreadTs,
+        outputMode,
+        stepContent: stepContentForValidation({ taskId: "new-task", steps }),
+      });
+      if (builderError) return text(builderError);
 
       // Guard against silently dropping step content if the repo wasn't plumbed
       // through. Runs after input validation so user-input errors surface first.
@@ -581,11 +745,15 @@ export async function handleManageScheduledTasks(
         title: params.title,
         description: params.description,
         steps: JSON.stringify(stepsForDb),
-        edges: params.edges ? JSON.stringify(params.edges) : null,
+        edges: JSON.stringify(edgesForDb),
         outputTarget: deliveryFields.outputTarget,
         outputPlatform: deliveryFields.outputPlatform,
         outputThreadTs: deliveryFields.outputThreadTs,
         outputMode: deliveryFields.outputMode,
+        originPlatform: ctx.origin?.platform ?? null,
+        originConversationId: ctx.origin?.conversationId ?? null,
+        originProviderThreadId: ctx.origin?.providerThreadId ?? null,
+        originMessageId: ctx.origin?.currentMessageId ?? null,
       });
 
       // Store step content
@@ -664,11 +832,12 @@ export async function handleManageScheduledTasks(
         const brokerError = await ensureBrokerForActionSteps(params.steps);
         if (brokerError) return brokerError;
 
-        if (!deps.stepContentRepo && params.steps.some((s) => s.agentPrompt || s.script)) {
+        if (!deps.stepContentRepo && params.steps.some((s) => s.type !== "trigger")) {
           return text(
-            "Error: step content storage is not available in this context. Multi-step automations with prompts or scripts cannot be updated.",
+            "Error: step content storage is not available in this context. Multi-step automations cannot be updated safely.",
           );
         }
+        const existingContent = deps.stepContentRepo ? await deps.stepContentRepo.getByTask(task_id) : [];
 
         const triggerStep = params.steps.find((step) => step.type === "trigger");
         if (triggerStep?.triggerConfig?.type === "canvas") {
@@ -688,15 +857,54 @@ export async function handleManageScheduledTasks(
             stepsForDb = normalizeScheduleTriggerSteps(stepsForDb, { scheduleType, scheduleValue, timezone });
           }
         }
+        const currentEdges = parseWorkflowEdgesJson(guardedTask?.edges);
+        const edgesForDb = params.edges ?? currentEdges ?? defaultEdgesForSteps(stepsForDb);
+        const scheduleType = (updateFields.scheduleType ?? guardedTask?.scheduleType) as
+          | "cron"
+          | "interval"
+          | "once"
+          | "external";
+        const scheduleValue = updateFields.scheduleValue ?? guardedTask?.scheduleValue;
+        const timezone = updateFields.timezone ?? guardedTask?.timezone;
+        const outputPlatform = (updateFields.outputPlatform ?? guardedTask?.outputPlatform ?? ctx.platform) as
+          | "slack"
+          | "whatsapp";
+        const outputTarget = updateFields.outputTarget ?? guardedTask?.outputTarget ?? guardedTask?.deliveryTarget;
+        const outputThreadTs =
+          updateFields.outputThreadTs !== undefined
+            ? (updateFields.outputThreadTs ?? null)
+            : (guardedTask?.outputThreadTs ?? null);
+        const outputMode = (updateFields.outputMode ?? guardedTask?.outputMode ?? "deliver") as "deliver" | "silent";
+        if (!scheduleType || !scheduleValue || !timezone || !outputTarget) {
+          return text("Error: task metadata is not available for workflow validation.");
+        }
+        const builderError = validateBuilderLikeDefinition({
+          title: (updateFields.title ?? guardedTask?.title ?? null) as string | null,
+          description: (updateFields.description ?? guardedTask?.description ?? null) as string | null,
+          prompt: (updateFields.prompt ?? guardedTask?.prompt ?? params.title ?? task_id) as string,
+          scheduleType,
+          scheduleValue,
+          timezone,
+          status: guardedTask?.status ?? "active",
+          steps: stepsForDb,
+          edges: edgesForDb,
+          outputPlatform,
+          outputTarget,
+          outputThreadTs,
+          outputMode,
+          stepContent: stepContentForValidation({ taskId: task_id, steps: params.steps, existingContent }),
+        });
+        if (builderError) return text(builderError);
         updateFields.steps = JSON.stringify(stepsForDb);
+        if (params.edges !== undefined || !guardedTask?.edges) updateFields.edges = JSON.stringify(edgesForDb);
 
         // Sync step content
         if (deps.stepContentRepo) {
-          const keepStepIds = params.steps.filter((s) => s.agentPrompt || s.script).map((s) => s.id);
+          const keepStepIds = params.steps.map((s) => s.id);
           await deps.stepContentRepo.deleteOrphanedSteps(task_id, keepStepIds);
 
           for (const step of params.steps) {
-            if (step.agentPrompt) {
+            if (step.agentPrompt !== undefined) {
               await deps.stepContentRepo.upsert({
                 taskId: task_id,
                 stepId: step.id,
@@ -704,7 +912,7 @@ export async function handleManageScheduledTasks(
                 content: step.agentPrompt,
                 apps: step.apps,
               });
-            } else if (step.script) {
+            } else if (step.script !== undefined) {
               await deps.stepContentRepo.upsert({
                 taskId: task_id,
                 stepId: step.id,
@@ -717,7 +925,13 @@ export async function handleManageScheduledTasks(
         }
       }
 
-      if (params.edges !== undefined) updateFields.edges = JSON.stringify(params.edges);
+      if (params.edges !== undefined && !params.steps) {
+        const currentSteps = parseWorkflowStepsJson(guardedTask?.steps);
+        if (!currentSteps) return text("Error: task workflow steps are not available for edge validation.");
+        const graphError = formatGraphValidationError(currentSteps, params.edges);
+        if (graphError) return text(graphError);
+        updateFields.edges = JSON.stringify(params.edges);
+      }
 
       const scheduleChanged =
         params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;
@@ -842,6 +1056,7 @@ export async function handleManageScheduledTasks(
         content: params.step_content,
         apps: params.step_apps ?? (existing.apps ? JSON.parse(existing.apps) : null),
       });
+      await deps.scheduler.touchTaskRevision(task_id);
 
       return text(`Step ${params.step_id} content updated.`);
     }
@@ -867,6 +1082,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         queueManager: deps.queueManager,
         activeQueueKey: deps.activeQueueKey,
         config: deps.config,
+        automationArtifactCollector: deps.automationArtifactCollector,
       });
     },
   );

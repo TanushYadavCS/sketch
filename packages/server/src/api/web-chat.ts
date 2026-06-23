@@ -6,7 +6,11 @@ import {
   type WebChatIntegrationConnectionData,
   type WebChatProgressData,
   type WebProgressItem,
+  type WorkflowEdge,
+  type WorkflowStep,
   automationArtifactSchema,
+  workflowEdgeSchema,
+  workflowStepSchema,
 } from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
@@ -18,7 +22,7 @@ import { ensureWorkspace } from "../agent/workspace";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
-import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
@@ -40,6 +44,7 @@ import {
 } from "../progress-settings";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
+import type { ScheduledTask } from "../scheduler/types";
 import { transcribeAudioFile } from "../transcription/service";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -163,6 +168,8 @@ interface ParsedWebChatAttachment {
   file: WebChatFile;
 }
 
+type AutomationBuilderContext = { task: ScheduledTask; stepContentRows: StepContentRow[] } | null;
+
 type WebChatUiChunk =
   | { type: "start"; messageMetadata?: { createdAt: string } }
   | { type: "start-step" }
@@ -255,16 +262,135 @@ function extractAutomationTaskId(body: unknown): string | null {
   return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
 }
 
-function webChatCurrentMessage(message: string, automationTaskId: string | null): string {
-  if (!automationTaskId) return message;
-  return [
+async function resolveAutomationBuilderContext(params: {
+  deps: WebChatRouteDeps;
+  currentUserId: string;
+  role: string | undefined;
+  automationTaskId: string | null;
+  logger: Logger;
+}): Promise<AutomationBuilderContext> {
+  if (!params.automationTaskId || !params.deps.scheduler?.getTaskById) {
+    return null;
+  }
+
+  const task = await params.deps.scheduler.getTaskById(params.automationTaskId).catch((err) => {
+    params.logger.warn({ err, taskId: params.automationTaskId }, "Failed to resolve automation builder context");
+    return null;
+  });
+  if (!task || (params.role !== "admin" && task.createdBy !== params.currentUserId)) {
+    return null;
+  }
+
+  const stepContentRows = params.deps.stepContentRepo
+    ? await params.deps.stepContentRepo.getByTask(task.id).catch((err) => {
+        params.logger.warn({ err, taskId: task.id }, "Failed to load automation builder step content");
+        return [] as StepContentRow[];
+      })
+    : [];
+  return { task, stepContentRows };
+}
+
+function parseBuilderSteps(value: string | null): WorkflowStep[] {
+  if (!value) return [];
+  try {
+    const parsed = workflowStepSchema.array().safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseBuilderEdges(value: string | null): WorkflowEdge[] {
+  if (!value) return [];
+  try {
+    const parsed = workflowEdgeSchema.array().safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseBuilderApps(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function builderContextText(value: string | null | undefined, maxLength = 500): string {
+  const normalized = (value ?? "")
+    .replace(/<\/?automation_builder>/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function builderDeliverySummary(task: ScheduledTask): string {
+  const delivery = task.delivery;
+  const target = builderContextText(delivery.targetId, 160);
+  const thread = delivery.threadTs ? ` thread=${builderContextText(delivery.threadTs, 80)}` : "";
+  return `${delivery.platform} ${delivery.targetType} ${target}${thread} mode=${delivery.mode}`;
+}
+
+function builderStepSummary(step: WorkflowStep, content: StepContentRow | undefined): string {
+  const parts = [`- ${builderContextText(step.id, 80)} [${step.type}]: ${builderContextText(step.label, 160)}`];
+  if (step.type === "trigger" && step.triggerConfig) {
+    parts.push(`trigger: ${builderContextText(JSON.stringify(step.triggerConfig), 260)}`);
+  }
+  if (content) {
+    const kind = content.content_type === "script" ? "script" : "prompt";
+    parts.push(`${kind}: ${builderContextText(content.content, 360)}`);
+    const apps = parseBuilderApps(content.apps);
+    if (apps.length > 0) parts.push(`apps: ${apps.map((app) => builderContextText(app, 60)).join(", ")}`);
+  }
+  return parts.join(" | ");
+}
+
+function automationBuilderContextLines(context: Exclude<AutomationBuilderContext, null>): string[] {
+  const { task, stepContentRows } = context;
+  const steps = parseBuilderSteps(task.steps);
+  const edges = parseBuilderEdges(task.edges);
+  const contentByStep = new Map(stepContentRows.map((row) => [row.step_id, row]));
+  const lines = [
     "<automation_builder>",
-    `task_id: ${automationTaskId}`,
-    "The user is viewing this automation in the builder. Apply requested automation changes with ManageScheduledTasks instead of asking the user to edit the builder directly.",
-    "</automation_builder>",
-    "",
-    message,
-  ].join("\n");
+    `task_id: ${task.id}`,
+    "The user is working on the automation currently open in the builder.",
+    "Treat requests like 'this automation' or 'make it stricter' as applying to this task.",
+    "Apply automation changes with ManageScheduledTasks instead of asking the user to edit the builder directly.",
+    "current_automation:",
+    `title: ${builderContextText(task.title ?? task.prompt, 240)}`,
+    `status: ${task.status}`,
+    `schedule: ${task.scheduleType} ${builderContextText(task.scheduleValue, 160)} (${task.timezone})`,
+    `delivery: ${builderDeliverySummary(task)}`,
+  ];
+  const description = builderContextText(task.description, 500);
+  if (description) lines.push(`description: ${description}`);
+  lines.push(`prompt: ${builderContextText(task.prompt, 700)}`);
+
+  if (steps.length > 0) {
+    lines.push("steps:");
+    for (const step of steps.slice(0, 12)) {
+      lines.push(builderStepSummary(step, contentByStep.get(step.id)));
+    }
+    if (steps.length > 12) lines.push(`- ... ${steps.length - 12} more steps`);
+  }
+
+  if (edges.length > 0) {
+    lines.push(`edges: ${edges.map((edge) => `${edge.from}->${edge.to}`).join(", ")}`);
+  }
+
+  return lines;
+}
+
+function webChatCurrentMessage(message: string, automationBuilderContext: AutomationBuilderContext): string {
+  if (!automationBuilderContext) return message;
+  const lines = [...automationBuilderContextLines(automationBuilderContext), "</automation_builder>"];
+  return [...lines, "", message].join("\n");
 }
 
 const AUTOMATION_CARD_INTRO_TEXT = "All set - here's the automation.";
@@ -801,6 +927,14 @@ function createProgressTranscriptMessage(
   };
 }
 
+function isPendingProgressTranscriptMessage(message: WebChatTranscriptMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    message.parts.length > 0 &&
+    message.parts.every((part) => part.type === "data-progress")
+  );
+}
+
 function createAssistantTranscriptMessage(
   finalText: string,
   files: Array<{ id: string; data: WebChatFile }>,
@@ -923,6 +1057,25 @@ async function completeWebChatProgressMessage(
       ? existing.map((message, index) => (index === progressIndex ? assistantMessage : message))
       : existing.filter((_, index) => index !== progressIndex);
     await writeWebChatTranscript(config, userId, conversationId, next);
+  });
+}
+
+async function interruptLatestPendingWebChatProgress(
+  config: Config,
+  workspaceDir: string,
+  userId: string,
+  logger: Logger,
+  conversationId: string,
+): Promise<boolean> {
+  return withWebChatTranscriptLock(userId, conversationId, async () => {
+    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
+    const latest = existing.at(-1);
+    if (!latest || !isPendingProgressTranscriptMessage(latest)) return false;
+
+    const next = [...existing];
+    next[next.length - 1] = createInterruptedAssistantTranscriptMessage("");
+    await writeWebChatTranscript(config, userId, conversationId, next);
+    return true;
   });
 }
 
@@ -1087,7 +1240,20 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       return c.json(badRequest("VALIDATION_ERROR", "Conversation id is invalid"), 400);
     }
 
-    return c.json({ success: true, interrupted: interruptActiveWebChatRun(currentUser.id, conversationId) });
+    const interruptedActiveRun = interruptActiveWebChatRun(currentUser.id, conversationId);
+    if (interruptedActiveRun) {
+      return c.json({ success: true, interrupted: true });
+    }
+
+    const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    const interruptedPendingTranscript = await interruptLatestPendingWebChatProgress(
+      deps.config,
+      workspaceDir,
+      currentUser.id,
+      deps.logger,
+      conversationId,
+    );
+    return c.json({ success: true, interrupted: interruptedPendingTranscript });
   });
 
   routes.get("/messages", async (c) => {
@@ -1294,6 +1460,13 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }));
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
+    const automationBuilderContext = await resolveAutomationBuilderContext({
+      deps,
+      currentUserId: currentUser.id,
+      role: c.get("role"),
+      automationTaskId,
+      logger: deps.logger,
+    });
     const deliveryPlatform = dmContext?.platform ?? "slack";
     const abortController = new AbortController();
     const baseProgressSettings = resolveProgressDisplaySettings(currentUser);
@@ -1318,7 +1491,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const userMessage = buildSketchContext({
       messages: [],
       currentUserName: currentUser.name,
-      currentMessage: webChatCurrentMessage(message, automationTaskId),
+      currentMessage: webChatCurrentMessage(message, automationBuilderContext),
       currentUserEmail: currentUser.email,
       currentUserPhone: currentUser.whatsapp_number,
       workspaceDir,
@@ -1462,6 +1635,13 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                       deliveryTarget: dmContext.deliveryTarget,
                       createdBy: currentUser.id,
                       creatorTimezone: currentUser.timezone,
+                      canManageAnyTask: c.get("role") === "admin",
+                      origin: {
+                        platform: "web" as const,
+                        conversationId,
+                        providerThreadId: null,
+                        currentMessageId: null,
+                      },
                     },
                   }
                 : {}),

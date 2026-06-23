@@ -190,6 +190,18 @@ export function buildAutomationDefinition(params: {
     revision: params.row.revision,
     title: params.row.title,
     description: params.row.description,
+    originChat:
+      params.row.origin_conversation_id &&
+      (params.row.origin_platform === "web" ||
+        params.row.origin_platform === "slack" ||
+        params.row.origin_platform === "whatsapp")
+        ? {
+            platform: params.row.origin_platform,
+            conversationId: params.row.origin_conversation_id,
+            providerThreadId: params.row.origin_provider_thread_id,
+            currentMessageId: params.row.origin_message_id,
+          }
+        : null,
     delivery,
     steps,
     edges,
@@ -230,97 +242,7 @@ export function validateAutomationBuilderSaveRequest(params: {
   brokerCapable: boolean;
 }): void {
   const { request } = params;
-  const issues: BuilderValidationIssue[] = [];
-  const stepIds = new Set<string>();
-  const incoming = new Map<string, number>();
-  const outgoing = new Map<string, number>();
-
-  for (const step of request.steps) {
-    if (stepIds.has(step.id)) addIssue(issues, "DUPLICATE_STEP_ID", `Duplicate step id "${step.id}"`, "steps");
-    stepIds.add(step.id);
-  }
-
-  const triggers = request.steps.filter((step) => step.type === "trigger");
-  if (triggers.length !== 1)
-    addIssue(issues, "TRIGGER_COUNT", "Automation must have exactly one trigger step", "steps");
-  if (request.steps.every((step) => step.type === "trigger")) {
-    addIssue(issues, "MISSING_EXECUTION_STEP", "Automation must have at least one non-trigger step", "steps");
-  }
-
-  const edgeKeys = new Set<string>();
-  for (const edge of request.edges) {
-    if (!stepIds.has(edge.from))
-      addIssue(issues, "EDGE_SOURCE_MISSING", `Edge source "${edge.from}" does not exist`, "edges");
-    if (!stepIds.has(edge.to))
-      addIssue(issues, "EDGE_TARGET_MISSING", `Edge target "${edge.to}" does not exist`, "edges");
-    if (edge.from === edge.to) addIssue(issues, "SELF_EDGE", "Edges cannot connect a step to itself", "edges");
-    const edgeKey = `${edge.from}:${edge.to}`;
-    if (edgeKeys.has(edgeKey)) addIssue(issues, "DUPLICATE_EDGE", `Duplicate edge "${edgeKey}"`, "edges");
-    edgeKeys.add(edgeKey);
-    outgoing.set(edge.from, (outgoing.get(edge.from) ?? 0) + 1);
-    incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
-  }
-
-  if (request.edges.length === 0) addIssue(issues, "MISSING_EDGES", "Automation graph must include edges", "edges");
-  for (const [stepId, count] of outgoing.entries()) {
-    if (count > 1) addIssue(issues, "FAN_OUT_UNSUPPORTED", `Step "${stepId}" has multiple outgoing edges`, "edges");
-  }
-
-  const trigger = triggers[0];
-  if (trigger) {
-    for (const step of request.steps) {
-      const incomingCount = incoming.get(step.id) ?? 0;
-      if (step.id === trigger.id && incomingCount > 0) {
-        addIssue(issues, "TRIGGER_INCOMING_EDGE", "Trigger step cannot have incoming edges", "edges");
-      }
-      if (step.id !== trigger.id && incomingCount === 0) {
-        addIssue(issues, "ROOT_NOT_TRIGGER", `Step "${step.id}" has no incoming edge`, "edges");
-      }
-    }
-  }
-
-  const adjacency = new Map<string, string[]>();
-  for (const edge of request.edges) {
-    if (!stepIds.has(edge.from) || !stepIds.has(edge.to)) continue;
-    adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to]);
-  }
-
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (stepId: string): boolean => {
-    if (visiting.has(stepId)) return false;
-    if (visited.has(stepId)) return true;
-    visiting.add(stepId);
-    for (const next of adjacency.get(stepId) ?? []) {
-      if (!visit(next)) return false;
-    }
-    visiting.delete(stepId);
-    visited.add(stepId);
-    return true;
-  };
-
-  for (const step of request.steps) {
-    if (!visit(step.id)) {
-      addIssue(issues, "CYCLE", "Automation graph must be acyclic", "edges");
-      break;
-    }
-  }
-
-  if (trigger) {
-    const reachable = new Set<string>();
-    const stack = [trigger.id];
-    while (stack.length > 0) {
-      const stepId = stack.pop();
-      if (!stepId || reachable.has(stepId)) continue;
-      reachable.add(stepId);
-      stack.push(...(adjacency.get(stepId) ?? []));
-    }
-    for (const step of request.steps) {
-      if (!reachable.has(step.id)) {
-        addIssue(issues, "UNREACHABLE_STEP", `Step "${step.id}" is not reachable from the trigger`, "edges");
-      }
-    }
-  }
+  const issues = validateWorkflowGraph(request.steps, request.edges);
 
   for (const step of request.steps) {
     const content = request.stepContent[step.id];
@@ -352,10 +274,110 @@ export function validateAutomationBuilderSaveRequest(params: {
     }
   }
 
-  validateTriggerSchedule(request, trigger, issues);
+  validateTriggerSchedule(
+    request,
+    request.steps.find((step) => step.type === "trigger"),
+    issues,
+  );
   validateScheduleValue(request, issues);
 
   if (issues.length > 0) throw new AutomationValidationError(issues);
+}
+
+export function validateWorkflowGraph(steps: WorkflowStep[], edges: WorkflowEdge[]): BuilderValidationIssue[] {
+  const issues: BuilderValidationIssue[] = [];
+  const stepIds = new Set<string>();
+  const incoming = new Map<string, number>();
+  const outgoing = new Map<string, number>();
+
+  for (const step of steps) {
+    if (stepIds.has(step.id)) addIssue(issues, "DUPLICATE_STEP_ID", `Duplicate step id "${step.id}"`, "steps");
+    stepIds.add(step.id);
+  }
+
+  const triggers = steps.filter((step) => step.type === "trigger");
+  if (triggers.length !== 1)
+    addIssue(issues, "TRIGGER_COUNT", "Automation must have exactly one trigger step", "steps");
+  if (steps.every((step) => step.type === "trigger")) {
+    addIssue(issues, "MISSING_EXECUTION_STEP", "Automation must have at least one non-trigger step", "steps");
+  }
+
+  const edgeKeys = new Set<string>();
+  for (const edge of edges) {
+    if (!stepIds.has(edge.from))
+      addIssue(issues, "EDGE_SOURCE_MISSING", `Edge source "${edge.from}" does not exist`, "edges");
+    if (!stepIds.has(edge.to))
+      addIssue(issues, "EDGE_TARGET_MISSING", `Edge target "${edge.to}" does not exist`, "edges");
+    if (edge.from === edge.to) addIssue(issues, "SELF_EDGE", "Edges cannot connect a step to itself", "edges");
+    const edgeKey = `${edge.from}:${edge.to}`;
+    if (edgeKeys.has(edgeKey)) addIssue(issues, "DUPLICATE_EDGE", `Duplicate edge "${edgeKey}"`, "edges");
+    edgeKeys.add(edgeKey);
+    outgoing.set(edge.from, (outgoing.get(edge.from) ?? 0) + 1);
+    incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
+  }
+
+  if (edges.length === 0) addIssue(issues, "MISSING_EDGES", "Automation graph must include edges", "edges");
+  for (const [stepId, count] of outgoing.entries()) {
+    if (count > 1) addIssue(issues, "FAN_OUT_UNSUPPORTED", `Step "${stepId}" has multiple outgoing edges`, "edges");
+  }
+
+  const trigger = triggers[0];
+  if (trigger) {
+    for (const step of steps) {
+      const incomingCount = incoming.get(step.id) ?? 0;
+      if (step.id === trigger.id && incomingCount > 0) {
+        addIssue(issues, "TRIGGER_INCOMING_EDGE", "Trigger step cannot have incoming edges", "edges");
+      }
+      if (step.id !== trigger.id && incomingCount === 0) {
+        addIssue(issues, "ROOT_NOT_TRIGGER", `Step "${step.id}" has no incoming edge`, "edges");
+      }
+    }
+  }
+
+  const adjacency = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (!stepIds.has(edge.from) || !stepIds.has(edge.to)) continue;
+    adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to]);
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (stepId: string): boolean => {
+    if (visiting.has(stepId)) return false;
+    if (visited.has(stepId)) return true;
+    visiting.add(stepId);
+    for (const next of adjacency.get(stepId) ?? []) {
+      if (!visit(next)) return false;
+    }
+    visiting.delete(stepId);
+    visited.add(stepId);
+    return true;
+  };
+
+  for (const step of steps) {
+    if (!visit(step.id)) {
+      addIssue(issues, "CYCLE", "Automation graph must be acyclic", "edges");
+      break;
+    }
+  }
+
+  if (trigger) {
+    const reachable = new Set<string>();
+    const stack = [trigger.id];
+    while (stack.length > 0) {
+      const stepId = stack.pop();
+      if (!stepId || reachable.has(stepId)) continue;
+      reachable.add(stepId);
+      stack.push(...(adjacency.get(stepId) ?? []));
+    }
+    for (const step of steps) {
+      if (!reachable.has(step.id)) {
+        addIssue(issues, "UNREACHABLE_STEP", `Step "${step.id}" is not reachable from the trigger`, "edges");
+      }
+    }
+  }
+
+  return issues;
 }
 
 function validateTriggerSchedule(

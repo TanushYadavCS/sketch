@@ -996,6 +996,63 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userMessage).toContain("description: A test group");
     });
 
+    it("does not send builder links for automations created by unknown group senders", async () => {
+      const deps = makeDeps({
+        repos: {
+          ...makeDeps().repos,
+          users: {
+            findByWhatsappNumber: vi.fn().mockResolvedValue(null),
+            findById: vi.fn(),
+            update: vi.fn(),
+            create: vi.fn(),
+          } as unknown as WhatsAppAdapterDeps["repos"]["users"],
+        },
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: {
+              progressEvents: [],
+              finalText: null,
+              automationArtifacts: [
+                {
+                  taskId: "task-1",
+                  kind: "New automation",
+                  title: "Design wins",
+                  description: "Post wins",
+                  tags: ["WhatsApp"],
+                  scheduleLabel: "External trigger",
+                  deliveryLabel: "WhatsApp group",
+                  builderUrl: "https://sketch.test/scheduled-tasks/task-1/edit",
+                  status: "active",
+                },
+              ],
+            },
+          }),
+        ),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "@bot create an automation",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.sendText).not.toHaveBeenCalledWith(
+        "group@g.us",
+        expect.stringContaining("/scheduled-tasks/task-1/edit"),
+        expect.anything(),
+      );
+    });
+
     it("injects durable missed messages on mention", async () => {
       const deps = makeDeps();
       vi.mocked(deps.repos.conversations.listBacklog).mockResolvedValue({
