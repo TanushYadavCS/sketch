@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { DB } from "../db/schema";
+import { normalizeSourceTimestampForStorage } from "../timestamps";
 import { clearEnrichmentData } from "./enrichment";
 import { getSyncIdentity, getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import type { ConnectorType, SyncedItem } from "./types";
@@ -89,6 +90,15 @@ export async function processSyncedItem({
   const existing = existingHashes.get(syncIdentityKey(getSyncIdentityForItem(item, connectorConfigId, connectorType)));
   const rollupGroupIds = uniqueRollupGroupIds([existing?.rollupGroupId, item.rollupGroupId ?? null]);
   if (existing && existing.contentHash === item.contentHash && existing.contentCategory === item.contentCategory) {
+    const sourceCreatedAt =
+      item.sourceCreatedAt === null || item.sourceCreatedAt === undefined
+        ? undefined
+        : normalizeSourceTimestampForStorage(item.sourceCreatedAt);
+    const sourceUpdatedAt =
+      item.sourceUpdatedAt === null || item.sourceUpdatedAt === undefined
+        ? undefined
+        : normalizeSourceTimestampForStorage(item.sourceUpdatedAt);
+
     await db
       .updateTable("indexed_files")
       .set({
@@ -101,8 +111,8 @@ export async function processSyncedItem({
         provider_url: item.providerUrl ?? undefined,
         file_type: item.fileType ?? undefined,
         content_category: item.contentCategory ?? undefined,
-        source_created_at: item.sourceCreatedAt ?? undefined,
-        source_updated_at: item.sourceUpdatedAt ?? undefined,
+        source_created_at: sourceCreatedAt,
+        source_updated_at: sourceUpdatedAt,
         mime_type: item.mimeType ?? undefined,
         rollup_group_id: item.rollupGroupId ?? null,
       })

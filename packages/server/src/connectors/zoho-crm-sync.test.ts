@@ -236,8 +236,8 @@ describe("Zoho CRM connector sync integration", () => {
 
     expect(files[2].content).toContain("# Acme renewal (Deals)");
     expect(files[2].content).toContain("Stage: Negotiation");
-    expect(files[2].source_created_at).toBe("2026-01-01T00:00:00+05:30");
-    expect(files[2].source_updated_at).toBe("2026-01-02T00:00:00+05:30");
+    expect(files[2].source_created_at).toBe("2025-12-31T18:30:00.000Z");
+    expect(files[2].source_updated_at).toBe("2026-01-01T18:30:00.000Z");
     expect(files[3].content).toContain("# Follow up on renewal - Jane Buyer (Tasks)");
     expect(files[3].content).toContain("Status: Not Started");
     expect(files[3].content).toContain("Confirm renewal paperwork and next meeting date.");
@@ -251,8 +251,8 @@ describe("Zoho CRM connector sync integration", () => {
       connector_config_id: "zoho-crm-pr4",
       group_id: "Deals:d1",
       activity_count: 1,
-      basis_first_at: "2026-01-02T00:00:00+05:30",
-      basis_last_at: "2026-01-02T00:00:00+05:30",
+      basis_first_at: "2026-01-01T18:30:00.000Z",
+      basis_last_at: "2026-01-01T18:30:00.000Z",
     });
     expect(rollup.summary).toContain("Acme renewal has 1 CRM activity");
     expect(rollup.summary).toContain("Follow up on renewal - Jane Buyer");

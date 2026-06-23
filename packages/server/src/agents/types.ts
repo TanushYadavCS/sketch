@@ -1,0 +1,68 @@
+import type { Kysely } from "kysely";
+import type { AgentKnowledgeRefs, AgentOutputItemInput, AgentOutputItemRow } from "../db/repositories/agent-outputs";
+import type { DB } from "../db/schema";
+
+export type AgentStoredItem = AgentOutputItemRow & { knowledgeRefs: AgentKnowledgeRefs };
+
+export interface AgentSectionDef {
+  key: string;
+  title: string;
+  /** Whether the section is on for a brand-new user before any reconfiguration. */
+  enabledByDefault: boolean;
+  labels: readonly string[];
+}
+
+export interface AgentDefaults {
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+  maxItemsPerSection: number;
+}
+
+export interface AgentApiItem {
+  id: string;
+  sectionKey: string;
+  title: string;
+  summary: string;
+  priority: string;
+  label: string;
+  displayRef: string | null;
+  actionType: string | null;
+  actionLabel: string | null;
+  actionPrompt: string | null;
+  sourceUrl: string | null;
+  knowledgeRefs: AgentKnowledgeRefs;
+  sortOrder: number;
+}
+
+/**
+ * Code-owned, versioned contract for a prebuilt agent. Behavior (instructions,
+ * sections, labels, output shaping) lives here; per-user preferences and outputs
+ * are data. Users enable and reconfigure definitions but cannot author new ones.
+ */
+export interface AgentDefinition {
+  key: string;
+  version: string;
+  title: string;
+  /** One-line tagline for the agents index card. */
+  tagline: string;
+  description: string;
+  category: string;
+  defaults: AgentDefaults;
+  sections: AgentSectionDef[];
+  allowedTools: string[];
+  /** Allowed range for the per-section item cap; surfaced to the config editor. */
+  itemsPerSectionRange: { min: number; max: number };
+  /** When true, every output item must cite at least one known entity or file. */
+  requiresKnowledgeRefs: boolean;
+  /**
+   * Fully static instruction string. Per-user values (enabled sections, item cap,
+   * focus) are NOT interpolated here; they flow through the runtime context in the
+   * user message so this string stays byte-identical across users for prompt-cache reuse.
+   */
+  buildInstructions(): string;
+  /** Derive display refs, source URLs, and canonical action labels from indexed data. */
+  enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]>;
+  /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
+  toApiItem(item: AgentStoredItem): AgentApiItem;
+}

@@ -1158,6 +1158,30 @@ async function resolveWebChatDmContext(
   return null;
 }
 
+function automationBuilderTaskContext(params: {
+  context: Exclude<AutomationBuilderContext, null>;
+  currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
+  role: string | undefined;
+  conversationId: string;
+}) {
+  const task = params.context.task;
+  return {
+    platform: task.platform,
+    contextType: task.contextType,
+    deliveryTarget: task.deliveryTarget,
+    createdBy: params.currentUser.id,
+    creatorTimezone: params.currentUser.timezone,
+    threadTs: task.threadTs ?? undefined,
+    canManageAnyTask: params.role === "admin",
+    origin: {
+      platform: "web" as const,
+      conversationId: params.conversationId,
+      providerThreadId: null,
+      currentMessageId: null,
+    },
+  };
+}
+
 export function webChatRoutes(deps: WebChatRouteDeps) {
   const routes = new Hono();
   const toolConfig = { BASE_URL: deps.config.BASE_URL, PORT: deps.config.PORT };
@@ -1467,7 +1491,30 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       automationTaskId,
       logger: deps.logger,
     });
-    const deliveryPlatform = dmContext?.platform ?? "slack";
+    const taskContext = automationBuilderContext
+      ? automationBuilderTaskContext({
+          context: automationBuilderContext,
+          currentUser,
+          role: c.get("role"),
+          conversationId,
+        })
+      : dmContext
+        ? {
+            platform: dmContext.platform,
+            contextType: "dm" as const,
+            deliveryTarget: dmContext.deliveryTarget,
+            createdBy: currentUser.id,
+            creatorTimezone: currentUser.timezone,
+            canManageAnyTask: c.get("role") === "admin",
+            origin: {
+              platform: "web" as const,
+              conversationId,
+              providerThreadId: null,
+              currentMessageId: null,
+            },
+          }
+        : null;
+    const deliveryPlatform = taskContext?.platform ?? "slack";
     const abortController = new AbortController();
     const baseProgressSettings = resolveProgressDisplaySettings(currentUser);
     const progressMode = resolveWebChatProgressRendererMode(
@@ -1627,24 +1674,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               currentUserId: currentUser.id,
               sendDm: deps.sendDm,
               ...(attachments.length > 0 ? { attachments } : {}),
-              ...(dmContext
-                ? {
-                    taskContext: {
-                      platform: dmContext.platform,
-                      contextType: "dm" as const,
-                      deliveryTarget: dmContext.deliveryTarget,
-                      createdBy: currentUser.id,
-                      creatorTimezone: currentUser.timezone,
-                      canManageAnyTask: c.get("role") === "admin",
-                      origin: {
-                        platform: "web" as const,
-                        conversationId,
-                        providerThreadId: null,
-                        currentMessageId: null,
-                      },
-                    },
-                  }
-                : {}),
+              ...(taskContext ? { taskContext } : {}),
             }),
           ),
         );

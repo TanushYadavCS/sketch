@@ -525,6 +525,21 @@ describe("web chat API", () => {
     expect(call.userMessage).toContain("title: Post design wins");
     expect(call.userMessage).not.toContain("Alice");
     expect(call.userMessage).not.toContain("The automation was created from a slack chat");
+    expect(call.platform).toBe("slack");
+    expect(call.taskContext).toMatchObject({
+      platform: "slack",
+      contextType: "channel",
+      deliveryTarget: "C123",
+      createdBy: admin.id,
+      threadTs: "1700.1",
+      canManageAnyTask: true,
+      origin: {
+        platform: "web",
+        conversationId: "builder-task-123",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    });
     expect(call.conversationRepo).toBeUndefined();
     expect(call.conversationContext).toBeUndefined();
   });
