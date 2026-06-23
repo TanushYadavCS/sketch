@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 107;
+const EXPECTED_MIGRATION_COUNT = 108;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -163,6 +163,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[104]).toBe("109-sub-entities");
     expect(names[105]).toBe("110-tasks-assignee-name");
     expect(names[106]).toBe("111-milestone-series-and-value-signature");
+    expect(names[107]).toBe("112-work-cycles");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -240,6 +241,94 @@ describe("runMigrations — full sequence", () => {
 
     const taskIndexes = await sql<{ name: string }>`PRAGMA index_list(tasks)`.execute(db);
     expect(taskIndexes.rows.map((row) => row.name)).toContain("idx_tasks_milestone_series_key");
+  });
+
+  it("creates work cycle tables and indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const cycleColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>`PRAGMA table_info(work_cycles)`.execute(db);
+    expect(cycleColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "scope_entity_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "source", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "external_ref", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "name", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "sequence", type: "INTEGER", notnull: 0 }),
+        expect.objectContaining({ name: "state", type: "TEXT", notnull: 1, dflt_value: "'planned'" }),
+        expect.objectContaining({ name: "last_seen_sync_run_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "deleted_at", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    const membershipColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+    }>`PRAGMA table_info(task_cycle_memberships)`.execute(db);
+    expect(membershipColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "task_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "cycle_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "assigned_at", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "removed_at", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "source_fact_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    const cycleIndexes = await sql<{ name: string; unique: number }>`PRAGMA index_list(work_cycles)`.execute(db);
+    expect(cycleIndexes.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "idx_work_cycles_source_ref", unique: 1 })]),
+    );
+    expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_last_seen");
+
+    const cycleForeignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(work_cycles)`.execute(db);
+    expect(cycleForeignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "entities", from: "scope_entity_id", to: "id", on_delete: "SET NULL" }),
+      ]),
+    );
+
+    const membershipIndexes = await sql<{
+      name: string;
+      unique: number;
+      partial: number;
+    }>`PRAGMA index_list(task_cycle_memberships)`.execute(db);
+    expect(membershipIndexes.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "idx_task_cycle_current", unique: 1, partial: 1 }),
+        expect.objectContaining({ name: "idx_task_cycle_memberships_cycle" }),
+        expect.objectContaining({ name: "idx_task_cycle_memberships_task" }),
+      ]),
+    );
+
+    const membershipForeignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(task_cycle_memberships)`.execute(db);
+    expect(membershipForeignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "tasks", from: "task_id", to: "id", on_delete: "CASCADE" }),
+        expect.objectContaining({ table: "work_cycles", from: "cycle_id", to: "id", on_delete: "CASCADE" }),
+        expect.objectContaining({
+          table: "indexed_file_facts",
+          from: "source_fact_id",
+          to: "id",
+          on_delete: "SET NULL",
+        }),
+      ]),
+    );
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {

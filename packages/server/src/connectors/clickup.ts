@@ -211,6 +211,23 @@ function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+type SyncedTaskCycle = NonNullable<NonNullable<SyncedItem["task"]>["cycle"]>;
+
+/**
+ * Threads ClickUp list/folder/space context for WORK_STRUCTURES PR-S part 1.
+ * Sprint metadata fetch and auto-detection are deferred until the follow-on plan
+ * verifies the required ClickUp auth scope.
+ */
+function taskCycleContext(task: ClickUpTask, folderId: string | undefined, spaceId: string): SyncedTaskCycle {
+  return {
+    source: "clickup",
+    externalRef: task.list.id,
+    name: task.list.name,
+    scopeRef: { source: "clickup", sourceId: folderId ?? spaceId },
+    isSprint: false,
+  };
+}
+
 function taskToSyncedItem(
   task: ClickUpTask,
   workspaceName: string,
@@ -297,6 +314,7 @@ function taskToSyncedItem(
             sourceId: `assignee:${primaryAssignee.username}`,
           }
         : undefined,
+      cycle: taskCycleContext(task, folderId, spaceId),
     },
     authorEmail: task.creator?.email,
     authorName: task.creator?.username,

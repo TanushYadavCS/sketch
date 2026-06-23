@@ -115,6 +115,16 @@ export interface SyncedItem {
     dueAt?: string;
     project?: { name: string; source: string; sourceId: string };
     assignee?: { name: string; email?: string; source?: string; sourceId?: string };
+    cycle?: {
+      source: string;
+      externalRef: string;
+      name: string;
+      scopeRef?: { source: string; sourceId: string };
+      startsAt?: string;
+      endsAt?: string;
+      sequence?: number;
+      isSprint: boolean;
+    };
   };
   commitments?: CommitmentSeed[];
   decisions?: DecisionSeed[];
