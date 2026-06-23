@@ -202,6 +202,16 @@ export interface CommitmentSeed {
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
+export interface FeatureFactRaw {
+  featureId: string;
+  featureName: string;
+  parentProductRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  status: "proposed" | "building" | "shipped" | "deprecated";
+  dueAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+}
+
 export interface DecisionSeed {
   decisionId?: string;
   topic: string;
@@ -255,6 +265,7 @@ export type IndexedFileFactRaw =
       task: NonNullable<SyncedItem["task"]>;
     }
   | CommitmentSeed
+  | FeatureFactRaw
   | DecisionSeed
   | LlmTaskFactRaw
   | { providerFileId: string; contactPoint: ContactPointSeed }

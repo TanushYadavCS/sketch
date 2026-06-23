@@ -9,7 +9,7 @@ export async function materializeDecision(deps: MaterializeDeps, fact: IndexedFi
   const decision = readDecision(raw);
   if (!decision) return { kind: "skipped", reason: "invalid_decision" };
 
-  const parent = resolveParent(deps, decision);
+  const parent = resolveParent(deps, decision, ["project", "person"]);
   if (!parent) return { kind: "skipped", reason: "missing_decision_parent" };
   const effectiveAt = await resolveEffectiveAt(deps, fact, decision);
   if (!effectiveAt) return { kind: "skipped", reason: "missing_decision_effective_time" };
