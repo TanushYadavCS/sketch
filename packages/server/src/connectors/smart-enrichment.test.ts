@@ -88,6 +88,53 @@ function makeDeps(db: Kysely<DB>) {
   };
 }
 
+function smartFileContext(
+  id: string,
+  contentHash: string,
+  overrides: Partial<Parameters<typeof smartEnrichFile>[1]> = {},
+): Parameters<typeof smartEnrichFile>[1] {
+  return {
+    id,
+    fileName: `${id}.txt`,
+    content: "Sarah Chen works on Project Atlas with the Platform Team.",
+    contentCategory: "document",
+    source: "google_drive",
+    sourcePath: "/",
+    contentHash,
+    connectorConfigId: "conn-smart",
+    sourceCreatedAt: null,
+    sourceUpdatedAt: null,
+    ...overrides,
+  };
+}
+
+function generatorWithProjectExtraction(): GeminiGenerator {
+  return {
+    generate: async () => "Sarah Chen works on Project Atlas with the Platform Team.",
+    generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+      if (opts?.label?.startsWith("extractEntities")) {
+        return {
+          mentions: [
+            { mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 },
+            { mention: "Project Atlas", type: "project", variations: ["Atlas"], confidence: 0.94 },
+            { mention: "Platform Team", type: "team", variations: ["Platform"], confidence: 0.93 },
+          ],
+          relations: [
+            {
+              type: "contributes_to",
+              source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
+              target: { name: "Project Atlas", type: "project", variations: ["Atlas"] },
+              confidence: 0.92,
+              context: "Sarah Chen works on Project Atlas.",
+            },
+          ],
+        } as T;
+      }
+      return {} as T;
+    },
+  } as GeminiGenerator;
+}
+
 describe("handleCandidates — stale seen_file_ids", () => {
   let db: Kysely<DB>;
 
@@ -220,6 +267,84 @@ describe("handleCandidates — stale seen_file_ids", () => {
     expect(await countEntitiesBySourceType(db, "product")).toBe(1);
     expect(await countEntitiesBySourceType(db, "project")).toBe(1);
     expect(await countReviewQueueRows(db)).toBe(0);
+  });
+});
+
+describe("smartEnrichFile — structural task file types", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  it.each(["issue", "task", "subtask", "Issue"])(
+    "drops project/team mentions and project endpoint relations for fileType %s",
+    async (fileType) => {
+      const fileId = randomUUID();
+      const contentHash = `hash-${fileType}`;
+      await seedFile(db, fileId, {
+        content: "Sarah Chen works on Project Atlas with the Platform Team.",
+        contentHash,
+      });
+
+      await smartEnrichFile(
+        { db, logger: createTestLogger(), generator: generatorWithProjectExtraction(), embeddingProvider: null },
+        smartFileContext(fileId, contentHash, { fileType }),
+      );
+
+      const facts = await db
+        .selectFrom("indexed_file_facts")
+        .select(["fact_type", "subject_name", "raw"])
+        .where("indexed_file_id", "=", fileId)
+        .where("source", "=", "llm_extraction")
+        .where("deleted_at", "is", null)
+        .orderBy("subject_name", "asc")
+        .execute();
+
+      expect(facts.map((fact) => [fact.fact_type, fact.subject_name])).toEqual([["llm_extracted", "Sarah Chen"]]);
+      expect(facts.some((fact) => fact.subject_name === "Project Atlas")).toBe(false);
+      expect(facts.some((fact) => fact.subject_name === "Platform Team")).toBe(false);
+      expect(facts.some((fact) => fact.fact_type === "llm_relation")).toBe(false);
+
+      const projectOrTeamReviewRows = await db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("entity_type", "in", ["project", "team"])
+        .execute();
+      expect(projectOrTeamReviewRows).toHaveLength(0);
+    },
+  );
+
+  it.each(["meeting_transcript", "doc", undefined])("keeps project mentions for fileType %s", async (fileType) => {
+    const fileId = randomUUID();
+    const contentHash = `hash-${fileType ?? "none"}`;
+    await seedFile(db, fileId, {
+      content: "Sarah Chen works on Project Atlas with the Platform Team.",
+      contentHash,
+    });
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator: generatorWithProjectExtraction(), embeddingProvider: null },
+      smartFileContext(fileId, contentHash, { fileType }),
+    );
+
+    const projectFact = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "subject_name"])
+      .where("indexed_file_id", "=", fileId)
+      .where("fact_type", "=", "llm_extracted")
+      .where("subject_name", "=", "Project Atlas")
+      .where("deleted_at", "is", null)
+      .executeTakeFirst();
+    expect(projectFact).toEqual({ fact_type: "llm_extracted", subject_name: "Project Atlas" });
   });
 });
 
@@ -995,11 +1120,11 @@ describe("extractEntities prompt — v6 entity type removal", () => {
     expect(capturedPrompt).toContain("Companies");
     expect(capturedPrompt).toContain("Projects");
     expect(capturedPrompt).toContain("Products");
-    expect(capturedPrompt).toContain("Teams");
+    expect(capturedPrompt).not.toContain("Teams");
     expect(capturedPrompt).toContain("Prefer extracting from the top down");
     expect(capturedPrompt).toContain('"engaged_with"');
     expect(capturedPrompt).toContain("without being employed by it");
-    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product", "team"');
+    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product"');
     expect(capturedPrompt).not.toContain("Features");
     expect(capturedPrompt).not.toContain('"feature"');
     expect(capturedPrompt).not.toContain("feature -> project | product");

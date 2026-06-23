@@ -55,7 +55,7 @@ export interface EmitDocumentDerivedFactsResult {
  * structural task, and so is not double-sourced. A null/unknown file type falls
  * through to normal extraction.
  */
-const STRUCTURAL_TASK_FILE_TYPES = new Set(["issue", "task", "subtask"]);
+export const STRUCTURAL_TASK_FILE_TYPES = new Set(["issue", "task", "subtask"]);
 
 export function sortDocumentParentRefs(parentRefs: DocumentFactParentRef[]): DocumentFactParentRef[] {
   return [...parentRefs].sort((a, b) => a.source.localeCompare(b.source) || a.sourceId.localeCompare(b.sourceId));
