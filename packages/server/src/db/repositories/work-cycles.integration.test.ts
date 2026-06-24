@@ -72,6 +72,7 @@ describe("work cycle sink postgres", () => {
       state: "active",
       deleted_at: null,
       last_seen_sync_run_id: "sync-1",
+      connector_config_id: CONNECTOR_ID,
     });
     expect(await tableCount(db, "work_cycles")).toBe(1);
     expect(await openMembershipCount(db, "work-cycle-task-sprint")).toBe(1);
@@ -179,13 +180,16 @@ describe("work cycle sink postgres", () => {
 
   it("reconciles unseen cycles and returns current task rollups", async () => {
     db = await createTestPgDb();
+    await seedBase(db);
     const cycleA = await upsertWorkCycle(db, {
+      connectorConfigId: CONNECTOR_ID,
       source: "linear",
       externalRef: "sprint-rollup-a",
       name: "Sprint 10",
       lastSeenSyncRunId: "sync-1",
     });
     const cycleB = await upsertWorkCycle(db, {
+      connectorConfigId: CONNECTOR_ID,
       source: "linear",
       externalRef: "sprint-rollup-b",
       name: "Sprint 11",
@@ -216,6 +220,7 @@ describe("work cycle sink postgres", () => {
       at: "2026-06-01T00:00:00.000Z",
     });
     await upsertWorkCycle(db, {
+      connectorConfigId: CONNECTOR_ID,
       source: "linear",
       externalRef: "sprint-rollup-a",
       name: "Sprint 10",
@@ -223,7 +228,7 @@ describe("work cycle sink postgres", () => {
     });
 
     const closed = await reconcileWorkCycles(db, {
-      source: "linear",
+      connectorConfigId: CONNECTOR_ID,
       syncRunId: "sync-2",
       at: "2026-06-15T00:00:00.000Z",
     });

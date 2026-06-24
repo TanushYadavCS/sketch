@@ -50,7 +50,11 @@ export async function reconcileConnectorSync({
   maxReconcileRatio,
   encryptionKey,
   logger,
-}: ReconcileConnectorSyncParams): Promise<{ itemsArchived: number; affectedIndexedFileIds: string[] }> {
+}: ReconcileConnectorSyncParams): Promise<{
+  itemsArchived: number;
+  affectedIndexedFileIds: string[];
+  reconciled: boolean;
+}> {
   const repo = createConnectorRepository(db, encryptionKey);
   const entityRepo = createEntityRepository(db);
   const reconcileResult = await factRepo.reconcileStaleFacts(
@@ -74,7 +78,7 @@ export async function reconcileConnectorSync({
       },
       "Stale-fact reconcile skipped: delta exceeds threshold",
     );
-    return { itemsArchived: 0, affectedIndexedFileIds: [] };
+    return { itemsArchived: 0, affectedIndexedFileIds: [], reconciled: false };
   }
 
   const itemsArchived = await repo.archiveStaleFiles(connectorConfigId, seenSyncIdentityKeys);
@@ -90,7 +94,7 @@ export async function reconcileConnectorSync({
     await factRepo.clearMaterializedAtForActiveFacts(reconcileResult.affectedIndexedFileIds);
   }
 
-  return { itemsArchived, affectedIndexedFileIds: reconcileResult.affectedIndexedFileIds };
+  return { itemsArchived, affectedIndexedFileIds: reconcileResult.affectedIndexedFileIds, reconciled: true };
 }
 
 export async function removeConnectorSourceItems({

@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { createTaskRepository } from "../db/repositories/tasks";
+import { reconcileWorkCycles } from "../db/repositories/work-cycles";
 import type { DB } from "../db/schema";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
@@ -14,6 +15,10 @@ export interface PostSyncGraphPipelineParams {
   coMentionContributesToThreshold?: number;
   floorRetryMaxFilesPerDomain?: number;
   source?: string;
+  syncRunId?: string;
+  connectorConfigId?: string;
+  experimentalFlag?: boolean;
+  runCycleReconcile?: boolean;
 }
 
 export async function runPostSyncGraphPipeline({
@@ -23,6 +28,10 @@ export async function runPostSyncGraphPipeline({
   coMentionContributesToThreshold,
   floorRetryMaxFilesPerDomain,
   source,
+  syncRunId,
+  connectorConfigId,
+  experimentalFlag,
+  runCycleReconcile,
 }: PostSyncGraphPipelineParams): Promise<void> {
   const materializeSummary = await materializeUnmaterializedFacts(db, syncLogger);
   if (materializeSummary.factsRead > 0) {
@@ -33,6 +42,16 @@ export async function runPostSyncGraphPipeline({
   const expiredTasks = await taskRepo.expireOrphanedTasks(source);
   if (reanchoredTasks > 0 || expiredTasks > 0) {
     syncLogger.info({ reanchoredTasks, expiredTasks }, "Post-sync task sweep complete");
+  }
+  if (experimentalFlag && runCycleReconcile && connectorConfigId && syncRunId) {
+    const closedWorkCycles = await reconcileWorkCycles(db, {
+      connectorConfigId,
+      syncRunId,
+      at: new Date().toISOString(),
+    });
+    if (closedWorkCycles > 0) {
+      syncLogger.info({ closedWorkCycles }, "Post-sync work cycle reconcile complete");
+    }
   }
 
   const domainSweep = await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));

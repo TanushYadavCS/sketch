@@ -959,6 +959,7 @@ export interface TaskEvidenceTable {
 export interface WorkCyclesTable {
   id: string;
   scope_entity_id: string | null;
+  connector_config_id: string | null;
   source: string;
   external_ref: string;
   name: string;

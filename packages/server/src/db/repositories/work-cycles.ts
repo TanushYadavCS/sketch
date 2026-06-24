@@ -8,6 +8,7 @@ export type WorkCycleState = "planned" | "active" | "closed";
 
 export interface UpsertWorkCycleInput {
   scopeEntityId?: string | null;
+  connectorConfigId?: string | null;
   source: string;
   externalRef: string;
   name: string;
@@ -26,8 +27,13 @@ export interface AssignMembershipInput {
 }
 
 export interface ReconcileWorkCyclesInput {
-  source: string;
+  connectorConfigId: string;
   syncRunId: string;
+  at: string;
+}
+
+export interface CloseOpenMembershipForTaskInput {
+  taskId: string;
   at: string;
 }
 
@@ -55,6 +61,7 @@ export async function upsertWorkCycle(
   const now = new Date().toISOString();
   const values = {
     scope_entity_id: input.scopeEntityId ?? null,
+    connector_config_id: input.connectorConfigId ?? null,
     name: input.name,
     sequence: input.sequence ?? null,
     starts_at: input.startsAt ?? null,
@@ -111,7 +118,7 @@ export async function reconcileWorkCycles(db: Kysely<DB>, input: ReconcileWorkCy
   const rows = await db
     .selectFrom("work_cycles")
     .select("id")
-    .where("source", "=", input.source)
+    .where("connector_config_id", "=", input.connectorConfigId)
     .where("deleted_at", "is", null)
     .where((eb) => eb.or([eb("last_seen_sync_run_id", "is", null), eb("last_seen_sync_run_id", "!=", input.syncRunId)]))
     .execute();
@@ -137,6 +144,19 @@ export async function reconcileWorkCycles(db: Kysely<DB>, input: ReconcileWorkCy
     await yieldToEventLoop();
   }
   return closed;
+}
+
+export async function closeOpenMembershipForTask(
+  db: Kysely<DB>,
+  input: CloseOpenMembershipForTaskInput,
+): Promise<number> {
+  const result = await db
+    .updateTable("task_cycle_memberships")
+    .set({ removed_at: input.at })
+    .where("task_id", "=", input.taskId)
+    .where("removed_at", "is", null)
+    .executeTakeFirst();
+  return Number(result.numUpdatedRows ?? 0);
 }
 
 export async function getCycleRollup(db: Kysely<DB>, cycleId: string): Promise<CycleRollup> {
