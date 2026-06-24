@@ -25,6 +25,15 @@ export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" |
 
 export type ContentCategory = "document" | "structured";
 
+export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
+
+export interface HierarchyLevelDeclaration {
+  key: string;
+  label: string;
+  allowedTargets: HierarchyTarget[];
+  default: HierarchyTarget;
+}
+
 /**
  * Decrypted credentials stored per connector.
  * Shape varies by provider + auth type.
@@ -398,6 +407,8 @@ export interface Connector {
    */
   readonly promotableFileTypes?: string[];
 
+  readonly hierarchyLevels?: HierarchyLevelDeclaration[];
+
   /**
    * Whether this connector's people are email correspondents rather than meeting
    * attendees / document authors. When true, `attendees` and `authorEmail` seed
@@ -437,6 +448,7 @@ export interface Connector {
      * Optional — connectors that don't need it leave it unset.
      */
     resolveNameToEmail?: NameResolver;
+    experimentalFlag?: boolean;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;

@@ -716,11 +716,21 @@ export type BrowseResult =
   | { type: "nested"; groups: BrowseNestedGroup[] }
   | { type: "tree"; items: BrowseTreeItem[]; groups?: BrowseNestedGroup[] };
 
+export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
+
+export interface HierarchyLevel {
+  key: string;
+  label: string;
+  allowedTargets: HierarchyTarget[];
+  default: HierarchyTarget;
+}
+
 export interface ConnectorConfig {
   id: string;
   connectorType: string;
   authType: string;
   scopeConfig: Record<string, unknown>;
+  hierarchyLevels?: HierarchyLevel[] | null;
 
   syncStatus: "active" | "syncing" | "error" | "paused" | "pending" | "disabled";
   lastSyncedAt: string | null;

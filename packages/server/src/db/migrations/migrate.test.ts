@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 109;
+const EXPECTED_MIGRATION_COUNT = 110;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -165,6 +165,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[106]).toBe("111-milestone-series-and-value-signature");
     expect(names[107]).toBe("112-work-cycles");
     expect(names[108]).toBe("113-work-cycles-connector");
+    expect(names[109]).toBe("114-work-cycles-connector-key");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -284,8 +285,12 @@ describe("runMigrations — full sequence", () => {
 
     const cycleIndexes = await sql<{ name: string; unique: number }>`PRAGMA index_list(work_cycles)`.execute(db);
     expect(cycleIndexes.rows).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "idx_work_cycles_source_ref", unique: 1 })]),
+      expect.arrayContaining([expect.objectContaining({ name: "idx_work_cycles_connector_source_ref", unique: 1 })]),
     );
+    const cycleKeyColumns = await sql<{
+      name: string;
+    }>`PRAGMA index_info(idx_work_cycles_connector_source_ref)`.execute(db);
+    expect(cycleKeyColumns.rows.map((row) => row.name)).toEqual(["connector_config_id", "source", "external_ref"]);
     expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_last_seen");
     expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_connector");
 

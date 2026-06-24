@@ -14,11 +14,21 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
+import {
+  type HierarchyMapping,
+  type HierarchyNode,
+  computeStructureAwareDefault,
+  mappedAncestors,
+  nearestMappedAncestor,
+  resolveHierarchyMapping,
+} from "./hierarchy-mapping";
 import type {
   Connector,
   ConnectorCredentials,
   EntitySeed,
   EntitySeedCallback,
+  HierarchyLevelDeclaration,
+  HierarchyTarget,
   OAuthCredentials,
   PersonEntitySeedCallback,
   SyncedItem,
@@ -101,6 +111,16 @@ function getAccessToken(credentials: ConnectorCredentials): string {
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1000;
+
+const CLICKUP_HIERARCHY_LEVELS: HierarchyLevelDeclaration[] = [
+  { key: "workspace", label: "Workspace", allowedTargets: ["team", "ignore"], default: "ignore" },
+  { key: "space", label: "Space", allowedTargets: ["team", "project", "ignore"], default: "ignore" },
+  { key: "folder", label: "Folder", allowedTargets: ["project", "ignore"], default: "ignore" },
+  { key: "list", label: "List", allowedTargets: ["project", "sprint", "ignore"], default: "ignore" },
+];
+
+const HIERARCHY_TARGETS = new Set<HierarchyTarget>(["team", "project", "sprint", "ignore"]);
+const CLICKUP_HIERARCHY_LEVEL_KEYS = new Set(CLICKUP_HIERARCHY_LEVELS.map((level) => level.key));
 
 async function clickupRequest(path: string, token: string, logger: Logger, attempt = 1): Promise<unknown> {
   const url = `${CLICKUP_API}${path}`;
@@ -254,6 +274,92 @@ function isPositiveDigitString(value: string | null | undefined): value is strin
   return Number.isFinite(numericValue) && numericValue > 0;
 }
 
+function hasListDates(list: ClickUpList): boolean {
+  return isPositiveDigitString(list.start_date) && isPositiveDigitString(list.due_date);
+}
+
+function hasStoredHierarchyMapping(stored: unknown): boolean {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return false;
+  return Object.entries(stored).some(
+    ([levelKey, target]) =>
+      CLICKUP_HIERARCHY_LEVEL_KEYS.has(levelKey) && HIERARCHY_TARGETS.has(target as HierarchyTarget),
+  );
+}
+
+function clickupHierarchyNodes(params: {
+  workspaceName: string;
+  workspaceId: string;
+  spaceName: string;
+  spaceId: string;
+  folder?: { id: string; name: string };
+  list?: ClickUpList;
+}): HierarchyNode[] {
+  return [
+    { levelKey: "workspace", id: params.workspaceId, name: params.workspaceName },
+    { levelKey: "space", id: params.spaceId, name: params.spaceName },
+    ...(params.folder ? [{ levelKey: "folder", id: params.folder.id, name: params.folder.name }] : []),
+    ...(params.list
+      ? [{ levelKey: "list", id: params.list.id, name: params.list.name, hasDates: hasListDates(params.list) }]
+      : []),
+  ];
+}
+
+export function resolveListCycle(params: {
+  list: ClickUpList;
+  space: ClickUpSpace;
+  folder?: { id: string; name: string };
+  workspaceName: string;
+  workspaceId: string;
+  storedMapping: unknown;
+  experimentalFlag: boolean;
+  logger?: Pick<Logger, "warn">;
+}): SyncedTaskCycle | null {
+  if (!params.experimentalFlag || !hasStoredHierarchyMapping(params.storedMapping)) {
+    return detectSprintCycle(params.list, params.space, params.folder);
+  }
+
+  const mapping = resolveHierarchyMapping(CLICKUP_HIERARCHY_LEVELS, params.storedMapping, {
+    levelContexts: [{ key: "list", hasDates: hasListDates(params.list) }],
+    logger: params.logger,
+  });
+  if (mapping.list !== "sprint") return null;
+
+  const startsAt = parseClickUpTimestamp(params.list.start_date);
+  const endsAt = parseClickUpTimestamp(params.list.due_date);
+  if (!startsAt || !endsAt) return null;
+
+  const projectAncestor = nearestMappedAncestor(
+    clickupHierarchyNodes({
+      workspaceName: params.workspaceName,
+      workspaceId: params.workspaceId,
+      spaceName: params.space.name,
+      spaceId: params.space.id,
+      folder: params.folder,
+    }),
+    mapping,
+    ["project"],
+  );
+  if (!projectAncestor) {
+    params.logger?.warn(
+      { listId: params.list.id, listName: params.list.name },
+      "Ignoring mapped sprint list without project ancestor",
+    );
+    return null;
+  }
+
+  const sequenceMatch = /\bsprint\s*#?\s*(\d+)/i.exec(params.list.name);
+  return {
+    source: "clickup",
+    externalRef: params.list.id,
+    name: params.list.name,
+    scopeRef: { source: "clickup", sourceId: projectAncestor.id },
+    startsAt,
+    endsAt,
+    sequence: sequenceMatch ? Number(sequenceMatch[1]) : undefined,
+    isSprint: true,
+  };
+}
+
 function taskToSyncedItem(
   task: ClickUpTask,
   workspaceName: string,
@@ -265,6 +371,7 @@ function taskToSyncedItem(
   listProjectParent: { id: string; name: string } | undefined,
   accessScope?: SyncedItem["accessScope"],
   cycle?: SyncedTaskCycle,
+  hierarchyMapping?: HierarchyMapping,
 ): SyncedItem {
   const hasDescription = task.description && task.description.trim().length > 0;
 
@@ -287,22 +394,42 @@ function taskToSyncedItem(
   // Full hierarchical path: Workspace / Space / Folder / List
   const sourcePath = [workspaceName, spaceName, folderName, task.list.name].filter(Boolean).join(" / ");
 
-  const parentEntities: SyncedItem["parentEntities"] = [
-    { source: "clickup", sourceId: workspaceId, contextSnippet: `In workspace: ${workspaceName}` },
-    { source: "clickup", sourceId: spaceId, contextSnippet: `In space: ${spaceName}` },
-  ];
-  if (folderId && folderName) {
+  const rawHierarchyNodes = clickupHierarchyNodes({
+    workspaceName,
+    workspaceId,
+    spaceName,
+    spaceId,
+    folder: folderId && folderName ? { id: folderId, name: folderName } : undefined,
+    list: { id: task.list.id, name: task.list.name },
+  });
+  const parentEntities: SyncedItem["parentEntities"] = hierarchyMapping
+    ? mappedAncestors(rawHierarchyNodes, hierarchyMapping).map((node) => ({
+        source: "clickup",
+        sourceId: node.id,
+        contextSnippet: `In ${node.levelKey}: ${node.name}`,
+      }))
+    : [
+        { source: "clickup", sourceId: workspaceId, contextSnippet: `In workspace: ${workspaceName}` },
+        { source: "clickup", sourceId: spaceId, contextSnippet: `In space: ${spaceName}` },
+      ];
+  if (!hierarchyMapping && folderId && folderName) {
     parentEntities.push({ source: "clickup", sourceId: folderId, contextSnippet: `In folder: ${folderName}` });
   }
-  if (listProjectParent) {
+  if (!hierarchyMapping && listProjectParent) {
     parentEntities.push({
       source: "clickup",
       sourceId: listProjectParent.id,
       contextSnippet: `In list: ${listProjectParent.name}`,
     });
   }
-  const taskProject =
-    folderId && folderName
+  const mappedProject = hierarchyMapping
+    ? nearestMappedAncestor(rawHierarchyNodes, hierarchyMapping, ["project"])
+    : undefined;
+  const taskProject = hierarchyMapping
+    ? mappedProject
+      ? { name: mappedProject.name, source: "clickup", sourceId: mappedProject.id }
+      : undefined
+    : folderId && folderName
       ? { name: folderName, source: "clickup", sourceId: folderId }
       : listProjectParent
         ? { name: listProjectParent.name, source: "clickup", sourceId: listProjectParent.id }
@@ -371,6 +498,60 @@ function clickupProjectSeed(params: {
       path: `${params.workspaceName} / ${params.spaceName} / ${params.node.name}`,
     },
   };
+}
+
+function clickupHierarchySeed(params: {
+  node: { id: string; name: string };
+  sourceType: "team" | "project";
+  levelKey: string;
+  workspaceName: string;
+  workspaceId: string;
+  spaceName?: string;
+  spaceId?: string;
+  parentPath?: string[];
+}): EntitySeed {
+  const path = [...(params.parentPath ?? []), params.node.name].join(" / ");
+  return {
+    name: params.node.name,
+    sourceType: params.sourceType,
+    source: "clickup",
+    sourceId: params.node.id,
+    metadata: {
+      levelKey: params.levelKey,
+      workspaceName: params.workspaceName,
+      workspaceId: params.workspaceId,
+      spaceName: params.spaceName,
+      spaceId: params.spaceId,
+      path,
+    },
+  };
+}
+
+async function maybeSeedMappedClickUpNode(params: {
+  onEntitySeed?: EntitySeedCallback;
+  mapping: HierarchyMapping;
+  levelKey: string;
+  node: { id: string; name: string };
+  workspaceName: string;
+  workspaceId: string;
+  spaceName?: string;
+  spaceId?: string;
+  parentPath?: string[];
+}): Promise<void> {
+  const target = params.mapping[params.levelKey];
+  if (target !== "team" && target !== "project") return;
+  await params.onEntitySeed?.(
+    clickupHierarchySeed({
+      node: params.node,
+      sourceType: target,
+      levelKey: params.levelKey,
+      workspaceName: params.workspaceName,
+      workspaceId: params.workspaceId,
+      spaceName: params.spaceName,
+      spaceId: params.spaceId,
+      parentPath: params.parentPath,
+    }),
+  );
 }
 
 /** Flatten nested doc pages into a single ordered list. */
@@ -453,6 +634,7 @@ export function createClickUpConnector(): Connector {
     type: "clickup",
     perUserAuth: false,
     requiresOAuthClientSetup: false,
+    hierarchyLevels: CLICKUP_HIERARCHY_LEVELS,
 
     assigneeSourceRefKey(name: string) {
       return `clickup:assignee:${name}`;
@@ -463,10 +645,12 @@ export function createClickUpConnector(): Connector {
       await clickupRequest("/user", token, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed, onPersonSeed }) {
+    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed, onPersonSeed, experimentalFlag = false }) {
       const token = getAccessToken(credentials);
       const allowedWorkspaces = (scopeConfig.workspaces as string[] | undefined) ?? [];
       const allowedSpaces = (scopeConfig.spaces as string[] | undefined) ?? [];
+      const storedHierarchyMapping = scopeConfig.hierarchyMapping;
+      const hasStoredMapping = hasStoredHierarchyMapping(storedHierarchyMapping);
       const seenAssignees = new Map<string, { username: string; email?: string }>();
 
       // Incremental: convert cursor to Unix ms for date_updated_gt filter
@@ -491,8 +675,28 @@ export function createClickUpConnector(): Connector {
           "Workspace members resolved",
         );
 
+        const workspaceMapping = experimentalFlag
+          ? resolveHierarchyMapping(
+              CLICKUP_HIERARCHY_LEVELS,
+              hasStoredMapping ? storedHierarchyMapping : computeStructureAwareDefault(CLICKUP_HIERARCHY_LEVELS),
+              { logger },
+            )
+          : undefined;
+
+        if (experimentalFlag && workspaceMapping) {
+          await maybeSeedMappedClickUpNode({
+            onEntitySeed,
+            mapping: workspaceMapping,
+            levelKey: "workspace",
+            node: { id: team.id, name: workspaceName },
+            workspaceName,
+            workspaceId: team.id,
+            parentPath: [],
+          });
+        }
+
         // Seed workspace as top-level entity
-        if (onEntitySeed) {
+        if (!experimentalFlag && onEntitySeed) {
           await onEntitySeed({
             name: workspaceName,
             sourceType: "clickup_workspace",
@@ -535,7 +739,7 @@ export function createClickUpConnector(): Connector {
           }
 
           // Seed space as entity with workspace context
-          if (onEntitySeed) {
+          if (!experimentalFlag && onEntitySeed) {
             await onEntitySeed({
               name: space.name,
               sourceType: "clickup_space",
@@ -571,11 +775,49 @@ export function createClickUpConnector(): Connector {
           const foldersRes = (await clickupRequest(`/space/${space.id}/folder`, token, logger)) as {
             folders: ClickUpFolder[];
           };
+
+          // Folderless lists are fetched up-front only on the experimental path, where the
+          // structure-aware default mapping needs to know whether the space has any. When the
+          // flag is off they are fetched after the folder loop (the original order) so a failure
+          // there cannot block folder-list tasks that have already been traversed.
+          let hierarchyMapping: HierarchyMapping | undefined;
+          let folderlessLists: ClickUpList[] = [];
+          if (experimentalFlag) {
+            const folderlessListsRes = (await clickupRequest(`/space/${space.id}/list`, token, logger)) as {
+              lists: ClickUpList[];
+            };
+            folderlessLists = folderlessListsRes.lists;
+            hierarchyMapping = resolveHierarchyMapping(
+              CLICKUP_HIERARCHY_LEVELS,
+              hasStoredMapping
+                ? storedHierarchyMapping
+                : computeStructureAwareDefault(CLICKUP_HIERARCHY_LEVELS, {
+                    hasFolders: foldersRes.folders.length > 0,
+                    hasFolderlessLists: folderlessLists.length > 0,
+                  }),
+              { logger },
+            );
+            if (hierarchyMapping) {
+              await maybeSeedMappedClickUpNode({
+                onEntitySeed,
+                mapping: hierarchyMapping,
+                levelKey: "space",
+                node: space,
+                workspaceName,
+                workspaceId: team.id,
+                spaceName: space.name,
+                spaceId: space.id,
+                parentPath: [workspaceName],
+              });
+            }
+          }
+
           for (const folder of foldersRes.folders) {
             const listsRes = (await clickupRequest(`/folder/${folder.id}/list`, token, logger)) as {
               lists: ClickUpList[];
             };
-            if (onEntitySeed && listsRes.lists.length > 0) {
+            const lists = listsRes.lists;
+            if (!experimentalFlag && onEntitySeed && lists.length > 0) {
               await onEntitySeed(
                 clickupProjectSeed({
                   node: folder,
@@ -586,8 +828,43 @@ export function createClickUpConnector(): Connector {
                 }),
               );
             }
-            for (const list of listsRes.lists) {
-              const cycle = detectSprintCycle(list, space, { id: folder.id, name: folder.name });
+            if (experimentalFlag && hierarchyMapping) {
+              await maybeSeedMappedClickUpNode({
+                onEntitySeed,
+                mapping: hierarchyMapping,
+                levelKey: "folder",
+                node: folder,
+                workspaceName,
+                workspaceId: team.id,
+                spaceName: space.name,
+                spaceId: space.id,
+                parentPath: [workspaceName, space.name],
+              });
+            }
+            for (const list of lists) {
+              if (experimentalFlag && hierarchyMapping) {
+                await maybeSeedMappedClickUpNode({
+                  onEntitySeed,
+                  mapping: hierarchyMapping,
+                  levelKey: "list",
+                  node: list,
+                  workspaceName,
+                  workspaceId: team.id,
+                  spaceName: space.name,
+                  spaceId: space.id,
+                  parentPath: [workspaceName, space.name, folder.name],
+                });
+              }
+              const cycle = resolveListCycle({
+                list,
+                space,
+                folder: { id: folder.id, name: folder.name },
+                workspaceName,
+                workspaceId: team.id,
+                storedMapping: storedHierarchyMapping,
+                experimentalFlag,
+                logger,
+              });
               yield* fetchTasksFromList(
                 list.id,
                 workspaceName,
@@ -603,15 +880,19 @@ export function createClickUpConnector(): Connector {
                 seenAssignees,
                 sinceMs,
                 cycle ?? undefined,
+                hierarchyMapping,
               );
             }
           }
 
-          const folderlessListsRes = (await clickupRequest(`/space/${space.id}/list`, token, logger)) as {
-            lists: ClickUpList[];
-          };
-          for (const list of folderlessListsRes.lists) {
-            if (onEntitySeed) {
+          if (!experimentalFlag) {
+            const folderlessListsRes = (await clickupRequest(`/space/${space.id}/list`, token, logger)) as {
+              lists: ClickUpList[];
+            };
+            folderlessLists = folderlessListsRes.lists;
+          }
+          for (const list of folderlessLists) {
+            if (!experimentalFlag && onEntitySeed) {
               await onEntitySeed(
                 clickupProjectSeed({
                   node: list,
@@ -622,7 +903,28 @@ export function createClickUpConnector(): Connector {
                 }),
               );
             }
-            const cycle = detectSprintCycle(list, space, undefined);
+            if (experimentalFlag && hierarchyMapping) {
+              await maybeSeedMappedClickUpNode({
+                onEntitySeed,
+                mapping: hierarchyMapping,
+                levelKey: "list",
+                node: list,
+                workspaceName,
+                workspaceId: team.id,
+                spaceName: space.name,
+                spaceId: space.id,
+                parentPath: [workspaceName, space.name],
+              });
+            }
+            const cycle = resolveListCycle({
+              list,
+              space,
+              workspaceName,
+              workspaceId: team.id,
+              storedMapping: storedHierarchyMapping,
+              experimentalFlag,
+              logger,
+            });
             yield* fetchTasksFromList(
               list.id,
               workspaceName,
@@ -638,6 +940,7 @@ export function createClickUpConnector(): Connector {
               seenAssignees,
               sinceMs,
               cycle ?? undefined,
+              hierarchyMapping,
             );
           }
         }
@@ -702,6 +1005,7 @@ async function* fetchTasksFromList(
   seenAssignees?: Map<string, { username: string; email?: string }>,
   sinceMs?: number,
   cycle?: SyncedTaskCycle,
+  hierarchyMapping?: HierarchyMapping,
 ): AsyncGenerator<SyncedItem> {
   try {
     let url = `/list/${listId}/task?include_subtasks=true&subtasks=true&include_closed=true`;
@@ -730,6 +1034,7 @@ async function* fetchTasksFromList(
         listProjectParent,
         accessScope,
         cycle,
+        hierarchyMapping,
       );
     }
   } catch (err) {

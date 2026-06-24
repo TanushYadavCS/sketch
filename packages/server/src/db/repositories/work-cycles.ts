@@ -8,7 +8,7 @@ export type WorkCycleState = "planned" | "active" | "closed";
 
 export interface UpsertWorkCycleInput {
   scopeEntityId?: string | null;
-  connectorConfigId?: string | null;
+  connectorConfigId: string;
   source: string;
   externalRef: string;
   name: string;
@@ -52,16 +52,18 @@ export async function upsertWorkCycle(
   db: Kysely<DB>,
   input: UpsertWorkCycleInput,
 ): Promise<{ cycleId: string; created: boolean }> {
+  if (!input.connectorConfigId) throw new Error("Work cycle upsert requires connectorConfigId");
   const existing = await db
     .selectFrom("work_cycles")
     .selectAll()
+    .where("connector_config_id", "=", input.connectorConfigId)
     .where("source", "=", input.source)
     .where("external_ref", "=", input.externalRef)
     .executeTakeFirst();
   const now = new Date().toISOString();
   const values = {
     scope_entity_id: input.scopeEntityId ?? null,
-    connector_config_id: input.connectorConfigId ?? null,
+    connector_config_id: input.connectorConfigId,
     name: input.name,
     sequence: input.sequence ?? null,
     starts_at: input.startsAt ?? null,
@@ -82,7 +84,7 @@ export async function upsertWorkCycle(
       state: input.state ?? "active",
     })
     .onConflict((oc) =>
-      oc.columns(["source", "external_ref"]).doUpdateSet({
+      oc.columns(["connector_config_id", "source", "external_ref"]).doUpdateSet({
         ...values,
       }),
     )
@@ -91,6 +93,7 @@ export async function upsertWorkCycle(
   const row = await db
     .selectFrom("work_cycles")
     .select("id")
+    .where("connector_config_id", "=", input.connectorConfigId)
     .where("source", "=", input.source)
     .where("external_ref", "=", input.externalRef)
     .executeTakeFirstOrThrow();

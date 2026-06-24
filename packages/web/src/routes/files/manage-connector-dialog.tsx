@@ -8,8 +8,9 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
  *
  * Authz: edit controls render from server-provided connector capability fields.
  */
+import { HierarchyMappingPanel } from "@/components/hierarchy-mapping-panel";
 import { GenericScopeEditor } from "@/components/scope-picker";
-import type { ConnectorConfig } from "@/lib/api";
+import type { ConnectorConfig, HierarchyLevel } from "@/lib/api";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import {
@@ -218,6 +219,7 @@ export function ManageConnectorDialog({
               connectorId={connector.id}
               connectorType={connector.connectorType}
               scopeConfig={connector.scopeConfig}
+              hierarchyLevels={connector.hierarchyLevels}
               scopeLabel={definition.scopeLabel}
               scopeEntries={scopeEntries}
               onBrowsingChange={setIsBrowsingScope}
@@ -413,6 +415,7 @@ function ScopeEditorDispatch({
   connectorId,
   connectorType,
   scopeConfig,
+  hierarchyLevels,
   scopeLabel,
   scopeEntries,
   onBrowsingChange,
@@ -421,44 +424,64 @@ function ScopeEditorDispatch({
   connectorId: string;
   connectorType: string;
   scopeConfig: Record<string, unknown>;
+  hierarchyLevels?: HierarchyLevel[] | null;
   scopeLabel: string;
   scopeEntries: [string, unknown][];
   onBrowsingChange?: (browsing: boolean) => void;
 }) {
+  const { data: setupStatus } = useQuery({ queryKey: ["setup", "status"], queryFn: () => api.setup.status() });
+  const experimentalEnabled = setupStatus?.experimentalFlag === true;
+  const showHierarchy = experimentalEnabled && Array.isArray(hierarchyLevels) && hierarchyLevels.length > 0;
+
   if (connectorType === "gmail") {
     return <EmailScopeEditor connectorId={connectorId} scopeConfig={scopeConfig} />;
   }
 
+  const hierarchySection = showHierarchy ? (
+    <HierarchyMappingPanel
+      key={connectorId}
+      connectorId={connectorId}
+      levels={hierarchyLevels}
+      scopeConfig={scopeConfig}
+    />
+  ) : null;
+
   if (scopeType === "none") {
     return (
-      <div>
-        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          Sync scope — {scopeLabel}
-        </p>
-        <div className="mt-1.5">
-          {scopeEntries.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {scopeEntries.map(([key, value]) => (
-                <Badge key={key} variant="secondary" className="text-[10px]">
-                  {Array.isArray(value) ? value.join(", ") : String(value)}
-                </Badge>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">All accessible {scopeLabel} are being synced.</p>
-          )}
+      <div className="space-y-4">
+        {hierarchySection}
+        <div>
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Sync scope — {scopeLabel}
+          </p>
+          <div className="mt-1.5">
+            {scopeEntries.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {scopeEntries.map(([key, value]) => (
+                  <Badge key={key} variant="secondary" className="text-[10px]">
+                    {Array.isArray(value) ? value.join(", ") : String(value)}
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">All accessible {scopeLabel} are being synced.</p>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <GenericScopeEditor
-      connectorId={connectorId}
-      scopeConfig={scopeConfig}
-      noun={scopeLabel}
-      onBrowsingChange={onBrowsingChange}
-    />
+    <div className="space-y-4">
+      {hierarchySection}
+      <GenericScopeEditor
+        connectorId={connectorId}
+        scopeConfig={scopeConfig}
+        noun={scopeLabel}
+        onBrowsingChange={onBrowsingChange}
+      />
+    </div>
   );
 }
 
