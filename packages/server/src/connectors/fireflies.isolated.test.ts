@@ -1,11 +1,13 @@
 /**
- * Tests for the Fireflies connector's cursor lag.
+ * Tests for the Fireflies connector's incremental overlap window.
  *
  * Fireflies' GraphQL `fromDate` filters by meeting start time, not by
- * transcript availability. Fireflies takes ~15–45 min to post-process a
- * recording into a queryable transcript. If `getCursor` returned `now`,
- * any transcript whose meeting predates the cursor at the moment
- * Fireflies makes it listable would be silently dropped forever.
+ * transcript availability. A transcript can be finalized days after its
+ * meeting (delayed processing or a manual upload of an old recording); it
+ * then carries an OLD meeting `date`. If incremental sync started exactly at
+ * the stored cursor, such a transcript would sit below the high-watermark and
+ * be filtered out forever. `sync` instead looks back an overlap window before
+ * the cursor and relies on content-hash dedup to make the re-scan cheap.
  */
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -118,8 +120,8 @@ async function runFirefliesOnce(
   }
 }
 
-describe("Fireflies getCursor lag", () => {
-  it("returns a timestamp exactly 2h behind the current time", async () => {
+describe("Fireflies getCursor", () => {
+  it("stores the true high-watermark (now), leaving the recent-window re-scan to sync's overlap", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-27T12:00:00.000Z"));
 
@@ -133,7 +135,7 @@ describe("Fireflies getCursor lag", () => {
         logger: silentLogger,
       });
 
-      expect(cursor).toBe("2026-04-27T10:00:00.000Z");
+      expect(cursor).toBe("2026-04-27T12:00:00.000Z");
     } finally {
       vi.useRealTimers();
     }
@@ -142,8 +144,11 @@ describe("Fireflies getCursor lag", () => {
 
 describe("Fireflies sync includes late-arriving transcripts", () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
+  /** Captures the `fromDate` the connector asked the API to filter on. */
+  let requestedFromDate: string | undefined;
 
   beforeEach(() => {
+    requestedFromDate = undefined;
     fetchSpy = vi.spyOn(globalThis, "fetch");
   });
 
@@ -151,13 +156,13 @@ describe("Fireflies sync includes late-arriving transcripts", () => {
     vi.restoreAllMocks();
   });
 
-  it("yields a transcript whose meeting date is 30 min before now when cursor is 2h in the past", async () => {
-    const now = Date.now();
-    const meetingDate = now - 30 * 60 * 1000; // 30 min ago
-    const cursor = new Date(now - 2 * 60 * 60 * 1000).toISOString();
-
-    // Page 1: one transcript; page 2: empty list ends pagination.
-    // Interleaved with summary lookups per transcript.
+  /**
+   * Mock that mimics Fireflies' SERVER-SIDE `fromDate` filtering: a transcript
+   * is only listable when its meeting `date` is at or after the requested
+   * `fromDate`. This is what makes the test meaningful — a connector that
+   * started exactly at the cursor would never see the late transcript.
+   */
+  function mockFirefliesFilteringByFromDate(transcripts: Array<{ id: string; date: number }>): void {
     fetchSpy.mockImplementation(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse((init as RequestInit).body as string) as {
         query: string;
@@ -165,26 +170,24 @@ describe("Fireflies sync includes late-arriving transcripts", () => {
       };
 
       if (body.query.includes("transcripts(")) {
-        // List query
         if ((body.variables.skip as number) === 0) {
-          return new Response(
-            JSON.stringify({
-              data: {
-                transcripts: [
-                  {
-                    id: "t1",
-                    title: "Late transcript",
-                    date: meetingDate,
-                    duration: 600,
-                    organizer_email: "a@example.com",
-                    participants: ["a@example.com", "b@example.com"],
-                    transcript_url: "https://fireflies.example/t1",
-                  },
-                ],
-              },
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          );
+          requestedFromDate = body.variables.fromDate as string | undefined;
+          const fromMs = requestedFromDate ? Date.parse(requestedFromDate) : Number.NEGATIVE_INFINITY;
+          const visible = transcripts
+            .filter((t) => t.date >= fromMs)
+            .map((t) => ({
+              id: t.id,
+              title: `Meeting ${t.id}`,
+              date: t.date,
+              duration: 600,
+              organizer_email: "a@example.com",
+              participants: ["a@example.com"],
+              transcript_url: `https://fireflies.example/${t.id}`,
+            }));
+          return new Response(JSON.stringify({ data: { transcripts: visible } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
         }
         return new Response(JSON.stringify({ data: { transcripts: [] } }), {
           status: 200,
@@ -193,21 +196,10 @@ describe("Fireflies sync includes late-arriving transcripts", () => {
       }
 
       if (body.query.includes("transcript(id:")) {
-        return new Response(
-          JSON.stringify({
-            data: {
-              transcript: {
-                summary: {
-                  overview: "Overview",
-                  shorthand_bullet: ["Point"],
-                  action_items: ["Action"],
-                  keywords: ["kw"],
-                },
-              },
-            },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
+        return new Response(JSON.stringify({ data: { transcript: { summary: { overview: "o" }, speakers: [] } } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
 
       return new Response(JSON.stringify({ data: {} }), {
@@ -215,20 +207,47 @@ describe("Fireflies sync includes late-arriving transcripts", () => {
         headers: { "Content-Type": "application/json" },
       });
     });
+  }
 
+  async function collectSync(cursor: string, scopeConfig: Record<string, unknown> = {}): Promise<string[]> {
     const connector = createFirefliesConnector({ minRequestIntervalMs: 0 });
-    const items: Array<{ providerFileId: string }> = [];
+    const ids: string[] = [];
     for await (const item of connector.sync({
       credentials: { type: "api_key", api_key: "test" },
-      scopeConfig: {},
+      scopeConfig,
       cursor,
       logger: silentLogger,
     })) {
-      items.push(item);
+      ids.push(item.providerFileId);
     }
+    return ids;
+  }
 
-    expect(items).toHaveLength(1);
-    expect(items[0].providerFileId).toBe("t1");
+  it("recovers a transcript finalized days after its meeting date (below the cursor high-watermark)", async () => {
+    const cursor = "2026-06-23T00:00:00.000Z";
+    // Meeting was 5 days before the cursor — a tight `fromDate=cursor` filter
+    // would skip it. The 7-day overlap pulls it back in.
+    const meetingDate = Date.parse("2026-06-18T00:00:00.000Z");
+    mockFirefliesFilteringByFromDate([{ id: "t-late", date: meetingDate }]);
+
+    const ids = await collectSync(cursor);
+
+    expect(ids).toEqual(["t-late"]);
+    expect(requestedFromDate).toBe("2026-06-16T00:00:00.000Z");
+  }, 20_000);
+
+  it("respects a per-connector scopeConfig.incrementalOverlapDays override", async () => {
+    const cursor = "2026-06-23T00:00:00.000Z";
+    // 10 days back: missed by the default 7-day window, caught by a 14-day override.
+    const meetingDate = Date.parse("2026-06-13T00:00:00.000Z");
+    mockFirefliesFilteringByFromDate([{ id: "t-old", date: meetingDate }]);
+
+    const missed = await collectSync(cursor);
+    expect(missed).toEqual([]);
+
+    const recovered = await collectSync(cursor, { incrementalOverlapDays: 14 });
+    expect(recovered).toEqual(["t-old"]);
+    expect(requestedFromDate).toBe("2026-06-09T00:00:00.000Z");
   }, 20_000);
 });
 
