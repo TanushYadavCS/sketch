@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 108;
+const EXPECTED_MIGRATION_COUNT = 109;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -141,6 +141,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[105]).toBe("110-tasks-assignee-name");
     expect(names[106]).toBe("111-milestone-series-and-value-signature");
     expect(names[107]).toBe("112-work-cycles");
+    expect(names[108]).toBe("113-work-cycles-connector");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -268,6 +269,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(cycleColumns.rows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ column_name: "scope_entity_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "connector_config_id", data_type: "text", is_nullable: "YES" }),
         expect.objectContaining({ column_name: "source", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "external_ref", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "name", data_type: "text", is_nullable: "NO" }),
@@ -310,6 +312,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(sourceRefIndex?.indexdef).toContain("source");
     expect(sourceRefIndex?.indexdef).toContain("external_ref");
     expect(cycleIndexes.rows.map((row) => row.indexname)).toContain("idx_work_cycles_last_seen");
+    expect(cycleIndexes.rows.map((row) => row.indexname)).toContain("idx_work_cycles_connector");
 
     const cycleForeignKeys = await sql<{
       column_name: string;
@@ -339,6 +342,12 @@ describe("runMigrations on Postgres — full sequence", () => {
           foreign_table_name: "entities",
           foreign_column_name: "id",
           delete_rule: "SET NULL",
+        }),
+        expect.objectContaining({
+          column_name: "connector_config_id",
+          foreign_table_name: "connector_configs",
+          foreign_column_name: "id",
+          delete_rule: "CASCADE",
         }),
       ]),
     );

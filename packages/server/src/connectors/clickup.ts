@@ -52,11 +52,12 @@ interface ClickUpMember {
   user: { id: number; username: string; email?: string };
 }
 
-interface ClickUpSpace {
+export interface ClickUpSpace {
   id: string;
   name: string;
   private?: boolean;
   members?: ClickUpMember[];
+  features?: { sprints?: { enabled?: boolean } };
 }
 
 interface ClickUpFolder {
@@ -64,10 +65,12 @@ interface ClickUpFolder {
   name: string;
 }
 
-interface ClickUpList {
+export interface ClickUpList {
   id: string;
   name: string;
   task_count?: number;
+  start_date?: string | null;
+  due_date?: string | null;
 }
 
 interface ClickUpDoc {
@@ -214,18 +217,41 @@ function contentHash(content: string): string {
 type SyncedTaskCycle = NonNullable<NonNullable<SyncedItem["task"]>["cycle"]>;
 
 /**
- * Threads ClickUp list/folder/space context for WORK_STRUCTURES PR-S part 1.
- * Sprint metadata fetch and auto-detection are deferred until the follow-on plan
- * verifies the required ClickUp auth scope.
+ * Detects ClickUp sprints structurally because lists and folders do not expose
+ * a dedicated sprint flag. A list is treated as a sprint only when the space has
+ * sprints enabled, the list name contains sprint without backlog/archive/template
+ * wording, and both list dates are positive epoch strings. Undated sprint lists
+ * are intentionally not detected until list-level metadata support is expanded.
  */
-function taskCycleContext(task: ClickUpTask, folderId: string | undefined, spaceId: string): SyncedTaskCycle {
+export function detectSprintCycle(
+  list: ClickUpList,
+  space: ClickUpSpace,
+  folder?: { id: string; name: string },
+): SyncedTaskCycle | null {
+  if (space.features?.sprints?.enabled !== true) return null;
+  if (!/\bsprint\b/i.test(list.name)) return null;
+  if (/\b(backlog|archive|template)\b/i.test(list.name)) return null;
+  if (!isPositiveDigitString(list.start_date) || !isPositiveDigitString(list.due_date)) return null;
+  const startsAt = parseClickUpTimestamp(list.start_date);
+  const endsAt = parseClickUpTimestamp(list.due_date);
+  if (!startsAt || !endsAt) return null;
+  const sequenceMatch = /\bsprint\s*#?\s*(\d+)/i.exec(list.name);
   return {
     source: "clickup",
-    externalRef: task.list.id,
-    name: task.list.name,
-    scopeRef: { source: "clickup", sourceId: folderId ?? spaceId },
-    isSprint: false,
+    externalRef: list.id,
+    name: list.name,
+    scopeRef: { source: "clickup", sourceId: folder ? folder.id : space.id },
+    startsAt,
+    endsAt,
+    sequence: sequenceMatch ? Number(sequenceMatch[1]) : undefined,
+    isSprint: true,
   };
+}
+
+function isPositiveDigitString(value: string | null | undefined): value is string {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue > 0;
 }
 
 function taskToSyncedItem(
@@ -238,6 +264,7 @@ function taskToSyncedItem(
   folderId: string | undefined,
   listProjectParent: { id: string; name: string } | undefined,
   accessScope?: SyncedItem["accessScope"],
+  cycle?: SyncedTaskCycle,
 ): SyncedItem {
   const hasDescription = task.description && task.description.trim().length > 0;
 
@@ -281,6 +308,25 @@ function taskToSyncedItem(
         ? { name: listProjectParent.name, source: "clickup", sourceId: listProjectParent.id }
         : undefined;
   const primaryAssignee = task.assignees.find((assignee) => assignee.username);
+  const syncedTask: NonNullable<SyncedItem["task"]> = {
+    sourceTaskId: task.id,
+    externalRef: task.id,
+    title: task.name,
+    statusType: task.status.type,
+    statusRaw: task.status.status,
+    priority: task.priority?.priority,
+    dueAt: parseClickUpTimestamp(task.due_date) ?? undefined,
+    project: taskProject,
+    assignee: primaryAssignee
+      ? {
+          name: primaryAssignee.username,
+          email: primaryAssignee.email,
+          source: "clickup",
+          sourceId: `assignee:${primaryAssignee.username}`,
+        }
+      : undefined,
+    ...(cycle ? { cycle } : {}),
+  };
 
   return {
     providerFileId: task.id,
@@ -297,25 +343,7 @@ function taskToSyncedItem(
     assignees: task.assignees
       .filter((a) => a.username)
       .map((a) => ({ name: a.username, email: a.email, source: "clickup", sourceId: `assignee:${a.username}` })),
-    task: {
-      sourceTaskId: task.id,
-      externalRef: task.id,
-      title: task.name,
-      statusType: task.status.type,
-      statusRaw: task.status.status,
-      priority: task.priority?.priority,
-      dueAt: parseClickUpTimestamp(task.due_date) ?? undefined,
-      project: taskProject,
-      assignee: primaryAssignee
-        ? {
-            name: primaryAssignee.username,
-            email: primaryAssignee.email,
-            source: "clickup",
-            sourceId: `assignee:${primaryAssignee.username}`,
-          }
-        : undefined,
-      cycle: taskCycleContext(task, folderId, spaceId),
-    },
+    task: syncedTask,
     authorEmail: task.creator?.email,
     authorName: task.creator?.username,
     authorSourceId: task.creator?.id === undefined ? undefined : `user:${String(task.creator.id)}`,
@@ -559,6 +587,7 @@ export function createClickUpConnector(): Connector {
               );
             }
             for (const list of listsRes.lists) {
+              const cycle = detectSprintCycle(list, space, { id: folder.id, name: folder.name });
               yield* fetchTasksFromList(
                 list.id,
                 workspaceName,
@@ -573,6 +602,7 @@ export function createClickUpConnector(): Connector {
                 spaceScope,
                 seenAssignees,
                 sinceMs,
+                cycle ?? undefined,
               );
             }
           }
@@ -592,6 +622,7 @@ export function createClickUpConnector(): Connector {
                 }),
               );
             }
+            const cycle = detectSprintCycle(list, space, undefined);
             yield* fetchTasksFromList(
               list.id,
               workspaceName,
@@ -606,6 +637,7 @@ export function createClickUpConnector(): Connector {
               spaceScope,
               seenAssignees,
               sinceMs,
+              cycle ?? undefined,
             );
           }
         }
@@ -669,6 +701,7 @@ async function* fetchTasksFromList(
   accessScope?: SyncedItem["accessScope"],
   seenAssignees?: Map<string, { username: string; email?: string }>,
   sinceMs?: number,
+  cycle?: SyncedTaskCycle,
 ): AsyncGenerator<SyncedItem> {
   try {
     let url = `/list/${listId}/task?include_subtasks=true&subtasks=true&include_closed=true`;
@@ -696,6 +729,7 @@ async function* fetchTasksFromList(
         folderId,
         listProjectParent,
         accessScope,
+        cycle,
       );
     }
   } catch (err) {

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 108;
+const EXPECTED_MIGRATION_COUNT = 109;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -164,6 +164,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[105]).toBe("110-tasks-assignee-name");
     expect(names[106]).toBe("111-milestone-series-and-value-signature");
     expect(names[107]).toBe("112-work-cycles");
+    expect(names[108]).toBe("113-work-cycles-connector");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -255,6 +256,7 @@ describe("runMigrations — full sequence", () => {
     expect(cycleColumns.rows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: "scope_entity_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "connector_config_id", type: "TEXT", notnull: 0 }),
         expect.objectContaining({ name: "source", type: "TEXT", notnull: 1 }),
         expect.objectContaining({ name: "external_ref", type: "TEXT", notnull: 1 }),
         expect.objectContaining({ name: "name", type: "TEXT", notnull: 1 }),
@@ -285,6 +287,7 @@ describe("runMigrations — full sequence", () => {
       expect.arrayContaining([expect.objectContaining({ name: "idx_work_cycles_source_ref", unique: 1 })]),
     );
     expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_last_seen");
+    expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_connector");
 
     const cycleForeignKeys = await sql<{
       table: string;
@@ -295,6 +298,12 @@ describe("runMigrations — full sequence", () => {
     expect(cycleForeignKeys.rows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ table: "entities", from: "scope_entity_id", to: "id", on_delete: "SET NULL" }),
+        expect.objectContaining({
+          table: "connector_configs",
+          from: "connector_config_id",
+          to: "id",
+          on_delete: "CASCADE",
+        }),
       ]),
     );
 

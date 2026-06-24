@@ -221,6 +221,7 @@ export async function runConnectorSync(
     const seenSyncIdentityKeys = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
     const dirtyCrmRollupGroupIds = new Set<string>();
+    let syncReconciled = false;
 
     const connectorType = config.connector_type as ConnectorType;
     const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
@@ -374,6 +375,7 @@ export async function runConnectorSync(
         encryptionKey: appConfig?.ENCRYPTION_KEY,
         logger: syncLogger,
       });
+      syncReconciled = reconcileResult.reconciled;
       result.itemsArchived = reconcileResult.itemsArchived;
       for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
     }
@@ -385,6 +387,10 @@ export async function runConnectorSync(
       coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
       floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
       source: connectorType,
+      syncRunId,
+      connectorConfigId: config.id,
+      experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
+      runCycleReconcile: syncReconciled,
     });
 
     if (connectorType === "zoho_crm") {
