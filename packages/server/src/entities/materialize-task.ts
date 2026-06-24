@@ -55,6 +55,7 @@ export async function materializeStructuralTask(
   if (deps.experimentalFlag) {
     const now = new Date().toISOString();
     if (task.cycle?.isSprint) {
+      if (!fact.connector_config_id) throw new Error("Work cycle materialization requires connector_config_id");
       const scopeEntityId = resolveCycleScope(deps, task.cycle.scopeRef)?.id ?? null;
       const cycle = await upsertWorkCycle(deps.db, {
         scopeEntityId,

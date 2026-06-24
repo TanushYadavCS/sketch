@@ -5,7 +5,13 @@
  * do not produce an infinite loop.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type ClickUpList, type ClickUpSpace, createClickUpConnector, detectSprintCycle } from "./clickup";
+import {
+  type ClickUpList,
+  type ClickUpSpace,
+  createClickUpConnector,
+  detectSprintCycle,
+  resolveListCycle,
+} from "./clickup";
 
 const sprintsEnabledSpace: ClickUpSpace = {
   id: "space-design",
@@ -65,6 +71,112 @@ describe("detectSprintCycle", () => {
     ]) {
       expect(detectSprintCycle(list, sprintsEnabledSpace)).toBeNull();
     }
+  });
+});
+
+describe("resolveListCycle", () => {
+  it("keeps legacy sprint detection for flag-off and computed-default states", () => {
+    expect(
+      resolveListCycle({
+        list: sprintList,
+        space: sprintsEnabledSpace,
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { space: "project", list: "ignore" },
+        experimentalFlag: false,
+      }),
+    ).toMatchObject({ externalRef: sprintList.id, scopeRef: { source: "clickup", sourceId: sprintsEnabledSpace.id } });
+
+    for (const storedMapping of [undefined, {}, { nope: "project" }, { list: "bogus" }]) {
+      expect(
+        resolveListCycle({
+          list: sprintList,
+          space: sprintsEnabledSpace,
+          workspaceName: "Workspace",
+          workspaceId: "workspace",
+          storedMapping,
+          experimentalFlag: true,
+        }),
+      ).toMatchObject({ externalRef: sprintList.id });
+    }
+  });
+
+  it("lets a stored list mapping suppress the heuristic or create dates-only sprint cycles", () => {
+    expect(
+      resolveListCycle({
+        list: sprintList,
+        space: sprintsEnabledSpace,
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { space: "project", list: "project" },
+        experimentalFlag: true,
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveListCycle({
+        list: { ...sprintList, name: "Iteration 5" },
+        space: { ...sprintsEnabledSpace, features: { sprints: { enabled: false } } },
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { space: "project", list: "sprint" },
+        experimentalFlag: true,
+      }),
+    ).toMatchObject({
+      externalRef: sprintList.id,
+      name: "Iteration 5",
+      scopeRef: { source: "clickup", sourceId: sprintsEnabledSpace.id },
+      isSprint: true,
+    });
+  });
+
+  it("requires dates and a nearest mapped project ancestor for stored sprint lists", () => {
+    expect(
+      resolveListCycle({
+        list: { ...sprintList, start_date: null },
+        space: sprintsEnabledSpace,
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { space: "project", list: "sprint" },
+        experimentalFlag: true,
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveListCycle({
+        list: sprintList,
+        space: sprintsEnabledSpace,
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { workspace: "team", space: "ignore", list: "sprint" },
+        experimentalFlag: true,
+        logger: { warn: vi.fn() },
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveListCycle({
+        list: sprintList,
+        space: sprintsEnabledSpace,
+        folder: { id: "folder-design", name: "Design" },
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { space: "project", folder: "ignore", list: "sprint" },
+        experimentalFlag: true,
+      }),
+    ).toMatchObject({ scopeRef: { source: "clickup", sourceId: sprintsEnabledSpace.id } });
+
+    expect(
+      resolveListCycle({
+        list: sprintList,
+        space: sprintsEnabledSpace,
+        folder: { id: "folder-design", name: "Design" },
+        workspaceName: "Workspace",
+        workspaceId: "workspace",
+        storedMapping: { folder: "project", list: "sprint" },
+        experimentalFlag: true,
+      }),
+    ).toMatchObject({ scopeRef: { source: "clickup", sourceId: "folder-design" } });
   });
 });
 

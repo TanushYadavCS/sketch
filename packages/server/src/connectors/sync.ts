@@ -256,6 +256,7 @@ export async function runConnectorSync(
       logger: syncLogger,
       ownerEmail,
       resolveNameToEmail,
+      experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,

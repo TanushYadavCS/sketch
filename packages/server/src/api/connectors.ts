@@ -532,6 +532,7 @@ export function connectorRoutes(
           fileCount,
           perUserAuth: meta.perUserAuth,
           requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
+          hierarchyLevels: appConfig?.EXPERIMENTAL_FLAG ? (meta.hierarchyLevels ?? null) : undefined,
           ...permissionFields(permissions),
         };
       }),
@@ -1799,6 +1800,7 @@ export function connectorRoutes(
         fileCount,
         perUserAuth: meta.perUserAuth,
         requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
+        hierarchyLevels: appConfig?.EXPERIMENTAL_FLAG ? (meta.hierarchyLevels ?? null) : undefined,
         ...permissionFields(permissions),
       },
     });
@@ -2177,9 +2179,16 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    // Update scope and clear sync cursor to force a full re-sync
+    // Merge into the existing scope_config and clear the sync cursor to force a full re-sync.
+    // hierarchyMapping and the workspace/space selections are sibling keys edited by separate
+    // flows, so a partial update must preserve the keys it does not touch rather than replace.
+    const existingScope =
+      config.scope_config && typeof config.scope_config === "string"
+        ? (JSON.parse(config.scope_config) as Record<string, unknown>)
+        : {};
+    const mergedScope = { ...existingScope, ...parsed.data.scopeConfig };
     await connectorRepo.updateConfig(config.id, {
-      scopeConfig: JSON.stringify(parsed.data.scopeConfig),
+      scopeConfig: JSON.stringify(mergedScope),
       syncCursor: null,
       errorMessage: null,
     });
