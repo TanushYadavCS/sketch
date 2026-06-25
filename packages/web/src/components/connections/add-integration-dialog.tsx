@@ -23,16 +23,12 @@ import { isOwnedOrPersonalAppConnection } from "./connection-status";
 type AddIntegrationStep =
   | { kind: "search" }
   | { kind: "direct_loading"; appId: string }
-  | { kind: "direct_ready"; app: IntegrationApp }
+  | { kind: "direct_ready"; app: IntegrationApp; redirectUrl: string }
   | { kind: "direct_not_found"; appId: string }
   | { kind: "oauth"; app: IntegrationApp }
   | { kind: "oauth_cancelled"; app: IntegrationApp }
   | { kind: "popup_blocked"; app: IntegrationApp }
   | { kind: "connected"; app: IntegrationApp };
-
-function normalizeAppLookup(value: string | undefined): string {
-  return value?.trim().toLowerCase() ?? "";
-}
 
 function appNameFromId(appId: string): string {
   return appId
@@ -122,12 +118,9 @@ export function AddIntegrationDialog({
 
     async function loadDirectApp() {
       try {
-        const result = await api.mcpServers.listApps(providerId, appId, 10);
-        const target = normalizeAppLookup(appId);
-        const app = result.apps.find(
-          (candidate) => normalizeAppLookup(candidate.id) === target || normalizeAppLookup(candidate.name) === target,
-        );
-        if (!cancelled) setStep(app ? { kind: "direct_ready", app } : { kind: "direct_not_found", appId });
+        const callbackUrl = `${window.location.origin}/integrations/callback`;
+        const result = await api.mcpServers.createConnectionIntent(providerId, appId, callbackUrl);
+        if (!cancelled) setStep({ kind: "direct_ready", app: result.app, redirectUrl: result.redirectUrl });
       } catch {
         if (!cancelled) {
           toast.error("Failed to load integration");
@@ -199,51 +192,58 @@ export function AddIntegrationDialog({
     onOpenChange(false);
   };
 
+  const startOAuthWindow = (app: IntegrationApp, redirectUrl: string) => {
+    if (connectedAppIds.has(app.id)) return;
+    setStep({ kind: "oauth", app });
+
+    const popup = window.open(redirectUrl, "_blank", "width=600,height=700");
+
+    if (!popup || popup.closed) {
+      setStep({ kind: "popup_blocked", app });
+      return;
+    }
+
+    oauthWindowRef.current = popup;
+    cancelledRef.current = false;
+
+    const verifyConnection = async () => {
+      try {
+        const connections = await api.mcpServers.listConnections(providerId);
+        const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
+        if (cancelledRef.current) return;
+        if (connected) {
+          toast.success("App connected successfully!");
+          onSuccess();
+          resetAndClose();
+        } else {
+          toast.error("App connection cancelled");
+          setStep({ kind: "oauth_cancelled", app });
+        }
+      } catch {
+        if (cancelledRef.current) return;
+        toast.error("Could not verify connection status");
+        setStep({ kind: "oauth_cancelled", app });
+      }
+    };
+
+    pollIntervalRef.current = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = undefined;
+        oauthWindowRef.current = null;
+        verifyConnection();
+      }
+    }, 500);
+  };
+
   const handleStartOAuth = async (app: IntegrationApp) => {
     if (connectedAppIds.has(app.id)) return;
     setStep({ kind: "oauth", app });
 
     try {
       const callbackUrl = `${window.location.origin}/integrations/callback`;
-      const result = await api.mcpServers.createConnection(providerId, app.id, callbackUrl);
-      const popup = window.open(result.redirectUrl, "_blank", "width=600,height=700");
-
-      if (!popup || popup.closed) {
-        setStep({ kind: "popup_blocked", app });
-        return;
-      }
-
-      oauthWindowRef.current = popup;
-      cancelledRef.current = false;
-
-      const verifyConnection = async () => {
-        try {
-          const connections = await api.mcpServers.listConnections(providerId);
-          const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
-          if (cancelledRef.current) return;
-          if (connected) {
-            toast.success("App connected successfully!");
-            onSuccess();
-            resetAndClose();
-          } else {
-            toast.error("App connection cancelled");
-            setStep({ kind: "oauth_cancelled", app });
-          }
-        } catch {
-          if (cancelledRef.current) return;
-          toast.error("Could not verify connection status");
-          setStep({ kind: "oauth_cancelled", app });
-        }
-      };
-
-      pollIntervalRef.current = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = undefined;
-          oauthWindowRef.current = null;
-          verifyConnection();
-        }
-      }, 500);
+      const result = await api.mcpServers.createConnectionIntent(providerId, app.id, callbackUrl, app);
+      startOAuthWindow(result.app, result.redirectUrl);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to start connection");
       setStep({ kind: "search" });
@@ -366,7 +366,10 @@ export function AddIntegrationDialog({
               <Button variant="outline" onClick={resetAndClose}>
                 Cancel
               </Button>
-              <Button onClick={() => handleStartOAuth(step.app)} disabled={connectedAppIds.has(step.app.id)}>
+              <Button
+                onClick={() => startOAuthWindow(step.app, step.redirectUrl)}
+                disabled={connectedAppIds.has(step.app.id)}
+              >
                 {connectedAppIds.has(step.app.id) ? "Already added" : `Connect ${step.app.name}`}
               </Button>
             </DialogFooter>

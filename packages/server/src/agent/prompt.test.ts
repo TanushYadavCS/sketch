@@ -320,8 +320,10 @@ describe("buildSystemContext", () => {
       expect(result).toContain("Should I pull up the connection card?");
       expect(result).toContain("I can pull up the right card");
       expect(result).toContain("Which Zoho product should I use?");
-      expect(result).toContain("use the Connect button on that card");
+      expect(result).toContain("do not give manual navigation, API-key, or 'look for this app' setup instructions");
+      expect(result).toContain("Do not include a separate 'connect these apps' section");
       expect(result).toContain("Do not send users to Settings -> Integrations unless no setup card/link");
+      expect(result).toContain("Do not tell the user how to use the setup card/link");
       expect(result).toContain("Do not describe card or link rendering mechanics");
       expect(result).toContain("it will add an app-specific setup option automatically");
       expect(result).toContain("do not mention that rendering step");
@@ -334,9 +336,11 @@ describe("buildSystemContext", () => {
       const whatsapp = buildSystemContext({ platform: "whatsapp" });
 
       expect(slack).toContain("use the integration search-apps capability");
-      expect(slack).toContain("setup link is available");
+      expect(slack).toContain("Sketch will resolve the returned app identity into the right connection target");
       expect(slack).toContain("Do not send users to Settings -> Integrations unless no setup card/link");
-      expect(whatsapp).toContain("setup link is available");
+      expect(slack).toContain("Do not tell the user how to use the setup card/link");
+      expect(whatsapp).toContain("Do not tell the user how to use the setup card/link");
+      expect(whatsapp).toContain("Do not include a separate 'connect these apps' section");
       expect(whatsapp).not.toContain("RequestIntegrationConnection");
     });
 

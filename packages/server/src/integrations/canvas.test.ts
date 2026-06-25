@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CanvasProvider } from "./canvas";
+import { CanvasProvider, type CanvasProviderRequestError } from "./canvas";
 
 describe("CanvasProvider", () => {
   afterEach(() => {
@@ -80,6 +80,26 @@ describe("CanvasProvider", () => {
         "X-User-Name": "Priya Shah",
       },
     });
+  });
+
+  it("preserves Canvas error codes when initiating app connections", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: "App not found" } }), { status: 404 }),
+        ),
+    );
+
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+
+    await expect(provider.initiateConnection("priya@example.com", "google-gmail-oauth", "")).rejects.toMatchObject({
+      name: "CanvasProviderRequestError",
+      status: 404,
+      code: "NOT_FOUND",
+      message: "App not found",
+    } satisfies Partial<CanvasProviderRequestError>);
   });
 
   it("classifies legacy Canvas access rows as Canvas-owned when source is missing", async () => {

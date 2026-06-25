@@ -1,12 +1,9 @@
 import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
 import { api } from "@/lib/api";
 import type { IntegrationApp } from "@sketch/shared";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@sketch/ui/components/dialog";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 import type { ChatThreadIntegrationConnection, ChatThreadIntegrationConnectionStatus } from "./chat-thread";
-
-type ConnectionFrame = { app: IntegrationApp; redirectUrl: string };
 
 function fallbackApp(connection: ChatThreadIntegrationConnection): IntegrationApp {
   return {
@@ -32,7 +29,6 @@ export function ChatIntegrationConnectionFrame({
   onStatusChange: (requestId: string, status: ChatThreadIntegrationConnectionStatus) => void;
   onConnected: () => void;
 }) {
-  const [frame, setFrame] = useState<ConnectionFrame | null>(null);
   const requestRef = useRef(0);
   const connectedRef = useRef(false);
   const activeAppRef = useRef<IntegrationApp | null>(null);
@@ -40,7 +36,6 @@ export function ChatIntegrationConnectionFrame({
 
   useEffect(() => {
     if (!open || !connection) {
-      setFrame(null);
       activeAppRef.current = null;
       latestStatusRef.current = "idle";
       return;
@@ -60,15 +55,15 @@ export function ChatIntegrationConnectionFrame({
     let cancelled = false;
     let intervalId: number | null = null;
     let timeoutId: number | null = null;
+    let popup: Window | null = null;
 
     const updateStatus = (status: ChatThreadIntegrationConnectionStatus) => {
       latestStatusRef.current = status;
       if (!cancelled) onStatusChange(connection.requestId, status);
     };
 
-    const closeFrame = () => {
+    const closeConnection = () => {
       if (!cancelled) {
-        setFrame(null);
         onOpenChange(false);
       }
     };
@@ -87,7 +82,7 @@ export function ChatIntegrationConnectionFrame({
       updateStatus("connected");
       onConnected();
       toast.success(`${app.name} connected`);
-      closeFrame();
+      closeConnection();
     };
 
     const fail = (message: string) => {
@@ -96,13 +91,19 @@ export function ChatIntegrationConnectionFrame({
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       updateStatus("error");
       toast.error(message);
-      closeFrame();
+      closeConnection();
     };
 
     const startPolling = (app: IntegrationApp) => {
       const check = async () => {
         try {
-          if (await verifyConnected(app)) complete(app);
+          if (await verifyConnected(app)) {
+            complete(app);
+            return;
+          }
+          if (popup?.closed) {
+            fail("Connection was not completed. Please try again.");
+          }
         } catch {
           if (!cancelled) updateStatus("connecting");
         }
@@ -118,17 +119,20 @@ export function ChatIntegrationConnectionFrame({
 
     const start = async () => {
       updateStatus("connecting");
-      setFrame(null);
 
       try {
         const app = fallbackApp(connection);
         if (cancelled || requestRef.current !== requestId) return;
         const callbackUrl = `${window.location.origin}/integrations/callback`;
-        const result = await api.mcpServers.createConnection(providerId, app.id, callbackUrl);
+        const result = await api.mcpServers.createConnectionIntent(providerId, app.id, callbackUrl, app);
         if (cancelled || requestRef.current !== requestId) return;
-        activeAppRef.current = app;
-        setFrame({ app, redirectUrl: result.redirectUrl });
-        startPolling(app);
+        activeAppRef.current = result.app;
+        popup = window.open(result.redirectUrl, "_blank", "width=600,height=700");
+        if (!popup || popup.closed) {
+          fail("Sketch could not open the connection window. Allow popups and try again.");
+          return;
+        }
+        startPolling(result.app);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to start the connection.";
         fail(message);
@@ -165,24 +169,5 @@ export function ChatIntegrationConnectionFrame({
     };
   }, [open, providerId, connection, onConnected, onOpenChange, onStatusChange]);
 
-  if (!open || !frame) return null;
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        data-integration-connection-frame
-        aria-label={`Connect ${frame.app.name}`}
-        className="h-[min(700px,calc(100vh-2rem))] gap-0 overflow-hidden p-0 sm:h-[min(700px,calc(100vh-3rem))] sm:max-w-[600px]"
-      >
-        <DialogTitle className="sr-only">Connect {frame.app.name}</DialogTitle>
-        <DialogDescription className="sr-only">Authorize Sketch to access {frame.app.name}.</DialogDescription>
-        <iframe
-          title={`Connect ${frame.app.name}`}
-          src={frame.redirectUrl}
-          className="h-full w-full border-0 bg-background"
-          sandbox="allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts allow-top-navigation-by-user-activation"
-        />
-      </DialogContent>
-    </Dialog>
-  );
+  return null;
 }

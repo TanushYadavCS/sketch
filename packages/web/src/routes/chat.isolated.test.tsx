@@ -35,6 +35,10 @@ const mocks = vi.hoisted(() => ({
   listConnections: vi.fn().mockResolvedValue([]),
   listApps: vi.fn().mockResolvedValue({ apps: [], pageInfo: { endCursor: null, hasMore: false } }),
   createConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://canvas.example/connect" }),
+  createConnectionIntent: vi.fn().mockResolvedValue({
+    app: { id: "github", name: "GitHub", description: "Code hosting" },
+    redirectUrl: "https://canvas.example/connect",
+  }),
   search: { message: "Plan my day" } as Record<string, unknown>,
 }));
 
@@ -61,6 +65,7 @@ vi.mock("@/lib/api", () => ({
       listConnections: mocks.listConnections,
       listApps: mocks.listApps,
       createConnection: mocks.createConnection,
+      createConnectionIntent: mocks.createConnectionIntent,
     },
   },
 }));
@@ -99,6 +104,7 @@ vi.mock("@/components/sketch/home-pane", () => ({
 
 describe("chat route", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     takePendingWebChatSubmission("chat-alpha");
     mocks.loadMessages.mockReset();
     mocks.loadMessages.mockResolvedValue({ messages: [] });
@@ -116,6 +122,11 @@ describe("chat route", () => {
     mocks.listApps.mockResolvedValue({ apps: [], pageInfo: { endCursor: null, hasMore: false } });
     mocks.createConnection.mockReset();
     mocks.createConnection.mockResolvedValue({ redirectUrl: "https://canvas.example/connect" });
+    mocks.createConnectionIntent.mockReset();
+    mocks.createConnectionIntent.mockResolvedValue({
+      app: { id: "github", name: "GitHub", description: "Code hosting" },
+      redirectUrl: "https://canvas.example/connect",
+    });
     mockChatStatus = "ready";
     mockChatMessages = [
       { id: "u1", role: "user", parts: [{ type: "text", text: "Hi Sketch" }] },
@@ -656,10 +667,12 @@ describe("chat route", () => {
     });
   });
 
-  it("opens the Canvas connection frame from assistant cards and keeps state on the card", async () => {
+  it("opens Canvas connections from assistant cards in a popup and keeps state on the card", async () => {
     const user = userEvent.setup();
     let connectionStarted = false;
     let connectionVerified = false;
+    const popup = { closed: false, close: vi.fn() };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     mocks.search = {};
     mockChatMessages = [
       {
@@ -694,9 +707,9 @@ describe("chat route", () => {
         updatedAt: "2026-01-01T00:00:00Z",
       },
     ]);
-    mocks.createConnection.mockImplementation(async () => {
+    mocks.createConnectionIntent.mockImplementation(async () => {
       connectionStarted = true;
-      return { redirectUrl: "about:blank" };
+      return { app: { id: "github", name: "GitHub", description: "Code hosting" }, redirectUrl: "about:blank" };
     });
     mocks.listConnections.mockImplementation(async () =>
       connectionStarted && connectionVerified
@@ -722,12 +735,16 @@ describe("chat route", () => {
     await user.click(await screen.findByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
-      expect(mocks.createConnection).toHaveBeenCalledWith("provider-1", "github", expect.any(String)),
+      expect(mocks.createConnectionIntent).toHaveBeenCalledWith(
+        "provider-1",
+        "github",
+        expect.any(String),
+        expect.objectContaining({ id: "github", name: "GitHub" }),
+      ),
     );
     expect(mocks.listApps).not.toHaveBeenCalled();
-    expect(await screen.findByTitle("Connect GitHub")).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "Connect GitHub" })).toHaveClass("sm:max-w-[600px]");
-    expect(screen.getByRole("dialog", { name: "Connect GitHub" })).not.toHaveClass("inset-0");
+    expect(window.open).toHaveBeenCalledWith("about:blank", "_blank", "width=600,height=700");
+    expect(screen.queryByRole("dialog", { name: "Connect GitHub" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connecting", hidden: true })).toBeDisabled();
 
     connectionVerified = true;
@@ -775,7 +792,10 @@ describe("chat route", () => {
       },
     ];
     mocks.listMcpServers.mockReturnValue(servers.promise);
-    mocks.createConnection.mockResolvedValue({ redirectUrl: "about:blank" });
+    mocks.createConnectionIntent.mockResolvedValue({
+      app: { id: "github", name: "GitHub", description: "Code hosting" },
+      redirectUrl: "about:blank",
+    });
 
     renderWithProviders(<ChatPage />);
 
@@ -783,7 +803,7 @@ describe("chat route", () => {
     await waitFor(() => expect(connectButton).toBeDisabled());
     expect(screen.getByText("Checking")).toBeInTheDocument();
     await user.click(connectButton);
-    expect(mocks.createConnection).not.toHaveBeenCalled();
+    expect(mocks.createConnectionIntent).not.toHaveBeenCalled();
 
     servers.resolve([
       {
@@ -804,7 +824,12 @@ describe("chat route", () => {
     await user.click(screen.getByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
-      expect(mocks.createConnection).toHaveBeenCalledWith("provider-1", "github", expect.any(String)),
+      expect(mocks.createConnectionIntent).toHaveBeenCalledWith(
+        "provider-1",
+        "github",
+        expect.any(String),
+        expect.objectContaining({ id: "github", name: "GitHub" }),
+      ),
     );
   });
 });

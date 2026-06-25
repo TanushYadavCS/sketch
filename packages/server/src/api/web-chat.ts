@@ -24,6 +24,7 @@ import {
   dedupeIntegrationCards,
   isConnectedAccountsInquiry,
 } from "../integrations/cards";
+import { sanitizeIntegrationConnectionText } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -609,12 +610,24 @@ function sanitizeTranscriptMessage(message: unknown): WebChatTranscriptMessage |
   if (!Array.isArray(message.parts)) return null;
   const createdAt = typeof message.createdAt === "string" && message.createdAt.trim() ? message.createdAt : undefined;
 
-  const parts = message.parts.flatMap((part) => {
+  const parts: WebChatStoredPart[] = message.parts.flatMap((part) => {
     const sanitized = sanitizeTranscriptPart(part);
     return sanitized ? [sanitized] : [];
   });
   if (parts.length === 0) return null;
-  return { id: message.id, role: message.role, ...(createdAt ? { createdAt } : {}), parts };
+  const integrationConnections = parts
+    .filter((part) => part.type === "data-integration-connection")
+    .map((part) => part.data);
+  const sanitizedParts: WebChatStoredPart[] =
+    message.role === "assistant" && integrationConnections.length > 0
+      ? parts.flatMap((part): WebChatStoredPart[] => {
+          if (part.type !== "text") return [part];
+          const text = sanitizeIntegrationConnectionText(part.text, integrationConnections);
+          return text ? [{ type: "text" as const, text }] : [];
+        })
+      : parts;
+  if (sanitizedParts.length === 0) return null;
+  return { id: message.id, role: message.role, ...(createdAt ? { createdAt } : {}), parts: sanitizedParts };
 }
 
 async function readWebChatTranscript(
@@ -1357,9 +1370,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ),
         );
 
-        const finalText = result.trace.finalText ?? "";
-        writeFinalText(finalText);
-
         const fileParts: Array<{ id: string; data: WebChatFile }> = [];
         for (const [index, filePath] of result.pendingUploads.entries()) {
           const file = await webChatFileForUpload(workspaceDir, filePath);
@@ -1369,7 +1379,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           }
           const id = `file-${index}`;
           fileParts.push({ id, data: file });
-          write({ type: "data-file", id, data: file });
         }
         const deterministicIntegrationCards = await deterministicIntegrationCardsForWebChat({
           deps,
@@ -1382,6 +1391,12 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...(result.pendingIntegrationConnections ?? []),
           ...deterministicIntegrationCards,
         ]);
+        const finalText = sanitizeIntegrationConnectionText(result.trace.finalText, integrationCards) ?? "";
+        writeFinalText(finalText);
+
+        for (const file of fileParts) {
+          write({ type: "data-file", id: file.id, data: file.data });
+        }
         const integrationConnectionParts = integrationCards.map((connection, index) => {
           const id = `integration-connection-${index}`;
           write({ type: "data-integration-connection", id, data: connection });

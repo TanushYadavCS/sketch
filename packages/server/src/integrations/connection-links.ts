@@ -42,6 +42,57 @@ function fallbackConnectionInstructions(
   return `To continue, open Integrations in Sketch to connect these apps: ${appNames.join(", ")}.`;
 }
 
+function cardAppNames(cards: WebChatIntegrationConnectionData[]): string[] {
+  return cards.map((card) => card.appName.trim()).filter(Boolean);
+}
+
+function lineMentionsAnyApp(line: string, appNames: string[]): boolean {
+  const normalized = line.toLowerCase();
+  return appNames.some((appName) => normalized.includes(appName.toLowerCase()));
+}
+
+function isManualConnectionInstructionLine(line: string, appNames: string[]): boolean {
+  const normalized = line.trim().toLowerCase();
+  if (!normalized) return false;
+  if (/settings\s*(->|→)\s*integrations/.test(normalized)) return true;
+  if (/\bintegrations\?connect=/.test(normalized)) return true;
+  if (/\b(api key|oauth flow|connection card|connect button|setup card|setup link)\b/.test(normalized)) return true;
+  if (/\b(you'?ll|you will)\s+need\s+to\s+connect\b/.test(normalized)) return true;
+  if (/\bonce\s+(they'?re|they are|those are|these are|it'?s|it is|connected)\b/.test(normalized)) return true;
+  if (/^[-*]\s+/.test(normalized) && lineMentionsAnyApp(line, appNames) && /\b(connect|link|authorize)\b/i.test(line)) {
+    return true;
+  }
+  return false;
+}
+
+function compactConnectionTextLines(lines: string[]): string {
+  const compacted: string[] = [];
+  for (const line of lines) {
+    if (!line.trim() && compacted.at(-1) === "") continue;
+    compacted.push(line.trimEnd());
+  }
+  return compacted.join("\n").trim();
+}
+
+export function sanitizeIntegrationConnectionText(
+  text: string | null | undefined,
+  cards: WebChatIntegrationConnectionData[] | undefined,
+): string | null {
+  const trimmedText = text?.trim() ?? "";
+  const missingCards = missingConnectionCards(cards);
+  if (!trimmedText || missingCards.length === 0) return trimmedText || null;
+
+  const appNames = cardAppNames(missingCards);
+  const lines = trimmedText.split(/\r?\n/).filter((line) => !isManualConnectionInstructionLine(line, appNames));
+  const sanitized = compactConnectionTextLines(lines);
+  if (sanitized) return sanitized;
+
+  if (appNames.length === 1) return `${appNames[0]} needs to be connected before I can continue.`;
+  const last = appNames.at(-1);
+  const prefix = appNames.slice(0, -1).join(", ");
+  return `${prefix} and ${last} need to be connected before I can continue.`;
+}
+
 export function integrationConnectionUrl(
   card: WebChatIntegrationConnectionData,
   config: IntegrationConnectionLinkConfig,
@@ -95,7 +146,7 @@ export function appendIntegrationConnectionLinks(
   platform: IntegrationConnectionLinkPlatform,
   config: IntegrationConnectionLinkConfig,
 ): string | null {
-  const trimmedText = text?.trim() ?? "";
+  const trimmedText = sanitizeIntegrationConnectionText(text, cards)?.trim() ?? "";
   const links = formatIntegrationConnectionLinks(cards, platform, config);
   if (!links) return trimmedText || null;
   if (!trimmedText) return links;

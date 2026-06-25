@@ -1861,12 +1861,23 @@ export const api = {
         body: JSON.stringify({ appId, callbackUrl }),
       });
     },
-    createConnectionIntent(providerId: string, appId: string, callbackUrl?: string) {
+    createConnectionIntent(
+      providerId: string,
+      appId: string,
+      callbackUrl?: string,
+      app?: Pick<IntegrationApp, "name" | "description" | "icon">,
+    ) {
       return request<{ app: IntegrationApp; redirectUrl: string }>(
         `/api/mcp-servers/${providerId}/connections/intents`,
         {
           method: "POST",
-          body: JSON.stringify({ appId, callbackUrl }),
+          body: JSON.stringify({
+            appId,
+            callbackUrl,
+            appName: app?.name,
+            description: app?.description,
+            icon: app?.icon,
+          }),
         },
       );
     },
