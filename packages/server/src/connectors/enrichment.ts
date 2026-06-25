@@ -16,17 +16,17 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
+import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { applyEngagementFloor } from "./engagement-floor";
 import { type KnownEntityForPrompt, buildFileScopedKnownEntities } from "./file-scope-context";
-import { createGeminiGenerator } from "./gemini-generate";
-import type { GeminiGenerator } from "./gemini-generate";
+import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
 import { buildParticipantBlock } from "./participant-block";
 import { smartEnrichFile } from "./smart-enrichment";
 import { extractDatesFromText } from "./tagging";
@@ -115,6 +115,7 @@ export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEn
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
     .execute();
   return entities.map((entity) => ({
     id: entity.id,
@@ -130,7 +131,8 @@ export interface EnrichmentDeps {
   db: Kysely<DB>;
   logger: Logger;
   embeddingProvider: EmbeddingProvider | null;
-  /** Gemini API key for AI-powered enrichment (summaries, entity extraction). */
+  generator?: GeminiGenerator | null;
+  /** Gemini API key for AI-powered enrichment when a generator is not supplied. */
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
@@ -214,6 +216,19 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     // entities table may not exist yet — ignore
   }
 
+  let generatorForRun: GeminiGenerator | null = deps.generator ?? null;
+  const getGenerator = () => {
+    if (generatorForRun) return generatorForRun;
+    if (!deps.geminiApiKey) return null;
+    generatorForRun ??= createGeminiGenerator(deps.geminiApiKey, {
+      maxRpm: deps.geminiMaxRpm,
+      maxRetries: deps.geminiMaxRetries,
+    });
+    return generatorForRun;
+  };
+  const hasGenerator = () => !!deps.generator || !!deps.geminiApiKey;
+  const touchedEmailThreads = new Map<string, { connectorConfigId: string; threadId: string }>();
+
   // Find files needing enrichment
   let query = db
     .selectFrom("indexed_files")
@@ -228,6 +243,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "source_path",
       "mime_type",
       "provider_file_id",
+      "thread_id",
       "connector_config_id",
       "source_created_at",
       "source_updated_at",
@@ -282,20 +298,29 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     try {
       const isImage = file.mime_type?.startsWith("image/") || file.file_type === "image";
       const isStructured = file.content_category === "structured";
+      const isEmailMessage = file.file_type === "email_message";
+      const threadContext =
+        isEmailMessage && file.thread_id
+          ? await (async () => {
+              const generator = getGenerator();
+              return generator
+                ? ensureEmailThreadSummary(db, generator, file.connector_config_id, file.thread_id)
+                : Promise.resolve(null);
+            })()
+          : null;
 
       // Summary-only pass: file already has embeddings, just needs AI summary
       const needsSummaryOnly =
         file.embedding_status === "done" && file.summary_status !== "done" && file.summary_status !== "skipped";
 
       if (needsSummaryOnly) {
-        if (file.content && !isImage && !isStructured && deps.geminiApiKey) {
-          const wordCount = file.content.split(/\s+/).length;
-          if (wordCount >= 100) {
+        if (file.content && !isImage && !isStructured && hasGenerator()) {
+          const wordCount = file.content.split(/\s+/).filter(Boolean).length;
+          const minWordsForSummary = isEmailMessage ? (threadContext ? 1 : 10) : 100;
+          if (wordCount >= minWordsForSummary) {
             try {
-              const generator = createGeminiGenerator(deps.geminiApiKey, {
-                maxRpm: deps.geminiMaxRpm,
-                maxRetries: deps.geminiMaxRetries,
-              });
+              const generator = getGenerator();
+              if (!generator) throw new Error("Enrichment generator unavailable");
               const knownEntities = await buildFileScopedKnownEntities(
                 { db, logger },
                 file.id,
@@ -321,6 +346,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   id: file.id,
                   fileName: file.file_name,
                   content: file.content,
+                  threadContext,
                   contentCategory: file.content_category,
                   source: file.source_path?.split("/")[0] ?? "unknown",
                   sourcePath: file.source_path,
@@ -376,6 +402,12 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
             .execute();
         }
         result.filesProcessed++;
+        if (isEmailMessage && file.thread_id) {
+          touchedEmailThreads.set(`${file.connector_config_id}:${file.thread_id}`, {
+            connectorConfigId: file.connector_config_id,
+            threadId: file.thread_id,
+          });
+        }
         const elapsed = ((Date.now() - fileStart) / 1000).toFixed(1);
         logger.info(
           { fileName: file.file_name, progress: `${idx + 1}/${pendingFiles.length}`, elapsed: `${elapsed}s` },
@@ -405,7 +437,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       if (isImage) {
         await enrichImage(file, deps);
       } else if (file.content) {
-        await enrichTextDocument(file as typeof file & { content: string }, isStructured, deps);
+        await enrichTextDocument(file as typeof file & { content: string }, isStructured, deps, threadContext);
       } else {
         // No content and not an image — skip
         await db.updateTable("indexed_files").set({ embedding_status: "skipped" }).where("id", "=", file.id).execute();
@@ -421,6 +453,12 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
         .execute();
 
       result.filesProcessed++;
+      if (isEmailMessage && file.thread_id) {
+        touchedEmailThreads.set(`${file.connector_config_id}:${file.thread_id}`, {
+          connectorConfigId: file.connector_config_id,
+          threadId: file.thread_id,
+        });
+      }
 
       const elapsed = ((Date.now() - fileStart) / 1000).toFixed(1);
       logger.info(
@@ -453,6 +491,20 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
     "Enrichment run complete",
   );
 
+  const generator = getGenerator();
+  if (generator && touchedEmailThreads.size > 0) {
+    for (const thread of touchedEmailThreads.values()) {
+      try {
+        await rebuildEmailThreadSummary(db, generator, thread.connectorConfigId, thread.threadId);
+      } catch (err) {
+        logger.warn(
+          { err, threadId: thread.threadId, connectorId: thread.connectorConfigId },
+          "Email thread summary rebuild failed",
+        );
+      }
+    }
+  }
+
   return result;
 }
 
@@ -470,11 +522,13 @@ async function enrichTextDocument(
     source_path: string | null;
     source_created_at: string | null;
     source_updated_at: string | null;
+    file_type: string | null;
     summary_status: string;
     summary_attempts: number;
   },
   isStructured: boolean,
   deps: EnrichmentDeps,
+  threadContext: string | null = null,
 ): Promise<void> {
   const { db, logger, embeddingProvider } = deps;
 
@@ -518,16 +572,23 @@ async function enrichTextDocument(
 
   // 4. Entity linking — AI-powered when Gemini available, deterministic fallback
   // Skip LLM calls for tiny documents (<100 words) — not enough content to extract meaningful entities/summaries
-  const wordCount = file.content.split(/\s+/).length;
+  const wordCount = file.content.split(/\s+/).filter(Boolean).length;
   let usedSmartEnrichment = false;
   let smartEnrichmentFailed = false;
   const summaryAlreadyResolved = file.summary_status === "done" || file.summary_status === "skipped";
-  if (!summaryAlreadyResolved && deps.geminiApiKey && wordCount >= 100) {
+  const isEmailMessage = file.file_type === "email_message";
+  const minWordsForSummary = isEmailMessage ? (threadContext ? 1 : 10) : 100;
+  const generator =
+    deps.generator ??
+    (deps.geminiApiKey
+      ? createGeminiGenerator(deps.geminiApiKey, {
+          maxRpm: deps.geminiMaxRpm,
+          maxRetries: deps.geminiMaxRetries,
+        })
+      : null);
+
+  if (!summaryAlreadyResolved && generator && wordCount >= minWordsForSummary) {
     try {
-      const generator = createGeminiGenerator(deps.geminiApiKey, {
-        maxRpm: deps.geminiMaxRpm,
-        maxRetries: deps.geminiMaxRetries,
-      });
       const knownEntities = await buildFileScopedKnownEntities(
         { db, logger },
         file.id,
@@ -550,6 +611,7 @@ async function enrichTextDocument(
           id: file.id,
           fileName: file.file_name,
           content: file.content,
+          threadContext,
           contentCategory: file.content_category,
           source: file.source_path?.split("/")[0] ?? "unknown",
           sourcePath: file.source_path,
@@ -856,6 +918,7 @@ async function deleteStaleLegacyDeterministicMentions(db: Kysely<DB>, fileId: st
     .where("entity_mentions.indexed_file_id", "=", fileId)
     .where("entity_mentions.source", "=", "llm_extraction")
     .where("entity_mentions.confidence", "!=", "EXTRACTED")
+    .where(whereLiveEntity())
     .execute();
   const staleIds = legacyMentions
     .filter((mention) => entityNames(mention).every((name) => !activeLlmNames.has(normalizeDeterministicName(name))))

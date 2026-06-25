@@ -58,6 +58,7 @@ export class SqliteSpanExporter implements SpanExporter {
         platform: a["sketch.platform"] as string,
         context_type: a["sketch.context_type"] as string,
         cost_usd: (a["sketch.cost_usd"] as number) ?? 0,
+        aux_cost_usd: (a["sketch.aux_cost_usd"] as number) ?? 0,
         is_error: span.status.code === 2 ? 1 : 0,
         duration_ms: durationMs,
         attributes: JSON.stringify(a),

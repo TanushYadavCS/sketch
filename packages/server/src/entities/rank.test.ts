@@ -17,6 +17,8 @@ function person(id: string, name: string): Entity {
     updated_at: "2026-01-01T00:00:00.000Z",
     ai_brief: null,
     share_with_everyone: 0,
+    deleted_at: null,
+    merged_into_entity_id: null,
   };
 }
 

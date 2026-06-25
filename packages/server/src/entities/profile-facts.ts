@@ -44,6 +44,7 @@ export interface EntityProfileFacts {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   domainsForCompany: CompanyDomainFact[];
+  crmActivityBrief: { summary: string; activityCount: number; updatedAt: string } | null;
   topRelationships: RelationListEntry[];
   incomingCounts: Record<string, number>;
   outgoingCounts: Record<string, number>;

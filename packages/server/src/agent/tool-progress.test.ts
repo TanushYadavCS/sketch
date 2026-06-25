@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ProgressDisplaySettings } from "../progress-settings";
 import type { ProgressEvent } from "./runner";
-import { createProgressRenderer, getProgressTransportStrategy } from "./tool-progress";
+import {
+  createProgressRenderer,
+  createWebProgressData,
+  createWebProgressItem,
+  getProgressTransportStrategy,
+} from "./tool-progress";
 
 function renderEvents(settings: ProgressDisplaySettings, events: ProgressEvent[]) {
   const renderer = createProgressRenderer(settings);
@@ -142,11 +147,31 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(['🧩 Canvas web search: "TypeScript best practices"']);
   });
 
+  it("renders delivery target search progress", () => {
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+      ]).lines,
+    ).toEqual(['📍 Searching delivery targets for "engineering"']);
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { platform: "slack" } },
+      ]).lines,
+    ).toEqual(["📍 Listing delivery targets"]);
+  });
+
+  it("renders delivery target search in technical mode", () => {
+    const { lines } = renderEvents({ toolProgress: "technical", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+    ]);
+    expect(lines).toEqual(['📍 SearchDeliveryTargets: "engineering"']);
+  });
+
   it("renders a clear fallback for unknown tools with safe available input", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "mcp__google_drive__list_files", input: { folder: "root" } },
     ]);
-    expect(lines).toEqual(['⚙️ Using list_files: "root"']);
+    expect(lines).toEqual(['⚙️ list_files: "root"']);
   });
 
   it("renders chat history reads with a dedicated label", () => {
@@ -156,11 +181,38 @@ describe("createProgressRenderer", () => {
     expect(lines).toEqual(["💬 Reading Chat History"]);
   });
 
+  it("renders chat history searches with the query", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__SearchChatHistory", input: { query: "launch budget" } },
+    ]);
+    expect(lines).toEqual(['🔎 Searching chat history for "launch budget"']);
+  });
+
+  it("renders visual analysis with the image path", () => {
+    expect(
+      renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__VisualAnalysis", input: { file_path: "attachments/photo.jpg" } },
+      ]).lines,
+    ).toEqual(['🖼️ Analyzing image "attachments/photo.jpg"']);
+    expect(
+      renderEvents({ toolProgress: "technical", reasoningText: false }, [
+        { kind: "tool_use", toolName: "mcp__sketch__VisualAnalysis", input: { file_path: "attachments/photo.jpg" } },
+      ]).lines,
+    ).toEqual(['🖼️ VisualAnalysis: "attachments/photo.jpg"']);
+  });
+
+  it("renders local Mac commands without echoing the command", () => {
+    const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
+      { kind: "tool_use", toolName: "mcp__sketch__local_run_command", input: { command: "cat ~/.ssh/id_rsa" } },
+    ]);
+    expect(lines).toEqual(["💻 Running local Mac command"]);
+  });
+
   it("does not include unsafe fallback input fields", () => {
     const { lines } = renderEvents({ toolProgress: "friendly", reasoningText: false }, [
       { kind: "tool_use", toolName: "UnknownTool", input: { apiKey: "secret", message: "hello" } },
     ]);
-    expect(lines).toEqual(["⚙️ Using UnknownTool"]);
+    expect(lines).toEqual(["⚙️ UnknownTool"]);
   });
 
   it("strips the mcp__<server>__ prefix in technical output", () => {
@@ -175,6 +227,157 @@ describe("createProgressRenderer", () => {
       { kind: "tool_use", toolName: "mcp__plugin_pipedream__SendFileToChat", input: { file_path: "a.ts" } },
     ]);
     expect(lines).toEqual(['📎 Sending file "a.ts"']);
+  });
+});
+
+describe("createWebProgressItem", () => {
+  it("builds generic friendly tool progress metadata without changing the rendered line contract", () => {
+    const event: ProgressEvent = { kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } };
+
+    expect(createWebProgressItem(event, { toolProgress: "friendly", reasoningText: false })).toEqual({
+      kind: "tool",
+      label: "Using tool",
+      icon: { type: "tool" },
+    });
+    expect(renderEvents({ toolProgress: "friendly", reasoningText: false }, [event]).lines).toEqual([
+      '📖 Reading "notes.md"',
+    ]);
+  });
+
+  it("builds technical tool progress metadata with the stripped tool name", () => {
+    expect(
+      createWebProgressItem(
+        { kind: "tool_use", toolName: "mcp__sketch__SearchDeliveryTargets", input: { query: "engineering" } },
+        { toolProgress: "technical", reasoningText: false },
+      ),
+    ).toEqual({
+      kind: "delivery",
+      label: "SearchDeliveryTargets",
+      detail: "engineering",
+      icon: { type: "tool", name: "SearchDeliveryTargets" },
+      toolName: "SearchDeliveryTargets",
+    });
+  });
+
+  it("builds friendly Canvas progress metadata without command details", () => {
+    expect(
+      createWebProgressItem(
+        {
+          kind: "tool_use",
+          toolName: "Bash",
+          input: {
+            command:
+              '$CANVAS_CLI direct-execute-action --component-key slack-send-message --configured-props \'{"text":"hi"}\' --output json',
+          },
+        },
+        { toolProgress: "friendly", reasoningText: false },
+      ),
+    ).toEqual({
+      kind: "integration",
+      label: "Running integration",
+      icon: { type: "canvas", name: "Canvas" },
+    });
+  });
+
+  it("collapses disabled tool progress to generic thinking metadata", () => {
+    expect(
+      createWebProgressItem(
+        { kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } },
+        { toolProgress: "off", reasoningText: false },
+      ),
+    ).toEqual({
+      kind: "reasoning",
+      label: "Thinking…",
+      icon: { type: "generic", name: "reasoning" },
+    });
+  });
+
+  it("builds detailed reasoning metadata only in technical mode", () => {
+    const event: ProgressEvent = { kind: "intermediate_text", text: "Checking config" };
+
+    expect(createWebProgressItem(event, { toolProgress: "technical", reasoningText: true })).toEqual({
+      kind: "reasoning",
+      label: "Thinking",
+      detail: "Checking config",
+      icon: { type: "generic", name: "reasoning" },
+    });
+    expect(createWebProgressItem(event, { toolProgress: "off", reasoningText: true })).toEqual({
+      kind: "reasoning",
+      label: "Thinking…",
+      icon: { type: "generic", name: "reasoning" },
+    });
+    expect(createWebProgressItem(event, { toolProgress: "friendly", reasoningText: false })).toBeNull();
+  });
+
+  it("uses average-user labels for skills and integrations in friendly mode", () => {
+    expect(
+      createWebProgressItem(
+        { kind: "tool_use", toolName: "Skill", input: { skill: "canvas-add-integration" } },
+        { toolProgress: "friendly", reasoningText: false },
+      ),
+    ).toEqual({
+      kind: "integration",
+      label: "Running integration",
+      icon: { type: "generic", name: "integration" },
+    });
+
+    expect(
+      createWebProgressItem(
+        { kind: "tool_use", toolName: "mcp__google_drive__list_files", input: { folder: "root" } },
+        { toolProgress: "friendly", reasoningText: false },
+      ),
+    ).toEqual({
+      kind: "integration",
+      label: "Running Google Drive integration",
+      icon: { type: "generic", name: "integration" },
+    });
+
+    expect(
+      createWebProgressItem(
+        { kind: "tool_use", toolName: "mcp__sketch__custom_tool", input: {} },
+        { toolProgress: "friendly", reasoningText: false },
+      ),
+    ).toEqual({
+      kind: "integration",
+      label: "Running integration",
+      icon: { type: "generic", name: "integration" },
+    });
+  });
+});
+
+describe("createWebProgressData", () => {
+  it("uses generic friendly lines instead of Slack-style rendered lines", () => {
+    const event: ProgressEvent = { kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } };
+
+    expect(
+      createWebProgressData(event, { toolProgress: "friendly", reasoningText: false }, "friendly", [
+        '📖 Reading "notes.md"',
+      ]),
+    ).toEqual({
+      lines: ["Using tool"],
+      items: [{ kind: "tool", label: "Using tool", icon: { type: "tool" } }],
+    });
+  });
+
+  it("keeps technical rendered lines and detailed metadata", () => {
+    const event: ProgressEvent = { kind: "tool_use", toolName: "Read", input: { file_path: "notes.md" } };
+
+    expect(
+      createWebProgressData(event, { toolProgress: "technical", reasoningText: false }, "technical", [
+        '📖 Read: "notes.md"',
+      ]),
+    ).toEqual({
+      lines: ['📖 Read: "notes.md"'],
+      items: [
+        {
+          kind: "file",
+          label: "Read",
+          detail: "notes.md",
+          icon: { type: "tool", name: "Read" },
+          toolName: "Read",
+        },
+      ],
+    });
   });
 });
 

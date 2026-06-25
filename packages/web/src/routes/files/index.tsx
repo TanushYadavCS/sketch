@@ -27,6 +27,7 @@ import { ConnectorPicker } from "./connector-picker";
 import { EntityExplorer } from "./entity-explorer";
 import { FileDetailSheet } from "./file-detail-sheet";
 import { FileList } from "./file-list";
+import { KnowledgeGraphView } from "./knowledge-graph";
 import { ManageConnectorDialog } from "./manage-connector-dialog";
 import { SearchBar } from "./search-bar";
 
@@ -38,7 +39,7 @@ export const filesRoute = createRoute({
 
 const PAGE_SIZE = 50;
 
-type FilesTab = "files" | "entities";
+type FilesTab = "files" | "entities" | "graph";
 
 function FilesPage() {
   const queryClient = useQueryClient();
@@ -81,6 +82,8 @@ function FilesPage() {
   });
 
   const connectors = connectorsData?.connectors ?? [];
+  const teamMemberCount = connectorsData?.teamMemberCount ?? 0;
+  const connectorMemberCounts = connectorsData?.connectorMemberCounts ?? {};
 
   // Viewer-aware file count per source. Connector-row counts under-count for
   // members who have file-access via meetings someone else's connector synced;
@@ -100,22 +103,35 @@ function FilesPage() {
     const params = new URLSearchParams(window.location.search);
     const oauthStatus = params.get("oauth");
     const connectorId = params.get("connectorId");
+    const connectorParam = params.get("connector");
+    const isMicrosoftFlow = connectorParam === "teams" || connectorParam === "outlook";
 
-    if (!oauthStatus || connectors.length === 0) return;
+    if (!oauthStatus) return;
+    if (oauthStatus !== "admin_consent_granted" && connectors.length === 0) return;
 
     window.history.replaceState({}, "", window.location.pathname);
 
+    if (oauthStatus === "admin_consent_granted") {
+      const name = connectorParam === "outlook" ? "Outlook" : "Microsoft Teams";
+      toast.success(`Admin consent granted — teammates in your organization can now connect ${name}.`);
+      return;
+    }
+
     if (oauthStatus === "success" && connectorId) {
       const connector = connectors.find((c) => c.id === connectorId);
-      if (connector) {
-        const def = getIntegration(connector.connectorType as IntegrationType);
-        if (def) {
-          toast.success("Google account connected — now select which drives or folders to sync.");
+      const def = connector ? getIntegration(connector.connectorType as IntegrationType) : undefined;
+      if (connector && def) {
+        if (connector.connectorType === "gmail") {
+          toast.success("Gmail connected — importing your recent mail now.");
+        } else if (def.scopeType === "none") {
+          toast.success(`${def.name} connected — syncing automatically.`);
+        } else {
+          toast.success(`${def.name} connected — now select what to sync.`);
           setManagingConnector({ definition: def, connector });
-          return;
         }
+        return;
       }
-      toast.success("Google Drive connected successfully.");
+      toast.success("Connected successfully.");
     } else if (oauthStatus === "error") {
       const reason = params.get("reason") ?? "unknown";
 
@@ -126,7 +142,7 @@ function FilesPage() {
         if (connector) {
           const def = getIntegration(connector.connectorType as IntegrationType);
           if (def) {
-            toast.info("You already have Google Drive connected. Manage it here.", {
+            toast.info(`You already have ${def.name} connected. Manage it here.`, {
               action: {
                 label: "Manage",
                 onClick: () => setManagingConnector({ definition: def, connector }),
@@ -135,16 +151,31 @@ function FilesPage() {
             return;
           }
         }
-        toast.info("You already have Google Drive connected. Open Files → Connections to manage it.");
+        toast.info("You already have this connected. Open Files → Connections to manage it.");
         return;
       }
 
+      if (reason === "admin_consent_required") {
+        toast.error(
+          "Your Microsoft admin must approve Sketch for this organization before you can connect. Ask an admin to grant consent, then try again.",
+          {
+            action: {
+              label: "Grant admin consent",
+              onClick: () => window.open(api.microsoftOAuth.adminConsentUrl(connectorParam ?? "teams"), "_self"),
+            },
+          },
+        );
+        return;
+      }
+
+      const provider = isMicrosoftFlow ? "Microsoft" : "Google";
       const messages: Record<string, string> = {
-        denied: "Google authorization was denied.",
-        no_refresh_token:
-          "No refresh token received — try revoking app access in Google Account settings and reconnecting.",
+        denied: `${provider} authorization was denied.`,
+        no_refresh_token: isMicrosoftFlow
+          ? "No refresh token received — disconnect Sketch in your Microsoft account and reconnect."
+          : "No refresh token received — try revoking app access in Google Account settings and reconnecting.",
         token_exchange: "Failed to exchange authorization code for tokens.",
-        not_configured: "Google OAuth is not configured.",
+        not_configured: `${provider} OAuth is not configured.`,
         internal: "An internal error occurred during authorization.",
       };
       toast.error(messages[reason] ?? `OAuth error: ${reason}`);
@@ -211,10 +242,25 @@ function FilesPage() {
     sourceFilter === "local"
   );
 
-  const handleConnected = () => {
+  const refreshFilesData = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
     queryClient.invalidateQueries({ queryKey: ["all-files"] });
-  };
+    queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
+    queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+  }, [queryClient]);
+
+  const handleConnected = useCallback(() => {
+    refreshFilesData();
+  }, [refreshFilesData]);
+
+  const handleDisconnected = useCallback(
+    (connector: ConnectorConfig) => {
+      if (sourceFilter === connector.connectorType) setSourceFilter(null);
+      refreshFilesData();
+    },
+    [refreshFilesData, setSourceFilter, sourceFilter],
+  );
 
   const isLoading = isLoadingConnectors || isLoadingFiles;
 
@@ -287,15 +333,30 @@ function FilesPage() {
         >
           Entity Explorer
         </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("graph")}
+          className={`px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === "graph"
+              ? "border-b-2 border-foreground text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Graph
+        </button>
       </div>
 
       <TabContentContainer>
-        {activeTab === "entities" ? (
+        {activeTab === "graph" ? (
+          <KnowledgeGraphView />
+        ) : activeTab === "entities" ? (
           <EntityExplorer />
         ) : (
           <>
             <ConnectorPicker
               connectors={connectors}
+              teamMemberCount={teamMemberCount}
+              connectorMemberCounts={connectorMemberCounts}
               sourceCounts={sourceCounts}
               totalFiles={totalFiles}
               localFileCount={localFileCount}
@@ -359,7 +420,10 @@ function FilesPage() {
                 hasClientOnlyFilter={hasClientOnlyFilter}
                 allFilesCount={allFiles.length}
                 totalFiles={totalFiles}
-                onView={setViewingFile}
+                onView={(id) => {
+                  const result = searchResults.find((r) => r.id === id);
+                  setViewingFile(result?.hitFileId ?? id);
+                }}
                 onLoadMore={loadMore}
               />
             </div>
@@ -372,15 +436,18 @@ function FilesPage() {
         connector={managingConnector?.connector ?? null}
         open={!!managingConnector}
         onOpenChange={(open) => !open && setManagingConnector(null)}
-        onDisconnected={handleConnected}
+        onDisconnected={handleDisconnected}
         onReconnect={(def) => {
+          if (managingConnector?.connector && sourceFilter === managingConnector.connector.connectorType) {
+            setSourceFilter(null);
+          }
           setManagingConnector(null);
-          queryClient.invalidateQueries({ queryKey: ["integrations"] });
+          refreshFilesData();
           setReconnectTarget(def);
         }}
       />
 
-      <FileDetailSheet fileId={viewingFile} onClose={() => setViewingFile(null)} />
+      <FileDetailSheet fileId={viewingFile} connectors={connectors} onClose={() => setViewingFile(null)} />
     </div>
   );
 }

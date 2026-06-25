@@ -30,6 +30,54 @@ export function GoogleDriveLogo({ size = 16, className, style }: LogoProps) {
   );
 }
 
+export function GmailLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" />
+    </svg>
+  );
+}
+
+export function OutlookLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M3 4.5 13.5 2v20L3 19.5v-15Zm4.9 10.3c1.7 0 2.9-1.4 2.9-3.3s-1.2-3.3-2.9-3.3S5 9.6 5 11.5s1.2 3.3 2.9 3.3Zm0-1.4c-.8 0-1.3-.7-1.3-1.9s.5-1.9 1.3-1.9 1.3.7 1.3 1.9-.5 1.9-1.3 1.9ZM15 5h6v14h-6v-2h4v-6.1l-2.5 1.7L15 11.5V5Zm1.2 2v2.7l.3.2L19 8.2V7h-2.8Z" />
+    </svg>
+  );
+}
+
+export function TeamsLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M10.5 4.5h7A2.5 2.5 0 0 1 20 7v1.25h1.25A1.75 1.75 0 0 1 23 10v3.5A4.5 4.5 0 0 1 18.5 18H18a4.5 4.5 0 0 1-4.5 4.5h-3A2.5 2.5 0 0 1 8 20v-2H3.5A2.5 2.5 0 0 1 1 15.5v-7A2.5 2.5 0 0 1 3.5 6H8.1a2.5 2.5 0 0 1 2.4-1.5ZM10 6v12h3.5A2.5 2.5 0 0 0 16 15.5V7a.5.5 0 0 0-.5-.5H10Zm8 4v5.5c0 .17-.01.34-.03.5h.53A2.5 2.5 0 0 0 21 13.5V10h-3ZM4 10v2h1.7v4h2.1v-4h1.7v-2H4Zm14-3v1.25h1.5V7a.5.5 0 0 0-.5-.5h-1.05c.03.16.05.33.05.5Z" />
+    </svg>
+  );
+}
+
 export function ClickUpLogo({ size = 16, className, style }: LogoProps) {
   return (
     <svg
@@ -79,6 +127,22 @@ export function LinearLogo({ size = 16, className, style }: LogoProps) {
 }
 
 /** Returns the brand logo component for a connector type, or null if unknown. */
+export function ZohoLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M4 4h16v3.4l-9.4 9.4H20V20H4v-3.4L13.4 7.2H4z" />
+    </svg>
+  );
+}
+
 export function ConnectorLogo({
   type,
   size = 16,
@@ -94,12 +158,20 @@ export function ConnectorLogo({
   switch (type) {
     case "google_drive":
       return <GoogleDriveLogo {...props} />;
+    case "gmail":
+      return <GmailLogo {...props} />;
+    case "outlook":
+      return <OutlookLogo {...props} />;
+    case "teams":
+      return <TeamsLogo {...props} />;
     case "clickup":
       return <ClickUpLogo {...props} />;
     case "notion":
       return <NotionLogo {...props} />;
     case "linear":
       return <LinearLogo {...props} />;
+    case "zoho_crm":
+      return <ZohoLogo {...props} />;
     default:
       return null;
   }

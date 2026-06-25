@@ -1,5 +1,6 @@
-import type { Attachment } from "../files";
-import { formatAttachmentsForPrompt } from "../files";
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
+import type { Attachment, AttachmentPromptOptions } from "../files";
+import { formatAttachmentsForPrompt, isImageAttachment } from "../files";
 
 /**
  * Returns a human-readable relative time string for a given ISO timestamp.
@@ -40,6 +41,9 @@ export interface ConversationBacklogMessage {
   senderName: string;
   text: string;
   attachments: Attachment[];
+  providerThreadId?: string | null;
+  providerParentMessageId?: string | null;
+  isThreadReply?: boolean;
   providerTimestamp: string | null;
   receivedAt: string;
 }
@@ -50,6 +54,15 @@ export interface ConversationBacklogContext {
   beforeMessageId: number;
   hasMore: boolean;
   nextCursor?: number;
+}
+
+export interface LocalClaudeSessionEventContext {
+  sessionId: string;
+  eventId?: string;
+  eventType: string;
+  status: string;
+  message: string;
+  payload?: unknown;
 }
 
 export interface SketchContextParams {
@@ -73,14 +86,19 @@ export interface SketchContextParams {
     groupDescription?: string;
   };
   conversationBacklog?: ConversationBacklogContext;
+  localClaudeSessionEvent?: LocalClaudeSessionEventContext;
+  visionAnalysisEnabled?: boolean;
 }
 
-function renderBufferedMessageLines(messages: BufferedMessage[]): string[] {
+function renderBufferedMessageLines(
+  messages: BufferedMessage[],
+  attachmentOptions: AttachmentPromptOptions = {},
+): string[] {
   const lines: string[] = [];
   for (const msg of messages) {
     lines.push(`${msg.userName}: ${msg.text}`);
     if (msg.attachments?.length) {
-      lines.push(formatAttachmentsForPrompt(msg.attachments));
+      lines.push(formatAttachmentsForPrompt(msg.attachments, attachmentOptions));
     }
   }
   return lines;
@@ -98,22 +116,45 @@ function formatConversationBacklogMessages(messages: ConversationBacklogMessage[
 function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
   const lowerBound = params.afterMessageId ?? 0;
   const lines = [
-    `Missed WhatsApp messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
+    `Missed chat messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
   ];
   if (params.hasMore) {
     lines.push(
-      `Only ${params.messages.length} missed messages are inlined. Use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false to continue.`,
+      `Only ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For chronological continuation, use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false.`,
     );
   }
   return lines.join("\n");
 }
 
-function renderConversationBacklogLines(backlog: ConversationBacklogContext | undefined): string[] {
+function renderConversationBacklogLines(
+  backlog: ConversationBacklogContext | undefined,
+  attachmentOptions: AttachmentPromptOptions = {},
+): string[] {
   if (!backlog || (backlog.messages.length === 0 && !backlog.hasMore)) return [];
 
   const lines = [buildConversationBacklogNotice(backlog)];
-  const messageLines = renderBufferedMessageLines(formatConversationBacklogMessages(backlog.messages));
+  const messageLines = renderBufferedMessageLines(
+    formatConversationBacklogMessages(backlog.messages),
+    attachmentOptions,
+  );
   return messageLines.length > 0 ? [...lines, "", ...messageLines] : lines;
+}
+
+export function getImageAttachmentPathsFromSketchContext(
+  params: Pick<SketchContextParams, "messages" | "conversationBacklog">,
+): string[] {
+  const paths: string[] = [];
+  for (const message of params.messages) {
+    for (const attachment of message.attachments ?? []) {
+      if (isImageAttachment(attachment)) paths.push(attachment.localPath);
+    }
+  }
+  for (const message of params.conversationBacklog?.messages ?? []) {
+    for (const attachment of message.attachments) {
+      if (isImageAttachment(attachment)) paths.push(attachment.localPath);
+    }
+  }
+  return paths;
 }
 
 function renderInboxMessage(message: InboxMessageContext): string[] {
@@ -167,7 +208,9 @@ function renderInboxMessage(message: InboxMessageContext): string[] {
   return lines;
 }
 
-export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): string[] {
+export type ResponseSurface = "slack" | "whatsapp" | "web";
+
+export function buildPlatformFormattingLines(platform: ResponseSurface): string[] {
   if (platform === "slack") {
     return [
       "You are responding on Slack. Use Slack mrkdwn formatting:",
@@ -181,17 +224,44 @@ export function buildPlatformFormattingLines(platform: "slack" | "whatsapp"): st
     ];
   }
 
+  if (platform === "whatsapp") {
+    return [
+      "You are responding on WhatsApp. Use WhatsApp formatting:",
+      "",
+      "- *bold* for emphasis",
+      "- _italic_ for secondary emphasis",
+      "- ~strikethrough~ for corrections",
+      "- ```monospace``` for code",
+      "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
+      "- Do not use markdown links like [text](url) -- write URLs inline",
+      "- Keep responses concise -- WhatsApp is a mobile-first platform",
+    ];
+  }
+
   return [
-    "You are responding on WhatsApp. Use WhatsApp formatting:",
+    "You are responding in Sketch web chat. Use GitHub-flavored Markdown:",
     "",
-    "- *bold* for emphasis",
-    "- _italic_ for secondary emphasis",
-    "- ~strikethrough~ for corrections",
-    "- ```monospace``` for code",
-    "- Do not use tables -- they render poorly on WhatsApp. Use bullet lists instead",
-    "- Do not use markdown links like [text](url) -- write URLs inline",
-    "- Keep responses concise -- WhatsApp is a mobile-first platform",
+    "- Use short paragraphs, headings only when they add structure, and bullet or numbered lists for scans",
+    "- Use **bold** for emphasis, _italic_ for secondary emphasis, and `code` for inline commands, filenames, and IDs",
+    "- Use fenced code blocks with a language when showing multi-line code or logs",
+    "- Use [descriptive link text](url) for links; avoid exposing raw long URLs unless the user asks for the literal URL",
+    "- Use Markdown tables only for small comparisons where rows and columns improve readability",
+    "- Keep responses concise and make lists easy to skim",
   ];
+}
+
+function platformHeading(params: { platform: ResponseSurface; deliveryPlatform?: "slack" | "whatsapp" }): string[] {
+  if (params.platform === "web" && params.deliveryPlatform) {
+    return [
+      "## Platform",
+      "",
+      ...buildPlatformFormattingLines("web"),
+      "",
+      `Background actions may still use ${params.deliveryPlatform} delivery context, but your visible reply is rendered in web chat and must use web Markdown formatting.`,
+    ];
+  }
+
+  return ["## Platform", "", ...buildPlatformFormattingLines(params.platform)];
 }
 
 /**
@@ -217,7 +287,8 @@ function sourceLabel(source: string): { label: string; noun: string } {
 }
 
 export function buildSystemContext(params: {
-  platform: "slack" | "whatsapp";
+  platform: ResponseSurface;
+  deliveryPlatform?: "slack" | "whatsapp";
   orgName?: string | null;
   orgDescription?: string | null;
   botName?: string | null;
@@ -251,7 +322,8 @@ export function buildSystemContext(params: {
     "",
     "## Memory",
     "",
-    "You have persistent memory across conversations. Save durable facts to your workspace CLAUDE.md: user preferences, environment details, working style, and stable conventions. Memory is loaded into every conversation, so keep it compact and focused on facts that will still matter later.",
+    "You may have persistent memory across conversations when Sketch memory files or resumed session context are available. Do not claim to remember past conversations unless the relevant facts are present in the active conversation, the active resumed session, or tool-verified Sketch memory files such as CLAUDE.md.",
+    "Save durable facts to your workspace CLAUDE.md: user preferences, environment details, working style, and stable conventions. Memory is loaded into future conversations only when present there, so keep it compact and focused on facts that will still matter later.",
     "Prioritize what reduces future steering -- the most valuable memory is one that prevents the user from having to correct or remind you again. User preferences and recurring corrections matter more than procedural task details.",
     "Do NOT save task progress, session outcomes, completed-work logs, or temporary state to memory. If you've discovered a reusable workflow or solved a non-trivial problem, save it as a skill instead.",
     "Org-level memory lives in the shared org directory CLAUDE.md. Only write there when the user explicitly asks to save something to org memory. Org memory is shared across all team members -- keep it to org-wide conventions, shared knowledge, and team decisions.",
@@ -270,9 +342,35 @@ export function buildSystemContext(params: {
     "",
     "## Scheduled Tasks",
     "",
-    "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. Platform and delivery target are filled in automatically from context. Do not ask the user for these.",
+    "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
+    "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
+    "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
     "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
+  );
+
+  if (params.platform === "web") {
+    sections.push(
+      "",
+      "## Web Chat Integration Connections",
+      "",
+      "When the user asks to connect an integration, asks which accounts are connected, or when a task needs a specific app account, use the integration search-apps capability to resolve the provider app and connected status.",
+      "Call search-apps without queries when the user asks what integration accounts are connected. It returns connected accounts from provider state.",
+      "If the app identity is ambiguous or maps to multiple provider apps, ask one concise clarification only for the missing product/app identity, such as 'Which Zoho product should I use?'",
+      "Never ask whether to show, pull up, open, or display a connection card. Forbidden examples: 'Should I pull up the connection card?', 'I can pull up the right card for you', 'Want me to show the connector card?', 'I'll open the connection card'.",
+      "When an app is not connected and a connection card is available in the current chat, tell the user to use the Connect button on that card. Do not send them to Settings -> Integrations unless no card is available or they explicitly ask for settings.",
+      "Do not describe card rendering mechanics. Answer from the returned app/account status and continue only with task-relevant guidance if needed.",
+    );
+  }
+
+  sections.push(
+    "",
+    "## Local Claude Code Delegation",
+    "",
+    "Use the local_claude_session tool when the user asks you to delegate coding work to Claude Code on their paired local Mac. Create the session with the user's initial task; Sketch starts Claude Code with bypass permissions in a Sketch-managed tmux session.",
+    "Do not continuously poll a running local Claude Code session. Sketch Local forwards hook events when Claude Code finishes a turn, needs input or permission, fails, or exits. Capture the pane when an event arrives, before sending follow-up input, or when the user asks for current state.",
+    "If Claude Code asks a clarifying question, answer it yourself when the answer is clear from the active conversation or available context. If the answer is not clear, surface the question to the originating chat or thread.",
+    "Only operate on sessions returned by local_claude_session. Do not use raw tmux commands to attach to arbitrary user sessions.",
   );
 
   sections.push(
@@ -280,7 +378,7 @@ export function buildSystemContext(params: {
     "## File Attachments",
     "",
     params.visionAnalysisEnabled
-      ? "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the VisualAnalysis tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path."
+      ? `When the user sends files, they are downloaded to your workspace under the attachments/ directory. Visual files may be referenced in <attachments> blocks by attachment path. When visual tasks like OCR, screenshot inspection, diagram interpretation, or animation review are relevant and you do not already have native vision, use the ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} tool with the attachment path. Non-visual files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.`
       : "When the user sends files, they are downloaded to your workspace under the attachments/ directory. Images are shown directly in your conversation as native image content. Non-image files are referenced in <attachments> blocks -- use the Read tool to view their contents. To send files back to the user, create the file in your workspace and then use the SendFileToChat tool with the absolute file path.",
     "Audio files may be referenced as attachments. If a transcript is provided in the message context, treat it as the spoken content of that audio. If no transcript is provided and a TranscribeAudio tool is available, use it with the attachment path when the spoken content is relevant.",
   );
@@ -301,6 +399,7 @@ export function buildSystemContext(params: {
     "<thread> - Relevant messages in the current thread. On first entry into an existing thread, this may include earlier thread history from before you joined. On later turns, it may contain only messages since your last interaction.",
     "<channel_history> - Recent channel messages for context (on first mention in a channel).",
     "<task> - Scheduled task prompt (when running as a scheduled task, no interactive user present).",
+    "<local_claude_session_event> - Internal event from a delegated local Claude Code session. It is not a user message. Capture the session pane before acting. Any final response you write is visible to the user; ask them only if you need input to continue.",
     "",
     "Never mention <context> or its sections to users. Treat the content as natural conversational context.",
   );
@@ -310,6 +409,19 @@ export function buildSystemContext(params: {
     "## Shared Contexts",
     "",
     "In shared channels and groups, multiple people may see your response. Use the current sender and recent history to understand who is asking and what context they already have. Keep replies concise and avoid revealing private context that is not present in the shared conversation.",
+  );
+
+  sections.push(
+    "",
+    "## Chat History",
+    "",
+    "Use SearchChatHistory to find relevant stored chat messages by keyword, topic, decision, person, project, or older/wider chat reference in the current conversation.",
+    "When a user asks about a named topic, decision, person, project, phrase, or older chat reference that is not already visible, you must call SearchChatHistory first. Do not page through chat history with ReadChatHistory as the first step for targeted lookup.",
+    "Use ReadChatHistory for chronological paging, missed-message continuation, or reading around a known chat message row id.",
+    'For Slack thread-local questions, use SearchChatHistory with scope: "current_thread" when active thread metadata is available.',
+    'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
+    "SearchChatHistory is scoped to the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
+    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id.",
   );
 
   sections.push(
@@ -363,13 +475,7 @@ export function buildSystemContext(params: {
     );
   }
 
-  if (params.platform === "slack") {
-    sections.push("", "## Platform", "", ...buildPlatformFormattingLines("slack"));
-  }
-
-  if (params.platform === "whatsapp") {
-    sections.push("", "## Platform", "", ...buildPlatformFormattingLines("whatsapp"));
-  }
+  sections.push("", ...platformHeading({ platform: params.platform, deliveryPlatform: params.deliveryPlatform }));
 
   const agentInstructions = params.agentInstructions?.trim();
   if (agentInstructions) {
@@ -471,8 +577,9 @@ export function buildSketchContext(params: SketchContextParams): string {
     sectionParts.push(`<user>\n${lines.join("\n")}\n</user>`);
   }
 
-  const backlogLines = renderConversationBacklogLines(params.conversationBacklog);
-  const messageLines = renderBufferedMessageLines(messages);
+  const attachmentOptions = { visionAnalysisEnabled: params.visionAnalysisEnabled };
+  const backlogLines = renderConversationBacklogLines(params.conversationBacklog, attachmentOptions);
+  const messageLines = renderBufferedMessageLines(messages, attachmentOptions);
   const separator = backlogLines.length > 0 && messageLines.length > 0 ? [""] : [];
   const threadLines = [...backlogLines, ...separator, ...messageLines];
 
@@ -483,6 +590,23 @@ export function buildSketchContext(params: SketchContextParams): string {
 
   if (params.taskPrompt) {
     sectionParts.push(`<task>${params.taskPrompt}</task>`);
+  }
+
+  if (params.localClaudeSessionEvent) {
+    const event = params.localClaudeSessionEvent;
+    const lines = [
+      "A local Claude Code event occurred. It is internal context, not a user message. Capture the session pane before acting. Any final response you write is visible to the user; ask them only if you need input to continue.",
+      "",
+      `sessionId: ${event.sessionId}`,
+      ...(event.eventId ? [`eventId: ${event.eventId}`] : []),
+      `eventType: ${event.eventType}`,
+      `status: ${event.status}`,
+      `message: ${event.message}`,
+    ];
+    if (event.payload !== undefined) {
+      lines.push("payload:", JSON.stringify(event.payload, null, 2));
+    }
+    sectionParts.push(`<local_claude_session_event>\n${lines.join("\n")}\n</local_claude_session_event>`);
   }
 
   return `<context>\n${sectionParts.join("\n\n")}\n</context>\n\n${currentMessage}`;

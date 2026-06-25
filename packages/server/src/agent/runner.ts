@@ -9,7 +9,8 @@
  */
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
-import { AGENT_BUILT_IN_TOOL_NAMES } from "@sketch/shared";
+import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
+import type { WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -19,30 +20,39 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
+import { collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
   cleanupIntegrationAccess,
   startIntegrationAccess,
 } from "../integrations/wrapper";
+import type { LocalClaudeSessionService } from "../local-devices/claude-sessions";
+import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
 import type { TaskContext } from "../scheduler/types";
+import type { SlackBot } from "../slack/bot";
 import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
+import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
-import { buildSystemContext } from "./prompt";
+import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
-import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
+import { IntegrationConnectionCollector, UploadCollector, createSketchMcpServer } from "./sketch-tools";
+import type { AgentOutputWriter } from "./tools/agent-output";
 
+/**
+ * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
+ * start comes from canUseTool (falling back to message arrival), end from the
+ * next canUseTool call (falling back to run end).
+ */
 export interface ToolCallRecord {
   toolName: string;
   skillName: string | null;
-  /** Epoch ms when tool execution started (from canUseTool, or message arrival fallback) */
   startedAt: number;
-  /** Epoch ms when tool execution ended (next canUseTool call, or run end) */
   endedAt: number;
 }
 
@@ -69,23 +79,43 @@ export interface RunTrace {
   finalText: string | null;
 }
 
+/**
+ * Business result of an agent run. `costUsd` is the authoritative agent-model
+ * USD cost: the runner defaults it to the SDK's own figure
+ * (`rawUsage.sdkCostUsd`), and the telemetry boundary overwrites it with the
+ * provider-aware repriced value (correct for OpenRouter). `auxCostUsd` is the
+ * separate, additive sum of transcription/vision sub-call costs for this run
+ * (OpenRouter's own figures); total turn cost is `costUsd + auxCostUsd`.
+ */
 export interface AgentResult {
   messageSent: boolean;
   sessionId: string;
   costUsd: number;
+  auxCostUsd: number;
   pendingUploads: string[];
-  durationMs: number;
-  durationApiMs: number;
-  numTurns: number;
-  stopReason: string | null;
-  errorSubtype: string | null;
+  pendingIntegrationConnections?: WebChatIntegrationConnectionData[];
+  trace: RunTrace;
+}
+
+/**
+ * Raw, un-priced usage facts captured from the SDK message stream and the
+ * request params. Consumed by the telemetry boundary (OTel span attributes)
+ * and the pricing service. The runner produces these but does not interpret
+ * them (no cost decision, no telemetry mapping). `sdkCostUsd` is the SDK's own
+ * total_cost_usd, unreliable for non-Anthropic providers.
+ */
+export interface RawRunUsage {
+  model: string | null;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   webSearchRequests: number;
   webFetchRequests: number;
-  model: string | null;
+  durationApiMs: number;
+  numTurns: number;
+  stopReason: string | null;
+  errorSubtype: string | null;
   isResumedSession: boolean;
   totalAttachments: number;
   imageCount: number;
@@ -94,8 +124,12 @@ export interface AgentResult {
   fileSizes: number[];
   promptMode: "text" | "multimodal";
   toolCalls: ToolCallRecord[];
-  trace: RunTrace;
+  auxLlmCalls: AuxLlmCall[];
+  sdkCostUsd: number;
 }
+
+/** Business result plus the raw usage payload for the telemetry/pricing boundary. */
+export type RunAgentResult = AgentResult & { rawUsage: RawRunUsage };
 
 export interface McpServerConfig {
   type: "http";
@@ -103,6 +137,14 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
 }
 
+/**
+ * Inputs to a single agent run. A few fields carry non-obvious behaviour:
+ * `sessionMode` controls session persistence ("fresh" skips both resume and
+ * save for a fully ephemeral run; "persistent"/"chat"/undefined do the normal
+ * get+save); `agentInstructions` is a /team persona's system-prompt append; and
+ * `agentAllowedTools`, when set, restricts the exposed and permitted toolset to
+ * that persona's allowlist (undefined keeps the runner default).
+ */
 export interface RunAgentParams {
   db: Kysely<DB>;
   workspaceKey: string;
@@ -114,7 +156,9 @@ export interface RunAgentParams {
   userPhone?: string | null;
   logger: Logger;
   platform: "slack" | "whatsapp";
+  responseSurface?: ResponseSurface;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
+  onTextDelta?: (delta: string) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
@@ -127,15 +171,10 @@ export interface RunAgentParams {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   model?: string;
   maxTurns?: number;
-  /**
-   * Controls session behaviour for scheduled tasks.
-   * - "fresh": skip session resume and skip session save (fully ephemeral run)
-   * - "persistent" or "chat": normal get+save behaviour (same as undefined)
-   * When omitted, behaves exactly as before (always get + save).
-   */
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
+  getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
@@ -143,6 +182,8 @@ export interface RunAgentParams {
   activeQueueKey?: string;
   toolConfig?: { BASE_URL?: string; PORT: number };
   geminiConfig?: { maxRpm?: number; maxRetries?: number };
+  openRouterApiKey?: string;
+  settingsEncryptionKey?: string;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: {
     list: () => Promise<Selectable<UsersTable>[]>;
@@ -151,6 +192,8 @@ export interface RunAgentParams {
   };
   contextType?: "dm" | "channel_mention" | "scheduled_task";
   currentUserId?: string | null;
+  localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
+  localClaudeSessionService?: LocalClaudeSessionService;
   sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -166,26 +209,33 @@ export interface RunAgentParams {
   agentEnv?: Record<string, string>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;
   visionConfig?: VisionConfig | null;
+  blockedReadPaths?: string[] | null;
   /**
-   * Free-form instruction set for an agent persona, appended to the system
-   * prompt. Set when the run is associated with a /team agent (channel-bound,
-   * group-bound, or fallback). Null/undefined for runs that are not under an
-   * agent persona.
+   * Aux LLM costs incurred before the run (eager transcription of voice-message
+   * attachments in the adapters) to fold into this run's aux total, since they
+   * happen outside the run's own tool-call collector.
    */
+  seedAuxCalls?: AuxLlmCall[];
   agentInstructions?: string | null;
-  /**
-   * Canonical tool-name allowlist for an agent persona. When provided, only
-   * tools in this list are exposed to the SDK and permitted by canUseTool.
-   * Null/undefined preserves the runner's default toolset.
-   */
   agentAllowedTools?: string[] | null;
+  agentOutputWriter?: AgentOutputWriter;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
+    currentMessageId?: number;
+    providerThreadId?: string | null;
   };
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
+
+export function canUseVisualAnalysisTool(
+  visionConfig: VisionConfig | null,
+  agentAllowedTools?: string[] | null,
+): boolean {
+  if (!visionConfig) return false;
+  return agentAllowedTools == null || agentAllowedTools.includes(VISUAL_ANALYSIS_AGENT_TOOL_NAME);
+}
 
 /**
  * Extracts text content from an SDK assistant message. Returns null if the
@@ -212,7 +262,20 @@ export function extractAssistantText(message: unknown): string | null {
   return joined.trim() ? joined : null;
 }
 
-export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
+export function extractAssistantTextDelta(message: unknown): string | null {
+  if (!message || typeof message !== "object") return null;
+  const msg = message as Record<string, unknown>;
+  if (msg.type !== "stream_event") return null;
+
+  const event = msg.event as Record<string, unknown> | undefined;
+  if (!event || event.type !== "content_block_delta") return null;
+
+  const delta = event.delta as Record<string, unknown> | undefined;
+  if (!delta || delta.type !== "text_delta" || typeof delta.text !== "string") return null;
+  return delta.text ? delta.text : null;
+}
+
+export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
   const isFresh = params.sessionMode === "fresh";
   const shouldPersistSession = params.persistSession ?? !isFresh;
@@ -241,15 +304,17 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     : null;
   const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
   const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
+  const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, params.agentAllowedTools);
 
   const systemAppend = buildSystemContext({
-    platform: params.platform,
+    platform: params.responseSurface ?? params.platform,
+    deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
     orgName: params.orgName,
     orgDescription: params.orgDescription,
     botName: params.botName,
     indexedSources,
     agentInstructions: params.agentInstructions,
-    visionAnalysisEnabled: Boolean(visionConfig),
+    visionAnalysisEnabled: visualAnalysisAllowed,
   });
 
   const sdkBuiltInTools = params.agentAllowedTools
@@ -257,8 +322,7 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     : DEFAULT_RUN_TOOLS;
 
   let sessionId = "";
-  let costUsd = 0;
-  let durationMs = 0;
+  let sdkCostUsd = 0;
   let durationApiMs = 0;
   let numTurns = 0;
   let stopReason: string | null = null;
@@ -307,14 +371,19 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       };
     })();
   } else {
-    prompt = userMessage + formatAttachmentsForPrompt(attachments);
+    prompt = userMessage + formatAttachmentsForPrompt(attachments, { visionAnalysisEnabled: visualAnalysisAllowed });
   }
 
   const uploadCollector = new UploadCollector();
+  const integrationConnectionCollector = new IntegrationConnectionCollector();
+  const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
+    integrationConnectionCollector,
+    auxCostCollector,
     workspaceDir: absWorkspace,
     db: params.db,
+    getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
@@ -324,21 +393,49 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     activeQueueKey: params.activeQueueKey,
     toolConfig: params.toolConfig,
     geminiConfig: params.geminiConfig,
+    openRouterApiKey: params.openRouterApiKey,
+    settingsEncryptionKey: params.settingsEncryptionKey,
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
+    currentUserEmail: params.userEmail ?? null,
+    currentUserName: params.userName,
+    localDeviceInvoker: params.localDeviceInvoker,
+    localClaudeSessionService: params.localClaudeSessionService,
+    workspaceKey: params.workspaceKey,
+    originThreadTs: params.threadTs,
     sendDm: params.sendDm,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),
     visionConfig,
-    visionAnalysisEnabled: Boolean(visionConfig),
+    visionAnalysisEnabled: visualAnalysisAllowed,
     logger,
     conversationRepo: params.conversationRepo,
     conversationContext: params.conversationContext,
+    agentInstructions: params.agentInstructions,
+    agentAllowedTools: params.agentAllowedTools,
+    agentOutputWriter: params.agentOutputWriter,
+    originOrgContextEnabled: params.claudeConfigDir !== undefined,
   });
 
-  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, params.agentAllowedTools);
+  const blockedReadPaths = new Set<string>();
+  if (useVisionToolForImages && visualAnalysisAllowed) {
+    for (const image of images) {
+      blockedReadPaths.add(image.localPath);
+    }
+  }
+  if (visualAnalysisAllowed) {
+    for (const path of params.blockedReadPaths ?? []) {
+      blockedReadPaths.add(path);
+    }
+  }
+
+  const baseCanUseTool = createCanUseTool(absWorkspace, logger, params.claudeConfigDir, {
+    agentAllowedTools: params.agentAllowedTools,
+    blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
+    blockImageReads: visualAnalysisAllowed,
+  });
   const canUseToolTimings: CanUseToolTiming[] = [];
   const timedCanUseTool = async (toolName: string, input: Record<string, unknown>) => {
     canUseToolTimings.push({ toolName, calledAt: Date.now() });
@@ -383,6 +480,12 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     }
   };
 
+  /**
+   * Runs a single SDK query() pass and processes its message stream. When the
+   * caller skips the org config dir (e.g. the WhatsApp fallback agent for
+   * external users), the SDK is pointed at the workspace itself so it does not
+   * inherit the org's CLAUDE.md.
+   */
   const executeSdkRun = async (resumeSessionId: string | undefined) => {
     const notifySessionId = async (nextSessionId: string) => {
       if (!nextSessionId || nextSessionId === notifiedSessionId) return;
@@ -403,15 +506,13 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
         resume: resumeSessionId,
         env: {
           ...process.env,
-          // When the caller intentionally skips the org config dir (e.g. the
-          // WhatsApp fallback agent for external users), point the SDK at the
-          // workspace itself so it does not pick up the org's CLAUDE.md.
           ...(params.claudeConfigDir === undefined ? { CLAUDE_CONFIG_DIR: workspaceDir } : {}),
           ...integrationAccess.envVars,
           ...params.agentEnv,
         },
         systemPrompt: systemAppend,
         abortController: params.abortController,
+        includePartialMessages: Boolean(params.onTextDelta),
         tools: sdkBuiltInTools as string[],
         permissionMode: "default" as const,
         allowDangerouslySkipPermissions: false,
@@ -434,6 +535,17 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       if (message.type === "system" && message.subtype === "init") {
         sessionId = message.session_id;
         await notifySessionId(sessionId);
+      }
+
+      if (message.type === "stream_event" && params.onTextDelta) {
+        const delta = extractAssistantTextDelta(message);
+        if (delta) {
+          try {
+            await params.onTextDelta(delta);
+          } catch (err) {
+            logger.warn({ err }, "Failed to deliver assistant text delta");
+          }
+        }
       }
 
       if (message.type === "assistant") {
@@ -489,9 +601,8 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
       if (message.type === "result") {
         sessionId = message.session_id;
         await notifySessionId(sessionId);
-        costUsd = message.total_cost_usd;
+        sdkCostUsd = message.total_cost_usd;
         const resultMsg = message as Record<string, unknown>;
-        durationMs = (resultMsg.duration_ms as number) ?? 0;
         durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
         numTurns = (resultMsg.num_turns as number) ?? 0;
         stopReason = (resultMsg.stop_reason as string) ?? null;
@@ -568,38 +679,70 @@ export async function runAgent(params: RunAgentParams): Promise<AgentResult> {
     }
   }
 
+  if (params.responseSurface === "web" && params.contextType !== "scheduled_task") {
+    try {
+      await collectIntegrationCardsFromProgressEvents({
+        events: progressEvents,
+        loadIntegrationProvider: params.loadIntegrationProvider,
+        collector: integrationConnectionCollector,
+        userEmail: params.userEmail ?? null,
+        userName: params.userName,
+      });
+    } catch (err) {
+      logger.warn({ err }, "Failed to resolve integration cards from agent progress");
+    }
+  }
+
   const pendingUploads = uploadCollector.drain();
-  logger.info({ userId: userName, sessionId, costUsd, pendingUploads: pendingUploads.length }, "Agent run completed");
+  const pendingIntegrationConnections = integrationConnectionCollector.drain();
+  const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
+  const auxCostUsd = sumAuxCost(auxLlmCalls);
+  logger.info(
+    {
+      userId: userName,
+      sessionId,
+      sdkCostUsd,
+      auxCostUsd,
+      pendingUploads: pendingUploads.length,
+      pendingIntegrationConnections: pendingIntegrationConnections.length,
+    },
+    "Agent run completed",
+  );
   const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
-    messageSent: finalText !== null,
+    messageSent: finalText !== null || pendingIntegrationConnections.length > 0,
     sessionId,
-    costUsd,
+    costUsd: sdkCostUsd,
+    auxCostUsd,
     pendingUploads,
-    durationMs,
-    durationApiMs,
-    numTurns,
-    stopReason,
-    errorSubtype,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    webSearchRequests,
-    webFetchRequests,
-    model,
-    isResumedSession: usedExistingSession,
-    totalAttachments: attachments.length,
-    imageCount: images.length,
-    nonImageCount: nonImages.length,
-    mimeTypes: attachments.map((a) => a.mimeType),
-    fileSizes: attachments.map((a) => a.sizeBytes),
-    promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
-    toolCalls,
+    pendingIntegrationConnections,
     trace: {
       progressEvents,
       finalText,
+    },
+    rawUsage: {
+      model,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      webSearchRequests,
+      webFetchRequests,
+      durationApiMs,
+      numTurns,
+      stopReason,
+      errorSubtype,
+      isResumedSession: usedExistingSession,
+      totalAttachments: attachments.length,
+      imageCount: images.length,
+      nonImageCount: nonImages.length,
+      mimeTypes: attachments.map((a) => a.mimeType),
+      fileSizes: attachments.map((a) => a.sizeBytes),
+      promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
+      toolCalls,
+      auxLlmCalls,
+      sdkCostUsd,
     },
   };
 }

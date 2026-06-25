@@ -9,7 +9,7 @@
 <h3 align="center">One AI assistant for your entire team.<br/>Deploy once. Show up everywhere.</h3>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge" alt="Apache 2.0 License" /></a>
   <img src="https://img.shields.io/github/v/tag/canvasxai/sketch?style=for-the-badge&label=version&color=green" alt="version" />
   <img src="https://img.shields.io/badge/node-24%2B-brightgreen?style=for-the-badge" alt="Node 24+" />
   <a href="https://github.com/canvasxai/sketch/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/canvasxai/sketch/ci.yml?style=for-the-badge&label=CI" alt="CI" /></a>
@@ -139,4 +139,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, and PR guideli
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).

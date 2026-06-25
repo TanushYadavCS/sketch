@@ -8,12 +8,13 @@
  *  - clicking a related entity pill pushes a new drawer level and shows a Back chip.
  */
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
+import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { useEffect, useRef } from "react";
+import { beforeEach, describe, expect, it } from "vitest";
 import { EntityDrawer } from "./entity-drawer";
 
 const SARAH = {
@@ -36,6 +37,7 @@ const SARAH = {
     firstSeenAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-05-01T00:00:00.000Z",
     domainsForCompany: [],
+    crmActivityBrief: null,
     summary: {
       identity: "Person · Engineer · works at Stripe (sarah@stripe.com). Engaged with Acme.",
       activity: "Active in 5 files (5 mentions) across 3 days. Most-frequent collaborators: Ada Lovelace.",
@@ -54,6 +56,11 @@ const STRIPE = {
     ...SARAH.profile,
     entityType: "company",
     domainsForCompany: [{ domain: "stripe.com", confidence: 0.95, isPrimary: true }],
+    crmActivityBrief: {
+      summary: "Recent CRM activity focused on renewal follow-ups and stakeholder alignment.",
+      activityCount: 47,
+      updatedAt: "2026-05-22T00:00:00.000Z",
+    },
     summary: {
       identity: "Company · stripe.com.",
       activity: "Active in 5 files (5 mentions) across 3 days.",
@@ -97,22 +104,18 @@ const relationsForSarah = {
 
 const emptyTimeline = { groups: [], truncated: false, totalCount: 0 };
 
-const handlers = [
-  http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
-  http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
-  http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
-  http.get("/api/entities/e-stripe/relations", () =>
-    HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
-  ),
-  http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
-  http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
-];
-
-const server = setupServer(...handlers);
-
-beforeAll(() => server.listen({ onUnhandledRequest: "warn" }));
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
+beforeEach(() => {
+  server.use(
+    http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
+    http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
+    http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
+    http.get("/api/entities/e-stripe/relations", () =>
+      HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
+    ),
+    http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
+    http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
+  );
+});
 
 function DrawerHarness({ initialId }: { initialId: string }) {
   return (
@@ -124,8 +127,32 @@ function DrawerHarness({ initialId }: { initialId: string }) {
 }
 
 function OpenOnMount({ id }: { id: string }) {
-  const ui = useEntityUi();
-  if (ui.stack.length === 0) ui.openEntity(id);
+  const { stack, openEntity } = useEntityUi();
+  useEffect(() => {
+    if (stack.length === 0) openEntity(id);
+  }, [stack, openEntity, id]);
+  return null;
+}
+
+/** Opens the drawer exactly once — unlike OpenOnMount it won't re-open after closeAll. */
+function OpenOnceHarness({ initialId }: { initialId: string }) {
+  return (
+    <EntityUiProvider>
+      <OpenOnce id={initialId} />
+      <EntityDrawer />
+    </EntityUiProvider>
+  );
+}
+
+function OpenOnce({ id }: { id: string }) {
+  const { openEntity } = useEntityUi();
+  const opened = useRef(false);
+  useEffect(() => {
+    if (!opened.current) {
+      opened.current = true;
+      openEntity(id);
+    }
+  }, [openEntity, id]);
   return null;
 }
 
@@ -190,10 +217,38 @@ describe("EntityDrawer", () => {
     });
   });
 
+  it("lets an admin delete an entity: confirm fires DELETE and closes the drawer", async () => {
+    const user = userEvent.setup();
+    let deleted = false;
+    server.use(
+      http.get("/api/auth/session", () =>
+        HttpResponse.json({ authenticated: true, email: "admin@test.com", role: "admin" }),
+      ),
+      http.delete("/api/entities/e-sarah", () => {
+        deleted = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    renderWithProviders(<OpenOnceHarness initialId="e-sarah" />);
+    await screen.findByRole("heading", { name: /Sarah Chen/ });
+
+    await user.click(await screen.findByRole("button", { name: /Delete/ }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleted).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: /Sarah Chen/ })).not.toBeInTheDocument());
+  });
+
   it("renders the company variant: primary domain chip in header, deterministic summary in body", async () => {
     renderWithProviders(<DrawerHarness initialId="e-stripe" />);
     await screen.findByRole("heading", { name: /Stripe/ });
     expect(screen.getByText(/stripe\.com · primary/)).toBeInTheDocument();
     expect(screen.getByText(/Company · stripe\.com\./)).toBeInTheDocument();
+    expect(screen.getByText("CRM Activity")).toBeInTheDocument();
+    expect(screen.getByText(/Recent CRM activity focused on renewal follow-ups/)).toBeInTheDocument();
+    expect(screen.getByText(/47 activities · updated/)).toBeInTheDocument();
   });
 });

@@ -6,6 +6,10 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@theme {
+  --font-serif: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -18,36 +22,45 @@
 
 @layer components {
   .markdown-body {
-    @apply text-sm leading-relaxed space-y-2 break-words;
+    @apply text-sm leading-[1.68] space-y-3 break-words;
     overflow-wrap: anywhere;
   }
 
   .markdown-body h1 {
-    @apply text-base font-semibold;
+    @apply text-base font-semibold leading-[1.45];
   }
 
   .markdown-body h2 {
-    @apply text-sm font-semibold mt-2;
+    @apply mt-4 text-sm font-semibold leading-[1.5] first:mt-0;
   }
 
   .markdown-body h3 {
-    @apply text-sm font-semibold;
+    @apply mt-3 text-sm font-semibold leading-[1.5] first:mt-0;
   }
 
   .markdown-body p {
-    @apply text-sm;
+    @apply text-sm leading-[1.68];
   }
 
   .markdown-body ul {
-    @apply list-disc pl-5 space-y-1;
+    @apply list-disc space-y-1.5 pl-5;
   }
 
   .markdown-body ol {
-    @apply list-decimal pl-5 space-y-1;
+    @apply list-decimal space-y-1.5 pl-5;
   }
 
   .markdown-body li {
-    @apply text-sm;
+    @apply pl-0.5 text-sm leading-[1.65];
+  }
+
+  .markdown-body li > p {
+    @apply inline leading-[1.65];
+  }
+
+  .markdown-body li > ul,
+  .markdown-body li > ol {
+    @apply mt-1.5;
   }
 
   .markdown-body code {
@@ -55,11 +68,22 @@
   }
 
   .markdown-body a {
-    @apply break-words;
+    @apply break-words underline underline-offset-4 transition-colors;
+    color: var(--accent-foreground);
+    text-decoration-color: color-mix(in oklch, var(--accent-foreground) 52%, transparent);
+  }
+
+  .markdown-body a:hover {
+    color: var(--accent-foreground);
+    text-decoration-color: var(--accent-foreground);
+  }
+
+  .markdown-body blockquote {
+    @apply my-3 border-l-2 border-border pl-3 text-muted-foreground;
   }
 
   .markdown-body pre {
-    @apply max-w-full overflow-x-auto rounded bg-muted p-3;
+    @apply my-3 max-w-full overflow-x-auto rounded bg-muted p-3;
   }
 
   .markdown-body pre code {
@@ -113,11 +137,214 @@
   transition: transform 0.8s ease-out;
 }
 
-/* ── Hide scrollbar for chip rows ── */
-.scrollbar-none {
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
+.chip-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 34%, transparent) transparent;
 }
-.scrollbar-none::-webkit-scrollbar {
-  display: none !important;
+
+.chip-scrollbar::-webkit-scrollbar {
+  height: 8px;
+}
+
+.chip-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chip-scrollbar::-webkit-scrollbar-thumb {
+  min-width: 48px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: color-mix(in oklch, var(--muted-foreground) 34%, transparent);
+}
+
+.chip-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklch, var(--muted-foreground) 48%, transparent);
+}
+
+.chat-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.chat-scrollbar:hover,
+.chat-scrollbar:focus-within {
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 28%, transparent) transparent;
+}
+
+.chat-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-scrollbar::-webkit-scrollbar-thumb {
+  min-height: 48px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: transparent;
+}
+
+.chat-scrollbar:hover::-webkit-scrollbar-thumb,
+.chat-scrollbar:focus-within::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklch, var(--muted-foreground) 28%, transparent);
+}
+
+.chat-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklch, var(--muted-foreground) 42%, transparent);
+}
+
+@keyframes sketch-icon-thinking {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(1.06);
+  }
+}
+
+@keyframes sketch-progress-change {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-shimmer-text {
+  0% {
+    background-position: 240px center;
+  }
+  100% {
+    background-position: 0 center;
+  }
+}
+
+@keyframes sketch-response-fading {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.78;
+  }
+}
+
+@keyframes sketch-collapsible-timeline-open {
+  from {
+    height: 0;
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-collapsible-timeline-close {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    height: 0;
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+.sketch-icon-thinking {
+  animation: sketch-icon-thinking 1.4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.sketch-progress-change {
+  animation: sketch-progress-change 180ms ease-out both;
+}
+
+.sketch-timeline-window {
+  transition: height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sketch-timeline-window-track {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.sketch-timeline-entry {
+  transition: opacity 220ms ease-out;
+}
+
+.sketch-timeline-entry-exiting {
+  opacity: 0;
+}
+
+.sketch-collapsible-timeline-content {
+  overflow: hidden;
+  contain: layout paint;
+  transform-origin: top;
+  will-change: height, opacity, transform;
+}
+
+.sketch-collapsible-timeline-content[data-state="open"] {
+  animation: sketch-collapsible-timeline-open 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sketch-collapsible-timeline-content[data-state="closed"] {
+  animation: sketch-collapsible-timeline-close 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sketch-shimmer-text,
+.sketch-shimmer-progress {
+  will-change: background-position;
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 0%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 36%,
+    var(--foreground) 50%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 64%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 100%
+  );
+  background-size: 240px 100%;
+  background-repeat: repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: sketch-shimmer-text 2.2s linear infinite;
+}
+
+.sketch-shimmer-text {
+  display: inline-block;
+}
+
+.sketch-shimmer-progress {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.sketch-response-fading {
+  animation: sketch-response-fading 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sketch-timeline-window,
+  .sketch-timeline-window-track,
+  .sketch-timeline-entry,
+  .sketch-collapsible-timeline-content {
+    animation: none !important;
+    transition: none;
+  }
 }

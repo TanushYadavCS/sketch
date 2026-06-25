@@ -19,8 +19,11 @@ import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { entityRoutes } from "./api/entities";
 import { healthRoutes } from "./api/health";
+import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
+import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
+import { createProjectRoutes } from "./api/projects";
 import { providerIdentityRoutes } from "./api/provider-identities";
 import { scheduledTaskRoutes } from "./api/scheduled-tasks";
 import { settingsRoutes } from "./api/settings";
@@ -33,9 +36,11 @@ import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
+import { webChatRoutes } from "./api/web-chat";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
 import { createWorkspaceApi } from "./api/workspace";
+import { workspaceSummaryRoutes } from "./api/workspace-summary";
 import type { Config } from "./config";
 import {
   type AgentEnvironmentRuntimeContext,
@@ -43,12 +48,16 @@ import {
 } from "./db/repositories/agent-environment-variables";
 import { createChannelRepository } from "./db/repositories/channels";
 import { createConnectorRepository } from "./db/repositories/connectors";
+import { createConversationRepository } from "./db/repositories/conversations";
+import { createEntityRepository } from "./db/repositories/entities";
 import { createInboxMessagesRepository } from "./db/repositories/inbox-messages";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
 
-import type { AgentResult, McpServerConfig, RunAgentParams } from "./agent/runner";
+import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
+import { agentRoutes, dailyBriefRoutes } from "./agents/routes";
+import type { AgentRunService } from "./agents/service";
 import { getSmtpConfig } from "./api/shared";
 import type { createAutomationRunsRepository } from "./db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "./db/repositories/automation-step-content";
@@ -57,6 +66,10 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import type { DB } from "./db/schema";
 import { createEmailTransport, sendMagicLinkEmail } from "./email";
 import type { IntegrationProvider } from "./integrations/types";
+import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
+import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
+import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
@@ -72,7 +85,7 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
-  runAgent?: (params: RunAgentParams) => Promise<AgentResult>;
+  runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
@@ -83,6 +96,9 @@ interface AppDeps {
     channelId: string;
     messageRef: string;
   }>;
+  localDeviceGateway?: LocalDeviceGateway;
+  localClaudeSessionService?: LocalClaudeSessionService;
+  agentRunService?: AgentRunService;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -91,11 +107,60 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
+  const conversations = createConversationRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
-  const connectors = createConnectorRepository(db);
+  const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
+  const entityRepo = createEntityRepository(db);
   const agentEnvVars = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
+  const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
+  const localClaudeEventDispatcher =
+    deps?.localClaudeSessionService && deps.runAgent && deps.queueManager
+      ? createLocalClaudeEventDispatcher({
+          db,
+          config,
+          logger,
+          settingsRepo: settings,
+          users,
+          conversations,
+          queueManager: deps.queueManager,
+          runAgent: deps.runAgent,
+          buildMcpServers: deps.buildMcpServers,
+          loadIntegrationProvider: deps.loadIntegrationProvider,
+          scheduler: deps.scheduler as RunAgentParams["scheduler"],
+          stepContentRepo: deps.stepContentRepo,
+          automationRunsRepo: deps.automationRunsRepo,
+          inboxMessagesRepo: inboxMessages,
+          getSlack: deps.getSlack,
+          whatsapp: deps.whatsapp,
+          sendDm: deps.sendDm,
+        })
+      : null;
+
+  app.route(
+    "/",
+    mcpOAuthRoutes({
+      db,
+      settings,
+      users,
+      config,
+      logger,
+    }),
+  );
+
+  if (deps?.localClaudeSessionService) {
+    app.route(
+      "/api/local-claude-sessions",
+      localClaudeSessionEventRoutes({
+        service: deps.localClaudeSessionService,
+        logger,
+        dispatchEvent: localClaudeEventDispatcher
+          ? (delivery) => localClaudeEventDispatcher.enqueue(delivery)
+          : undefined,
+      }),
+    );
+  }
 
   // Slack HTTP events endpoint — must come before auth middleware so it doesn't
   // require JWT authentication. Only registered when SLACK_MODE=http.
@@ -121,7 +186,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     });
   }
 
-  // Auth middleware on all /api/* routes (with setup mode + auth checks)
   app.use(
     "/api/*",
     createAuthMiddleware(settings, {
@@ -234,6 +298,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         deps?.listAgentEnvForRuntime ?? ((context) => agentEnvVars.listForRuntimeContext(context)),
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
+      queueManager: deps?.queueManager,
     }),
   );
   if (deps?.runAgent) {
@@ -260,8 +325,33 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         sendDm: deps.sendDm,
       }),
     );
+    app.route(
+      "/api/web-chat",
+      webChatRoutes({
+        db,
+        config,
+        logger,
+        users,
+        settings,
+        inboxMessagesRepo: inboxMessages,
+        runAgent: deps.runAgent,
+        buildMcpServers: deps.buildMcpServers,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
+        scheduler: deps.scheduler as TaskScheduler | undefined,
+        stepContentRepo: deps.stepContentRepo,
+        automationRunsRepo: deps.automationRunsRepo,
+        queueManager: deps.queueManager,
+        getSlack: deps.getSlack,
+        sendDm: deps.sendDm,
+      }),
+    );
   }
-  app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users, { experimentalFlag: config.EXPERIMENTAL_FLAG }));
+  app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
+  app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
+  if (deps?.agentRunService) {
+    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService));
+    app.route("/api/agents", agentRoutes(deps.agentRunService));
+  }
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
     app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));
@@ -283,30 +373,43 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
 
   app.route("/api/usage", usageRoutes(db));
-  app.route("/api/entities", entityRoutes(db, { logger, config }));
-  app.route("/api/entity-review", entityReviewRoutes(db));
-  if (config.EXPERIMENTAL_FLAG) {
-    app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
-    mountPublicMcpServer({
-      app,
-      db,
-      userRepo: users,
-      workspaceDir: join(config.DATA_DIR, "external-mcp"),
-      logger,
-    });
+  if (deps?.localDeviceGateway) {
+    app.route(
+      "/api/local-devices",
+      localDeviceRoutes(db, { baseUrl: config.BASE_URL, port: config.PORT, gateway: deps.localDeviceGateway }),
+    );
   }
+  app.route("/api/entities", entityRoutes(db, { logger, config }));
+  app.route("/api/projects", createProjectRoutes(db));
+  app.route("/api/entity-review", entityReviewRoutes(db));
+  app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
+  mountPublicMcpServer({
+    app,
+    db,
+    userRepo: users,
+    workspaceDir: join(config.DATA_DIR, "external-mcp"),
+    logger,
+    baseUrl: config.BASE_URL,
+  });
 
   if (deps?.logger) {
     app.route("/api/connectors", connectorRoutes(connectors, db, deps.logger, users, config));
   }
 
-  const identities = createProviderIdentityRepository(db);
   app.route("/api/identities", providerIdentityRoutes(identities, users));
 
   if (deps?.logger) {
     app.route(
       "/api/oauth",
-      oauthRoutes(settings, identities, connectors, users, db, deps.logger, config.BASE_URL, config.ENCRYPTION_KEY),
+      oauthRoutes(settings, identities, connectors, users, db, deps.logger, {
+        baseUrl: config.BASE_URL,
+        appConfig: config,
+        zohoClientId: config.ZOHO_CLIENT_ID,
+        zohoClientSecret: config.ZOHO_CLIENT_SECRET,
+        microsoftClientId: config.MICROSOFT_CLIENT_ID,
+        microsoftClientSecret: config.MICROSOFT_CLIENT_SECRET,
+        microsoftTenant: config.MICROSOFT_TENANT,
+      }),
     );
   }
 
@@ -325,6 +428,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         onSlackTokensUpdated: onSlackTokensUpdated ? () => onSlackTokensUpdated() : undefined,
         onLlmSettingsUpdated: onLlmSettingsUpdated ? () => onLlmSettingsUpdated() : undefined,
         userRepo: users,
+        entityRepo,
         inboxMessagesRepo: inboxMessages,
         mcpServers,
         sendSlackDmToSlackUser: deps?.getSlack
@@ -414,7 +518,12 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         !!(await verifyJwt(platformToken, config.MANAGED_AUTH_SECRET));
 
       if (!isValidPlatformSession) {
-        return c.redirect(`${config.MANAGED_URL}/login`);
+        const loginUrl = new URL("/login", config.MANAGED_URL);
+        const returnTo = new URL(c.req.url).searchParams.get("return_to");
+        if (path === "/login" && returnTo) {
+          loginUrl.searchParams.set("return_to", returnTo);
+        }
+        return c.redirect(loginUrl.toString());
       }
 
       return next();

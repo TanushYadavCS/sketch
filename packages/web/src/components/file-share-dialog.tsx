@@ -5,9 +5,8 @@
  * file_share_emails, the org-wide flag goes onto indexed_files. Connector
  * reconcile never touches these so manual shares survive resyncs.
  *
- * Admin-only in v1: the calling component should gate the trigger button on
- * `auth.role === "admin"`. Backend also allows connector owners — they reach
- * the same endpoints via API but no UI affordance exists yet.
+ * The calling component passes owning-connector capabilities. Email shares require
+ * canManage; org-wide sharing is additionally admin-only.
  */
 import { api } from "@/lib/api";
 import type { FileManualShare, User } from "@/lib/api";
@@ -33,6 +32,8 @@ interface FileShareDialogProps {
   fileName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  canManage: boolean;
+  canShareWithEveryone: boolean;
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -41,7 +42,14 @@ function isEmail(value: string) {
   return EMAIL_PATTERN.test(value.trim());
 }
 
-export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileShareDialogProps) {
+export function FileShareDialog({
+  fileId,
+  fileName,
+  open,
+  onOpenChange,
+  canManage,
+  canShareWithEveryone,
+}: FileShareDialogProps) {
   const queryClient = useQueryClient();
 
   const sharesQuery = useQuery({
@@ -102,6 +110,7 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
   });
 
   function tryAddEmail() {
+    if (!canManage) return;
     const value = draft.trim().toLowerCase();
     if (!value) return;
     if (!isEmail(value)) {
@@ -122,7 +131,7 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
 
   const hasOrgWideChange = orgWideDraft !== null && orgWideDraft !== currentOrgWide;
   const hasPendingEmails = pendingEmails.length > 0;
-  const canSave = hasPendingEmails || hasOrgWideChange;
+  const canSave = canManage && (hasPendingEmails || hasOrgWideChange) && (!hasOrgWideChange || canShareWithEveryone);
 
   const suggestions = useMemo(() => {
     const draftLower = draft.trim().toLowerCase();
@@ -161,8 +170,9 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
                   }
                 }}
                 className="text-sm"
+                disabled={!canManage}
               />
-              <Button size="sm" variant="outline" onClick={tryAddEmail} disabled={!draft.trim()}>
+              <Button size="sm" variant="outline" onClick={tryAddEmail} disabled={!canManage || !draft.trim()}>
                 Add
               </Button>
             </div>
@@ -174,9 +184,11 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
                     key={email}
                     className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-muted"
                     onClick={() => {
+                      if (!canManage) return;
                       setPendingEmails((prev) => (prev.includes(email) ? prev : [...prev, email]));
                       setDraft("");
                     }}
+                    disabled={!canManage}
                   >
                     {email}
                   </button>
@@ -197,6 +209,7 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
                     share={share}
                     user={usersQuery.data?.users.find((u) => u.email?.toLowerCase() === share.email)}
                     onRevoke={() => revokeMutation.mutate(share.email)}
+                    canManage={canManage}
                     isRevoking={revokeMutation.isPending && revokeMutation.variables === share.email}
                   />
                 ))}
@@ -211,6 +224,7 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
                       <button
                         type="button"
                         onClick={() => removePending(email)}
+                        disabled={!canManage}
                         className="text-muted-foreground hover:text-foreground"
                         aria-label={`Remove ${email}`}
                       >
@@ -244,6 +258,7 @@ export function FileShareDialog({ fileId, fileName, open, onOpenChange }: FileSh
                 checked={effectiveOrgWide}
                 onCheckedChange={(value) => setOrgWideDraft(value)}
                 aria-label="Share with everyone in the org"
+                disabled={!canShareWithEveryone}
               />
             </div>
           </div>
@@ -275,11 +290,13 @@ function ShareRow({
   share,
   user,
   onRevoke,
+  canManage,
   isRevoking,
 }: {
   share: FileManualShare;
   user?: User;
   onRevoke: () => void;
+  canManage: boolean;
   isRevoking: boolean;
 }) {
   const displayName = user?.name ?? share.email;
@@ -292,7 +309,7 @@ function ShareRow({
       <button
         type="button"
         onClick={onRevoke}
-        disabled={isRevoking}
+        disabled={!canManage || isRevoking}
         className="ml-2 text-muted-foreground hover:text-destructive disabled:opacity-50"
         aria-label={`Revoke ${share.email}`}
       >

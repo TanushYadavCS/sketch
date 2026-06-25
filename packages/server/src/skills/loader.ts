@@ -119,7 +119,7 @@ export function inferNameFromBody(body: string): string | null {
 export function loadClaudeSkillsFromDir(dir: string): LoadedSkill[] {
   let entries: string[] = [];
   try {
-    entries = readdirSync(dir);
+    entries = readdirSync(dir).sort();
   } catch {
     return [];
   }

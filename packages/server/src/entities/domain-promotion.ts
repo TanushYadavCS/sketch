@@ -1,6 +1,6 @@
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
@@ -183,7 +183,11 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     .execute();
 
   result.scanned = candidates.length;
-  const allEntities = (await db.selectFrom("entities").selectAll().execute()) as Selectable<EntitiesTable>[];
+  const allEntities = (await db
+    .selectFrom("entities")
+    .selectAll()
+    .where(whereLiveEntity())
+    .execute()) as Selectable<EntitiesTable>[];
   const lookup = makeLookup(allEntities);
 
   for (const candidate of candidates) {

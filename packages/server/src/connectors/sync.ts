@@ -20,16 +20,25 @@ import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
 import { resolveConnectorCredentials } from "./credential-source";
-import { type EmbeddingProviderConfig, createEmbeddingProvider } from "./embeddings";
+import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
+import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import { runEnrichment } from "./enrichment";
+import {
+  createEnrichmentEmbeddingProvider,
+  createEnrichmentGenerator,
+  resolveOpenRouterEnrichmentConfig,
+} from "./enrichment-providers";
+import { createGeminiGenerator } from "./gemini-generate";
+import { applyMicrosoftOAuthConfig, resolveMicrosoftOAuthConfig } from "./microsoft-graph";
 import { runPostSyncGraphPipeline } from "./post-sync";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
+import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
-import { reconcileConnectorSync } from "./sync-reconcile";
+import { reconcileConnectorSync, removeConnectorSourceItems } from "./sync-reconcile";
 import { extractErrorMessage, runWithConcurrency, serializeCredentials, truncateErrorMessage } from "./sync-utils";
-import type { ConnectorType, SyncResult } from "./types";
+import type { ConnectorCredentials, ConnectorType, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
 export interface SyncProgress {
@@ -107,6 +116,13 @@ export async function runConnectorSync(
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
       | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
+      | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
+      | "OUTLOOK_MAX_INFLIGHT"
+      | "TEAMS_INITIAL_LOOKBACK_DAYS"
+      | "TEAMS_MAX_INFLIGHT"
+      | "MICROSOFT_CLIENT_ID"
+      | "MICROSOFT_CLIENT_SECRET"
+      | "MICROSOFT_TENANT"
     >
   >,
 ): Promise<SyncResult> {
@@ -122,7 +138,7 @@ export async function runConnectorSync(
     };
   }
 
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, appConfig?.ENCRYPTION_KEY);
   const entityRepo = createEntityRepository(db);
   const factRepo = createIndexedFileFactRepository(db);
   const userRepo = createUserRepository(db);
@@ -132,8 +148,23 @@ export async function runConnectorSync(
     throw new Error(`Connector config not found: ${connectorConfigId}`);
   }
 
-  const connector = getConnector(config.connector_type as ConnectorType);
-  const scopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
+  const connectorType = config.connector_type as ConnectorType;
+  const connector = getConnector(connectorType);
+  const storedScopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
+  const scopeConfig =
+    config.connector_type === "outlook"
+      ? {
+          ...storedScopeConfig,
+          initialDays: storedScopeConfig.initialDays ?? appConfig?.OUTLOOK_INITIAL_LOOKBACK_DAYS,
+          maxInflight: storedScopeConfig.maxInflight ?? appConfig?.OUTLOOK_MAX_INFLIGHT,
+        }
+      : config.connector_type === "teams"
+        ? {
+            ...storedScopeConfig,
+            initialDays: storedScopeConfig.initialDays ?? appConfig?.TEAMS_INITIAL_LOOKBACK_DAYS,
+            maxInflight: storedScopeConfig.maxInflight ?? appConfig?.TEAMS_MAX_INFLIGHT,
+          }
+        : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
   const ownerEmail = owner?.email ?? null;
 
@@ -161,14 +192,19 @@ export async function runConnectorSync(
       ownerEmail,
       logger: syncLogger,
     });
-    let credentials = resolvedCredentials.credentials;
+    let credentials = await resolveConnectorCredentialsForSync({
+      db,
+      connectorType,
+      credentials: resolvedCredentials.credentials,
+      appConfig,
+    });
 
     if (resolvedCredentials.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
       const refreshed = await connector.refreshTokens(credentials);
       if (refreshed) {
         credentials = refreshed;
         await repo.updateConfig(config.id, {
-          credentials: serializeCredentials(credentials, appConfig?.ENCRYPTION_KEY),
+          credentials: serializeCredentials(credentials),
         });
         syncLogger.debug("OAuth tokens refreshed");
       }
@@ -183,11 +219,11 @@ export async function runConnectorSync(
       errors: [],
     };
 
-    const seenProviderFileIds = new Set<string>();
+    const seenSyncIdentityKeys = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
+    const dirtyCrmRollupGroupIds = new Set<string>();
 
-    const connectorType = config.connector_type as ConnectorType;
-    const existingHashes = await loadExistingContentHashes(db, connectorType);
+    const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
     const syncRunId = randomUUID();
     const factContext = {
@@ -197,6 +233,7 @@ export async function runConnectorSync(
     };
 
     for await (const item of connector.sync({
+      connectorConfigId: config.id,
       credentials,
       accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
@@ -229,9 +266,27 @@ export async function runConnectorSync(
           raw: seed,
         });
       },
+      onEmailSuppressed: async (record) => {
+        await recordSuppressedEmailRecord(db, {
+          connectorConfigId: config.id,
+          record,
+        });
+      },
+      onSourceItemRemoved: async (record) => {
+        const removal = await removeConnectorSourceItems({
+          db,
+          connectorConfigId: config.id,
+          connectorType,
+          providerFileIds: record.providerFileId ? [record.providerFileId] : undefined,
+          providerMessageIds: record.providerMessageId ? [record.providerMessageId] : undefined,
+          sourceCreatedBefore: record.sourceCreatedBefore,
+        });
+        result.itemsArchived += removal.itemsDeleted;
+        for (const indexedFileId of removal.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
+      },
     })) {
       try {
-        seenProviderFileIds.add(item.providerFileId);
+        seenSyncIdentityKeys.add(syncIdentityKey(getSyncIdentityForItem(item, config.id, connectorType)));
 
         const itemResult = await processSyncedItem({
           db,
@@ -240,6 +295,7 @@ export async function runConnectorSync(
           connectorType,
           item,
           existingHashes,
+          encryptionKey: appConfig?.ENCRYPTION_KEY,
         });
 
         if (itemResult.kind === "skipped_empty") {
@@ -247,6 +303,11 @@ export async function runConnectorSync(
         }
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
+        for (const groupId of itemResult.rollupGroupIds) dirtyCrmRollupGroupIds.add(groupId);
+
+        if (isEmailSyncedItem(item)) {
+          await persistEnvelopeMetadata(db, itemResult.indexedFileId, item.emailEnvelope);
+        }
 
         await emitFactsForSyncedItem({
           factRepo,
@@ -255,6 +316,7 @@ export async function runConnectorSync(
           factContext,
           item,
           indexedFileId: itemResult.indexedFileId,
+          emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
         });
 
         if (itemResult.kind === "unchanged") {
@@ -288,16 +350,17 @@ export async function runConnectorSync(
       }
     }
 
-    if (!config.sync_cursor && seenProviderFileIds.size > 0) {
+    if (!config.sync_cursor && seenSyncIdentityKeys.size > 0) {
       const reconcileResult = await reconcileConnectorSync({
         db,
         factRepo,
         connectorConfigId: config.id,
         connectorType,
         syncRunId,
-        seenProviderFileIds,
+        seenSyncIdentityKeys,
         allowLargeReconcile: appConfig?.SYNC_ALLOW_LARGE_RECONCILE,
         maxReconcileRatio: appConfig?.SYNC_MAX_RECONCILE_RATIO,
+        encryptionKey: appConfig?.ENCRYPTION_KEY,
         logger: syncLogger,
       });
       result.itemsArchived = reconcileResult.itemsArchived;
@@ -311,6 +374,17 @@ export async function runConnectorSync(
       coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
       floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
     });
+
+    if (connectorType === "zoho_crm") {
+      await refreshCrmRollupsForSync({
+        db,
+        connectorConfigId: config.id,
+        dirtyGroupIds: [...dirtyCrmRollupGroupIds],
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        syncLogger,
+        appConfig,
+      });
+    }
 
     result.newCursor = await connector.getCursor({
       credentials,
@@ -355,6 +429,54 @@ export async function runConnectorSync(
   }
 }
 
+async function refreshCrmRollupsForSync(params: {
+  db: Kysely<DB>;
+  connectorConfigId: string;
+  dirtyGroupIds: string[];
+  affectedIndexedFileIds: string[];
+  syncLogger: Logger;
+  appConfig?: Partial<Pick<Config, "GEMINI_MAX_RPM" | "GEMINI_MAX_RETRIES">>;
+}): Promise<void> {
+  try {
+    const settings = await params.db
+      .selectFrom("settings")
+      .select(["gemini_api_key", "enrichment_enabled"])
+      .where("id", "=", "default")
+      .executeTakeFirst();
+    const generator =
+      settings?.gemini_api_key && settings.enrichment_enabled !== 0
+        ? createGeminiGenerator(settings.gemini_api_key, {
+            maxRpm: params.appConfig?.GEMINI_MAX_RPM,
+            maxRetries: params.appConfig?.GEMINI_MAX_RETRIES,
+          })
+        : null;
+    const reconcile = await reconcileDanglingCrmRollups(params.db, params.connectorConfigId, params.syncLogger);
+    const dirtyGroupIds = [...new Set([...params.dirtyGroupIds, ...reconcile.affectedGroupIds])];
+    const result = await refreshCrmActivityRollups({
+      db: params.db,
+      connectorConfigId: params.connectorConfigId,
+      dirtyGroupIds,
+      affectedIndexedFileIds: params.affectedIndexedFileIds,
+      generator,
+      logger: params.syncLogger,
+    });
+    if (result.groupsRefreshed > 0 || result.groupsDeleted > 0 || result.errors.length > 0 || result.groupsCapped > 0) {
+      params.syncLogger.info(
+        {
+          refreshed: result.groupsRefreshed,
+          deleted: result.groupsDeleted,
+          skipped: result.groupsSkipped,
+          capped: result.groupsCapped,
+          errors: result.errors.length,
+        },
+        "CRM activity rollups refreshed",
+      );
+    }
+  } catch (err) {
+    params.syncLogger.warn({ err }, "CRM activity rollup refresh failed");
+  }
+}
+
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
@@ -370,10 +492,18 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
-      | "ENCRYPTION_KEY"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
       | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
+      | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
+      | "OUTLOOK_MAX_INFLIGHT"
+      | "TEAMS_INITIAL_LOOKBACK_DAYS"
+      | "TEAMS_MAX_INFLIGHT"
+      | "MICROSOFT_CLIENT_ID"
+      | "MICROSOFT_CLIENT_SECRET"
+      | "MICROSOFT_TENANT"
+      | "ENCRYPTION_KEY"
+      | "OPENROUTER_API_KEY"
     >
   >;
 }
@@ -383,6 +513,27 @@ const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
 const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const FEATURE_ARCHIVE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let lastFeatureArchiveSweepAt = 0;
+
+async function resolveConnectorCredentialsForSync(params: {
+  db: Kysely<DB>;
+  connectorType: ConnectorType;
+  credentials: ConnectorCredentials;
+  appConfig?: Partial<
+    Pick<Config, "ENCRYPTION_KEY" | "MICROSOFT_CLIENT_ID" | "MICROSOFT_CLIENT_SECRET" | "MICROSOFT_TENANT">
+  >;
+}): Promise<ConnectorCredentials> {
+  if (params.credentials.type !== "oauth" || (params.connectorType !== "outlook" && params.connectorType !== "teams")) {
+    return params.credentials;
+  }
+
+  const settings = await createSettingsRepository(params.db, params.appConfig?.ENCRYPTION_KEY).get();
+  const microsoftConfig = resolveMicrosoftOAuthConfig(settings, {
+    clientId: params.appConfig?.MICROSOFT_CLIENT_ID,
+    clientSecret: params.appConfig?.MICROSOFT_CLIENT_SECRET,
+    tenant: params.appConfig?.MICROSOFT_TENANT,
+  });
+  return applyMicrosoftOAuthConfig(params.credentials, microsoftConfig);
+}
 
 async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Promise<number> {
   try {
@@ -408,12 +559,12 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     return;
   }
 
-  const repo = createConnectorRepository(db);
+  const repo = createConnectorRepository(db, deps?.appConfig?.ENCRYPTION_KEY);
 
   // Auto-recover any connector stuck in `syncing` past the staleness threshold —
   // a row stuck mid-process is otherwise excluded from `findSyncableConfigs` and
   // would never retry until the server restarts.
-  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS);
+  await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS, deps?.appConfig?.ENCRYPTION_KEY);
 
   // Same idea for enrichment: scheduled runs only claim `pending`/`failed` (so
   // an in-flight run can't be re-claimed mid-flight and race on chunk inserts),
@@ -438,30 +589,29 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   // Run enrichment after all syncs complete
   try {
-    const settings = await db
-      .selectFrom("settings")
-      .select(["gemini_api_key", "enrichment_enabled"])
-      .where("id", "=", "default")
-      .executeTakeFirst();
+    const settings = await createSettingsRepository(db, deps?.appConfig?.ENCRYPTION_KEY).get();
 
     if (settings?.enrichment_enabled === 0) {
       logger.info("Enrichment disabled, skipping post-sync enrichment");
       return;
     }
 
-    const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({
-          provider: "gemini",
-          apiKey: settings.gemini_api_key,
-          maxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
-          maxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
-        })
-      : null;
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, deps?.appConfig?.OPENROUTER_API_KEY);
+    const providerConfig = {
+      geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
+      logger,
+      ...openRouterConfig,
+    };
+    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
+    const generator = createEnrichmentGenerator(providerConfig);
 
     const enrichResult = await runEnrichment({
       db,
       logger: logger.child({ component: "enrichment" }),
       embeddingProvider,
+      generator,
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
@@ -515,8 +665,13 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
  * process. Recovered rows are flipped to "error" so `findSyncableConfigs` re-includes
  * them on the next eligibility pass.
  */
-async function recoverStaleSyncs(db: Kysely<DB>, logger: Logger, staleThresholdMs = 0): Promise<void> {
-  const repo = createConnectorRepository(db);
+async function recoverStaleSyncs(
+  db: Kysely<DB>,
+  logger: Logger,
+  staleThresholdMs = 0,
+  encryptionKey?: string,
+): Promise<void> {
+  const repo = createConnectorRepository(db, encryptionKey);
   const stale = await repo.findStaleSyncingConfigs(staleThresholdMs);
 
   if (stale.length === 0) return;
@@ -576,7 +731,7 @@ export function startSyncScheduler(
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   // Recover any connectors stuck in "syncing" from a previous crash
-  recoverStaleSyncs(db, logger).catch((err) => {
+  recoverStaleSyncs(db, logger, 0, deps?.appConfig?.ENCRYPTION_KEY).catch((err) => {
     logger.error({ err }, "Failed to recover stale syncs on startup");
   });
 

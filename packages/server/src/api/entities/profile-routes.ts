@@ -3,14 +3,16 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod";
 import { type FileViewer, fileVisibilityPredicate } from "../../db/repositories/connectors";
-import { createEntityRepository, entityVisibilityPredicate } from "../../db/repositories/entities";
+import { createEntityRepository, entityVisibilityPredicate, whereLiveEntity } from "../../db/repositories/entities";
 import {
   type RelationListEntry,
   createEntityRelationshipsRepository,
 } from "../../db/repositories/entity-relationships";
 import { createEntitySharesRepository } from "../../db/repositories/entity-shares";
+import { createEntitySuppressionRepository } from "../../db/repositories/entity-suppressions";
 import { createEntityTimelineRepository } from "../../db/repositories/entity-timeline";
 import type { DB } from "../../db/schema";
+import { normalizeEntityMatchName } from "../../entities/materialize-deps";
 import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, mapSourceTypeToEntityType } from "../../entities/profile-facts";
 import { denyIfNotAdmin, getContentViewer, getFileViewer } from "../auth-helpers";
 import type { EntityRoutesDeps } from "./types";
@@ -53,6 +55,7 @@ async function loadEntityFactsForId(
     firstSeenAt: aggregates.firstSeenAt,
     lastSeenAt: aggregates.lastSeenAt,
     domainsForCompany: aggregates.domainsForCompany,
+    crmActivityBrief: aggregates.crmActivityBrief,
     topRelationships,
     incomingCounts: countByType(relations.incoming),
     outgoingCounts: countByType(relations.outgoing),
@@ -98,6 +101,7 @@ async function loadActivityStats(db: Kysely<DB>, entityId: string, viewer: FileV
     .select(["e2.id as id", "e2.name as name", sql<number>`COUNT(DISTINCT em1.indexed_file_id)`.as("files")])
     .where("em1.entity_id", "=", entityId)
     .where("e2.source_type", "=", "person")
+    .where(whereLiveEntity("e2"))
     .groupBy(["e2.id", "e2.name"])
     .orderBy("files", "desc")
     .limit(3);
@@ -336,7 +340,8 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       .selectFrom("entities")
       .selectAll("entities")
       .select(mentionCountSql.as("mention_count"))
-      .select(lastMentionSql.as("last_mention_at"));
+      .select(lastMentionSql.as("last_mention_at"))
+      .where(whereLiveEntity());
 
     if (typeFilter && typeFilter.length > 0) {
       query = query.where("entities.source_type", "in", typeFilter);
@@ -381,7 +386,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
 
     const entities = await query.execute();
 
-    let countQuery = db.selectFrom("entities").select(db.fn.count("entities.id").as("total"));
+    let countQuery = db.selectFrom("entities").select(db.fn.count("entities.id").as("total")).where(whereLiveEntity());
     if (typeFilter && typeFilter.length > 0) {
       countQuery = countQuery.where("entities.source_type", "in", typeFilter);
     }
@@ -422,6 +427,59 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   });
 
   /**
+   * GET /api/entities/graph
+   * Whole-graph payload for the knowledge map: the top entities by hotness plus
+   * every relationship edge between them, in one round trip. Nodes carry just
+   * enough to render (id/name/type/hotness); the client derives size from degree.
+   * Visibility-scoped for non-admins via the same predicate as the entity list.
+   * Registered before /:id so "graph" isn't matched as an entity id.
+   */
+  routes.get("/graph", async (c) => {
+    const limit = Math.min(Number(c.req.query("limit")) || 500, 1000);
+    const includeSystem = c.req.query("includeSystem") === "true";
+    const systemTypes = [...SYSTEM_SOURCE_TYPES];
+    const viewer = getFileViewer(c);
+
+    let nodeQuery = db
+      .selectFrom("entities")
+      .select(["id", "name", "source_type", "hotness"])
+      .where("status", "!=", "archived")
+      .where(whereLiveEntity());
+    if (!includeSystem && systemTypes.length > 0) {
+      nodeQuery = nodeQuery.where("source_type", "not in", systemTypes);
+    }
+    if (!viewer.isAdmin) {
+      nodeQuery = nodeQuery.where(entityVisibilityPredicate(viewer));
+    }
+    const nodeRows = await nodeQuery.orderBy("hotness", "desc").limit(limit).execute();
+
+    const ids = nodeRows.map((n) => n.id);
+    const edgeRows =
+      ids.length > 0
+        ? await db
+            .selectFrom("entity_relationships")
+            .select(["source_entity_id", "target_entity_id", "relationship_type"])
+            .where("source_entity_id", "in", ids)
+            .where("target_entity_id", "in", ids)
+            .execute()
+        : [];
+
+    return c.json({
+      nodes: nodeRows.map((n) => ({
+        id: n.id,
+        name: n.name,
+        sourceType: n.source_type,
+        hotness: n.hotness,
+      })),
+      edges: edgeRows.map((e) => ({
+        source: e.source_entity_id,
+        target: e.target_entity_id,
+        type: e.relationship_type,
+      })),
+    });
+  });
+
+  /**
    * DELETE /api/entities/tentative
    * Delete all tentative entities and their mentions.
    * Must be registered before /:id to prevent "tentative" matching as an ID.
@@ -431,7 +489,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     if (denied) return denied;
     const typeFilter = c.req.query("type")?.split(",").filter(Boolean);
 
-    let query = db.selectFrom("entities").select("id").where("status", "=", "tentative");
+    let query = db.selectFrom("entities").select("id").where("status", "=", "tentative").where(whereLiveEntity());
     if (typeFilter && typeFilter.length > 0) {
       query = query.where("source_type", "in", typeFilter);
     }
@@ -543,6 +601,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
           firstSeenAt: facts.firstSeenAt,
           lastSeenAt: facts.lastSeenAt,
           domainsForCompany: facts.domainsForCompany,
+          crmActivityBrief: facts.crmActivityBrief,
           summary,
         },
       },
@@ -659,7 +718,10 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
 
   /**
    * DELETE /api/entities/:id
-   * Delete an entity and its mentions/source refs (cascade).
+   * Soft-delete an entity: tombstone it (deleted_at) so it disappears from every
+   * `whereLiveEntity()` read, leaving its mentions/relationships/bindings intact
+   * but hidden (reversible, like a merge tombstone). Also writes a durable
+   * suppression so the loose LLM creation paths don't re-mint it.
    */
   routes.delete("/:id", async (c) => {
     const denied = denyIfNotAdmin(c);
@@ -669,7 +731,25 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       return c.json({ error: { code: "NOT_FOUND", message: "Entity not found" } }, 404);
     }
 
-    await db.deleteFrom("entities").where("id", "=", entity.id).execute();
+    const now = new Date().toISOString();
+    await db.transaction().execute(async (tx) => {
+      await tx
+        .updateTable("entities")
+        .set({ deleted_at: now, updated_at: now })
+        .where("id", "=", entity.id)
+        .where("deleted_at", "is", null)
+        .where("merged_into_entity_id", "is", null)
+        .execute();
+      await tx.deleteFrom("entity_source_refs").where("entity_id", "=", entity.id).execute();
+      await createEntitySuppressionRepository(tx).suppress({
+        normalizedName: normalizeEntityMatchName(entity.source_type, entity.name),
+        entityType: entity.source_type,
+        originalEntityId: entity.id,
+        reason: "soft_deleted",
+        createdBy: c.get("sub") as string,
+      });
+    });
+
     return c.json({ success: true });
   });
 
@@ -793,7 +873,12 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   });
 
   async function entityExists(entityId: string): Promise<boolean> {
-    const row = await db.selectFrom("entities").select("id").where("id", "=", entityId).executeTakeFirst();
+    const row = await db
+      .selectFrom("entities")
+      .select("id")
+      .where("id", "=", entityId)
+      .where(whereLiveEntity())
+      .executeTakeFirst();
     return !!row;
   }
 

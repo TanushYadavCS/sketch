@@ -36,6 +36,7 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import {
+  PERSON_PARTICIPANT_FACT_TYPES,
   type UpsertIndexedFileFactInput,
   buildIndexedFileFactKey,
   createIndexedFileFactRepository,
@@ -128,7 +129,7 @@ export async function applyEngagementFloor(
     .selectFrom("indexed_file_facts")
     .select(["subject_name", "subject_email"])
     .where("indexed_file_id", "=", opts.fileId)
-    .where("fact_type", "=", "attendee")
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
     .execute();
 
   if (attendees.length === 0) return finish(0);
@@ -235,7 +236,7 @@ export async function floorRetryForDomains(
     const attendeeRows = await deps.db
       .selectFrom("indexed_file_facts")
       .select(["indexed_file_id", "subject_email"])
-      .where("fact_type", "=", "attendee")
+      .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
       .where("subject_email", "is not", null)
       .$if(scopedFileIds !== null, (qb) => qb.where("indexed_file_id", "in", scopedFileIds ?? []))
       .where("deleted_at", "is", null)

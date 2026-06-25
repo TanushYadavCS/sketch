@@ -1,8 +1,9 @@
 import pino from "pino";
+import pretty from "pino-pretty";
 import type { Config } from "./config";
 
 export function createLogger(config: Config) {
-  return pino({
+  const options = {
     level: config.LOG_LEVEL,
     redact: {
       paths: [
@@ -19,11 +20,11 @@ export function createLogger(config: Config) {
       ],
       censor: "[REDACTED]",
     },
-    transport:
-      process.env.NODE_ENV !== "production"
-        ? { target: "pino-pretty", options: { colorize: true, minimumLevel: config.LOG_LEVEL } }
-        : undefined,
-  });
+  };
+
+  if (process.env.NODE_ENV === "production") return pino(options);
+
+  return pino(options, pretty({ colorize: true, minimumLevel: config.LOG_LEVEL }));
 }
 
 export type Logger = ReturnType<typeof createLogger>;

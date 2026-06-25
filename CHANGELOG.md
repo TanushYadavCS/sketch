@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented here.
 
+## [0.36.0] -- 2026-06-13
+
+- Zoho CRM: make the connector generally available by removing the experimental flag from the OAuth routes, connector APIs, and Files connector picker.
+- Docs: trim stale "currently gated" references from contributor guidance now that Zoho CRM is no longer hidden behind `EXPERIMENTAL_FLAG`.
+
+## [0.35.0] -- 2026-06-13
+
+- Connectors: enforce connector-scoped authorization across server routes so owner, admin, and member access is explicit, with disabled connectors exposing inert mutation capabilities.
+- Microsoft OAuth: support Outlook and Teams OAuth settings with saved workspace config, environment fallback, account-selection prompts, tenant-aware endpoints, and saved-settings precedence over later env vars.
+- Files UI: honor connector permission and capability flags across connector picking, file details, sharing, and management dialogs, including read-only states and admin Microsoft OAuth self-service when env config is missing.
+
+## [0.34.1] -- 2026-06-11
+
+- Fix(OAuth): derive redirect origins from forwarded proxy headers for multi-tenant hosts, keeping Google, Microsoft, and Zoho callback URLs on the public `https://<tenant>.getsketch.ai` origin when `BASE_URL` is unset.
+
+## [0.34.0] -- 2026-06-10
+
+- Microsoft connectors: add Outlook and Teams connector support with Microsoft Graph sync, tenant-aware OAuth setup, Files UI configuration, and cursor-gap hardening.
+- Web chat: add attachments and voice transcription support, preserving home-screen attachments and recording state across the chat handoff.
+- Files/knowledge: add the knowledge graph view and clean orphaned entities, relationships, and review rows when deleting connectors.
+- External MCP: add OAuth for public Sketch MCP clients alongside the existing token-authenticated MCP path.
+- OpenRouter/Gemini resilience: add OpenRouter fallbacks for enrichment and search embeddings, preserve Gemini query embeddings, and reprice OpenRouter usage from captured token counts while restoring gateway prompt caching.
+- Agent safety: block direct image reads in visual-analysis runs so image/OCR work routes through the intended VisualAnalysis path.
+- Licensing: switch the project license to Apache 2.0 and add the NOTICE file.
+
+## [0.33.0] -- 2026-06-03
+
+- Web app: add the Sketch Home experience and full-window web chat with multi-conversation history, streamed progress, generated file links, workspace summaries, and Markdown rendering.
+- Chat memory: persist WhatsApp and Slack conversation history with row-id watermarks, durable missed-message recall, and a `ReadChatHistory` tool for group/channel context.
+- External MCP: add gated per-user API tokens, PAT-authenticated `/mcp` Streamable HTTP support, external search/tool-call auditing, and the Settings API-token UI.
+- Integrations: add org-level integration access controls, owner-name forwarding/display, and Google Workspace role propagation to Canvas integration calls.
+- Agent tools: add gated OpenRouter-backed `VisualAnalysis` support for text-only agent deployments that need OCR, screenshot, diagram, or image inspection.
+- Files/enrichment: graduate Files/knowledge surfaces from the experimental flag path, trim pasted Gemini keys, preserve summaries on embedding retry, and add Gemini pacing/retry controls with enrichment backoff.
+- Workflows: separate workflow creation context from delivery target, add `SearchDeliveryTargets`, support Slack channel/thread/DM and WhatsApp delivery routing, and show source versus delivery in the workflow UI.
+- Reliability: clean dependent rows when removing team members, serialize web chat transcript writes and agent runs, and improve Slack bootstrap history continuation.
+
 ## [0.32.0] -- 2026-06-01
 
 - Entity graph: add richer entity materialization with mention provenance, indexed source facts, domain/affiliation inference, typed relationships, relation evidence, and improved graph extraction quality.

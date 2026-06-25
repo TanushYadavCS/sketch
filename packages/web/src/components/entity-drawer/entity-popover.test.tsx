@@ -5,12 +5,13 @@
  *    (mode flips from popover → drawer; stack length stays 1)
  */
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
+import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { useEffect } from "react";
+import { beforeEach, describe, expect, it } from "vitest";
 import { EntityDrawer } from "./entity-drawer";
 import { EntityPopover } from "./entity-popover";
 
@@ -34,6 +35,7 @@ const SARAH = {
     firstSeenAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-05-01T00:00:00.000Z",
     domainsForCompany: [],
+    crmActivityBrief: null,
     summary: {
       identity: "Person · works at Stripe.",
       activity: "Active in 5 files (5 mentions).",
@@ -62,19 +64,21 @@ const relations = {
   totalCount: 1,
 };
 
-const server = setupServer(
-  http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
-  http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relations)),
-  http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json({ groups: [], truncated: false, totalCount: 0 })),
-);
-
-beforeAll(() => server.listen({ onUnhandledRequest: "warn" }));
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
+beforeEach(() => {
+  server.use(
+    http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
+    http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relations)),
+    http.get("/api/entities/e-sarah/timeline", () =>
+      HttpResponse.json({ groups: [], truncated: false, totalCount: 0 }),
+    ),
+  );
+});
 
 function OpenAsPopover() {
-  const ui = useEntityUi();
-  if (ui.stack.length === 0) ui.openEntity("e-sarah", { mode: "popover" });
+  const { stack, openEntity } = useEntityUi();
+  useEffect(() => {
+    if (stack.length === 0) openEntity("e-sarah", { mode: "popover" });
+  }, [stack, openEntity]);
   return null;
 }
 

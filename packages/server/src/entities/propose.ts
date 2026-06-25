@@ -26,8 +26,8 @@ import type { EntitiesTable } from "../db/schema";
 
 export type Entity = Selectable<EntitiesTable>;
 
-export type ProposeEntityType = "person" | "company" | "product" | "project" | "team";
-export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous";
+export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal";
+export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous" | "birth-gated";
 
 export interface ProposeInput {
   name: string;
@@ -51,6 +51,14 @@ export interface ProposeInput {
   evidenceDomain?: string | null;
   precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
   skipFuzzy?: boolean;
+  /**
+   * Birth gate: when set, a proposal that would otherwise CREATE a brand-new
+   * entity (no exact/fuzzy match) is instead routed to the review queue. Used
+   * for `project` relation endpoints so a single extracted relation can no
+   * longer mint a project — it must be human-confirmed. Linking to an existing
+   * entity and queuing an ambiguous match are unaffected.
+   */
+  queueInsteadOfCreate?: boolean;
 }
 
 export type ProposeResult =
@@ -91,6 +99,7 @@ export interface ProposeDeps {
   lookup: EntityLookup;
   /** Read an entity's email from its metadata JSON. */
   readEmail: (entity: Entity) => string | null;
+  onEntityResolved?: (entity: Entity) => void | Promise<void>;
 }
 
 interface RankedCandidate {
@@ -305,6 +314,8 @@ async function queueProposal(
     proposedName: input.name,
     normalizedName: normalized,
     entityType: input.entityType,
+    source: input.source,
+    sourceId: input.sourceId,
     proposedEmail: input.email ?? null,
     candidateEntityId,
     candidateScore,
@@ -340,7 +351,15 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     for (const c of candidates) {
       const stored = deps.readEmail(c);
       if (stored && stored.toLowerCase() === lowered) {
-        const { entity } = await persistEntity(deps, input, c);
+        const existingSourceRef = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+        if (!existingSourceRef || existingSourceRef.id === c.id) {
+          await deps.entityRepo.upsertSourceRef({ entityId: c.id, source: input.source, sourceId: input.sourceId });
+        }
+        if (c.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+          await deps.entityRepo.appendAlias(c.id, input.name);
+        }
+        const entity = (await deps.entityRepo.getEntity(c.id)) ?? c;
+        await deps.onEntityResolved?.(entity);
         return { kind: "linked", entity };
       }
     }
@@ -350,6 +369,23 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     //    Auto-create instead of queuing.
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
+  }
+
+  if (input.entityType !== "person" && input.source && input.sourceId) {
+    const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+    if (found && found.source_type === input.entityType) {
+      await deps.entityRepo.upsertSourceRef({
+        entityId: found.id,
+        source: input.source,
+        sourceId: input.sourceId,
+      });
+      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+        await deps.entityRepo.appendAlias(found.id, input.name);
+      }
+      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
+      await deps.onEntityResolved?.(entity);
+      return { kind: "linked", entity };
+    }
   }
 
   // 3) Exact-name / alias fast-path — an entity already shares this canonical
@@ -444,6 +480,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.skipFuzzy) {
+    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
   }
@@ -464,6 +501,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 6) Decide.
   if (ranked.length === 0) {
+    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
   }

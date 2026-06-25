@@ -1,8 +1,10 @@
 import type { Kysely } from "kysely";
+import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
+import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
 import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
@@ -34,8 +36,13 @@ export function normalizeEntityMatchName(entityType: string, name: string): stri
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team"];
-  const entities = await db.selectFrom("entities").selectAll().where("source_type", "in", supportedTypes).execute();
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
+  const entities = await db
+    .selectFrom("entities")
+    .selectAll()
+    .where("source_type", "in", supportedTypes)
+    .where(whereLiveEntity())
+    .execute();
   const entitiesByType = new Map<ProposeEntityType, EntityRow[]>();
   for (const t of supportedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, EntityRow[]>();
@@ -63,6 +70,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     .innerJoin("entities", "entities.id", "entity_source_refs.entity_id")
     .select(["entity_source_refs.source as source", "entity_source_refs.source_id as source_id"])
     .selectAll("entities")
+    .where(whereLiveEntity())
     .execute();
   const bySourceRef = new Map<string, EntityRow>();
   for (const row of sourceRefs) {
@@ -86,6 +94,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
 }
 
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
+  unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
   const typeBucket = index.entitiesByType.get(entityType);
   if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
@@ -110,8 +119,43 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
   }
 }
 
+function removeEntityFromMapBuckets<T extends EntityRow>(map: Map<string, T[]>, entityId: string): void {
+  for (const [key, bucket] of map) {
+    const filtered = bucket.filter((entity) => entity.id !== entityId);
+    if (filtered.length === 0) map.delete(key);
+    else if (filtered.length !== bucket.length) map.set(key, filtered);
+  }
+}
+
+function unregisterEntity(index: LookupIndex, entityId: string): void {
+  for (const [type, bucket] of index.entitiesByType) {
+    const filtered = bucket.filter((entity) => entity.id !== entityId);
+    if (filtered.length !== bucket.length) index.entitiesByType.set(type, filtered);
+  }
+  removeEntityFromMapBuckets(index.byNormalizedName, entityId);
+  removeEntityFromMapBuckets(index.byNormalizedAlias, entityId);
+}
+
+export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIndex, entity: Entity): Promise<void> {
+  const sourceRefs = await db
+    .selectFrom("entity_source_refs")
+    .select(["source", "source_id"])
+    .where("entity_id", "=", entity.id)
+    .execute();
+  const refreshed = await db.selectFrom("entities").selectAll().where("id", "=", entity.id).executeTakeFirst();
+  const row = (refreshed ?? entity) as EntityRow;
+  for (const [key, indexedEntity] of index.bySourceRef) {
+    if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
+  }
+  registerEntity(index, row);
+  for (const ref of sourceRefs) {
+    index.bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
+  }
+}
+
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
+  logger?: Logger;
 }
 
 export async function buildMaterializeDeps(
@@ -120,6 +164,7 @@ export async function buildMaterializeDeps(
 ): Promise<MaterializeDeps> {
   const entityRepo = createEntityRepository(db);
   const reviewRepo = createEntityReviewRepo(db);
+  const suppressionRepo = createEntitySuppressionRepository(db);
   const domainsRepo = createEntityDomainsRepository(db);
   const index = await buildLookupIndex(db);
   const llmPromotionThreshold =
@@ -143,13 +188,16 @@ export async function buildMaterializeDeps(
 
   return {
     db,
+    logger: opts.logger,
     entityRepo,
     reviewRepo,
+    suppressionRepo,
     domainsRepo,
     lookup,
     index,
     llmPromotionThreshold,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
+    onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
     resolveOwner: (fact: IndexedFileFactRow) => {
       if (fact.created_by_user_id) return fact.created_by_user_id;
       const indexedFileId = fact.indexed_file_id;

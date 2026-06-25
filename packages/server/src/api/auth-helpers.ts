@@ -19,16 +19,43 @@ export function denyIfNotAdmin(c: Context): Response | null {
   return c.json({ error: { code: "FORBIDDEN", message: "Admin role required" } }, 403);
 }
 
-/** Edit semantics: admin OR the row's owner. */
-export function denyIfCannotEdit(c: Context, config: { created_by: string }): Response | null {
-  if (isAdmin(c) || config.created_by === c.get("sub")) return null;
-  return c.json({ error: { code: "FORBIDDEN", message: "Not authorized for this connector" } }, 403);
+export interface ConnectorPermissions {
+  isOwner: boolean;
+  canView: boolean;
+  canManage: boolean;
+  canDisconnect: boolean;
+  canSync: boolean;
+  canChangeScope: boolean;
+  canUpdateCredentials: boolean;
+  canBrowseScope: boolean;
+  canEnrich: boolean;
 }
 
-/** Read semantics: org-wide rows visible to all; per-user rows visible to admin or owner. */
-export function denyIfCannotRead(c: Context, config: { created_by: string }, perUserAuth: boolean): Response | null {
-  if (!perUserAuth) return null;
-  return denyIfCannotEdit(c, config);
+export function connectorPermissions(
+  c: Context,
+  config: { created_by: string; sync_status: string },
+  perUserAuth: boolean,
+): ConnectorPermissions {
+  const isOwner = config.created_by === c.get("sub");
+  const orgWide = !perUserAuth;
+  const enabled = config.sync_status !== "disabled";
+  const canManage = orgWide ? isAdmin(c) : isOwner;
+  return {
+    isOwner,
+    canView: orgWide || isOwner || isAdmin(c),
+    canManage,
+    canDisconnect: canManage && enabled,
+    canSync: canManage && enabled,
+    canChangeScope: canManage && enabled,
+    canUpdateCredentials: canManage && enabled,
+    canBrowseScope: canManage,
+    canEnrich: canManage && enabled,
+  };
+}
+
+export function denyUnless(c: Context, allowed: boolean): Response | null {
+  if (allowed) return null;
+  return c.json({ error: { code: "FORBIDDEN", message: "Not authorized for this connector" } }, 403);
 }
 
 /** File-list viewer descriptor — passed to repo helpers for RBAC. Admins bypass; others filter by email. */

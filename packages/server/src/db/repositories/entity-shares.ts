@@ -9,6 +9,7 @@
  */
 import type { Kysely } from "kysely";
 import type { DB } from "../schema";
+import { whereLiveEntity } from "./entities";
 
 export interface EntityShareRow {
   email: string;
@@ -66,6 +67,7 @@ export function createEntitySharesRepository(db: Kysely<DB>) {
         .selectFrom("entities")
         .select(["share_with_everyone"])
         .where("id", "=", entityId)
+        .where(whereLiveEntity())
         .executeTakeFirst();
       return row?.share_with_everyone === 1;
     },

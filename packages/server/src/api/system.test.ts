@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
+import type { createEntityRepository } from "../db/repositories/entities";
 import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -40,6 +41,7 @@ function createTestSystemApp(
     onSlackTokensUpdated?: ReturnType<typeof vi.fn>;
     onLlmSettingsUpdated?: ReturnType<typeof vi.fn>;
     userRepo?: ReturnType<typeof createUserRepository>;
+    entityRepo?: ReturnType<typeof createEntityRepository>;
     inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
     mcpServers?: ReturnType<typeof createMcpServerRepository>;
     sendSlackDmToSlackUser?: (params: {
@@ -269,6 +271,76 @@ describe("PUT /api/system/api-key", () => {
     const res = await app.request("/api/system/api-key", { method: "PUT" });
 
     expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /api/system/entities/graph/hotness-recomputations", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("runs a hotness recomputation batch with cursor and limit", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const entityRepo = {
+      recomputeHotnessBatch: vi.fn().mockResolvedValue({ processed: 25, nextCursor: "entity-25", done: false }),
+    } as unknown as ReturnType<typeof createEntityRepository>;
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, entityRepo });
+
+    const res = await app.request("/api/system/entities/graph/hotness-recomputations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ cursor: "entity-0", limit: 25 }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ processed: 25, nextCursor: "entity-25", done: false });
+    expect(entityRepo.recomputeHotnessBatch).toHaveBeenCalledWith({ cursor: "entity-0", limit: 25 });
+  });
+
+  it("defaults the batch request body", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const entityRepo = {
+      recomputeHotnessBatch: vi.fn().mockResolvedValue({ processed: 0, nextCursor: null, done: true }),
+    } as unknown as ReturnType<typeof createEntityRepository>;
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, entityRepo });
+
+    const res = await app.request("/api/system/entities/graph/hotness-recomputations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ processed: 0, nextCursor: null, done: true });
+    expect(entityRepo.recomputeHotnessBatch).toHaveBeenCalledWith({ limit: 500 });
+  });
+
+  it("rejects invalid batch limits", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const entityRepo = {
+      recomputeHotnessBatch: vi.fn(),
+    } as unknown as ReturnType<typeof createEntityRepository>;
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, entityRepo });
+
+    const res = await app.request("/api/system/entities/graph/hotness-recomputations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ limit: 0 }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(entityRepo.recomputeHotnessBatch).not.toHaveBeenCalled();
   });
 });
 
@@ -1114,7 +1186,34 @@ describe("PUT /api/system/llm", () => {
     expect(settings?.aws_region).toBe("us-east-1");
   });
 
-  it("stores OpenRouter Bedrock credentials in settings", async () => {
+  it("stores OpenRouter credentials in settings", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/llm", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "openrouter",
+        apiKey: "sk-or-v1-tenant-virtual-key",
+        modelId: "anthropic/claude-sonnet-4.6@preset/sketch-bedrock",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true });
+
+    const settings = await settingsRepo.get();
+    expect(settings?.llm_provider).toBe("openrouter");
+    expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
+    expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+  });
+
+  it("normalizes the legacy openrouter_bedrock provider alias to openrouter", async () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
@@ -1132,16 +1231,12 @@ describe("PUT /api/system/llm", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ ok: true });
 
     const settings = await settingsRepo.get();
-    expect(settings?.llm_provider).toBe("openrouter_bedrock");
-    expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
-    expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+    expect(settings?.llm_provider).toBe("openrouter");
   });
 
-  it("creates settings before storing OpenRouter Bedrock credentials when the row is missing", async () => {
+  it("creates settings before storing OpenRouter credentials when the row is missing", async () => {
     await db.deleteFrom("settings").where("id", "=", "default").execute();
     const settingsRepo = createSettingsRepository(db, TEST_ENCRYPTION_KEY);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
@@ -1153,7 +1248,7 @@ describe("PUT /api/system/llm", () => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        provider: "openrouter_bedrock",
+        provider: "openrouter",
         apiKey: "sk-or-v1-tenant-virtual-key",
         modelId: "anthropic/claude-sonnet-4.6@preset/sketch-bedrock",
       }),
@@ -1162,7 +1257,7 @@ describe("PUT /api/system/llm", () => {
     expect(res.status).toBe(200);
 
     const settings = await settingsRepo.get();
-    expect(settings?.llm_provider).toBe("openrouter_bedrock");
+    expect(settings?.llm_provider).toBe("openrouter");
     expect(settings?.anthropic_api_key).toBe("sk-or-v1-tenant-virtual-key");
     expect(settings?.model_id).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
 
@@ -1171,7 +1266,7 @@ describe("PUT /api/system/llm", () => {
     expect((rawApiKey as string).startsWith("enc:")).toBe(true);
   });
 
-  it("rejects openrouter_bedrock without modelId", async () => {
+  it("rejects openrouter without modelId", async () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
@@ -1182,7 +1277,7 @@ describe("PUT /api/system/llm", () => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        provider: "openrouter_bedrock",
+        provider: "openrouter",
         apiKey: "sk-or-v1-tenant-virtual-key",
       }),
     });

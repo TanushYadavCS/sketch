@@ -1,11 +1,15 @@
 import { createRouter } from "@tanstack/react-router";
+import { agentDetailRoute, agentsRoute } from "./routes/agents";
 import { channelsRoute } from "./routes/channels";
+import { chatIndexRoute, chatRoute } from "./routes/chat";
 import { connectionsCallbackRoute, connectionsRoute } from "./routes/connections";
 import { dashboardRoute } from "./routes/dashboard";
 import { filesRoute } from "./routes/files";
+import { homeRoute } from "./routes/home";
 import { indexRoute } from "./routes/index";
 import { loginRoute } from "./routes/login";
 import { onboardingRoute } from "./routes/onboarding";
+import { projectsRoute } from "./routes/projects";
 import { reviewEntitiesRoute } from "./routes/review-entities";
 import { rootRoute } from "./routes/root";
 import { scheduledTasksRoute } from "./routes/scheduled-tasks";
@@ -19,11 +23,17 @@ const routeTree = rootRoute.addChildren([
   onboardingRoute,
   indexRoute,
   dashboardRoute.addChildren([
+    homeRoute,
+    agentsRoute,
+    agentDetailRoute,
+    chatIndexRoute,
+    chatRoute,
     channelsRoute,
     teamRoute,
     scheduledTasksRoute,
     skillsRoute,
     filesRoute,
+    projectsRoute,
     reviewEntitiesRoute,
     connectionsRoute.addChildren([connectionsCallbackRoute]),
     usageRoute,

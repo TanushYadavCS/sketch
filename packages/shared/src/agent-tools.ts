@@ -18,6 +18,8 @@ export interface AgentToolCatalogEntry {
   category: AgentToolCategory;
 }
 
+export const VISUAL_ANALYSIS_AGENT_TOOL_NAME = "mcp__sketch__VisualAnalysis";
+
 export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
   {
     name: "Read",
@@ -74,13 +76,25 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__ReadChatHistory",
+    label: "Read chat history",
+    description: "Read persisted messages from the current chat conversation.",
+    category: "sketch",
+  },
+  {
+    name: "mcp__sketch__SearchChatHistory",
+    label: "Search chat history",
+    description: "Search persisted messages in the current chat conversation.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__TranscribeAudio",
     label: "Transcribe audio",
     description: "Convert an audio attachment in the workspace into text.",
     category: "sketch",
   },
   {
-    name: "mcp__sketch__VisualAnalysis",
+    name: VISUAL_ANALYSIS_AGENT_TOOL_NAME,
     label: "Visual analysis",
     description:
       "Inspect visual attachments in the workspace for tasks such as OCR, screenshots, diagrams, or animations using the configured vision model.",
@@ -90,6 +104,18 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     name: "mcp__sketch__getProviderConfig",
     label: "Check integration provider",
     description: "Check whether an integration provider is configured.",
+    category: "sketch",
+  },
+  {
+    name: "mcp__sketch__local_run_command",
+    label: "Run local Mac command",
+    description: "Run shell commands on a paired local Mac through Sketch Local.",
+    category: "sketch",
+  },
+  {
+    name: "mcp__sketch__local_claude_session",
+    label: "Run local Claude Code",
+    description: "Start and supervise Claude Code in a Sketch-managed tmux session on a paired local Mac.",
     category: "sketch",
   },
   {

@@ -23,14 +23,16 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
 import {
+  type EntityContactPointKind,
   type EntityMentionConfidence,
   type EntityMentionRelation,
   createEntityRepository,
+  whereLiveEntity,
 } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
-import type { DB, EntitiesTable } from "../db/schema";
+import type { DB, EntitiesTable, EntityContactPointsTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { finalizeLinkedDomainCandidates } from "./domain-promotion";
 import {
@@ -39,6 +41,7 @@ import {
   materializeFromFact,
   shouldMarkMaterialized,
 } from "./materialize";
+import { mergeEntitiesInTransaction } from "./merge";
 
 type Entity = Selectable<EntitiesTable>;
 
@@ -199,7 +202,12 @@ async function fetchRow(ctx: ResolveTxnCtx, reviewId: string): Promise<QueueRow>
 }
 
 async function fetchEntity(ctx: ResolveTxnCtx, entityId: string): Promise<Entity | undefined> {
-  return ctx.db.selectFrom("entities").selectAll().where("id", "=", entityId).executeTakeFirst();
+  return ctx.db
+    .selectFrom("entities")
+    .selectAll()
+    .where("id", "=", entityId)
+    .where(whereLiveEntity())
+    .executeTakeFirst();
 }
 
 /**
@@ -418,6 +426,7 @@ async function findStaleCandidates(ctx: ResolveTxnCtx, target: Entity, proposedN
     .selectAll()
     .where("source_type", "=", target.source_type)
     .where("id", "!=", target.id)
+    .where(whereLiveEntity())
     .execute();
   return candidates.filter((e) => {
     if (normalizeName(e.name) !== normalized) return false;
@@ -480,6 +489,8 @@ async function mergeStaleEntityPortable(ctx: ResolveTxnCtx, stale: Entity, targe
     `.execute(ctx.db);
   }
 
+  await transferStaleContactPoints(ctx, stale.id, target.id);
+
   // Audit FK fan-out: any other live reference to entities(id) needs to
   // either re-point at target or rely on ON DELETE SET NULL. Live refs in
   // the current schema:
@@ -497,6 +508,140 @@ async function mergeStaleEntityPortable(ctx: ResolveTxnCtx, stale: Entity, targe
   // entity_domains (linkage PR-2) lands it will add another FK — that
   // PR's migration owner is responsible for re-checking this list.
   await ctx.db.deleteFrom("entities").where("id", "=", stale.id).execute();
+}
+
+type PrimaryContactCandidate = {
+  kind: EntityContactPointKind;
+  value: string;
+  id: string;
+  lastContactedAt: string | null;
+  verifiedAt: string | null;
+};
+
+type ContactPoint = Selectable<EntityContactPointsTable>;
+
+function compareNullableIsoDesc(left: string | null, right: string | null): number {
+  if (left && right && left !== right) return left > right ? -1 : 1;
+  if (left && !right) return -1;
+  if (!left && right) return 1;
+  return 0;
+}
+
+function comparePrimaryContactCandidates(left: PrimaryContactCandidate, right: PrimaryContactCandidate): number {
+  const recency = compareNullableIsoDesc(left.lastContactedAt, right.lastContactedAt);
+  if (recency !== 0) return recency;
+  const verification = compareNullableIsoDesc(left.verifiedAt, right.verifiedAt);
+  if (verification !== 0) return verification;
+  return left.id.localeCompare(right.id);
+}
+
+/**
+ * Move stale contactability facts to the confirmed target before deleting the
+ * stale entity. Duplicate contact points collapse through the repository upsert;
+ * primary conflicts are resolved per kind by recency, then verification, then
+ * stable row id.
+ */
+async function transferStaleContactPoints(ctx: ResolveTxnCtx, staleId: string, targetId: string): Promise<void> {
+  const staleContactPoints = await ctx.db
+    .selectFrom("entity_contact_points")
+    .selectAll()
+    .where("entity_id", "=", staleId)
+    .execute();
+  if (staleContactPoints.length === 0) return;
+
+  const primaryRows = await ctx.db
+    .selectFrom("entity_contact_points")
+    .select(["kind", "value"])
+    .where("entity_id", "in", [targetId, staleId])
+    .where("is_primary", "=", 1)
+    .execute();
+  const primaryValuesByKind = new Map<EntityContactPointKind, Set<string>>();
+  for (const row of primaryRows) {
+    const kind = row.kind as EntityContactPointKind;
+    primaryValuesByKind.set(kind, (primaryValuesByKind.get(kind) ?? new Set()).add(row.value));
+  }
+
+  for (const contactPoint of staleContactPoints) {
+    await upsertTransferredContactPoint(ctx, targetId, contactPoint);
+  }
+
+  for (const [kind, values] of primaryValuesByKind) {
+    const candidates = await ctx.db
+      .selectFrom("entity_contact_points")
+      .select(["id", "value", "last_contacted_at", "verified_at"])
+      .where("entity_id", "=", targetId)
+      .where("kind", "=", kind)
+      .where("value", "in", [...values])
+      .execute();
+    const winner = candidates
+      .map(
+        (row): PrimaryContactCandidate => ({
+          kind,
+          value: row.value,
+          id: row.id,
+          lastContactedAt: row.last_contacted_at,
+          verifiedAt: row.verified_at,
+        }),
+      )
+      .sort(comparePrimaryContactCandidates)[0];
+    if (!winner) continue;
+
+    await ctx.db
+      .updateTable("entity_contact_points")
+      .set({ is_primary: 0, updated_at: ctx.now })
+      .where("entity_id", "=", targetId)
+      .where("kind", "=", kind)
+      .execute();
+    await ctx.db
+      .updateTable("entity_contact_points")
+      .set({ is_primary: 1, updated_at: ctx.now })
+      .where("id", "=", winner.id)
+      .execute();
+  }
+}
+
+async function upsertTransferredContactPoint(ctx: ResolveTxnCtx, targetId: string, contactPoint: ContactPoint) {
+  await ctx.db
+    .insertInto("entity_contact_points")
+    .values({
+      id: randomUUID(),
+      entity_id: targetId,
+      kind: contactPoint.kind,
+      value: contactPoint.value,
+      display_value: contactPoint.display_value,
+      label: contactPoint.label,
+      is_primary: 0,
+      source: contactPoint.source,
+      connector_config_id: contactPoint.connector_config_id,
+      created_by_user_id: contactPoint.created_by_user_id,
+      verified_at: contactPoint.verified_at,
+      last_contacted_at: contactPoint.last_contacted_at,
+      created_at: ctx.now,
+      updated_at: ctx.now,
+    })
+    .onConflict((oc) =>
+      oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
+        display_value: sql`COALESCE(entity_contact_points.display_value, excluded.display_value)`,
+        label: sql`COALESCE(excluded.label, entity_contact_points.label)`,
+        source: contactPoint.source,
+        connector_config_id: sql`COALESCE(excluded.connector_config_id, entity_contact_points.connector_config_id)`,
+        created_by_user_id: sql`COALESCE(excluded.created_by_user_id, entity_contact_points.created_by_user_id)`,
+        verified_at: sql`CASE
+          WHEN entity_contact_points.verified_at IS NULL THEN excluded.verified_at
+          WHEN excluded.verified_at IS NULL THEN entity_contact_points.verified_at
+          WHEN excluded.verified_at > entity_contact_points.verified_at THEN excluded.verified_at
+          ELSE entity_contact_points.verified_at
+        END`,
+        last_contacted_at: sql`CASE
+          WHEN entity_contact_points.last_contacted_at IS NULL THEN excluded.last_contacted_at
+          WHEN excluded.last_contacted_at IS NULL THEN entity_contact_points.last_contacted_at
+          WHEN excluded.last_contacted_at > entity_contact_points.last_contacted_at THEN excluded.last_contacted_at
+          ELSE entity_contact_points.last_contacted_at
+        END`,
+        updated_at: ctx.now,
+      }),
+    )
+    .execute();
 }
 
 export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: ConfirmOptions): Promise<ConfirmResult> {
@@ -538,27 +683,49 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
 
     // Target selection.
     const targetId: string | null = opts.mergeIntoEntityId ?? row.candidate_entity_id;
-    if (!targetId) {
-      throw new ResolveError("CANDIDATE_MISSING", "row has no candidate_entity_id and no mergeIntoEntityId provided", {
-        currentRow: row,
-      });
-    }
     const pickedDifferent =
       opts.mergeIntoEntityId !== undefined &&
       row.candidate_entity_id !== null &&
       opts.mergeIntoEntityId !== row.candidate_entity_id;
 
     // 2. Existence check + type check.
-    let target = await fetchEntity(trxCtx, targetId);
-    if (!target) {
-      throw new ResolveError("TARGET_DELETED", "target entity deleted between candidate-gen and confirm", {
-        currentRow: row,
+    let target: Entity;
+    if (!targetId) {
+      if (!row.seed_source || !row.seed_source_id) {
+        throw new ResolveError(
+          "CANDIDATE_MISSING",
+          "row has no candidate_entity_id and no mergeIntoEntityId provided",
+          {
+            currentRow: row,
+          },
+        );
+      }
+      target = await trxCtx.entityRepo.upsertEntityFromTool({
+        name: row.proposed_name,
+        sourceType: row.entity_type,
+        source: row.seed_source,
+        sourceId: row.seed_source_id,
       });
+    } else {
+      const fetchedTarget = await fetchEntity(trxCtx, targetId);
+      if (!fetchedTarget) {
+        throw new ResolveError("TARGET_DELETED", "target entity deleted between candidate-gen and confirm", {
+          currentRow: row,
+        });
+      }
+      if (fetchedTarget.source_type !== row.entity_type) {
+        throw new ResolveError("TYPE_MISMATCH", "mergeIntoEntityId entity_type does not match queue row", {
+          target: fetchedTarget.source_type,
+          row: row.entity_type,
+        });
+      }
+      target = fetchedTarget;
     }
-    if (target.source_type !== row.entity_type) {
-      throw new ResolveError("TYPE_MISMATCH", "mergeIntoEntityId entity_type does not match queue row", {
-        target: target.source_type,
-        row: row.entity_type,
+    if (row.seed_source && row.seed_source_id) {
+      await trxCtx.entityRepo.upsertSourceRef({
+        entityId: target.id,
+        source: row.seed_source,
+        sourceId: row.seed_source_id,
       });
     }
 
@@ -591,7 +758,11 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         );
       }
       if (stales.length === 1) {
-        await mergeStaleEntityPortable(trxCtx, stales[0], target);
+        await mergeEntitiesInTransaction(trxCtx.db, {
+          survivorId: target.id,
+          loserId: stales[0].id,
+          userId: trxCtx.userId,
+        });
         mergedStaleEntityId = stales[0].id;
       }
     }
@@ -624,6 +795,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
     if (row.entity_type === "company") {
       await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
+    await writeReviewSourceRef(trxCtx, row, target.id);
     await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // Pick-different: write rejection against original candidate so it isn't re-suggested.
@@ -654,6 +826,7 @@ async function findReResolveMatches(ctx: ResolveTxnCtx, row: QueueRow, excludeEn
     .selectFrom("entities")
     .selectAll()
     .where("source_type", "=", row.entity_type)
+    .where(whereLiveEntity())
     .execute();
   const excluded = new Set(excludeEntityIds.filter((id) => id != null));
   const out: Entity[] = [];
@@ -667,6 +840,15 @@ async function findReResolveMatches(ctx: ResolveTxnCtx, row: QueueRow, excludeEn
     if (aliases.some((a) => normalizeName(a) === normalized)) out.push(c);
   }
   return out;
+}
+
+async function writeReviewSourceRef(ctx: ResolveTxnCtx, row: QueueRow, entityId: string): Promise<void> {
+  if (!row.source || !row.source_id) return;
+  await ctx.entityRepo.upsertSourceRef({
+    entityId,
+    source: row.source,
+    sourceId: row.source_id,
+  });
 }
 
 export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: RejectOptions): Promise<RejectResult> {
@@ -741,13 +923,11 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (reResolvedToExisting) {
       target = matches[0];
     } else {
-      // 3. Create new entity. Decision recorded in plan §Helpers:
-      // - source/sourceId derived from the first evidence row so source_refs
-      //   carries honest provenance. When there is no evidence (rare —
-      //   ECR-01 always writes at least one), fall back to a synthetic
-      //   `entity-review` source.
-      const sourceFromEvidence = evidence[0]?.source ?? "entity-review";
-      const sourceId = `review:${reviewId}`;
+      // 3. Create new entity. Connector-backed queue rows carry source/sourceId
+      // from proposal time; older rows fall back to the evidence source and a
+      // synthetic review id.
+      const sourceFromEvidence = row.source ?? evidence[0]?.source ?? "entity-review";
+      const sourceId = row.source_id ?? `review:${reviewId}`;
       if (row.entity_type === "person") {
         const personData: {
           name: string;
@@ -810,6 +990,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     if (row.entity_type === "company") {
       await finalizeLinkedDomainCandidates(trxCtx.db, row.id, target.id);
     }
+    await writeReviewSourceRef(trxCtx, row, target.id);
     await reviveDeferredRelationsForEntity(trxCtx, target);
 
     // 6. Mark resolved.

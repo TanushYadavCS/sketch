@@ -10,7 +10,7 @@
  * Route ordering: static paths (/all-files, /search, /sources, /files/...)
  * must be registered before dynamic /:id to prevent param capture.
  */
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
@@ -21,26 +21,43 @@ import {
   loadCanvasProvider,
   resolveConnectorCredentials,
 } from "../connectors/credential-source";
-import { createEmbeddingProvider } from "../connectors/embeddings";
+import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/envelope-metadata";
+import type { EmailAddr } from "../connectors/email/normalized-email";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
+import {
+  createEnrichmentEmbeddingProvider,
+  createEnrichmentGenerator,
+  resolveOpenRouterEnrichmentConfig,
+} from "../connectors/enrichment-providers";
 import { buildCredentialHint } from "../connectors/fireflies";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
 import { VALID_CONNECTOR_TYPES, getConnector } from "../connectors/registry";
-import { browseFiles, getFileContent, listIndexedSources, search, searchFiles } from "../connectors/search";
+import {
+  browseFiles,
+  filterAccessibleFileIds,
+  getFileContent,
+  listIndexedSources,
+  search,
+  searchFiles,
+} from "../connectors/search";
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import { parseCredentials, serializeCredentials } from "../connectors/sync-utils";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
-import type { createConnectorRepository } from "../db/repositories/connectors";
-import { createEntityRepository } from "../db/repositories/entities";
+import { createConnectorRepository } from "../db/repositories/connectors";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createMcpServerRepository } from "../db/repositories/mcp-servers";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import {
-  denyIfCannotEdit,
-  denyIfCannotRead,
+  type ConnectorPermissions,
+  connectorPermissions,
   denyIfNotAdmin,
+  denyUnless,
   getContentViewer,
   getFileViewer,
   isAdmin,
@@ -48,6 +65,67 @@ import {
 
 type ConnectorRepo = ReturnType<typeof createConnectorRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
+
+function emailLabel(addr: EmailAddr): string {
+  return addr.name?.trim() || addr.email;
+}
+
+function sortBySentAtAsc<T extends { sent_at: string | null; indexed_file_id: string }>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    if (a.sent_at && b.sent_at && a.sent_at !== b.sent_at) return a.sent_at.localeCompare(b.sent_at);
+    if (a.sent_at && !b.sent_at) return -1;
+    if (!a.sent_at && b.sent_at) return 1;
+    return a.indexed_file_id.localeCompare(b.indexed_file_id);
+  });
+}
+
+interface IndexedFileRowForResponse {
+  id: string;
+  file_name: string;
+  file_type: string | null;
+  content_category: string;
+  source: string;
+  source_path: string | null;
+  provider_url: string | null;
+  synced_at: string;
+  source_created_at: string | null;
+  source_updated_at: string | null;
+  summary: string | null;
+  summary_status: string;
+  embedding_status: string;
+}
+
+/** Shared mapping from an indexed_files row to the Files-list response shape. */
+function mapIndexedFileRow(
+  f: IndexedFileRowForResponse,
+  accessInfo: { count: number } | undefined,
+  rollup?: { activityCount: number; summary?: string },
+) {
+  return {
+    id: f.id,
+    fileName: f.file_name,
+    fileType: f.file_type,
+    contentCategory: f.content_category,
+    source: f.source,
+    sourcePath: f.source_path,
+    providerUrl: f.provider_url,
+    syncedAt: f.synced_at,
+    sourceCreatedAt: f.source_created_at,
+    sourceUpdatedAt: f.source_updated_at,
+    hasSummary: !!f.summary,
+    summaryStatus: f.summary_status,
+    embeddingStatus: f.embedding_status,
+    accessScope: accessInfo ? ("restricted" as const) : ("unrestricted" as const),
+    accessCount: accessInfo?.count ?? null,
+    ...(rollup
+      ? {
+          resultKind: "crm_object" as const,
+          activityCount: rollup.activityCount,
+          ...(rollup.summary ? { rollupSummary: rollup.summary } : {}),
+        }
+      : {}),
+  };
+}
 
 /** Run sync in background. Enrichment runs separately on the scheduled sync cycle. */
 function syncInBackground(
@@ -158,11 +236,57 @@ export function connectorRoutes(
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
       | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
+      | "OPENROUTER_API_KEY"
     >
   >,
 ) {
   const routes = new Hono();
   const fileSharesRepo = createFileSharesRepository(db);
+
+  type ConfigForPermissions = {
+    connector_type: string;
+    created_by: string;
+    sync_status: string;
+  };
+  type ConfigForMetadata = ConfigForPermissions & {
+    credential_hint?: string | null;
+  };
+
+  function permissionFields(permissions: ConnectorPermissions) {
+    return {
+      isOwner: permissions.isOwner,
+      canManage: permissions.canManage,
+      canDisconnect: permissions.canDisconnect,
+      canSync: permissions.canSync,
+      canChangeScope: permissions.canChangeScope,
+      canUpdateCredentials: permissions.canUpdateCredentials,
+      canBrowseScope: permissions.canBrowseScope,
+      canEnrich: permissions.canEnrich,
+    };
+  }
+
+  function permissionsForConfig(c: Context, config: ConfigForPermissions) {
+    const meta = getConnector(config.connector_type as ConnectorType);
+    const permissions = connectorPermissions(c, config, meta.perUserAuth);
+    return { meta, permissions };
+  }
+
+  async function metadataFields(c: Context, config: ConfigForMetadata, permissions: ConnectorPermissions) {
+    const owner = userRepo ? await userRepo.findById(config.created_by) : undefined;
+    return {
+      credentialHint: isAdmin(c) || permissions.isOwner ? (config.credential_hint ?? null) : null,
+      createdByName: owner?.name ?? null,
+      createdByEmail: owner?.email ?? null,
+    };
+  }
+
+  function configVisible(config: { connector_type: string }): boolean {
+    return !!getConnector(config.connector_type as ConnectorType);
+  }
+
+  function configEnabled(config: { connector_type: string; sync_status?: string }): boolean {
+    return configVisible(config) && config.sync_status !== "disabled";
+  }
 
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
     if (!userRepo) return [];
@@ -201,21 +325,34 @@ export function connectorRoutes(
    * filtered to admins or the row's owner.
    */
   routes.get("/", async (c) => {
-    const sub = c.get("sub");
-    const callerIsAdmin = isAdmin(c);
     const viewer = getFileViewer(c);
-    const configs = await connectorRepo.listConfigs();
+    const [configs, users] = await Promise.all([connectorRepo.listConfigs(), userRepo ? userRepo.list() : []]);
+    const teamMemberCount = users.filter((user) => user.type !== "agent").length;
+    const connectorOwnersByType = new Map<string, Set<string>>();
+
+    for (const cfg of configs) {
+      if (!configVisible(cfg)) continue;
+      const meta = getConnector(cfg.connector_type as ConnectorType);
+      if (!meta.perUserAuth) continue;
+      const owners = connectorOwnersByType.get(cfg.connector_type) ?? new Set<string>();
+      owners.add(cfg.created_by);
+      connectorOwnersByType.set(cfg.connector_type, owners);
+    }
+
+    const connectorMemberCounts = Object.fromEntries(
+      [...connectorOwnersByType.entries()].map(([connectorType, owners]) => [connectorType, owners.size]),
+    );
 
     const visible = configs.filter((cfg) => {
-      const meta = getConnector(cfg.connector_type as ConnectorType);
-      if (!meta.perUserAuth) return true;
-      if (callerIsAdmin) return true;
-      return cfg.created_by === sub;
+      if (!configVisible(cfg)) return false;
+      const { permissions } = permissionsForConfig(c, cfg);
+      return permissions.canView;
     });
 
     const connectorsWithCounts = await Promise.all(
       visible.map(async (cfg) => {
-        const meta = getConnector(cfg.connector_type as ConnectorType);
+        const { meta, permissions } = permissionsForConfig(c, cfg);
+        const metadata = await metadataFields(c, cfg, permissions);
         const fileCount = await connectorRepo.countFilesByConnector(cfg.id, viewer);
         return {
           id: cfg.id,
@@ -227,15 +364,17 @@ export function connectorRoutes(
           lastSyncedAt: cfg.last_synced_at,
           errorMessage: cfg.error_message,
           createdBy: cfg.created_by,
+          ...metadata,
           createdAt: cfg.created_at,
           fileCount,
           perUserAuth: meta.perUserAuth,
           requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
+          ...permissionFields(permissions),
         };
       }),
     );
 
-    return c.json({ connectors: connectorsWithCounts });
+    return c.json({ connectors: connectorsWithCounts, teamMemberCount, connectorMemberCounts });
   });
 
   routes.get("/credential-source", async (c) => {
@@ -380,7 +519,7 @@ export function connectorRoutes(
     const config = await connectorRepo.createConfig({
       connectorType,
       authType: connectorType === "google_drive" ? "oauth" : "api_key",
-      credentials: serializeCredentials(storedCredentials, appConfig?.ENCRYPTION_KEY),
+      credentials: serializeCredentials(storedCredentials),
       credentialSource: "canvas",
       scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,
       syncStatus: needsScope ? "paused" : "pending",
@@ -468,7 +607,7 @@ export function connectorRoutes(
     const config = await connectorRepo.createConfig({
       connectorType,
       authType: parsed.data.authType,
-      credentials: serializeCredentials(credentials, appConfig?.ENCRYPTION_KEY),
+      credentials: serializeCredentials(credentials),
       credentialSource: "local",
       scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,
       createdBy: sub,
@@ -498,19 +637,23 @@ export function connectorRoutes(
     }
 
     const viewer = getFileViewer(c);
-    const configs = await connectorRepo.listByOwner(sub);
+    const configs = (await connectorRepo.listByOwner(sub)).filter(configVisible);
     const result = await Promise.all(
       configs.map(async (config) => {
+        const { permissions } = permissionsForConfig(c, config);
+        const metadata = await metadataFields(c, config, permissions);
         const fileCount = await connectorRepo.countFilesByConnector(config.id, viewer);
         return {
           id: config.id,
           connectorType: config.connector_type,
-          credentialHint: config.credential_hint,
+          createdBy: config.created_by,
+          ...metadata,
           syncStatus: config.sync_status,
           lastSyncedAt: config.last_synced_at,
           errorMessage: config.error_message,
           createdAt: config.created_at,
           fileCount,
+          ...permissionFields(permissions),
         };
       }),
     );
@@ -527,11 +670,12 @@ export function connectorRoutes(
     const access = c.req.query("access") || undefined;
 
     const viewer = getFileViewer(c);
-    const filters = { connectorType: source, category, status, access };
+    const filters = { connectorType: source, excludedSources: [], category, status, access };
+    // Collapse CRM activity members under their parent object rows.
     const [files, total, enrichedTotal] = await Promise.all([
-      connectorRepo.listAllFiles({ limit, offset, viewer, ...filters }),
-      connectorRepo.countAllFiles({ viewer, ...filters }),
-      connectorRepo.countEnrichedFiles({ viewer, ...filters }),
+      connectorRepo.listAllFiles({ limit, offset, viewer, collapseRollups: true, ...filters }),
+      connectorRepo.countAllFiles({ viewer, collapseRollups: true, ...filters }),
+      connectorRepo.countEnrichedFiles({ viewer, collapseRollups: true, ...filters }),
     ]);
 
     const fileIds = files.map((f) => f.id);
@@ -540,30 +684,58 @@ export function connectorRoutes(
         ? await connectorRepo.getFileAccessMap(fileIds)
         : new Map<string, { type: string; count: number }>();
 
+    // Annotate rollup anchors (parent objects with activities) with their live
+    // activity count + (optional) generated summary. Count drives the badge/expand
+    // so it works before summaries exist (they are async and capped).
+    const anchors = files
+      .filter((f) => f.rollup_group_id && f.rollup_group_id === f.provider_file_id)
+      .map((f) => ({ connectorConfigId: f.connector_config_id, groupId: f.provider_file_id }));
+    const [countMap, summaryMap] = await Promise.all([
+      connectorRepo.getActivityCounts(anchors),
+      connectorRepo.getRollupSummaries(anchors),
+    ]);
+
     return c.json({
       files: files.map((f) => {
-        const accessInfo = accessMap.get(f.id);
-        return {
-          id: f.id,
-          fileName: f.file_name,
-          fileType: f.file_type,
-          contentCategory: f.content_category,
-          source: f.source,
-          sourcePath: f.source_path,
-          providerUrl: f.provider_url,
-          syncedAt: f.synced_at,
-          sourceCreatedAt: f.source_created_at,
-          sourceUpdatedAt: f.source_updated_at,
-          hasSummary: !!f.summary,
-          summaryStatus: f.summary_status,
-          embeddingStatus: f.embedding_status,
-          accessScope: accessInfo ? "restricted" : "unrestricted",
-          accessCount: accessInfo?.count ?? null,
-        };
+        const key = `${f.connector_config_id}::${f.provider_file_id}`;
+        const count = f.rollup_group_id === f.provider_file_id ? (countMap.get(key) ?? 0) : 0;
+        const rollup = count > 0 ? { activityCount: count, summary: summaryMap.get(key)?.summary } : undefined;
+        return mapIndexedFileRow(f, accessMap.get(f.id), rollup);
       }),
       total,
       enrichedTotal,
       hasMore: offset + limit < total,
+    });
+  });
+
+  /** Activity members rolled up under a CRM object anchor (for the expand action). */
+  routes.get("/all-files/:id/activities", async (c) => {
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 100, 1), 500);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const viewer = getFileViewer(c);
+
+    const anchor = await connectorRepo.getRollupAnchorRef(c.req.param("id"), viewer);
+    if (!anchor) {
+      return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
+    }
+
+    const members = await connectorRepo.listGroupActivities({
+      connectorConfigId: anchor.connector_config_id,
+      groupId: anchor.provider_file_id,
+      viewer,
+      limit,
+      offset,
+    });
+
+    const memberIds = members.map((f) => f.id);
+    const accessMap =
+      memberIds.length > 0
+        ? await connectorRepo.getFileAccessMap(memberIds)
+        : new Map<string, { type: string; count: number }>();
+
+    return c.json({
+      files: members.map((f) => mapIndexedFileRow(f, accessMap.get(f.id))),
+      hasMore: members.length === limit,
     });
   });
 
@@ -592,6 +764,8 @@ export function connectorRoutes(
       userEmails,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+      openRouterApiKey: appConfig?.OPENROUTER_API_KEY,
+      settingsEncryptionKey: appConfig?.ENCRYPTION_KEY,
     });
     return c.json({ results });
   });
@@ -676,6 +850,7 @@ export function connectorRoutes(
         "entity_mentions.context_snippet",
       ])
       .where("entity_mentions.indexed_file_id", "=", fileId)
+      .where(whereLiveEntity())
       .execute();
 
     // Dedupe entities (a file may mention same entity in multiple chunks)
@@ -693,8 +868,23 @@ export function connectorRoutes(
         subtype: m.subtype,
       }));
 
+    // For email files, hand the detail sheet enough to fetch the whole visible
+    // thread. Safe metadata for a file the caller can already open; also lets a
+    // search result opened on `hitFileId` render its conversation.
+    let emailThread: { connectorId: string; threadKey: string } | undefined;
+    if (file.fileType === "email_message") {
+      const env = await db
+        .selectFrom("email_message_envelopes")
+        .select(["connector_config_id", "thread_id"])
+        .where("indexed_file_id", "=", fileId)
+        .executeTakeFirst();
+      if (env) {
+        emailThread = { connectorId: env.connector_config_id, threadKey: env.thread_id ?? fileId };
+      }
+    }
+
     return c.json({
-      file,
+      file: { ...file, emailThread },
       access: {
         scope: accessDetails.length > 0 ? "restricted" : "unrestricted",
         members: accessDetails.map((a) => ({
@@ -715,12 +905,10 @@ export function connectorRoutes(
    * Manual file share management. Connector reconcile never touches these rows.
    *
    * Authz:
-   *   - GET, POST, DELETE individual shares: admin OR connector owner
-   *     (admins always have manage access; connector owners can share files
-   *     they ingested)
+   *   - GET, POST, DELETE individual shares: owning connector canManage
    *   - PUT share-everyone: admin only (org-wide flag)
-   *   - PUT batch: admin OR connector owner for the emails delta, plus admin
-   *     gate when shareWithEveryone is in the body
+   *   - PUT batch: canManage for the emails delta, plus admin gate when
+   *     shareWithEveryone is in the body
    */
   const shareEmailBodySchema = z.object({ email: z.string().email().toLowerCase() });
   const shareEveryoneBodySchema = z.object({ enabled: z.boolean() });
@@ -729,17 +917,19 @@ export function connectorRoutes(
     shareWithEveryone: z.boolean().optional(),
   });
 
-  async function loadFileForShare(fileId: string) {
+  async function loadFileForShare(c: Context, fileId: string) {
     const config = await connectorRepo.findConfigByFileId(fileId);
     if (!config) return null;
-    return { connectorConfigId: config.id, createdBy: config.created_by };
+    if (!configEnabled(config)) return null;
+    const { permissions } = permissionsForConfig(c, config);
+    return { connectorConfigId: config.id, permissions };
   }
 
   routes.get("/files/:fileId/shares", async (c) => {
     const fileId = c.req.param("fileId");
-    const fileOwner = await loadFileForShare(fileId);
+    const fileOwner = await loadFileForShare(c, fileId);
     if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
-    const denied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    const denied = denyUnless(c, fileOwner.permissions.canManage);
     if (denied) return denied;
     const shares = await fileSharesRepo.listForFile(fileId);
     const shareWithEveryone = await fileSharesRepo.getOrgWide(fileId);
@@ -751,9 +941,9 @@ export function connectorRoutes(
 
   routes.post("/files/:fileId/shares", async (c) => {
     const fileId = c.req.param("fileId");
-    const fileOwner = await loadFileForShare(fileId);
+    const fileOwner = await loadFileForShare(c, fileId);
     if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
-    const denied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    const denied = denyUnless(c, fileOwner.permissions.canManage);
     if (denied) return denied;
     const body = await c.req.json().catch(() => ({}));
     const parsed = shareEmailBodySchema.safeParse(body);
@@ -770,9 +960,9 @@ export function connectorRoutes(
   routes.delete("/files/:fileId/shares/:email", async (c) => {
     const fileId = c.req.param("fileId");
     const email = decodeURIComponent(c.req.param("email"));
-    const fileOwner = await loadFileForShare(fileId);
+    const fileOwner = await loadFileForShare(c, fileId);
     if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
-    const denied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    const denied = denyUnless(c, fileOwner.permissions.canManage);
     if (denied) return denied;
     await fileSharesRepo.revokeFromEmail(fileId, email);
     return c.json({ success: true });
@@ -780,7 +970,7 @@ export function connectorRoutes(
 
   routes.put("/files/:fileId/share-everyone", async (c) => {
     const fileId = c.req.param("fileId");
-    const fileOwner = await loadFileForShare(fileId);
+    const fileOwner = await loadFileForShare(c, fileId);
     if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
@@ -800,9 +990,9 @@ export function connectorRoutes(
    */
   routes.put("/files/:fileId/shares", async (c) => {
     const fileId = c.req.param("fileId");
-    const fileOwner = await loadFileForShare(fileId);
+    const fileOwner = await loadFileForShare(c, fileId);
     if (!fileOwner) return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
-    const editDenied = denyIfCannotEdit(c, { created_by: fileOwner.createdBy });
+    const editDenied = denyUnless(c, fileOwner.permissions.canManage);
     if (editDenied) return editDenied;
     const body = await c.req.json().catch(() => ({}));
     const parsed = shareBatchBodySchema.safeParse(body);
@@ -930,7 +1120,8 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const connector = getConnector(parsed.data.connectorType as ConnectorType);
+    const connectorType = parsed.data.connectorType as ConnectorType;
+    const connector = getConnector(connectorType);
     if (!connector.browse) {
       return c.json(
         { error: { code: "NOT_SUPPORTED", message: "This connector does not support scope browsing" } },
@@ -962,12 +1153,12 @@ export function connectorRoutes(
   /** Browse scope items for an existing connector (generic). */
   routes.get("/:id/browse", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const connector = getConnector(config.connector_type as ConnectorType);
-    const denied = denyIfCannotRead(c, config, connector.perUserAuth);
+    const { meta: connector, permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canBrowseScope);
     if (denied) return denied;
 
     if (!connector.browseExisting && !connector.browse) {
@@ -998,7 +1189,7 @@ export function connectorRoutes(
         if (refreshed) {
           credentials = refreshed;
           await connectorRepo.updateConfig(config.id, {
-            credentials: serializeCredentials(credentials, appConfig?.ENCRYPTION_KEY),
+            credentials: serializeCredentials(credentials),
           });
         }
       }
@@ -1027,12 +1218,12 @@ export function connectorRoutes(
   /** Browse folder/subtree children for tree-type pickers (e.g. Google Drive). */
   routes.get("/:id/browse-children/:parentId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const connector = getConnector(config.connector_type as ConnectorType);
-    const denied = denyIfCannotRead(c, config, connector.perUserAuth);
+    const { meta: connector, permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canBrowseScope);
     if (denied) return denied;
 
     if (!connector.browseChildren) {
@@ -1050,7 +1241,7 @@ export function connectorRoutes(
         if (refreshed) {
           credentials = refreshed;
           await connectorRepo.updateConfig(config.id, {
-            credentials: serializeCredentials(credentials, appConfig?.ENCRYPTION_KEY),
+            credentials: serializeCredentials(credentials),
           });
         }
       }
@@ -1109,7 +1300,7 @@ export function connectorRoutes(
    */
   routes.get("/google-drive/browse/:connectorId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1117,7 +1308,8 @@ export function connectorRoutes(
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Google Drive" } }, 400);
     }
 
-    const denied = denyIfCannotRead(c, config, getConnector("google_drive").perUserAuth);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canBrowseScope);
     if (denied) return denied;
 
     try {
@@ -1128,7 +1320,7 @@ export function connectorRoutes(
       // Persist refreshed token if it changed
       if (!resolved.accessTokenProvider && validCreds.access_token !== credentials.access_token) {
         await connectorRepo.updateConfig(config.id, {
-          credentials: serializeCredentials(validCreds, appConfig?.ENCRYPTION_KEY),
+          credentials: serializeCredentials(validCreds),
         });
       }
 
@@ -1164,7 +1356,7 @@ export function connectorRoutes(
    */
   routes.get("/google-drive/browse/:connectorId/folder/:folderId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
@@ -1172,7 +1364,8 @@ export function connectorRoutes(
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Google Drive" } }, 400);
     }
 
-    const denied = denyIfCannotRead(c, config, getConnector("google_drive").perUserAuth);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canBrowseScope);
     if (denied) return denied;
 
     try {
@@ -1182,7 +1375,7 @@ export function connectorRoutes(
 
       if (!resolved.accessTokenProvider && validCreds.access_token !== credentials.access_token) {
         await connectorRepo.updateConfig(config.id, {
-          credentials: serializeCredentials(validCreds, appConfig?.ENCRYPTION_KEY),
+          credentials: serializeCredentials(validCreds),
         });
       }
 
@@ -1220,18 +1413,19 @@ export function connectorRoutes(
   /** Browse ClickUp workspaces for an existing connector (uses stored credentials). */
   routes.get("/clickup/browse/:connectorId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     if (config.connector_type !== "clickup") {
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not ClickUp" } }, 400);
     }
 
-    const denied = denyIfCannotRead(c, config, getConnector("clickup").perUserAuth);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canBrowseScope);
     if (denied) return denied;
 
     try {
-      const credentials = parseCredentials(config.credentials, appConfig?.ENCRYPTION_KEY) as {
+      const credentials = parseCredentials(config.credentials) as {
         type: string;
         api_key?: string;
         access_token?: string;
@@ -1298,18 +1492,19 @@ export function connectorRoutes(
   /** Browse Notion root pages for an existing connector (uses stored credentials). */
   routes.get("/notion/browse/:connectorId", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("connectorId"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
     if (config.connector_type !== "notion") {
       return c.json({ error: { code: "INVALID_TYPE", message: "Connector is not Notion" } }, 400);
     }
 
-    const denied = denyIfCannotRead(c, config, getConnector("notion").perUserAuth);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canBrowseScope);
     if (denied) return denied;
 
     try {
-      const credentials = parseCredentials(config.credentials, appConfig?.ENCRYPTION_KEY) as {
+      const credentials = parseCredentials(config.credentials) as {
         type: string;
         api_key?: string;
         access_token?: string;
@@ -1338,14 +1533,15 @@ export function connectorRoutes(
   /** Get a single connector. */
   routes.get("/:id", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configVisible(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const meta = getConnector(config.connector_type as ConnectorType);
-    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    const { meta, permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canView);
     if (denied) return denied;
 
+    const metadata = await metadataFields(c, config, permissions);
     const fileCount = await connectorRepo.countFilesByConnector(config.id, getFileViewer(c));
     return c.json({
       connector: {
@@ -1358,10 +1554,12 @@ export function connectorRoutes(
         lastSyncedAt: config.last_synced_at,
         errorMessage: config.error_message,
         createdBy: config.created_by,
+        ...metadata,
         createdAt: config.created_at,
         fileCount,
         perUserAuth: meta.perUserAuth,
         requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
+        ...permissionFields(permissions),
       },
     });
   });
@@ -1369,17 +1567,263 @@ export function connectorRoutes(
   /** Count entities associated with a connector's files (for disconnect confirmation). */
   routes.get("/:id/entity-count", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configVisible(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
-    const meta = getConnector(config.connector_type as ConnectorType);
-    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canView);
     if (denied) return denied;
 
-    const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
+    const fileIds = await connectorRepo.getOwnedFileIdsForConnector(config.id);
     const entityRepo = createEntityRepository(db);
     const count = await entityRepo.countEntitiesForFiles(fileIds);
     return c.json({ count });
+  });
+
+  /**
+   * Suppression transparency: what the shared email layer filtered out before
+   * indexing, and why. Connector-scoped (owner/admin) — the connector owner is a
+   * party to every message in their own perUserAuth mailbox, so no per-message
+   * visibility predicate is needed here.
+   *
+   * Counts-only: `email_suppressed_messages` persists only the reason + provider
+   * IDs, so sender/subject are intentionally absent (see GMAIL_CONNECTOR_UI §U3).
+   */
+  routes.get("/:id/suppressed-emails", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config || !configVisible(config)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canView);
+    if (denied) return denied;
+
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+
+    const [countRows, recentRows, totalRow] = await Promise.all([
+      db
+        .selectFrom("email_suppressed_messages")
+        .where("connector_config_id", "=", config.id)
+        .groupBy("reason")
+        .select((eb) => ["reason", eb.fn.count<number>("id").as("count")])
+        .execute(),
+      db
+        .selectFrom("email_suppressed_messages")
+        .where("connector_config_id", "=", config.id)
+        .select(["provider_file_id", "provider_message_id", "thread_id", "reason", "observed_at"])
+        .orderBy("observed_at", "desc")
+        .limit(limit)
+        .offset(offset)
+        .execute(),
+      db
+        .selectFrom("email_suppressed_messages")
+        .where("connector_config_id", "=", config.id)
+        .select((eb) => eb.fn.count<number>("id").as("count"))
+        .executeTakeFirst(),
+    ]);
+
+    const countsByReason: Record<string, number> = {
+      bulk: 0,
+      operational: 0,
+      role_account: 0,
+      inbound_only: 0,
+      missing_counterparty: 0,
+    };
+    for (const row of countRows) {
+      countsByReason[row.reason] = Number(row.count);
+    }
+    const total = Number(totalRow?.count ?? 0);
+
+    return c.json({
+      countsByReason,
+      recent: recentRows.map((row) => ({
+        providerFileId: row.provider_file_id,
+        providerMessageId: row.provider_message_id,
+        threadId: row.thread_id,
+        reason: row.reason,
+        observedAt: row.observed_at,
+      })),
+      total,
+      hasMore: offset + recentRows.length < total,
+    });
+  });
+
+  /**
+   * Thread-grouped email for the connector manage view. One row per conversation
+   * (`COALESCE(thread_id, indexed_file_id)`), ordered by latest activity.
+   * Connector-scoped (owner/admin): returns only envelope metadata (subject,
+   * participants, counts), never message bodies, so no per-viewer content
+   * predicate is needed here — see the detail route for body access.
+   */
+  routes.get("/:id/email-threads", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config || !configVisible(config)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canView);
+    if (denied) return denied;
+
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const threadKeyExpr = sql<string>`coalesce(email_message_envelopes.thread_id, email_message_envelopes.indexed_file_id)`;
+
+    const [pageRows, totalRow] = await Promise.all([
+      db
+        .selectFrom("email_message_envelopes")
+        .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+        .where("indexed_files.is_archived", "=", 0)
+        .where("email_message_envelopes.connector_config_id", "=", config.id)
+        .select((eb) => [
+          threadKeyExpr.as("thread_key"),
+          eb.fn.count<number>("email_message_envelopes.indexed_file_id").as("message_count"),
+        ])
+        .groupBy(threadKeyExpr)
+        .orderBy(sql`max(email_message_envelopes.sent_at)`, "desc")
+        .limit(limit)
+        .offset(offset)
+        .execute(),
+      db
+        .selectFrom((eb) =>
+          eb
+            .selectFrom("email_message_envelopes")
+            .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+            .where("indexed_files.is_archived", "=", 0)
+            .where("email_message_envelopes.connector_config_id", "=", config.id)
+            .select(threadKeyExpr.as("thread_key"))
+            .groupBy(threadKeyExpr)
+            .as("t"),
+        )
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .executeTakeFirst(),
+    ]);
+
+    const keys = pageRows.map((row) => row.thread_key);
+    const envelopes =
+      keys.length > 0
+        ? await db
+            .selectFrom("email_message_envelopes")
+            .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+            .where("indexed_files.is_archived", "=", 0)
+            .where("email_message_envelopes.connector_config_id", "=", config.id)
+            .where((eb) => eb(threadKeyExpr, "in", keys))
+            .select([
+              "email_message_envelopes.indexed_file_id",
+              "email_message_envelopes.thread_id",
+              "email_message_envelopes.subject",
+              "email_message_envelopes.sent_at",
+              "email_message_envelopes.from_json",
+              "email_message_envelopes.to_json",
+              "email_message_envelopes.cc_json",
+            ])
+            .execute()
+        : [];
+
+    const byThread = new Map<string, typeof envelopes>();
+    for (const env of envelopes) {
+      const key = env.thread_id ?? env.indexed_file_id;
+      const group = byThread.get(key) ?? [];
+      group.push(env);
+      byThread.set(key, group);
+    }
+
+    const total = Number(totalRow?.count ?? 0);
+    const threads = pageRows.map((row) => {
+      const group = sortBySentAtAsc(byThread.get(row.thread_key) ?? []);
+      const latest = group[group.length - 1];
+      const participants = new Map<string, string>();
+      for (const env of group) {
+        for (const addr of [
+          parseEmailAddrJson(env.from_json),
+          ...parseEmailAddrListJson(env.to_json),
+          ...parseEmailAddrListJson(env.cc_json),
+        ]) {
+          if (!participants.has(addr.email)) participants.set(addr.email, emailLabel(addr));
+        }
+      }
+      return {
+        threadKey: row.thread_key,
+        latestIndexedFileId: latest?.indexed_file_id ?? row.thread_key,
+        latestSubject: latest?.subject ?? null,
+        messageCount: Number(row.message_count),
+        lastActivity: latest?.sent_at ?? null,
+        participants: [...participants.values()].slice(0, 6),
+      };
+    });
+
+    return c.json({ threads, total, hasMore: offset + threads.length < total });
+  });
+
+  /**
+   * Structured thread detail (time-ordered messages with bodies).
+   *
+   * Content auth is load-bearing: connector metadata access gates route access, but
+   * returning message *bodies* additionally requires file-content visibility —
+   * the same predicate as GET /files/:fileId/content. A non-bypass admin can
+   * manage the connector yet still cannot read private bodies. If no message is
+   * content-visible, respond 403 without leaking which messages exist.
+   */
+  routes.get("/:id/email-threads/:threadKey", async (c) => {
+    const config = await connectorRepo.findConfigById(c.req.param("id"));
+    if (!config || !configVisible(config)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
+    }
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canView);
+    if (denied) return denied;
+
+    const threadKey = c.req.param("threadKey");
+    const threadKeyExpr = sql<string>`coalesce(email_message_envelopes.thread_id, email_message_envelopes.indexed_file_id)`;
+    const rows = await db
+      .selectFrom("email_message_envelopes")
+      .innerJoin("indexed_files", "indexed_files.id", "email_message_envelopes.indexed_file_id")
+      .where("indexed_files.is_archived", "=", 0)
+      .where("email_message_envelopes.connector_config_id", "=", config.id)
+      .where((eb) => eb(threadKeyExpr, "=", threadKey))
+      .select([
+        "email_message_envelopes.indexed_file_id",
+        "email_message_envelopes.subject",
+        "email_message_envelopes.sent_at",
+        "email_message_envelopes.from_json",
+        "email_message_envelopes.to_json",
+        "email_message_envelopes.cc_json",
+        "email_message_envelopes.provider_url",
+        "indexed_files.content",
+      ])
+      .orderBy("email_message_envelopes.sent_at", "asc")
+      .execute();
+
+    if (rows.length === 0) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Thread not found" } }, 404);
+    }
+
+    // Mirror GET /files/:fileId/content: admins bypass only with the
+    // admin_can_read_all_files setting; everyone else is filtered to visible files.
+    const contentViewer = getContentViewer(c);
+    const userEmails = contentViewer.isAdmin ? undefined : await getUserEmails(c);
+    const visibleIds = await filterAccessibleFileIds(
+      db,
+      rows.map((row) => row.indexed_file_id),
+      userEmails,
+    );
+    const visible = rows.filter((row) => visibleIds.has(row.indexed_file_id));
+    if (visible.length === 0) {
+      return c.json({ error: { code: "FORBIDDEN", message: "You don't have access to this thread's contents." } }, 403);
+    }
+
+    return c.json({
+      messages: visible.map((row) => ({
+        indexedFileId: row.indexed_file_id,
+        subject: row.subject,
+        sentAt: row.sent_at,
+        from: parseEmailAddrJson(row.from_json),
+        to: parseEmailAddrListJson(row.to_json),
+        cc: parseEmailAddrListJson(row.cc_json),
+        providerUrl: row.provider_url,
+        content: row.content,
+      })),
+    });
   });
 
   /**
@@ -1389,36 +1833,45 @@ export function connectorRoutes(
    */
   routes.delete("/:id", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const denied = denyIfCannotEdit(c, config);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canDisconnect);
     if (denied) return denied;
 
-    const fileIds = await connectorRepo.getFileIdsForConnector(config.id);
-    const entityRepo = createEntityRepository(db);
-    await entityRepo.deleteEntitiesForFiles(fileIds);
-
-    await connectorRepo.deleteConfig(config.id);
+    await db.transaction().execute(async (trx) => {
+      const txConnectorRepo = createConnectorRepository(trx);
+      const txEntityRepo = createEntityRepository(trx);
+      const txEntityDomainsRepo = createEntityDomainsRepository(trx);
+      const txEntityReviewRepo = createEntityReviewRepo(trx);
+      const fileIds = await txConnectorRepo.getOwnedFileIdsForConnector(config.id);
+      const relationshipIds = await txEntityDomainsRepo.relationshipIdsWithEvidenceInFiles(fileIds);
+      const reviewIds = await txEntityReviewRepo.pendingReviewIdsWithEvidenceInFiles(fileIds);
+      await txEntityRepo.deleteEntitiesForFiles(fileIds);
+      await txConnectorRepo.deleteConfig(config.id);
+      await txEntityDomainsRepo.deleteRelationshipEvidenceForFiles(fileIds);
+      await txEntityReviewRepo.deleteReviewEvidenceForFiles(fileIds);
+      await txEntityDomainsRepo.deleteEmptyRelationshipsByIds(relationshipIds);
+      await txEntityReviewRepo.deleteEmptyPendingReviewsByIds(reviewIds);
+    });
     return c.json({ success: true });
   });
 
   /**
-   * Rotate the API key for an existing connector. Owner-only — admins cannot rotate
-   * someone else's key (they don't have it). For OAuth connectors, this 400s on the
-   * api_key validator before authz, so the rule is moot today; it matters when more
-   * api_key-per-user connectors land.
+   * Rotate the API key for an existing connector. Per-user rows are owner-only;
+   * org-wide rows are admin-managed.
    */
   routes.post("/:id/rotate-key", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    if (config.created_by !== c.get("sub")) {
-      return c.json({ error: { code: "FORBIDDEN", message: "Only the connector's owner can rotate its key" } }, 403);
-    }
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canUpdateCredentials);
+    if (denied) return denied;
 
     const parsed = z.object({ api_key: z.string().min(1) }).safeParse(await c.req.json());
     if (!parsed.success) {
@@ -1437,7 +1890,7 @@ export function connectorRoutes(
     }
 
     await connectorRepo.updateConfig(config.id, {
-      credentials: serializeCredentials(credentials, appConfig?.ENCRYPTION_KEY),
+      credentials: serializeCredentials(credentials),
       credentialHint: buildCredentialHint(parsed.data.api_key),
       syncStatus: "active",
       errorMessage: null,
@@ -1449,11 +1902,12 @@ export function connectorRoutes(
   /** Update connector scope config (add/remove drives, folders, etc.). */
   routes.patch("/:id/scope", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const denied = denyIfCannotEdit(c, config);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canChangeScope);
     if (denied) return denied;
 
     const body = await c.req.json();
@@ -1490,11 +1944,12 @@ export function connectorRoutes(
   /** Trigger a manual sync (creates a sync job). */
   routes.post("/:id/syncs", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const denied = denyIfCannotEdit(c, config);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canSync);
     if (denied) return denied;
 
     if (config.sync_status === "syncing") {
@@ -1512,12 +1967,12 @@ export function connectorRoutes(
   /** List files for a connector, including access scope info. */
   routes.get("/:id/files", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configVisible(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const meta = getConnector(config.connector_type as ConnectorType);
-    const denied = denyIfCannotRead(c, config, meta.perUserAuth);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canView);
     if (denied) return denied;
 
     const files = await connectorRepo.listFilesByConnector(config.id, { archived: false });
@@ -1549,11 +2004,12 @@ export function connectorRoutes(
   /** Enrich files with AI-generated summaries and context (creates an enrichment job). */
   routes.post("/:id/enrichments", async (c) => {
     const config = await connectorRepo.findConfigById(c.req.param("id"));
-    if (!config) {
+    if (!config || !configEnabled(config)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Connector not found" } }, 404);
     }
 
-    const denied = denyIfCannotEdit(c, config);
+    const { permissions } = permissionsForConfig(c, config);
+    const denied = denyUnless(c, permissions.canEnrich);
     if (denied) return denied;
 
     const body = await c.req.json();
@@ -1586,25 +2042,24 @@ export function connectorRoutes(
     }
 
     const owningConfig = await connectorRepo.findConfigByFileId(fileId);
-    if (!owningConfig) {
+    if (!owningConfig || !configEnabled(owningConfig)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Owning connector not found" } }, 404);
     }
-    const denied = denyIfCannotEdit(c, owningConfig);
+    const { permissions } = permissionsForConfig(c, owningConfig);
+    const denied = denyUnless(c, permissions.canEnrich);
     if (denied) return denied;
 
-    const settings = await db
-      .selectFrom("settings")
-      .select("gemini_api_key")
-      .where("id", "=", "default")
-      .executeTakeFirst();
-    const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({
-          provider: "gemini",
-          apiKey: settings.gemini_api_key,
-          maxRpm: appConfig?.GEMINI_MAX_RPM,
-          maxRetries: appConfig?.GEMINI_MAX_RETRIES,
-        })
-      : null;
+    const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+    const providerConfig = {
+      geminiApiKey: settings?.gemini_api_key,
+      geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+      geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+      logger,
+      ...openRouterConfig,
+    };
+    const embeddingProvider = createEnrichmentEmbeddingProvider(providerConfig);
+    const generator = createEnrichmentGenerator(providerConfig);
 
     // Enrich only this specific file.
     // This endpoint is the per-file "Enrich File" debug surface — always dump
@@ -1616,6 +2071,7 @@ export function connectorRoutes(
       db,
       logger: logger.child({ component: "enrichment", fileId }),
       embeddingProvider,
+      generator,
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,

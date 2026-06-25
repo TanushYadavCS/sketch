@@ -8,7 +8,16 @@
  */
 import type { Logger } from "pino";
 
-export type ConnectorType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
+export type ConnectorType =
+  | "google_drive"
+  | "gmail"
+  | "outlook"
+  | "teams"
+  | "clickup"
+  | "notion"
+  | "linear"
+  | "fireflies"
+  | "zoho_crm";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
 
@@ -30,6 +39,11 @@ export interface OAuthCredentials {
   expires_at?: string;
   client_id: string;
   client_secret: string;
+  scope?: string;
+  tenant?: string;
+  accounts_server?: string;
+  api_domain?: string;
+  region?: string;
 }
 
 export interface ApiKeyCredentials {
@@ -54,12 +68,19 @@ export type AccessTokenProvider = (opts?: { forceRefresh?: boolean }) => Promise
  */
 export interface SyncedItem {
   providerFileId: string;
+  providerMessageId?: string;
+  threadId?: string;
   providerUrl: string | null;
   fileName: string;
   fileType: string | null;
   contentCategory: ContentCategory;
   content: string | null;
   sourcePath: string | null;
+  /**
+   * Optional display grouping key. For CRM this is the parent object provider id
+   * that should anchor activity rollups, for example `Deals:123`.
+   */
+  rollupGroupId?: string | null;
   contentHash: string | null;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
@@ -88,7 +109,7 @@ export interface SyncedItem {
    * Structured assignee data for deterministic entity linking.
    * Each assignee is matched to a person entity and linked via entity_mentions.
    */
-  assignees?: Array<{ name: string; email?: string }>;
+  assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present; entries
@@ -104,6 +125,15 @@ export interface SyncedItem {
    * `source` + `sourceId` are used to look up the entity.
    */
   parentEntities?: Array<{ source: string; sourceId: string; contextSnippet?: string }>;
+  contactPoints?: ContactPointSeed[];
+  entitySeeds?: EntitySeed[];
+  personSeeds?: PersonEntitySeed[];
+  relationships?: Array<{
+    relationType: string;
+    source: { source: string; sourceId: string; name: string; type: string };
+    target: { source: string; sourceId: string; name: string; type: string };
+    contextSnippet?: string;
+  }>;
 }
 
 /**
@@ -140,14 +170,34 @@ export interface PersonEntitySeed {
   sourceId: string;
 }
 
+export interface ContactPointSeed {
+  subjectName: string;
+  subjectEmail?: string;
+  subjectSource: string;
+  subjectSourceId: string;
+  kind: "email" | "phone" | "linkedin" | "whatsapp";
+  value: string;
+  displayValue?: string | null;
+  label?: string | null;
+  source: string;
+  verifiedAt?: string | null;
+  lastContactedAt?: string | null;
+}
+
 export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
 export type IndexedFileFactRaw =
   | { providerFileId: string; attendee: { name?: string; email?: string } }
-  | { providerFileId: string; assignee: { name: string; email?: string }; sourceRefKey: string }
+  | { providerFileId: string; correspondent: { name?: string; email?: string; sourceId?: string } }
+  | {
+      providerFileId: string;
+      assignee: { name: string; email?: string; source?: string; sourceId?: string };
+      sourceRefKey: string;
+    }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
+  | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }
   | EntitySeed
@@ -172,6 +222,12 @@ export type IndexedFileFactRaw =
       context?: string;
       source: { name: string; type: string; variations: string[] };
       target: { name: string; type: string; variations: string[] };
+    }
+  | {
+      providerFileId: string;
+      relationType: string;
+      source: { source: string; sourceId: string; name: string; type: string };
+      target: { source: string; sourceId: string; name: string; type: string };
     }
   | {
       providerFileId: string;
@@ -208,6 +264,20 @@ export interface NameResolution {
  */
 export type NameResolver = (name: string) => NameResolution | null;
 
+export interface SuppressedEmailRecord {
+  providerFileId: string;
+  providerMessageId?: string | null;
+  threadId?: string | null;
+  reason: string;
+}
+
+export interface SourceItemRemovalRecord {
+  providerFileId?: string;
+  providerMessageId?: string | null;
+  sourceCreatedBefore?: string;
+  reason: string;
+}
+
 /**
  * Base interface all connectors must implement.
  */
@@ -224,7 +294,7 @@ export interface Connector {
   /**
    * Whether an admin must populate provider Client ID/Secret in `settings`
    * before any user can authorize. Used to surface a "Ask your admin to
-   * configure X first" empty state. Currently only Google Drive.
+   * configure X first" empty state.
    */
   readonly requiresOAuthClientSetup: boolean;
 
@@ -234,6 +304,14 @@ export interface Connector {
    * Connectors that seed entities directly via onEntitySeed (e.g. Notion) leave this empty.
    */
   readonly promotableFileTypes?: string[];
+
+  /**
+   * Whether this connector's people are email correspondents rather than meeting
+   * attendees / document authors. When true, `attendees` and `authorEmail` seed
+   * `correspondent`/`corresponded` person facts instead of `attendee`/`author`.
+   * Email connectors (Gmail, Outlook) set this; everything else leaves it false.
+   */
+  readonly emitsCorrespondentFacts?: boolean;
 
   /**
    * Build the source ref key for an assignee (used to match against person entities).
@@ -247,6 +325,7 @@ export interface Connector {
 
   /** Run initial or incremental sync. Returns items to index. */
   sync(opts: {
+    connectorConfigId?: string;
     credentials: ConnectorCredentials;
     scopeConfig: Record<string, unknown>;
     cursor: string | null;
@@ -268,6 +347,8 @@ export interface Connector {
     resolveNameToEmail?: NameResolver;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
+    onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;
+    onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void>;
   }): AsyncGenerator<SyncedItem>;
 
   /** Return the new sync cursor after a sync run. */

@@ -10,7 +10,10 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
+import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
+import { normalizeSourceTimestampForStorage } from "../../timestamps";
 import type { DB } from "../schema";
 
 /**
@@ -73,26 +76,63 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
       LEFT JOIN entity_share_emails ese
         ON ese.entity_id = ent_shared.id AND ese.email = ${email}
       WHERE em_shared.indexed_file_id = ${t}.id
+        AND ent_shared.deleted_at IS NULL
+        AND ent_shared.merged_into_entity_id IS NULL
         AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
     )
   )`;
 }
 
-export function createConnectorRepository(db: Kysely<DB>) {
+function decodeConnectorConfigRow<T extends { credentials: string }>(row: T, encryptionKey?: string): T {
+  return {
+    ...row,
+    credentials: decodeSecretField(row.credentials, encryptionKey, "connector_configs.credentials"),
+  };
+}
+
+/** CRM activity file types whose bodyless ("empty reminder") rows are hidden from the list. */
+const CRM_ACTIVITY_FILE_TYPES_SQL = sql.join(
+  ["crm_task", "crm_call", "crm_event", "crm_meeting", "crm_note"].map((t) => sql`${t}`),
+);
+
+/**
+ * The Files-list (browse) visibility rule, Gmail-style:
+ *  - drop rollup *members* (activities shown under their parent object instead), and
+ *  - drop bodyless CRM activities ("empty reminders") entirely — they're only
+ *    counted under their object, never listed.
+ * Keeps rollup anchors (rollup_group_id = provider_file_id), ungrouped non-CRM
+ * rows (NULL), and CRM activities that carry real content (content_category = 'document').
+ */
+const browseVisibilityPredicate = sql<boolean>`(
+  (indexed_files.rollup_group_id IS NULL OR indexed_files.rollup_group_id = indexed_files.provider_file_id)
+  AND NOT (
+    indexed_files.content_category = 'structured'
+    AND indexed_files.file_type IN (${CRM_ACTIVITY_FILE_TYPES_SQL})
+  )
+)`;
+
+export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string) {
   return {
     /** List all connector configs. */
     async listConfigs() {
-      return db.selectFrom("connector_configs").selectAll().orderBy("created_at", "desc").execute();
+      const rows = await db.selectFrom("connector_configs").selectAll().orderBy("created_at", "desc").execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /** Find a connector config by ID. */
     async findConfigById(id: string) {
-      return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirst();
+      const row = await db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirst();
+      return row ? decodeConnectorConfigRow(row, encryptionKey) : undefined;
     },
 
     /** Find connector configs by type. */
     async findConfigsByType(connectorType: ConnectorType) {
-      return db.selectFrom("connector_configs").selectAll().where("connector_type", "=", connectorType).execute();
+      const rows = await db
+        .selectFrom("connector_configs")
+        .selectAll()
+        .where("connector_type", "=", connectorType)
+        .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /**
@@ -103,12 +143,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
     async findSyncableConfigs(opts?: { staleAfterMs?: number }) {
       const staleAfterMs = opts?.staleAfterMs ?? 15 * 60 * 1000;
       const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
-      return db
+      const rows = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("sync_status", "in", ["active", "pending", "error"])
         .where((eb) => eb.or([eb("last_synced_at", "is", null), eb("last_synced_at", "<", cutoff)]))
         .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /** Find connector configs stuck in `syncing` state past the staleness threshold. */
@@ -124,12 +165,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
     /** All connector configs owned by a user. */
     async listByOwner(createdBy: string) {
-      return db
+      const rows = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("created_by", "=", createdBy)
         .orderBy("created_at", "desc")
         .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /**
@@ -145,7 +187,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           .updateTable("connector_configs")
           .set({
             sync_status: "disabled",
-            credentials: scrubbed,
+            credentials: encodeSecretField(scrubbed, encryptionKey),
             credential_hint: null,
             error_message: "Owner removed from workspace",
             updated_at: new Date().toISOString(),
@@ -158,12 +200,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
     /** Find a connector config of a given type owned by the given user (used for per-user uniqueness). */
     async findByTypeAndOwner(connectorType: ConnectorType, createdBy: string) {
-      return db
+      const row = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("connector_type", "=", connectorType)
         .where("created_by", "=", createdBy)
         .executeTakeFirst();
+      return row ? decodeConnectorConfigRow(row, encryptionKey) : undefined;
     },
 
     /** Look up the connector config that owns a given indexed file (for file-scoped authz). */
@@ -172,7 +215,12 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .selectFrom("indexed_files")
         .innerJoin("connector_configs", "connector_configs.id", "indexed_files.connector_config_id")
         .where("indexed_files.id", "=", fileId)
-        .select(["connector_configs.id", "connector_configs.connector_type", "connector_configs.created_by"])
+        .select([
+          "connector_configs.id",
+          "connector_configs.connector_type",
+          "connector_configs.created_by",
+          "connector_configs.sync_status",
+        ])
         .executeTakeFirst();
     },
 
@@ -194,7 +242,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
           id,
           connector_type: data.connectorType,
           auth_type: data.authType,
-          credentials: data.credentials,
+          credentials: encodeSecretField(data.credentials, encryptionKey),
           credential_source: data.credentialSource ?? "local",
           scope_config: data.scopeConfig ?? "{}",
           ...(data.syncStatus ? { sync_status: data.syncStatus } : {}),
@@ -203,7 +251,8 @@ export function createConnectorRepository(db: Kysely<DB>) {
         })
         .execute();
 
-      return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const row = await db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return decodeConnectorConfigRow(row, encryptionKey);
     },
 
     /** Update connector config fields. */
@@ -221,7 +270,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
       }>,
     ) {
       const values: Record<string, unknown> = {};
-      if (data.credentials !== undefined) values.credentials = data.credentials;
+      if (data.credentials !== undefined) values.credentials = encodeSecretField(data.credentials, encryptionKey);
       if (data.scopeConfig !== undefined) values.scope_config = data.scopeConfig;
       if (data.syncStatus !== undefined) values.sync_status = data.syncStatus;
       if (data.syncCursor !== undefined) values.sync_cursor = data.syncCursor;
@@ -235,7 +284,8 @@ export function createConnectorRepository(db: Kysely<DB>) {
         await db.updateTable("connector_configs").set(values).where("id", "=", id).execute();
       }
 
-      return db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const row = await db.selectFrom("connector_configs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      return decodeConnectorConfigRow(row, encryptionKey);
     },
 
     /** Get all file IDs linked to a connector. */
@@ -246,6 +296,15 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .where("connector_config_id", "=", connectorId)
         .execute();
       return rows.map((r) => r.indexed_file_id);
+    },
+
+    async getOwnedFileIdsForConnector(connectorId: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where("connector_config_id", "=", connectorId)
+        .execute();
+      return rows.map((r) => r.id);
     },
 
     /**
@@ -307,12 +366,14 @@ export function createConnectorRepository(db: Kysely<DB>) {
     },
 
     /**
-     * Upsert an indexed file by (source, provider_file_id).
-     * A file exists once regardless of how many connectors discover it.
+     * Upsert an indexed file by message identity when present, otherwise by the
+     * legacy global provider-file identity.
      */
     async upsertFile(data: {
       source: string;
       providerFileId: string;
+      providerMessageId?: string | null;
+      threadId?: string | null;
       providerUrl: string | null;
       fileName: string;
       fileType: string | null;
@@ -324,20 +385,43 @@ export function createConnectorRepository(db: Kysely<DB>) {
       sourceUpdatedAt: string | null;
       connectorConfigId: string;
       mimeType?: string | null;
+      rollupGroupId?: string | null;
     }) {
       const now = new Date().toISOString();
+      const sourceCreatedAt = normalizeSourceTimestampForStorage(data.sourceCreatedAt);
+      const sourceUpdatedAt = normalizeSourceTimestampForStorage(data.sourceUpdatedAt);
 
-      const existing = await db
-        .selectFrom("indexed_files")
-        .selectAll()
-        .where("source", "=", data.source)
-        .where("provider_file_id", "=", data.providerFileId)
-        .executeTakeFirst();
+      const existing = data.providerMessageId
+        ? await db
+            .selectFrom("indexed_files")
+            .selectAll()
+            .where("connector_config_id", "=", data.connectorConfigId)
+            .where("provider_message_id", "=", data.providerMessageId)
+            .executeTakeFirst()
+        : data.source === "teams"
+          ? await db
+              .selectFrom("indexed_files")
+              .selectAll()
+              .where("connector_config_id", "=", data.connectorConfigId)
+              .where("source", "=", data.source)
+              .where("provider_file_id", "=", data.providerFileId)
+              .where("provider_message_id", "is", null)
+              .executeTakeFirst()
+          : await db
+              .selectFrom("indexed_files")
+              .selectAll()
+              .where("source", "=", data.source)
+              .where("provider_file_id", "=", data.providerFileId)
+              .where("provider_message_id", "is", null)
+              .executeTakeFirst();
 
       if (existing) {
-        // If content changed, mark for re-embedding
         const contentChanged = data.contentHash !== existing.content_hash;
+        const categoryChanged = data.contentCategory !== existing.content_category;
         const updates: Record<string, unknown> = {
+          provider_file_id: data.providerFileId,
+          provider_message_id: data.providerMessageId ?? null,
+          thread_id: data.threadId ?? null,
           provider_url: data.providerUrl,
           file_name: data.fileName,
           file_type: data.fileType,
@@ -346,12 +430,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
           source_path: data.sourcePath,
           content_hash: data.contentHash,
           is_archived: 0,
-          source_created_at: data.sourceCreatedAt,
-          source_updated_at: data.sourceUpdatedAt,
+          source_created_at: sourceCreatedAt,
+          source_updated_at: sourceUpdatedAt,
+          rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
-        if (contentChanged) {
+        if (contentChanged || categoryChanged) {
           updates.embedding_status = "pending";
           updates.summary_status = "pending";
           updates.embedding_attempts = 0;
@@ -362,7 +447,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
 
         await db.updateTable("indexed_files").set(updates).where("id", "=", existing.id).execute();
 
-        return { id: existing.id, created: false, contentChanged };
+        return { id: existing.id, created: false, contentChanged, categoryChanged };
       }
 
       const id = randomUUID();
@@ -372,6 +457,8 @@ export function createConnectorRepository(db: Kysely<DB>) {
           id,
           connector_config_id: data.connectorConfigId,
           provider_file_id: data.providerFileId,
+          provider_message_id: data.providerMessageId ?? null,
+          thread_id: data.threadId ?? null,
           provider_url: data.providerUrl,
           file_name: data.fileName,
           file_type: data.fileType,
@@ -380,8 +467,9 @@ export function createConnectorRepository(db: Kysely<DB>) {
           source: data.source,
           source_path: data.sourcePath,
           content_hash: data.contentHash,
-          source_created_at: data.sourceCreatedAt,
-          source_updated_at: data.sourceUpdatedAt,
+          source_created_at: sourceCreatedAt,
+          source_updated_at: sourceUpdatedAt,
+          rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
           mime_type: data.mimeType ?? null,
           embedding_status: "pending",
@@ -389,7 +477,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
         })
         .execute();
 
-      return { id, created: true, contentChanged: false };
+      return { id, created: true, contentChanged: false, categoryChanged: false };
     },
 
     /** Link a connector to a file (many-to-many). Idempotent. */
@@ -586,18 +674,32 @@ export function createConnectorRepository(db: Kysely<DB>) {
     },
 
     /** Archive files not seen in this sync for a given connector. */
-    async archiveStaleFiles(connectorConfigId: string, seenProviderFileIds: Set<string>) {
-      if (seenProviderFileIds.size === 0) return 0;
+    async archiveStaleFiles(connectorConfigId: string, seenSyncIdentityKeys: Set<string>) {
+      if (seenSyncIdentityKeys.size === 0) return 0;
 
       const linkedFiles = await db
         .selectFrom("connector_files")
         .innerJoin("indexed_files", "indexed_files.id", "connector_files.indexed_file_id")
-        .select(["indexed_files.id", "indexed_files.provider_file_id"])
+        .select([
+          "indexed_files.id",
+          "indexed_files.connector_config_id",
+          "indexed_files.source",
+          "indexed_files.provider_file_id",
+          "indexed_files.provider_message_id",
+        ])
         .where("connector_files.connector_config_id", "=", connectorConfigId)
         .where("indexed_files.is_archived", "=", 0)
         .execute();
 
-      const stale = linkedFiles.filter((f) => !seenProviderFileIds.has(f.provider_file_id));
+      const stale = linkedFiles.filter((f) => {
+        const identity = getSyncIdentity({
+          connectorConfigId: f.connector_config_id,
+          connectorType: f.source,
+          providerFileId: f.provider_file_id,
+          providerMessageId: f.provider_message_id,
+        });
+        return !seenSyncIdentityKeys.has(syncIdentityKey(identity));
+      });
       if (stale.length === 0) return 0;
 
       const staleIds = stale.map((f) => f.id);
@@ -684,12 +786,13 @@ export function createConnectorRepository(db: Kysely<DB>) {
     /** List connector configs accessible by a set of connector IDs. */
     async listConfigsByIds(ids: string[]) {
       if (ids.length === 0) return [];
-      return db
+      const rows = await db
         .selectFrom("connector_configs")
         .selectAll()
         .where("id", "in", ids)
         .orderBy("created_at", "desc")
         .execute();
+      return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
     /**
@@ -700,16 +803,21 @@ export function createConnectorRepository(db: Kysely<DB>) {
       limit: number;
       offset: number;
       connectorType?: string;
+      excludedSources?: string[];
       category?: string;
       status?: string;
       access?: string;
       viewer: FileViewer;
+      /** Collapse CRM activity members under their parent object (default off). */
+      collapseRollups?: boolean;
     }) {
       let query = db
         .selectFrom("indexed_files")
         .select([
           "indexed_files.id",
           "indexed_files.connector_config_id",
+          "indexed_files.provider_file_id",
+          "indexed_files.rollup_group_id",
           "indexed_files.file_name",
           "indexed_files.file_type",
           "indexed_files.content_category",
@@ -726,8 +834,15 @@ export function createConnectorRepository(db: Kysely<DB>) {
         ])
         .where("indexed_files.is_archived", "=", 0);
 
+      if (opts.collapseRollups) {
+        query = query.where(browseVisibilityPredicate);
+      }
+
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.excludedSources && opts.excludedSources.length > 0) {
+        query = query.where("indexed_files.source", "not in", opts.excludedSources);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);
@@ -766,6 +881,130 @@ export function createConnectorRepository(db: Kysely<DB>) {
     },
 
     /**
+     * Look up CRM rollup summaries for a set of anchor objects.
+     * Keyed by `${connectorConfigId}::${groupId}` to drive the collapsed
+     * "N activities + summary" rows in the Files list.
+     */
+    async getRollupSummaries(
+      anchors: Array<{ connectorConfigId: string; groupId: string }>,
+    ): Promise<Map<string, { activityCount: number; summary: string }>> {
+      const map = new Map<string, { activityCount: number; summary: string }>();
+      if (anchors.length === 0) return map;
+      const configIds = [...new Set(anchors.map((a) => a.connectorConfigId))];
+      const groupIds = [...new Set(anchors.map((a) => a.groupId))];
+      const rows = await db
+        .selectFrom("crm_object_summaries")
+        .select(["connector_config_id", "group_id", "summary", "activity_count"])
+        .where("connector_config_id", "in", configIds)
+        .where("group_id", "in", groupIds)
+        .execute();
+      for (const r of rows) {
+        map.set(`${r.connector_config_id}::${r.group_id}`, {
+          activityCount: Number(r.activity_count),
+          summary: r.summary,
+        });
+      }
+      return map;
+    },
+
+    /**
+     * Live count of activity members rolled up under each anchor object.
+     * Drives the "N activities" badge + expand affordance independently of
+     * whether a summary has been generated yet (summaries are capped/async).
+     */
+    async getActivityCounts(
+      anchors: Array<{ connectorConfigId: string; groupId: string }>,
+    ): Promise<Map<string, number>> {
+      const map = new Map<string, number>();
+      if (anchors.length === 0) return map;
+      const configIds = [...new Set(anchors.map((a) => a.connectorConfigId))];
+      const groupIds = [...new Set(anchors.map((a) => a.groupId))];
+      const rows = await db
+        .selectFrom("indexed_files")
+        .select([
+          "indexed_files.connector_config_id",
+          "indexed_files.rollup_group_id",
+          sql<number>`count(*)`.as("count"),
+        ])
+        .where("indexed_files.is_archived", "=", 0)
+        .where("indexed_files.connector_config_id", "in", configIds)
+        .where("indexed_files.rollup_group_id", "in", groupIds)
+        .whereRef("indexed_files.provider_file_id", "!=", "indexed_files.rollup_group_id")
+        .groupBy(["indexed_files.connector_config_id", "indexed_files.rollup_group_id"])
+        .execute();
+      for (const r of rows) {
+        if (r.rollup_group_id) {
+          map.set(`${r.connector_config_id}::${r.rollup_group_id}`, Number(r.count));
+        }
+      }
+      return map;
+    },
+
+    /** Resolve a file's group identity (for the rollup-members endpoint), viewer-scoped. */
+    async getRollupAnchorRef(fileId: string, viewer: FileViewer) {
+      let query = db
+        .selectFrom("indexed_files")
+        .select([
+          "indexed_files.id",
+          "indexed_files.connector_config_id",
+          "indexed_files.provider_file_id",
+          "indexed_files.rollup_group_id",
+          "indexed_files.source",
+        ])
+        .where("indexed_files.id", "=", fileId)
+        .where("indexed_files.is_archived", "=", 0);
+      if (!viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(viewer));
+      }
+      return query.executeTakeFirst();
+    },
+
+    /** List the activity member files rolled up under one parent object, viewer-scoped. */
+    async listGroupActivities(opts: {
+      connectorConfigId: string;
+      groupId: string;
+      viewer: FileViewer;
+      limit: number;
+      offset: number;
+    }) {
+      let query = db
+        .selectFrom("indexed_files")
+        .select([
+          "indexed_files.id",
+          "indexed_files.connector_config_id",
+          "indexed_files.provider_file_id",
+          "indexed_files.rollup_group_id",
+          "indexed_files.file_name",
+          "indexed_files.file_type",
+          "indexed_files.content_category",
+          "indexed_files.source",
+          "indexed_files.source_path",
+          "indexed_files.provider_url",
+          "indexed_files.synced_at",
+          "indexed_files.source_created_at",
+          "indexed_files.source_updated_at",
+          "indexed_files.summary",
+          "indexed_files.embedding_status",
+          "indexed_files.summary_status",
+          "indexed_files.access_scope_id",
+        ])
+        .where("indexed_files.is_archived", "=", 0)
+        .where("indexed_files.connector_config_id", "=", opts.connectorConfigId)
+        .where("indexed_files.rollup_group_id", "=", opts.groupId)
+        .where("indexed_files.provider_file_id", "!=", opts.groupId);
+      if (!opts.viewer.isAdmin) {
+        query = query.where(fileVisibilityPredicate(opts.viewer));
+      }
+      return query
+        .orderBy(
+          sql`coalesce(indexed_files.source_updated_at, indexed_files.source_created_at, indexed_files.synced_at) desc`,
+        )
+        .limit(opts.limit)
+        .offset(opts.offset)
+        .execute();
+    },
+
+    /**
      * Count non-archived files that have a summary, across the same filter
      * set as `listAllFiles`/`countAllFiles`. Drives the "X enriched" badge
      * in the Files header — must be filtered globally, not over the page
@@ -775,17 +1014,25 @@ export function createConnectorRepository(db: Kysely<DB>) {
     async countEnrichedFiles(opts: {
       viewer: FileViewer;
       connectorType?: string;
+      excludedSources?: string[];
       category?: string;
       status?: string;
       access?: string;
+      collapseRollups?: boolean;
     }) {
       let query = db
         .selectFrom("indexed_files")
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
 
+      if (opts.collapseRollups) {
+        query = query.where(browseVisibilityPredicate);
+      }
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.excludedSources && opts.excludedSources.length > 0) {
+        query = query.where("indexed_files.source", "not in", opts.excludedSources);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);
@@ -823,17 +1070,26 @@ export function createConnectorRepository(db: Kysely<DB>) {
     async countAllFiles(opts: {
       viewer: FileViewer;
       connectorType?: string;
+      excludedSources?: string[];
       category?: string;
       status?: string;
       access?: string;
+      collapseRollups?: boolean;
     }) {
       let query = db
         .selectFrom("indexed_files")
         .select(sql`count(*)`.as("count"))
         .where("indexed_files.is_archived", "=", 0);
 
+      if (opts.collapseRollups) {
+        query = query.where(browseVisibilityPredicate);
+      }
+
       if (opts.connectorType) {
         query = query.where("indexed_files.source", "=", opts.connectorType);
+      }
+      if (opts.excludedSources && opts.excludedSources.length > 0) {
+        query = query.where("indexed_files.source", "not in", opts.excludedSources);
       }
       if (opts.category) {
         query = query.where("indexed_files.content_category", "=", opts.category);
@@ -881,6 +1137,7 @@ export function createConnectorRepository(db: Kysely<DB>) {
         .selectFrom("indexed_files")
         .select(["indexed_files.source", sql<number>`count(*)`.as("count")])
         .where("indexed_files.is_archived", "=", 0)
+        .where(browseVisibilityPredicate)
         .groupBy("indexed_files.source");
       if (!viewer.isAdmin) {
         query = query.where(fileVisibilityPredicate(viewer));

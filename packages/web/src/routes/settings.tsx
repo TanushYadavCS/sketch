@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import {
   CopySimpleIcon,
+  DesktopIcon,
   EyeIcon,
   EyeSlashIcon,
   KeyIcon,
@@ -37,25 +38,18 @@ export const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
-function SettingsPage() {
+export function SettingsPage() {
   const auth = useDashboardAuth();
-  const setupStatusQuery = useQuery({
-    queryKey: ["setup", "status"],
-    queryFn: () => api.setup.status(),
-  });
-  const showApiTokens = setupStatusQuery.data?.experimentalFlag === true;
 
   if (auth.role !== "admin") {
     return (
       <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <h1 className="text-xl font-semibold text-foreground">Settings</h1>
-        {showApiTokens ? (
-          <div className="mt-6">
-            <ApiTokensSection />
-          </div>
-        ) : (
-          <p className="mt-2 text-sm text-muted-foreground">Admin access is required to manage workspace settings.</p>
-        )}
+        <p className="mt-2 text-sm text-muted-foreground">Manage your personal Sketch settings.</p>
+        <div className="mt-6 space-y-8">
+          <LocalDevicesSection />
+          <ApiTokensSection />
+        </div>
       </div>
     );
   }
@@ -67,9 +61,11 @@ function SettingsPage() {
 
       <div className="mt-6 space-y-8">
         <OrgContextSection />
+        <LocalDevicesSection />
         <AccessSection />
+        <MicrosoftOAuthSection />
         <ApiKeySection />
-        {showApiTokens ? <ApiTokensSection /> : null}
+        <ApiTokensSection />
       </div>
     </div>
   );
@@ -164,6 +160,203 @@ function OrgContextSection() {
   );
 }
 
+function LocalDevicesSection() {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("My Mac");
+  const [createdDevice, setCreatedDevice] = useState<{ plaintext: string; baseUrl: string } | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+
+  const devicesQuery = useQuery({
+    queryKey: ["local-devices"],
+    queryFn: () => api.localDevices.list(),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (payload: { name: string }) => api.localDevices.create({ ...payload, platform: "macos" }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["local-devices"] });
+      setCreatedDevice({ plaintext: result.plaintext, baseUrl: result.baseUrl });
+      toast.success("Local device token created");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (id: string) => api.localDevices.revoke(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["local-devices"] });
+      setConfirmRevokeId(null);
+      toast.success("Local device revoked");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const trimmedName = name.trim();
+  const activeDevices = (devicesQuery.data?.devices ?? []).filter((device) => !device.revokedAt);
+
+  return (
+    <section>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-muted-foreground">Local Mac</p>
+      </div>
+
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="h-9"
+            maxLength={120}
+            aria-label="Local device name"
+          />
+          <Button
+            size="sm"
+            className="shrink-0"
+            onClick={() => createMutation.mutate({ name: trimmedName })}
+            disabled={trimmedName.length === 0 || createMutation.isPending}
+          >
+            {createMutation.isPending ? (
+              <SpinnerGapIcon size={14} className="animate-spin" />
+            ) : (
+              <DesktopIcon size={14} />
+            )}
+            Pair Mac
+          </Button>
+        </div>
+
+        {createdDevice ? (
+          <div className="mt-4 rounded-md border border-brand-accent bg-brand-accent/[0.05] p-3">
+            <p className="text-sm font-medium">Sketch Local setup</p>
+            <div className="mt-2 grid gap-2">
+              <div className="grid gap-1.5">
+                <label htmlFor="local-device-sketch-domain" className="text-xs font-medium text-muted-foreground">
+                  Sketch Domain
+                </label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="local-device-sketch-domain"
+                    value={createdDevice.baseUrl}
+                    readOnly
+                    className="h-9 font-mono text-xs"
+                    aria-label="Sketch domain"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() =>
+                      copyTextToClipboard(createdDevice.baseUrl).then(() => toast.success("Sketch domain copied"))
+                    }
+                    aria-label="Copy Sketch domain"
+                  >
+                    <CopySimpleIcon size={16} />
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <label htmlFor="local-device-token" className="text-xs font-medium text-muted-foreground">
+                  Device token
+                </label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="local-device-token"
+                    value={createdDevice.plaintext}
+                    readOnly
+                    className="h-9 font-mono text-xs"
+                    aria-label="Device token"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() =>
+                      copyTextToClipboard(createdDevice.plaintext).then(() => toast.success("Token copied"))
+                    }
+                    aria-label="Copy device token"
+                  >
+                    <CopySimpleIcon size={16} />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-4 overflow-hidden rounded-md border border-border">
+          {devicesQuery.isLoading ? (
+            <Skeleton className="h-28 rounded-none" />
+          ) : activeDevices.length === 0 ? (
+            <div className="px-4 py-6 text-center text-sm text-muted-foreground">No paired Macs</div>
+          ) : (
+            <div className="divide-y divide-border">
+              {activeDevices.map((device) => (
+                <div key={device.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-medium">{device.name}</p>
+                      <span
+                        className={
+                          device.status === "online"
+                            ? "rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700"
+                            : "rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+                        }
+                      >
+                        {device.status}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {device.prefix}... · Created {formatDate(device.createdAt)}
+                      {device.lastSeenAt ? ` · Last seen ${formatDate(device.lastSeenAt)}` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="shrink-0 hover:text-destructive"
+                    onClick={() => setConfirmRevokeId(device.id)}
+                    aria-label={`Revoke ${device.name}`}
+                  >
+                    <TrashIcon size={16} />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <AlertDialog open={confirmRevokeId !== null} onOpenChange={(open) => !open && setConfirmRevokeId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke local Mac?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This Mac will disconnect and local commands will stop working.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revokeMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => confirmRevokeId && revokeMutation.mutate(confirmRevokeId)}
+              disabled={revokeMutation.isPending}
+            >
+              {revokeMutation.isPending ? (
+                <>
+                  <SpinnerGapIcon size={14} className="animate-spin" />
+                  Revoking...
+                </>
+              ) : (
+                "Revoke"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
+  );
+}
+
 function AccessSection() {
   const queryClient = useQueryClient();
   const accessQuery = useQuery({
@@ -214,6 +407,108 @@ function AccessSection() {
           />
         </div>
       )}
+    </section>
+  );
+}
+
+function MicrosoftOAuthSection() {
+  const queryClient = useQueryClient();
+  const statusQuery = useQuery({
+    queryKey: ["microsoft-oauth-status"],
+    queryFn: () => api.microsoftOAuth.status(),
+  });
+  const [clientId, setClientId] = useState("");
+  const [tenant, setTenant] = useState("common");
+  const [clientSecret, setClientSecret] = useState("");
+  const [initialised, setInitialised] = useState(false);
+
+  if (!initialised && statusQuery.data) {
+    setClientId(statusQuery.data.clientId ?? "");
+    setTenant(statusQuery.data.tenant ?? "common");
+    setInitialised(true);
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: () => api.microsoftOAuth.configure(clientId.trim(), clientSecret.trim(), tenant.trim()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["microsoft-oauth-status"] });
+      setClientSecret("");
+      toast.success("Microsoft OAuth saved");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const canSave = clientId.trim().length > 0 && tenant.trim().length > 0 && clientSecret.trim().length > 0;
+  const hasSavedConfig = statusQuery.data?.settingsConfigured === true;
+  const usesEnvFallback = statusQuery.data?.envConfigured === true && !hasSavedConfig;
+
+  if (statusQuery.isLoading || !statusQuery.data) {
+    return null;
+  }
+
+  return (
+    <section>
+      <p className="mb-3 text-sm font-medium text-muted-foreground">Microsoft OAuth</p>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">Shared Outlook and Teams client</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Used for Microsoft sign-in. Environment values are used when no workspace values are saved.
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground">
+            {hasSavedConfig ? "Workspace override" : usesEnvFallback ? "Environment fallback" : "Not configured"}
+          </span>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          <div>
+            <label htmlFor="microsoft-client-id" className="text-xs font-medium">
+              Application client ID
+            </label>
+            <Input
+              id="microsoft-client-id"
+              className="mt-1.5 h-9 font-mono text-xs"
+              value={clientId}
+              onChange={(event) => setClientId(event.target.value)}
+              placeholder="00000000-0000-0000-0000-000000000000"
+            />
+          </div>
+          <div>
+            <label htmlFor="microsoft-tenant" className="text-xs font-medium">
+              Tenant
+            </label>
+            <Input
+              id="microsoft-tenant"
+              className="mt-1.5 h-9 font-mono text-xs"
+              value={tenant}
+              onChange={(event) => setTenant(event.target.value)}
+              placeholder="common"
+            />
+          </div>
+          <div>
+            <label htmlFor="microsoft-client-secret" className="text-xs font-medium">
+              Client secret
+            </label>
+            <Input
+              id="microsoft-client-secret"
+              type="password"
+              className="mt-1.5 h-9 font-mono text-xs"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+              placeholder={statusQuery.data.configured ? "Enter a client secret to save workspace values" : ""}
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <Button size="sm" onClick={() => saveMutation.mutate()} disabled={!canSave || saveMutation.isPending}>
+            {saveMutation.isPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : null}
+            Save
+          </Button>
+        </div>
+      </div>
     </section>
   );
 }
@@ -448,14 +743,36 @@ function ApiTokensSection() {
   const trimmedName = name.trim();
   const tokens = tokensQuery.data?.tokens ?? [];
   const activeTokens = tokens.filter((token) => !token.revokedAt);
+  const mcpUrl =
+    tokensQuery.data?.mcpUrl ??
+    (typeof window === "undefined" ? "https://<sketch-host>/mcp" : `${window.location.origin}/mcp`);
 
   return (
     <section>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-sm font-medium text-muted-foreground">API tokens</p>
+        <p className="text-sm font-medium text-muted-foreground">MCP access</p>
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-4 rounded-md border border-border bg-muted/30 p-3">
+          <p className="text-sm font-medium">Sketch MCP URL</p>
+          <div className="mt-2 flex items-center gap-2">
+            <Input value={mcpUrl} readOnly className="h-9 font-mono text-xs" aria-label="Sketch MCP URL" />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => copyTextToClipboard(mcpUrl).then(() => toast.success("MCP URL copied"))}
+              aria-label="Copy MCP URL"
+            >
+              <CopySimpleIcon size={16} />
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Use this URL in Claude app connectors; use PATs below for clients that require a manual Bearer header.
+          </p>
+        </div>
+
         <div className="flex flex-col gap-3 sm:flex-row">
           <Input
             value={name}
@@ -510,12 +827,7 @@ function ApiTokensSection() {
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setSetupToken({ mcpUrl: tokensQuery.data?.mcpUrl ?? null })}
-                    >
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setSetupToken({ mcpUrl })}>
                       Setup
                     </Button>
                     <Button
@@ -541,7 +853,7 @@ function ApiTokensSection() {
           <AlertDialogHeader>
             <AlertDialogTitle>Claude Code setup</AlertDialogTitle>
             <AlertDialogDescription>
-              Paste this server entry into your Claude Code MCP configuration.
+              Use this server entry for clients that support custom Authorization headers.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs">
@@ -550,7 +862,7 @@ function ApiTokensSection() {
                 mcpServers: {
                   sketch: {
                     type: "http",
-                    url: setupToken?.mcpUrl ?? "https://<sketch-host>/mcp",
+                    url: setupToken?.mcpUrl ?? mcpUrl,
                     headers: { Authorization: `Bearer ${setupToken?.plaintext ?? "skp_..."}` },
                   },
                 },
@@ -569,7 +881,7 @@ function ApiTokensSection() {
                       mcpServers: {
                         sketch: {
                           type: "http",
-                          url: setupToken?.mcpUrl ?? "https://<sketch-host>/mcp",
+                          url: setupToken?.mcpUrl ?? mcpUrl,
                           headers: { Authorization: `Bearer ${setupToken?.plaintext ?? "skp_..."}` },
                         },
                       },

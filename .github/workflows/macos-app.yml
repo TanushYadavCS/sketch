@@ -1,0 +1,94 @@
+name: macOS App Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the macOS app to, e.g. v0.32.0"
+        required: true
+        type: string
+      force:
+        description: "Build even if apps/macos did not change since the previous v* tag"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release-tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+            git checkout "refs/tags/$tag"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check macOS app changes
+        id: changes
+        run: |
+          tag="${{ steps.release-tag.outputs.tag }}"
+          force="false"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            force="${{ inputs.force }}"
+          fi
+
+          if [[ "$force" == "true" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Forced build requested."
+            exit 0
+          fi
+
+          previous_tag="$(git tag --merged HEAD --sort=-v:refname | grep -E '^v' | grep -v "^${tag}$" | head -n 1 || true)"
+          if [[ -z "$previous_tag" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "No previous v* tag found; building macOS app."
+            exit 0
+          fi
+
+          if git diff --quiet "$previous_tag" "$tag" -- apps/macos; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No apps/macos changes between $previous_tag and $tag; skipping macOS release asset."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Detected apps/macos changes between $previous_tag and $tag."
+          fi
+
+      - name: Build macOS app zip
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          version="${{ steps.release-tag.outputs.tag }}"
+          version="${version#v}"
+          VERSION="$version" apps/macos/scripts/package-release.sh
+
+      - name: Upload app zip to GitHub Release
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release-tag.outputs.tag }}"
+          asset="apps/macos/.dist/Sketch-Local-macOS.zip"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" \
+              --verify-tag \
+              --title "$tag" \
+              --notes "Sketch release $tag"
+          fi

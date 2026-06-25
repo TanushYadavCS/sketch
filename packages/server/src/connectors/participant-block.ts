@@ -23,6 +23,7 @@
  */
 import type { Kysely } from "kysely";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 
@@ -104,7 +105,7 @@ export async function buildParticipantBlock(
     .selectFrom("indexed_file_facts")
     .select(["subject_name", "subject_email"])
     .where("indexed_file_id", "=", opts.fileId)
-    .where("fact_type", "=", "attendee")
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
     .execute()) as AttendeeRow[];
 
   if (attendees.length === 0) return "";

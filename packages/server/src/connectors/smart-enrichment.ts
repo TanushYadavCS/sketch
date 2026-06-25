@@ -77,7 +77,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v7";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v8";
 const PROPOSABLE_ENTITY_TYPES = new Set<ProposeEntityType>(["person", "company", "product", "project", "team"]);
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -149,6 +149,7 @@ interface FileContext {
   id: string;
   fileName: string;
   content: string;
+  threadContext?: string | null;
   contentCategory: string;
   source: string;
   sourcePath: string | null;
@@ -207,9 +208,12 @@ export async function extractEntities(
       : "";
 
   const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
+  const threadSection = file.threadContext
+    ? `\nEmail thread context for resolving references only. Do not emit entities or relationships that appear only in this context; emitted mentions and relationships must be supported by the current message content below.\n${file.threadContext}\n`
+    : "";
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
-${orgSection}${knownSection}${participantSection}
+${orgSection}${knownSection}${participantSection}${threadSection}
 File: ${file.fileName}
 Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
@@ -218,7 +222,7 @@ Extract entities that a business team would want to track and reference across d
 - **People**: named individuals (employees, clients, contacts)
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
-- **Projects**: named umbrella engagements or programs with a clear scope (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration")
+- **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
 - **Teams**: named organizational teams (e.g., "QC team", "Content Team")
 
 DO NOT extract:
@@ -234,6 +238,9 @@ DO NOT extract:
 - File formats, protocols, or standards (JSON, HTTP, WebSocket)
 - Meeting titles or calendar event names — anything containing "<>", "Standup", "Sync", "Weekly", "Daily", or "1:1". These are calendar event names, not projects. Extract the companies and people referenced by the meeting instead.
 - Document, note, or artifact titles as projects (e.g. names ending in "note", "chart", "doc", "spec", "deck"). These are filenames, not engagements.
+- Issue or ticket identifiers and keys — "SKE-123", "ECR-01", "ABC-1234", or a bare "#192". These are individual work items, not projects; extract the project or product they belong to instead, never the ticket key (even when the key is followed by a title, e.g. "SKE-120: Provenance columns").
+- Pull requests, commits, or branches — "PR #192", "Sketch PR #45", commit SHAs, branch names. These are code artifacts, not engagements.
+- A single feature, tab, screen, or module of a product as a project — "Files", "Workflows", "Analytics", "Push Notifications", "Outlook Integration". These are parts of a product, not umbrella engagements with their own scope.
 - Generic feature descriptions or internal component names as products (e.g. "responder functionality", "conversational model", "X service", "X module", "X pipeline"). Products must be a branded, proper-noun name your org or a client publicly markets — not the internal name of a component you are building.
 - Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns
 - Task fragments or implementation notes with no stable named project/product parent, such as "Vedant's Project Progress", "67 SQL queries on the new database", "limitation note", "UI development", "backend work", or "new database"
@@ -252,6 +259,8 @@ Type disambiguation:
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 
+If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
+
 Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People and Teams** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
 
 Also extract direct relationships only when the text explicitly supports them.
@@ -262,10 +271,13 @@ Valid relationship types:
 - "leads": person -> project | product | team
 - "contributes_to": person | team -> project | product
 - "builds": company -> product
-- "part_of": project -> project, product -> product, team -> company
+- "part_of": project -> project, project -> product, product -> product, team -> company
+- "engagement_for": project -> company (the project is a client engagement delivered for that company)
 - "partner_of": company -> company
 
 Use "engaged_with" (not "works_at") whenever the person's employer is a different company from the one named on the right. Example: a Canvas engineer meeting with Oliver Wyman is engaged_with Oliver Wyman, not works_at Oliver Wyman.
+Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON or TEAM working with a company.
+Do not extract "member_of", "deal_for", or "primary_contact" from prose; those are connector-sourced relationships.
 
 When a "Meeting participants" block is present above and lists attendees from multiple companies, the cross-company link is itself relationship evidence even when the prose never names the external company. Emit \`engaged_with\` edges from home-company participants who are marked \`[action-item owner]\` to each external company present in the participants block. Treat silent external attendees (no action items) with caution — only emit when the prose corroborates it. Use the participant name and the external company name exactly as they appear in the block as the relation endpoints.
 
@@ -551,6 +563,7 @@ Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
 Date: ${file.sourceCreatedAt || file.sourceUpdatedAt || "unknown"}
 ${entityContext ? `Related entities:\n${entityContext}` : ""}
+${file.threadContext ? `\nEmail thread context for resolving this message:\n${file.threadContext}\n` : ""}
 
 Write a 2-3 sentence summary focusing on: what this document is about, key decisions or outcomes, and topics discussed. Be specific — use names, numbers, dates. Do not start with "This document".
 
@@ -615,9 +628,11 @@ Entities:
 ${entityDescriptions}
 
 Document: ${file.fileName} (${file.sourceCreatedAt || file.sourceUpdatedAt || "unknown"})
+${file.threadContext ? `\nEmail thread context for resolving references only:\n${file.threadContext}\n` : ""}
 
 Return JSON: { "entity-id": [{ "fact": "short fact" }] }
 Return {} if no new facts.
+Only return facts supported by the document content. Thread context may disambiguate references but is not evidence by itself.
 
 <content>
 ${truncatedContent}
@@ -828,6 +843,7 @@ async function reconcileLlmExtractionFacts(
       entityType: mention.type,
       aliases: mention.variations,
       fileContent: file.content,
+      resolutionContext: file.threadContext,
       source: "llm_extraction",
     });
     if (!validation.ok) {

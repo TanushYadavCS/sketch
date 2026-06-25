@@ -75,10 +75,41 @@ import * as m072 from "./migrations/072-enrichment-retry-backoff";
 import * as m073 from "./migrations/073-api-tokens";
 import * as m074 from "./migrations/074-external-mcp-tool-calls";
 import * as m075 from "./migrations/075-conversation-messages";
-import * as m076 from "./migrations/076-connector-credential-source";
+import * as m076 from "./migrations/076-slack-conversation-thread-metadata";
+import * as m077 from "./migrations/077-scheduled-task-output-thread";
+import * as m078 from "./migrations/078-local-devices";
+import * as m079 from "./migrations/079-conversation-message-search";
+import * as m080 from "./migrations/080-message-id-idempotency";
+import * as m081 from "./migrations/081-email-message-metadata";
+import * as m082 from "./migrations/082-email-thread-summaries";
+import * as m083 from "./migrations/083-local-claude-sessions";
+import * as m084 from "./migrations/084-entity-contact-points";
+import * as m085 from "./migrations/085-crm-activity-rollups";
+import * as m086 from "./migrations/086-local-claude-session-origin-runtime";
+import * as m087 from "./migrations/087-rename-openrouter-provider";
+import * as m088 from "./migrations/088-agent-run-aux-cost";
+import * as m089 from "./migrations/089-mcp-oauth";
+import * as m090 from "./migrations/090-orphan-entity-cleanup";
+import * as m091 from "./migrations/091-cleanup-empty-relationships-and-review";
+import * as m092 from "./migrations/092-teams-provider-file-scope";
+import * as m093 from "./migrations/093-microsoft-oauth-settings";
+import * as m094 from "./migrations/094-microsoft-oauth-tenant";
+import * as m095 from "./migrations/095-entity-review-connector-identity";
+import * as m096 from "./migrations/096-linear-project-entity-seeding-cleanup";
+import * as m097 from "./migrations/097-clickup-project-entity-seeding-cleanup";
+import * as m098 from "./migrations/098-entity-merge-ledger";
+import * as m099 from "./migrations/099-review-queue-seed-handle";
+import * as m100 from "./migrations/100-entity-project-bindings";
+import * as m101 from "./migrations/101-entity-project-member-overrides";
+import * as m102 from "./migrations/102-entity-creation-suppressions";
+import * as m103 from "./migrations/103-daily-briefs";
+import * as m104 from "./migrations/104-daily-brief-item-metadata";
+import * as m105 from "./migrations/105-normalize-indexed-file-source-timestamps";
+import * as m106 from "./migrations/106-agents";
+import * as m107 from "./migrations/107-connector-credential-source";
 import type { DB } from "./schema";
 
-export async function runMigrations(db: Kysely<DB>): Promise<void> {
+export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
   const migrator = new Migrator({
     db,
     provider: {
@@ -155,7 +186,38 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
           "073-api-tokens": m073,
           "074-external-mcp-tool-calls": m074,
           "075-conversation-messages": m075,
-          "076-connector-credential-source": m076,
+          "076-slack-conversation-thread-metadata": m076,
+          "077-scheduled-task-output-thread": m077,
+          "078-local-devices": m078,
+          "079-conversation-message-search": m079,
+          "080-message-id-idempotency": m080,
+          "081-email-message-metadata": m081,
+          "082-email-thread-summaries": m082,
+          "083-local-claude-sessions": m083,
+          "084-entity-contact-points": m084,
+          "085-crm-activity-rollups": m085,
+          "086-local-claude-session-origin-runtime": m086,
+          "087-rename-openrouter-provider": m087,
+          "088-agent-run-aux-cost": m088,
+          "089-mcp-oauth": m089,
+          "090-orphan-entity-cleanup": m090,
+          "091-cleanup-empty-relationships-and-review": m091,
+          "092-teams-provider-file-scope": m092,
+          "093-microsoft-oauth-settings": m093,
+          "094-microsoft-oauth-tenant": m094,
+          "095-entity-review-connector-identity": m095,
+          "096-linear-project-entity-seeding-cleanup": m096,
+          "097-clickup-project-entity-seeding-cleanup": m097,
+          "098-entity-merge-ledger": m098,
+          "099-review-queue-seed-handle": m099,
+          "100-entity-project-bindings": m100,
+          "101-entity-project-member-overrides": m101,
+          "102-entity-creation-suppressions": m102,
+          "103-daily-briefs": m103,
+          "104-daily-brief-item-metadata": m104,
+          "105-normalize-indexed-file-source-timestamps": m105,
+          "106-agents": m106,
+          "107-connector-credential-source": m107,
         };
       },
     },
@@ -165,7 +227,7 @@ export async function runMigrations(db: Kysely<DB>): Promise<void> {
 
   for (const result of results ?? []) {
     if (result.status === "Success") {
-      console.log(`Migration applied: ${result.migrationName}`);
+      if (!options?.quiet) console.log(`Migration applied: ${result.migrationName}`);
     } else if (result.status === "Error") {
       console.error(`Migration failed: ${result.migrationName}`);
     }

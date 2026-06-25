@@ -75,6 +75,65 @@ describe("api token repository", () => {
     expect(found).toBeUndefined();
   });
 
+  it("lists PATs without internal OAuth tokens", async () => {
+    const user = await users.create({ name: "Mixed User", email: "mixed@example.com", emailVerified: true });
+    const pat = generateApiToken();
+    await apiTokens.create({
+      userId: user.id,
+      name: "CLI",
+      tokenHash: hashApiToken(pat),
+      prefix: getApiTokenDisplayPrefix(pat),
+    });
+    await apiTokens.createOAuth({
+      userId: user.id,
+      name: "Claude",
+      tokenHash: hashApiToken("sko_test"),
+      prefix: "sko_test",
+      clientId: "client",
+      scopes: ["mcp:read"],
+      refreshTokenHash: hashApiToken("skr_test"),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+
+    const rows = await apiTokens.listForUser(user.id);
+    expect(rows.map((row) => row.name)).toEqual(["CLI"]);
+  });
+
+  it("rejects OAuth refresh rotation when the presented refresh token is stale", async () => {
+    const user = await users.create({ name: "OAuth User", email: "oauth@example.com", emailVerified: true });
+    const row = await apiTokens.createOAuth({
+      userId: user.id,
+      name: "Claude",
+      tokenHash: hashApiToken("sko_old"),
+      prefix: "sko_old",
+      clientId: "client",
+      scopes: ["mcp:read"],
+      refreshTokenHash: hashApiToken("skr_old"),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+
+    const rotated = await apiTokens.rotateOAuthToken(row.id, {
+      previousRefreshTokenHash: hashApiToken("skr_old"),
+      tokenHash: hashApiToken("sko_new"),
+      prefix: "sko_new",
+      refreshTokenHash: hashApiToken("skr_new"),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    expect(rotated?.refresh_token_hash).toBe(hashApiToken("skr_new"));
+
+    const staleRotation = await apiTokens.rotateOAuthToken(row.id, {
+      previousRefreshTokenHash: hashApiToken("skr_old"),
+      tokenHash: hashApiToken("sko_race"),
+      prefix: "sko_race",
+      refreshTokenHash: hashApiToken("skr_race"),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    expect(staleRotation).toBeUndefined();
+
+    const stored = await apiTokens.findByRefreshHash(hashApiToken("skr_new"));
+    expect(stored?.token_hash).toBe(hashApiToken("sko_new"));
+  });
+
   it("throttles last_used_at updates", async () => {
     const user = await users.create({ name: "Touched User", email: "touched@example.com", emailVerified: true });
     const plaintext = generateApiToken();

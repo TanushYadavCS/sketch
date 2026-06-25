@@ -1,4 +1,6 @@
 import type { Kysely } from "kysely";
+import { whereLiveEntity } from "../db/repositories/entities";
+import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 
 export const MAX_FACTS_PER_ENTITY = 10;
@@ -66,7 +68,7 @@ async function loadMissingSourceFileContexts(
     .selectFrom("indexed_file_facts")
     .select(["indexed_file_id", "subject_email"])
     .where("indexed_file_id", "in", missing)
-    .where("fact_type", "=", "attendee")
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
     .where("subject_email", "is not", null)
     .where("deleted_at", "is", null)
     .execute();
@@ -82,6 +84,7 @@ async function loadMissingSourceFileContexts(
     .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
     .select(["entity_mentions.indexed_file_id", "entity_mentions.entity_id", "entities.source_type"])
     .where("entity_mentions.indexed_file_id", "in", missing)
+    .where(whereLiveEntity())
     .execute();
   for (const row of mentionRows) {
     const ctx = cache.bySourceFileId.get(row.indexed_file_id);
@@ -116,7 +119,7 @@ export async function buildFactSelectionContext(
     .selectFrom("indexed_file_facts")
     .select("subject_email")
     .where("indexed_file_id", "=", fileId)
-    .where("fact_type", "=", "attendee")
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
     .where("subject_email", "is not", null)
     .where("deleted_at", "is", null)
     .execute();

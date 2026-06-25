@@ -26,7 +26,9 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
+import { whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
+import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { SYSTEM_SOURCE_TYPES } from "../entities/profile-facts";
@@ -102,7 +104,7 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
     .selectFrom("indexed_file_facts")
     .select("subject_email")
     .where("indexed_file_id", "=", fileId)
-    .where("fact_type", "=", "attendee")
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
     .where("subject_email", "is not", null)
     .execute();
 
@@ -155,6 +157,7 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     .where("em1.confidence", "=", "EXTRACTED")
     .where("em2.confidence", "=", "EXTRACTED")
     .where("e.source_type", "not in", systemTypes.length > 0 ? systemTypes : [""])
+    .where(whereLiveEntity("e"))
     .execute();
 
   const now = deps.now ? deps.now() : Date.now();

@@ -12,9 +12,13 @@ import {
   ChatCircleIcon,
   DesktopIcon,
   FolderSimpleIcon,
+  FoldersIcon,
   GearIcon,
+  HashIcon,
+  HouseIcon,
   LinkSimpleIcon,
   MoonIcon,
+  RobotIcon,
   SignOutIcon,
   SunIcon,
   UsersThreeIcon,
@@ -62,8 +66,12 @@ interface NavItem {
 }
 
 const allPrimaryNav: NavItem[] = [
-  { label: "Channels", icon: <ChatCircleIcon size={18} />, href: "/channels" },
+  { label: "Home", icon: <HouseIcon size={18} />, href: "/home" },
+  { label: "Agents", icon: <RobotIcon size={18} />, href: "/agents" },
+  { label: "Chat", icon: <ChatCircleIcon size={18} />, href: "/chat" },
+  { label: "Channels", icon: <HashIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
+  { label: "Projects", icon: <FoldersIcon size={18} />, href: "/projects", adminOnly: true },
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
   { label: "Automations", icon: <CalendarDotsIcon size={18} />, href: "/scheduled-tasks" },
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
@@ -73,8 +81,6 @@ const allPrimaryNav: NavItem[] = [
     label: "Settings",
     icon: <GearIcon size={18} />,
     href: "/settings",
-    adminOnly: true,
-    memberVisibleWhenExperimental: true,
   },
 ];
 
@@ -82,6 +88,12 @@ function formatRole(role?: "admin" | "member"): string | null {
   if (role === "admin") return "Admin";
   if (role === "member") return "Member";
   return null;
+}
+
+function isNavItemActive(pathname: string, href: string): boolean {
+  if (href === "/home") return pathname === "/home";
+  if (href === "/chat") return pathname === "/chat" || pathname.startsWith("/chat/");
+  return pathname === href;
 }
 
 export function AppSidebar({
@@ -154,7 +166,7 @@ export function AppSidebar({
               {primaryNav.map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
-                    isActive={location.pathname === item.href}
+                    isActive={isNavItemActive(location.pathname, item.href)}
                     onClick={() => !item.disabled && navigate({ to: item.href })}
                     disabled={item.disabled}
                     tooltip={item.label}

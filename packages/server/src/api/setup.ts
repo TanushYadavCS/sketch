@@ -91,12 +91,6 @@ type UserRepo = ReturnType<typeof createUserRepository>;
 
 interface SetupDeps {
   managedUrl?: string;
-  /**
-   * Mirrors `config.EXPERIMENTAL_FLAG`. Surfaced on /status so the web UI
-   * can gate experimental surfaces (per CLAUDE.md §"Feature Gating").
-   * ECR-03's "Review entities" nav item is the first consumer; future
-   * experimental UI surfaces read the same field.
-   */
   experimentalFlag?: boolean;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
@@ -157,6 +151,11 @@ async function upsertSetupAdmin(userRepo: UserRepo, email: string, passwordHash:
 export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   const routes = new Hono();
 
+  /**
+   * Reports onboarding progress as a step index. Self-hosted runs the full flow
+   * (admin -> identity -> Slack -> LLM); managed deployments skip the Slack step,
+   * going straight from identity (2) to LLM (4).
+   */
   routes.get("/status", async (c) => {
     const row = await settings.get();
     const adminUser = deps.userRepo ? await deps.userRepo.findFirstLocalAdmin() : undefined;
@@ -168,7 +167,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       row?.llm_provider === "bedrock" &&
       Boolean(row?.aws_access_key_id?.trim() && row?.aws_secret_access_key?.trim() && row?.aws_region?.trim());
     const hasOpenRouter =
-      row?.llm_provider === "openrouter_bedrock" && Boolean(row?.anthropic_api_key?.trim() && row?.model_id?.trim());
+      row?.llm_provider === "openrouter" && Boolean(row?.anthropic_api_key?.trim() && row?.model_id?.trim());
     const hasLlm = Boolean(hasAnthropic || hasBedrock || hasOpenRouter);
     const provider = row?.llm_provider;
     const llmProvider = isLlmProvider(provider) ? provider : null;
@@ -180,10 +179,8 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     } else if (hasLlm) {
       currentStep = 5;
     } else if (isManaged) {
-      // Managed: skip Slack step (3), go directly from Identity (2) to LLM (4)
       currentStep = hasIdentity ? 4 : hasAdmin ? 2 : 0;
     } else {
-      // Self-hosted: full flow
       currentStep = hasSlack ? 4 : hasIdentity ? 3 : hasAdmin ? 2 : 0;
     }
     return c.json({

@@ -1,14 +1,18 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { createReadChatHistoryTool } from "./tools/chat-history";
+import { createWriteAgentOutputTool } from "./tools/agent-output";
+import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
+import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
+import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
+import { createLocalRunCommandTool } from "./tools/local-command";
 import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
-import { type SketchMcpDeps, UploadCollector } from "./tools/types";
+import { IntegrationConnectionCollector, type SketchMcpDeps, UploadCollector } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
 
@@ -17,6 +21,7 @@ export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } 
 export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
 export { UploadCollector };
+export { IntegrationConnectionCollector };
 export type { SketchMcpDeps };
 
 export function createSketchMcpServer(deps: SketchMcpDeps) {
@@ -24,12 +29,17 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
   const tools = [
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps),
+    createSearchChatHistoryTool(deps),
     createProviderConfigTool(deps),
+    createSearchDeliveryTargetsTool(deps),
+    createLocalRunCommandTool(deps),
+    createLocalClaudeSessionTool(deps),
     createManageScheduledTasksTool({
       scheduler: deps.scheduler,
       taskContext: deps.taskContext,
       stepContentRepo: deps.stepContentRepo,
       automationRunsRepo: deps.automationRunsRepo,
+      userRepo: deps.userRepo,
       loadIntegrationProvider: deps.loadIntegrationProvider,
       queueManager: deps.queueManager,
       activeQueueKey: deps.activeQueueKey,
@@ -38,12 +48,14 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ...createTeamTools(deps),
     ...createMessagingTools(deps),
     ...createInboxWorkflowTools(deps),
+    createWriteAgentOutputTool(deps.agentOutputWriter),
     ...(deps.transcriptionEnabled
       ? [
           createTranscribeAudioTool({
             absWorkspace,
             loadSettings: deps.loadTranscriptionSettings,
             logger: deps.logger,
+            onUsage: deps.auxCostCollector ? (call) => deps.auxCostCollector?.collect(call) : undefined,
           }),
         ]
       : []),
@@ -53,6 +65,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
             absWorkspace,
             config: deps.visionConfig,
             logger: deps.logger,
+            onUsage: deps.auxCostCollector ? (call) => deps.auxCostCollector?.collect(call) : undefined,
           }),
         ]
       : []),

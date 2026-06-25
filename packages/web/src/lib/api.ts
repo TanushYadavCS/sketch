@@ -13,6 +13,7 @@ import type {
   LlmProvider,
   McpServerRecord,
   PageInfo,
+  WebChatIntegrationConnectionData,
 } from "@sketch/shared";
 
 export type WorkspaceScope = "personal" | "org";
@@ -27,6 +28,17 @@ export interface ApiTokenRecord {
   prefix: string;
   createdAt: string;
   lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface LocalDeviceRecord {
+  id: string;
+  name: string;
+  platform: string;
+  prefix: string;
+  status: "online" | "offline" | "revoked";
+  lastSeenAt: string | null;
+  createdAt: string;
   revokedAt: string | null;
 }
 
@@ -93,7 +105,16 @@ export interface ScheduledTaskListItem {
   triggerConfig: WorkflowTriggerConfig | null;
   outputTarget: string | null;
   outputPlatform: string | null;
+  outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
+  delivery: {
+    platform: "slack" | "whatsapp";
+    targetType: "dm" | "channel" | "group" | "thread";
+    targetId: string;
+    threadTs: string | null;
+    mode: "deliver" | "silent";
+    label: string;
+  };
   lastRunStatus: string | null;
   runCount: number;
 }
@@ -341,6 +362,7 @@ export interface EntityProfile {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   domainsForCompany: Array<{ domain: string; confidence: number; isPrimary: boolean }>;
+  crmActivityBrief: { summary: string; activityCount: number; updatedAt: string } | null;
   summary: EntityProfileSummary;
 }
 
@@ -397,6 +419,24 @@ export interface EntityRelationsResponse {
   totalCount: number;
 }
 
+export interface EntityGraphNode {
+  id: string;
+  name: string;
+  sourceType: string;
+  hotness: number;
+}
+
+export interface EntityGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+}
+
+export interface EntityGraphResponse {
+  nodes: EntityGraphNode[];
+  edges: EntityGraphEdge[];
+}
+
 export interface EntityRelationEvidenceRow {
   fileId: string;
   fileName: string;
@@ -418,12 +458,19 @@ export interface EntityRelationEvidenceResponse {
 export interface EntityTimelineItem {
   fileId: string;
   fileName: string;
+  fileType: string | null;
+  contentCategory: string;
   sourceType: string;
   occurredAt: string;
   mentionConfidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
   mentionCount: number;
   contextSnippet: string | null;
   url: string | null;
+  rollupGroupId: string | null;
+  crmActivity: {
+    activityType: "task" | "call" | "event" | "meeting" | "note";
+    hasBody: boolean;
+  } | null;
 }
 
 export interface EntityTimelineGroup {
@@ -435,6 +482,106 @@ export interface EntityTimelineResponse {
   groups: EntityTimelineGroup[];
   truncated: boolean;
   totalCount: number;
+}
+
+/**
+ * A connector container (data source) bound to a project entity. The effective
+ * list (GET ?effective=true) annotates each row with `viaProjectId` (the subtree
+ * project that contributed it) and `origin` (true when derived from the
+ * project's own source ref rather than an explicit binding).
+ */
+export interface EntityBinding {
+  id: string;
+  entityId: string;
+  source: string;
+  containerId: string;
+  containerKind: string;
+  label: string | null;
+  connectorConfigId: string | null;
+  viaProjectId?: string;
+  origin?: boolean;
+}
+
+export interface GroupedProjectChild {
+  id: string;
+  name: string;
+}
+
+/** Dry-run of merging `loserId` into `survivorId`: what moves and what collides. */
+export interface EntityMergePreview {
+  survivorId: string;
+  loserId: string;
+  blocked?: string;
+  counts: {
+    sourceRefs: number;
+    mentions: number;
+    relationships: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    candidates: number;
+    reviewQueue: number;
+  };
+  collisions: {
+    mentions: number;
+    contactPoints: number;
+    shareEmails: number;
+    aliasRejections: number;
+    domains: number;
+    relationships: number;
+  };
+  selfLoopsDropped: number;
+}
+
+/** A past merge in an entity's ledger (raw server shape). Re-mergeable via unmerge. */
+export interface EntityMergeRecord {
+  id: string;
+  survivor_entity_id: string;
+  merged_entity_id: string;
+  entity_type: string;
+  merged_at: string;
+  unmerged_at: string | null;
+  unmerged_by_user_id: string | null;
+}
+
+/**
+ * A connector item (indexed file) that belongs to a project — nominated by one
+ * of the project's bindings (resolved up the spine) or added manually. `manual`
+ * marks a human-included file; `viaProjectId` (when set and not the project
+ * itself) marks one inherited from a grouped sub-project.
+ */
+export interface EntityMember {
+  indexedFileId: string;
+  fileName: string;
+  fileType: string | null;
+  source: string;
+  providerUrl: string | null;
+  viaProjectId: string | null;
+  containerId: string | null;
+  manual: boolean;
+}
+
+/**
+ * A confirmed project entity for the Projects index. `origin` distinguishes a
+ * project born from a connector container (`derived`) from one a human defined
+ * (`defined`). `sourceCount` is the effective bindings resolved up the spine;
+ * `subProjectCount` is the grouped children.
+ */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  origin: "derived" | "defined";
+  status: string;
+  sourceCount: number;
+  subProjectCount: number;
+}
+
+export interface BindableContainer {
+  source: string;
+  containerId: string;
+  containerKind: string;
+  label: string;
 }
 
 export type ReenrichScope = { all: true } | { fileIds: string[] } | { sources: string[] };
@@ -576,12 +723,29 @@ export interface ConnectorConfig {
   credentialSource?: "local" | "canvas";
   scopeConfig: Record<string, unknown>;
 
-  syncStatus: "active" | "syncing" | "error" | "paused" | "pending";
+  syncStatus: "active" | "syncing" | "error" | "paused" | "pending" | "disabled";
   lastSyncedAt: string | null;
   errorMessage: string | null;
   createdBy: string;
+  createdByName?: string | null;
+  createdByEmail?: string | null;
+  credentialHint?: string | null;
   createdAt: string;
   fileCount?: number;
+  isOwner?: boolean;
+  canManage?: boolean;
+  canDisconnect?: boolean;
+  canSync?: boolean;
+  canChangeScope?: boolean;
+  canUpdateCredentials?: boolean;
+  canBrowseScope?: boolean;
+  canEnrich?: boolean;
+}
+
+export interface ConnectorListResponse {
+  connectors: ConnectorConfig[];
+  teamMemberCount: number;
+  connectorMemberCounts: Record<string, number>;
 }
 
 export interface ConnectorFile {
@@ -600,10 +764,15 @@ export interface ConnectorFile {
   embeddingStatus: string;
   accessScope: "restricted" | "unrestricted";
   accessCount: number | null;
+  /** Present on collapsed CRM object anchors that roll up activity members. */
+  resultKind?: "crm_object";
+  activityCount?: number;
+  rollupSummary?: string;
 }
 
 export interface FileContent {
   id: string;
+  connectorConfigId: string;
   fileName: string;
   fileType: string | null;
   content: string | null;
@@ -614,6 +783,33 @@ export interface FileContent {
   sourcePath: string | null;
   providerUrl: string | null;
   enrichmentStatus: string;
+  /** Present for email_message files — lets the detail sheet load the full thread. */
+  emailThread?: { connectorId: string; threadKey: string };
+}
+
+export interface EmailAddr {
+  name?: string | null;
+  email: string;
+}
+
+export interface EmailThreadSummary {
+  threadKey: string;
+  latestIndexedFileId: string;
+  latestSubject: string | null;
+  messageCount: number;
+  lastActivity: string | null;
+  participants: string[];
+}
+
+export interface EmailThreadMessage {
+  indexedFileId: string;
+  subject: string | null;
+  sentAt: string | null;
+  from: EmailAddr;
+  to: EmailAddr[];
+  cc: EmailAddr[];
+  providerUrl: string | null;
+  content: string | null;
 }
 
 export interface FileAccessMember {
@@ -636,7 +832,9 @@ export type UnifiedFile = ConnectorFile;
 
 /** A result from hybrid search (FTS5 + vector). */
 export interface SearchResult {
+  resultKind?: "file" | "email_thread";
   id: string;
+  hitFileId?: string;
   fileName: string;
   source: string;
   contentCategory: string;
@@ -648,6 +846,11 @@ export interface SearchResult {
   snippet: string | null;
   similarity: number | null;
   score: number;
+  threadKey?: string;
+  messageCount?: number;
+  latestSubject?: string;
+  lastActivity?: string | null;
+  participants?: string[];
 }
 
 export interface FileManualShare {
@@ -692,7 +895,323 @@ export interface SkillRecord {
   body: string;
 }
 
+export interface WorkspaceSummary {
+  automations: {
+    total: number;
+    active: number;
+    paused: number;
+    completed: number;
+    running: number;
+    nextRunAt: string | null;
+  };
+  skills: {
+    total: number;
+    yours: number;
+    shared: number;
+  };
+  integrations: {
+    connected: number;
+    appNames: string[];
+  };
+  team: {
+    total: number;
+    humans: number;
+    agents: number;
+  };
+}
+
+export interface DailyBriefKnowledgeRefs {
+  entityIds: string[];
+  fileIds: string[];
+  relationshipIds?: string[];
+  mentionIds?: string[];
+  sourceRefIds?: string[];
+  factIds?: string[];
+}
+
+export interface DailyBriefItem {
+  id: string;
+  sectionKey: "todos" | "customer_updates" | "active_projects";
+  title: string;
+  summary: string;
+  priority: "high" | "medium" | "low";
+  label: string;
+  displayRef: string | null;
+  actionType: string | null;
+  actionLabel: string | null;
+  actionPrompt: string | null;
+  sourceUrl: string | null;
+  knowledgeRefs: DailyBriefKnowledgeRefs;
+  sortOrder: number;
+}
+
+export interface DailyBrief {
+  id: string;
+  userId: string;
+  briefDate: string;
+  timezone: string;
+  status: string;
+  generatedAt: string | null;
+  masthead: {
+    title: string;
+    summary: string;
+    generatedFor?: string;
+  } | null;
+  sections: {
+    todos: DailyBriefItem[];
+    customer_updates: DailyBriefItem[];
+    active_projects: DailyBriefItem[];
+  };
+}
+
+export interface DailyBriefResponse {
+  brief: DailyBrief | null;
+  running: boolean;
+  briefDate: string;
+  timezone: string;
+  /** Section keys currently enabled in the user's config. Disabled sections are hidden on Home. */
+  enabledSections?: string[];
+}
+
+export interface AgentSummary {
+  key: string;
+  title: string;
+  tagline: string;
+  description: string;
+  category: string;
+  version: string;
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+}
+
+export interface AgentSectionConfig {
+  key: string;
+  title: string;
+  enabled: boolean;
+}
+
+export interface AgentConfig {
+  agentKey: string;
+  title: string;
+  tagline: string;
+  description: string;
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+  timezone: string | null;
+  maxItemsPerSection: number;
+  itemsPerSectionRange: { min: number; max: number };
+  focus: string | null;
+  sections: AgentSectionConfig[];
+}
+
+/** Generic output item for any prebuilt agent. `sectionKey` is whatever the agent defines. */
+export interface AgentOutputItem {
+  id: string;
+  sectionKey: string;
+  title: string;
+  summary: string;
+  priority: "high" | "medium" | "low";
+  label: string;
+  displayRef: string | null;
+  actionType: string | null;
+  actionLabel: string | null;
+  actionPrompt: string | null;
+  sourceUrl: string | null;
+  knowledgeRefs: DailyBriefKnowledgeRefs;
+  sortOrder: number;
+}
+
+export interface AgentOutput {
+  id: string;
+  agentKey: string;
+  userId: string;
+  outputDate: string;
+  timezone: string;
+  status: string;
+  generatedAt: string | null;
+  masthead: {
+    title: string;
+    summary: string;
+    generatedFor?: string;
+  } | null;
+  sections: Record<string, AgentOutputItem[]>;
+}
+
+export interface AgentDetailResponse {
+  agent: AgentConfig;
+  output: AgentOutput | null;
+  running: boolean;
+  outputDate: string;
+  timezone: string;
+}
+
+export interface AgentConfigPatch {
+  enabled?: boolean;
+  scheduleHour?: number;
+  scheduleMinute?: number;
+  maxItemsPerSection?: number;
+  sections?: Record<string, boolean>;
+  focus?: string | null;
+}
+
+export type WebChatMessagePart =
+  | { type: "text"; text: string }
+  | {
+      type: "data-progress";
+      id: string;
+      data: {
+        lines?: string[];
+        items?: Array<{
+          id?: string;
+          kind: string;
+          label: string;
+          detail?: string;
+          toolName?: string;
+          icon?: {
+            type: "tool" | "skill" | "canvas" | "generic";
+            name?: string;
+          };
+        }>;
+      };
+    }
+  | {
+      type: "data-file";
+      id: string;
+      data: {
+        name: string;
+        url: string;
+        mediaType: string;
+        sizeBytes?: number;
+      };
+    }
+  | {
+      type: "data-integration-connection";
+      id: string;
+      data: WebChatIntegrationConnectionData;
+    };
+
+export interface WebChatStoredMessage {
+  id: string;
+  role: "user" | "assistant";
+  createdAt?: string;
+  parts: WebChatMessagePart[];
+}
+
+export interface WebChatMessagesResponse {
+  messages: WebChatStoredMessage[];
+  updatedAt: string | null;
+}
+
+export interface WebChatConversationSummary {
+  id: string;
+  title: string;
+  channel: "web";
+  updatedAt: string;
+}
+
+export interface WebChatUploadedAttachment {
+  name: string;
+  path: string;
+  relativePath: string;
+  url: string;
+  mediaType: string;
+  sizeBytes: number;
+}
+
+export type WebChatToolProgress = "off" | "friendly" | "technical";
+
+export interface WebChatProgressSettings {
+  toolProgress: WebChatToolProgress;
+}
+
 export const api = {
+  dailyBriefs: {
+    latest(opts?: { date?: string }) {
+      const params = new URLSearchParams();
+      if (opts?.date) params.set("date", opts.date);
+      const qs = params.toString();
+      return request<DailyBriefResponse>(`/api/daily-briefs${qs ? `?${qs}` : ""}`);
+    },
+    get(id: string) {
+      return request<{ brief: DailyBrief }>(`/api/daily-briefs/${id}`);
+    },
+    create(body?: { briefDate?: string }) {
+      return request<{ generation: { id: string; status: string; briefDate: string } | null }>("/api/daily-briefs", {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
+      });
+    },
+  },
+  agents: {
+    list() {
+      return request<{ agents: AgentSummary[] }>("/api/agents");
+    },
+    get(agentKey: string) {
+      return request<AgentDetailResponse>(`/api/agents/${agentKey}`);
+    },
+    updateConfig(agentKey: string, patch: AgentConfigPatch) {
+      return request<{ agent: AgentConfig }>(`/api/agents/${agentKey}/config`, {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      });
+    },
+    run(agentKey: string) {
+      return request<{ generation: { id: string; status: string; outputDate: string } | null }>(
+        `/api/agents/${agentKey}/runs`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  webChat: {
+    progressSettings() {
+      return request<WebChatProgressSettings>("/api/web-chat/progress-settings");
+    },
+    updateProgressSettings(toolProgress: WebChatToolProgress) {
+      return request<WebChatProgressSettings>("/api/web-chat/progress-settings", {
+        method: "PATCH",
+        body: JSON.stringify({ toolProgress }),
+      });
+    },
+    messages(conversationId = "default") {
+      return request<WebChatMessagesResponse>(
+        `/api/web-chat/messages?conversationId=${encodeURIComponent(conversationId)}`,
+      );
+    },
+    conversations() {
+      return request<{ conversations: WebChatConversationSummary[] }>("/api/web-chat/conversations");
+    },
+    removeConversation(conversationId: string) {
+      return request<{ success: boolean }>(`/api/web-chat/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE",
+      });
+    },
+    interrupt(conversationId: string) {
+      return request<{ success: boolean; interrupted: boolean }>(
+        `/api/web-chat/conversations/${encodeURIComponent(conversationId)}/interruptions`,
+        { method: "POST" },
+      );
+    },
+    transcribe(audioBlob: Blob, filename = "recording.webm") {
+      const form = new FormData();
+      const file =
+        audioBlob instanceof File ? audioBlob : new File([audioBlob], filename, { type: audioBlob.type || undefined });
+      form.append("file", file);
+      return request<{ text: string }>("/api/web-chat/transcribe", {
+        method: "POST",
+        body: form,
+      });
+    },
+    uploadAttachment(file: File) {
+      const form = new FormData();
+      form.append("file", file);
+      return request<WebChatUploadedAttachment>("/api/web-chat/attachments", {
+        method: "POST",
+        body: form,
+      });
+    },
+  },
   setup: {
     status() {
       return request<SetupStatus>("/api/setup/status");
@@ -877,9 +1396,26 @@ export const api = {
       return request<{ success: true }>(`/api/api-tokens/${id}`, { method: "DELETE" });
     },
   },
+  localDevices: {
+    list() {
+      return request<{ devices: LocalDeviceRecord[]; baseUrl: string; websocketUrl: string }>("/api/local-devices");
+    },
+    create(data: { name: string; platform?: string }) {
+      return request<{ device: LocalDeviceRecord; plaintext: string; baseUrl: string; websocketUrl: string }>(
+        "/api/local-devices",
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      );
+    },
+    revoke(id: string) {
+      return request<{ success: true }>(`/api/local-devices/${id}`, { method: "DELETE" });
+    },
+  },
   integrations: {
     list() {
-      return request<{ connectors: ConnectorConfig[] }>("/api/connectors");
+      return request<ConnectorListResponse>("/api/connectors");
     },
     get(id: string) {
       return request<{ connector: ConnectorConfig }>(`/api/connectors/${id}`);
@@ -925,6 +1461,38 @@ export const api = {
     entityCount(id: string) {
       return request<{ count: number }>(`/api/connectors/${id}/entity-count`);
     },
+    suppressedEmails(id: string, opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{
+        countsByReason: Record<string, number>;
+        recent: Array<{
+          providerFileId: string;
+          providerMessageId: string | null;
+          threadId: string | null;
+          reason: string;
+          observedAt: string;
+        }>;
+        total: number;
+        hasMore: boolean;
+      }>(`/api/connectors/${id}/suppressed-emails${qs ? `?${qs}` : ""}`);
+    },
+    emailThreads(id: string, opts?: { limit?: number; offset?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<{ threads: EmailThreadSummary[]; total: number; hasMore: boolean }>(
+        `/api/connectors/${id}/email-threads${qs ? `?${qs}` : ""}`,
+      );
+    },
+    emailThread(id: string, threadKey: string) {
+      return request<{ messages: EmailThreadMessage[] }>(
+        `/api/connectors/${id}/email-threads/${encodeURIComponent(threadKey)}`,
+      );
+    },
     sync(id: string) {
       return request<{ sync: { connectorId: string; status: string } }>(`/api/connectors/${id}/syncs`, {
         method: "POST",
@@ -939,8 +1507,19 @@ export const api = {
           syncStatus: string;
           lastSyncedAt: string | null;
           errorMessage: string | null;
+          createdBy: string;
+          createdByName?: string | null;
+          createdByEmail?: string | null;
           createdAt: string;
           fileCount: number;
+          isOwner?: boolean;
+          canManage?: boolean;
+          canDisconnect?: boolean;
+          canSync?: boolean;
+          canChangeScope?: boolean;
+          canUpdateCredentials?: boolean;
+          canBrowseScope?: boolean;
+          canEnrich?: boolean;
         }>;
       }>("/api/connectors/mine");
     },
@@ -995,6 +1574,9 @@ export const api = {
       return request<{ files: UnifiedFile[]; total: number; enrichedTotal: number; hasMore: boolean }>(
         `/api/connectors/all-files${qs ? `?${qs}` : ""}`,
       );
+    },
+    fileActivities(fileId: string) {
+      return request<{ files: UnifiedFile[]; hasMore: boolean }>(`/api/connectors/all-files/${fileId}/activities`);
     },
     search(opts: { query: string; source?: string; category?: string; limit?: number }) {
       const params = new URLSearchParams();
@@ -1153,8 +1735,46 @@ export const api = {
         body: JSON.stringify({ clientId, clientSecret }),
       });
     },
-    authorizeUrl() {
-      return "/api/oauth/google/authorize";
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/google/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/google/authorize";
+    },
+  },
+  zohoOAuth: {
+    status() {
+      return request<{ configured: boolean; clientId: string | null; baseUrl: string | null; regions: string[] }>(
+        "/api/oauth/zoho/status",
+      );
+    },
+    authorizeUrl(region: string) {
+      return `/api/oauth/zoho/authorize?region=${encodeURIComponent(region)}`;
+    },
+  },
+  microsoftOAuth: {
+    status() {
+      return request<{
+        configured: boolean;
+        envConfigured?: boolean;
+        settingsConfigured?: boolean;
+        clientId: string | null;
+        baseUrl: string | null;
+        tenant: string | null;
+      }>("/api/oauth/microsoft/status");
+    },
+    configure(clientId: string, clientSecret: string, tenant: string) {
+      return request<{ success: boolean }>("/api/oauth/microsoft/config", {
+        method: "PUT",
+        body: JSON.stringify({ clientId, clientSecret, tenant }),
+      });
+    },
+    authorizeUrl(connectorType?: string) {
+      return connectorType
+        ? `/api/oauth/microsoft/authorize?connector=${encodeURIComponent(connectorType)}`
+        : "/api/oauth/microsoft/authorize";
+    },
+    adminConsentUrl(connectorType: string) {
+      return `/api/oauth/microsoft/admin-consent?connector=${encodeURIComponent(connectorType)}`;
     },
   },
   identities: {
@@ -1441,11 +2061,74 @@ export const api = {
     relations(id: string) {
       return request<EntityRelationsResponse>(`/api/entities/${id}/relations`);
     },
+    graph(opts?: { limit?: number; includeSystem?: boolean }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.includeSystem) params.set("includeSystem", "true");
+      const qs = params.toString();
+      return request<EntityGraphResponse>(`/api/entities/graph${qs ? `?${qs}` : ""}`);
+    },
     relationEvidence(id: string, relationId: string) {
       return request<EntityRelationEvidenceResponse>(`/api/entities/${id}/relations/${relationId}/evidence`);
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    listBindings(id: string, effective = true) {
+      return request<{ bindings: EntityBinding[]; children: GroupedProjectChild[] }>(
+        `/api/entities/${id}/bindings${effective ? "?effective=true" : ""}`,
+      );
+    },
+    addBinding(
+      id: string,
+      data: { source: string; containerId: string; containerKind: string; label?: string | null },
+    ) {
+      return request<{ binding: EntityBinding }>(`/api/entities/${id}/bindings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    removeBinding(id: string, bindingId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/bindings/${bindingId}`, { method: "DELETE" });
+    },
+    groupProject(id: string, childId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/group`, {
+        method: "POST",
+        body: JSON.stringify({ childId }),
+      });
+    },
+    ungroupProject(id: string, childId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/group/${childId}`, { method: "DELETE" });
+    },
+    listMembers(id: string, limit?: number) {
+      const qs = limit ? `?limit=${limit}` : "";
+      return request<{ members: EntityMember[]; truncated: boolean }>(`/api/entities/${id}/members${qs}`);
+    },
+    setMembership(id: string, fileId: string, mode: "include" | "exclude") {
+      return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, {
+        method: "PUT",
+        body: JSON.stringify({ mode }),
+      });
+    },
+    clearMembership(id: string, fileId: string) {
+      return request<{ ok: true }>(`/api/entities/${id}/members/${fileId}`, { method: "DELETE" });
+    },
+    previewMerge(survivorId: string, loserId: string) {
+      return request<EntityMergePreview>(
+        `/api/entities/${survivorId}/merge-preview?against=${encodeURIComponent(loserId)}`,
+      );
+    },
+    merge(survivorId: string, loserId: string) {
+      return request<{ mergeId: string }>("/api/entities/merges", {
+        method: "POST",
+        body: JSON.stringify({ survivorId, loserId }),
+      });
+    },
+    listMerges(entityId: string) {
+      return request<{ merges: EntityMergeRecord[] }>(`/api/entities/merges?entityId=${encodeURIComponent(entityId)}`);
+    },
+    unmerge(mergeId: string) {
+      return request<{ ok: true }>(`/api/entities/merges/${mergeId}`, { method: "DELETE" });
     },
     listShares(id: string) {
       return request<EntitySharesResponse>(`/api/entities/${id}/shares`);
@@ -1580,6 +2263,14 @@ export const api = {
       }>(`/api/entities${qs ? `?${qs}` : ""}`);
     },
   },
+  projects: {
+    list() {
+      return request<{ projects: ProjectSummary[] }>("/api/projects");
+    },
+    bindableContainers() {
+      return request<{ containers: BindableContainer[] }>("/api/projects/bindable-containers");
+    },
+  },
   entityReview: {
     list(opts?: { limit?: number; offset?: number; search?: string }) {
       const params = new URLSearchParams();
@@ -1652,6 +2343,10 @@ export const api = {
     },
   },
   workspace: {
+    summary() {
+      return request<WorkspaceSummary>("/api/workspace/summary");
+    },
+
     // List directory contents
     async listFiles(scope: WorkspaceScope, path: string): Promise<{ files: FileMetadata[] }> {
       const params = new URLSearchParams();

@@ -44,6 +44,7 @@ function LoginPage() {
   const [step, setStep] = useState<LoginStep>("choose");
   const [magicLinkEmail, setMagicLinkEmail] = useState("");
   const [sentChannels, setSentChannels] = useState<string[]>([]);
+  const returnTo = safeReturnTo();
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -68,7 +69,16 @@ function LoginPage() {
         <ChooseStep onPassword={() => setStep("password")} onMagicLink={() => setStep("magic-link")} />
       )}
       {step === "password" && (
-        <PasswordStep onBack={() => setStep("choose")} onSuccess={() => navigate({ to: "/channels" })} />
+        <PasswordStep
+          onBack={() => setStep("choose")}
+          onSuccess={() => {
+            if (returnTo) {
+              window.location.assign(returnTo);
+              return;
+            }
+            navigate({ to: "/home" });
+          }}
+        />
       )}
       {step === "magic-link" && (
         <MagicLinkStep
@@ -86,6 +96,13 @@ function LoginPage() {
       )}
     </div>
   );
+}
+
+function safeReturnTo(): string | null {
+  const value = new URLSearchParams(window.location.search).get("return_to");
+  if (!value?.startsWith("/")) return null;
+  if (value.startsWith("//")) return null;
+  return value;
 }
 
 function ChooseStep({ onPassword, onMagicLink }: { onPassword: () => void; onMagicLink: () => void }) {

@@ -8,7 +8,16 @@
  * Today: 4 connectors. Tomorrow: 50+. This registry scales to both.
  */
 
-export type IntegrationType = "google_drive" | "clickup" | "notion" | "linear" | "fireflies";
+export type IntegrationType =
+  | "google_drive"
+  | "gmail"
+  | "outlook"
+  | "teams"
+  | "clickup"
+  | "notion"
+  | "linear"
+  | "fireflies"
+  | "zoho_crm";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -79,8 +88,10 @@ export interface IntegrationDefinition {
   itemNoun: string;
   /** External URL for getting credentials. */
   credentialUrl: string;
+  oauthClientCredentialUrl?: string;
   /** Step-by-step instructions for connecting. */
   connectSteps: string[];
+  oauthClientSetupSteps?: string[];
   /** Scope picker type for the connect/manage dialog. */
   scopeType: "none" | "flat" | "nested" | "tree";
   /** Noun for scope items in the picker (pages, spaces, folders). */
@@ -92,12 +103,54 @@ export interface IntegrationDefinition {
   perUserAuth: boolean;
   /** true = admin must populate provider Client ID/Secret in settings before any user can authorize. */
   requiresOAuthClientSetup: boolean;
+  /** OAuth-redirect connectors that pick a data center / region before authorizing. */
+  regionOptions?: { value: string; label: string }[];
 }
 
-/**
- * Registry of all available integrations.
- * To add a new integration, add an entry here.
- */
+const MICROSOFT_OAUTH_AUTH_FIELDS: AuthField[] = [
+  {
+    key: "client_id",
+    label: "Application (client) ID",
+    type: "text",
+    placeholder: "00000000-0000-0000-0000-000000000000",
+    helpText: "From App registrations > Overview. Use Application (client) ID, not Object ID.",
+  },
+  {
+    key: "tenant",
+    label: "Tenant",
+    type: "text",
+    placeholder: "common",
+    helpText: "Use a directory ID, verified domain, or tenant alias such as common.",
+  },
+  {
+    key: "client_secret",
+    label: "Client secret",
+    type: "password",
+    placeholder: "...",
+    helpText: "From Certificates & secrets. Paste the secret Value, not the Secret ID.",
+  },
+];
+
+const OUTLOOK_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
+  "Create or open a Microsoft Entra app registration for the tenant you want Outlook users to sign in with",
+  "In Authentication, add the Web redirect URI shown below exactly",
+  "In API permissions, add delegated Microsoft Graph permissions: Mail.Read, User.Read, and offline_access",
+  "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+  "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
+];
+
+const TEAMS_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
+  "Create or open a Microsoft Entra app registration for the tenant you want Teams users to sign in with",
+  "In Authentication, add the Web redirect URI shown below exactly",
+  "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, OnlineMeetings.Read, OnlineMeetingTranscript.Read.All, OnlineMeetingRecording.Read.All, User.Read, and offline_access",
+  "Have a tenant admin grant admin consent for transcript and recording permissions if your tenant requires it",
+  "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+  "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
+];
+
+const MICROSOFT_ENTRA_APP_REGISTRATIONS_URL =
+  "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade";
+
 export const INTEGRATIONS: IntegrationDefinition[] = [
   {
     type: "google_drive",
@@ -136,6 +189,89 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: true,
+  },
+  {
+    type: "gmail",
+    name: "Gmail",
+    description: "Email messages and threads",
+    category: "Communication",
+    color: "#EA4335",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [
+      {
+        key: "client_id",
+        label: "Client ID",
+        type: "text",
+        placeholder: "123456789.apps.googleusercontent.com",
+        helpText: "OAuth 2.0 Client ID from Google Cloud Console",
+      },
+      {
+        key: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        placeholder: "GOCSPX-...",
+        helpText: "OAuth 2.0 Client Secret",
+      },
+    ],
+    scopeLabel: "mailbox",
+    scopeType: "none",
+    itemNoun: "emails",
+    credentialUrl: "https://console.cloud.google.com/apis/credentials",
+    connectSteps: [
+      "Create an OAuth 2.0 Client in Google Cloud Console",
+      "Enable the Gmail API for your project",
+      "Add the redirect URI shown below to your OAuth client",
+      "Paste the Client ID and Client Secret, then connect with Google",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
+  },
+  {
+    type: "outlook",
+    name: "Outlook",
+    description: "Microsoft 365 email messages and threads",
+    category: "Communication",
+    color: "#0078D4",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: MICROSOFT_OAUTH_AUTH_FIELDS,
+    scopeLabel: "mailbox",
+    scopeType: "none",
+    itemNoun: "emails",
+    credentialUrl: "https://learn.microsoft.com/en-us/graph/permissions-reference",
+    oauthClientCredentialUrl: MICROSOFT_ENTRA_APP_REGISTRATIONS_URL,
+    connectSteps: [
+      "Sign in with your Microsoft account",
+      "Authorize read-only access to your Outlook mailbox",
+      "Inbox and sent messages sync automatically after authorization",
+    ],
+    oauthClientSetupSteps: OUTLOOK_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS,
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "teams",
+    name: "Microsoft Teams",
+    description: "Meeting transcripts and recording links",
+    category: "Meetings",
+    color: "#6264A7",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: MICROSOFT_OAUTH_AUTH_FIELDS,
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://learn.microsoft.com/en-us/graph/permissions-reference",
+    oauthClientCredentialUrl: MICROSOFT_ENTRA_APP_REGISTRATIONS_URL,
+    connectSteps: [
+      "Sign in with your Microsoft account",
+      "Authorize read-only calendar and Teams meeting access",
+      "A tenant admin may need to grant consent for transcript and recording permissions",
+    ],
+    oauthClientSetupSteps: TEAMS_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS,
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
   },
   {
     type: "clickup",
@@ -247,6 +383,36 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: false,
+  },
+  {
+    type: "zoho_crm",
+    name: "Zoho CRM",
+    description: "Accounts, contacts, deals, and activities",
+    category: "CRM",
+    color: "#E42527",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [],
+    scopeLabel: "modules",
+    scopeType: "none",
+    itemNoun: "records",
+    credentialUrl: "https://www.zoho.com/crm/developer/docs/api/v6/",
+    connectSteps: [
+      "Select your Zoho data center (region)",
+      "Sign in to Zoho and authorize read access to your CRM",
+      "Accounts, contacts, deals, and activities sync automatically",
+    ],
+    perUserAuth: false,
+    requiresOAuthClientSetup: false,
+    regionOptions: [
+      { value: "com", label: "United States (.com)" },
+      { value: "eu", label: "Europe (.eu)" },
+      { value: "in", label: "India (.in)" },
+      { value: "com.au", label: "Australia (.com.au)" },
+      { value: "jp", label: "Japan (.jp)" },
+      { value: "ca", label: "Canada (.ca)" },
+      { value: "sa", label: "Saudi Arabia (.sa)" },
+    ],
   },
 ];
 

@@ -16,7 +16,10 @@ describe("entity graph helpers", () => {
     expect(normalizeRelationType("contributes_to")).toBe("contributes_to");
     expect(normalizeRelationType("builds")).toBe("builds");
     expect(normalizeRelationType("part_of")).toBe("part_of");
+    expect(normalizeRelationType("engagement_for")).toBe("engagement_for");
     expect(normalizeRelationType("partner_of")).toBe("partner_of");
+    expect(normalizeRelationType("deal_for")).toBe("deal_for");
+    expect(normalizeRelationType("primary_contact")).toBe("primary_contact");
     expect(normalizeRelationType("owns")).toBeNull();
     expect(normalizeRelationType(null)).toBeNull();
   });
@@ -27,6 +30,7 @@ describe("entity graph helpers", () => {
     expect(normalizeMentionType("project")).toBe("project");
     expect(normalizeMentionType("product")).toBe("product");
     expect(normalizeMentionType("team")).toBe("team");
+    expect(normalizeMentionType("deal")).toBe("deal");
     expect(normalizeMentionType("feature")).toBeNull();
     expect(normalizeMentionType("topic")).toBeNull();
     expect(normalizeMentionType(undefined)).toBeNull();
@@ -73,12 +77,22 @@ describe("entity graph helpers", () => {
     expect(relationDirectionAllowed("builds", "person", "product")).toBe(false);
 
     expect(relationDirectionAllowed("part_of", "project", "project")).toBe(true);
+    expect(relationDirectionAllowed("part_of", "project", "product")).toBe(true);
     expect(relationDirectionAllowed("part_of", "product", "product")).toBe(true);
     expect(relationDirectionAllowed("part_of", "team", "company")).toBe(true);
+    expect(relationDirectionAllowed("part_of", "product", "project")).toBe(false);
     expect(relationDirectionAllowed("part_of", "company", "team")).toBe(false);
+
+    expect(relationDirectionAllowed("engagement_for", "project", "company")).toBe(true);
+    expect(relationDirectionAllowed("engagement_for", "company", "project")).toBe(false);
 
     expect(relationDirectionAllowed("partner_of", "company", "company")).toBe(true);
     expect(relationDirectionAllowed("partner_of", "person", "company")).toBe(false);
+
+    expect(relationDirectionAllowed("deal_for", "deal", "company")).toBe(true);
+    expect(relationDirectionAllowed("deal_for", "company", "deal")).toBe(false);
+    expect(relationDirectionAllowed("primary_contact", "deal", "person")).toBe(true);
+    expect(relationDirectionAllowed("primary_contact", "person", "deal")).toBe(false);
   });
 
   it("checks LLM relation confidence floors", () => {

@@ -197,6 +197,7 @@ describe("confirmReview", () => {
 
   beforeEach(async () => {
     db = await createTestDb();
+    await db.insertInto("users").values({ id: USER_ID, name: "User One", email: "user-1@example.com" }).execute();
     entityRepo = createEntityRepository(db);
     reviewRepo = createEntityReviewRepo(db);
     await seedConnectorConfig(db);
@@ -257,6 +258,107 @@ describe("confirmReview", () => {
     expect(finalRow?.status).toBe("confirmed");
     expect(finalRow?.resolved_entity_id).toBe(target.id);
     expect(finalRow?.resolved_by).toBe(USER_ID);
+  });
+
+  it("creates and source-binds a seed project on confirm", async () => {
+    await seedIndexedFile(db, "file-seed", { source: "clickup" });
+    const reviewId = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id: reviewId,
+        proposed_name: "Launch Plan",
+        normalized_name: "launch plan",
+        entity_type: "project",
+        candidate_entity_id: null,
+        candidate_score: null,
+        candidate_reason: null,
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: USER_ID,
+        seed_source: "clickup",
+        seed_source_id: "S1",
+      })
+      .execute();
+    await db
+      .insertInto("entity_review_evidence")
+      .values({
+        id: randomUUID(),
+        review_id: reviewId,
+        indexed_file_id: "file-seed",
+        source: "clickup",
+        note: JSON.stringify({ path: "Workspace / Space" }),
+        seen_at: now,
+      })
+      .execute();
+
+    const result = await confirmReview({ db, userId: USER_ID }, reviewId, { candidateGeneratedAt: now });
+
+    const entity = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", result.targetEntityId)
+      .executeTakeFirstOrThrow();
+    expect(entity).toMatchObject({ name: "Launch Plan", source_type: "project", status: "confirmed" });
+
+    const sourceRef = await db
+      .selectFrom("entity_source_refs")
+      .selectAll()
+      .where("source", "=", "clickup")
+      .where("source_id", "=", "S1")
+      .executeTakeFirstOrThrow();
+    expect(sourceRef.entity_id).toBe(entity.id);
+
+    expect(result.row.status).toBe("confirmed");
+    expect(result.row.resolved_entity_id).toBe(entity.id);
+    expect(result.shortCircuited).toBe(false);
+    expect(result.mergedStaleEntityId).toBeNull();
+  });
+
+  it("source-binds a seed row when confirming into an existing target", async () => {
+    const target = await entityRepo.upsertEntity({
+      name: "Existing Launch",
+      sourceType: "project",
+      status: "confirmed",
+    });
+    const now = new Date().toISOString();
+    const reviewId = randomUUID();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id: reviewId,
+        proposed_name: "Launch Plan",
+        normalized_name: "launch plan",
+        entity_type: "project",
+        candidate_entity_id: target.id,
+        candidate_score: 0.9,
+        candidate_reason: "seed match",
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: USER_ID,
+        seed_source: "clickup",
+        seed_source_id: "S1",
+      })
+      .execute();
+
+    const result = await confirmReview({ db, userId: USER_ID }, reviewId, { candidateGeneratedAt: now });
+
+    expect(result.targetEntityId).toBe(target.id);
+    await expect(
+      db
+        .selectFrom("entity_source_refs")
+        .select(["entity_id", "source", "source_id"])
+        .where("source", "=", "clickup")
+        .where("source_id", "=", "S1")
+        .executeTakeFirst(),
+    ).resolves.toMatchObject({ entity_id: target.id, source: "clickup", source_id: "S1" });
   });
 
   it("rematerializes held LLM non-person facts after confirm", async () => {
@@ -351,7 +453,7 @@ describe("confirmReview", () => {
     expect(row?.status).toBe("pending");
   });
 
-  it("merges a stale entity into target (ON CONFLICT preserves mentions)", async () => {
+  it("merges a stale entity into target through the ledgered merge core", async () => {
     const target = await entityRepo.upsertPersonEntity({
       name: "Simran Suri",
       email: "simran@acme.com",
@@ -401,6 +503,46 @@ describe("confirmReview", () => {
       })
       .execute();
 
+    await entityRepo.upsertContactPoint({
+      entityId: target.id,
+      kind: "email",
+      value: "simran@acme.com",
+      displayValue: "simran@acme.com",
+      source: "gmail",
+      connectorConfigId: "config-test",
+      lastContactedAt: "2026-01-01T00:00:00.000Z",
+      makePrimary: true,
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: stale.id,
+      kind: "email",
+      value: "SIMRAN@ACME.COM",
+      displayValue: "SIMRAN@ACME.COM",
+      source: "manual",
+      connectorConfigId: "config-test",
+      verifiedAt: "2026-01-04T00:00:00.000Z",
+      lastContactedAt: "2026-01-03T00:00:00.000Z",
+      makePrimary: true,
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: target.id,
+      kind: "linkedin",
+      value: "simran-old",
+      source: "manual",
+      connectorConfigId: "config-test",
+      lastContactedAt: "2026-01-01T00:00:00.000Z",
+      makePrimary: true,
+    });
+    await entityRepo.upsertContactPoint({
+      entityId: stale.id,
+      kind: "linkedin",
+      value: "simran-new",
+      source: "manual",
+      connectorConfigId: "config-test",
+      lastContactedAt: "2026-01-05T00:00:00.000Z",
+      makePrimary: true,
+    });
+
     // Queue with the stale entity NOT as the candidate — the resolver
     // discovers it via the name+no-email predicate at step 5. proposeEntity
     // would have routed this through token-superset to land Simran Suri as
@@ -446,9 +588,14 @@ describe("confirmReview", () => {
 
     expect(result.mergedStaleEntityId).toBe(stale.id);
 
-    // Stale entity is gone.
+    const merges = await db.selectFrom("entity_merges").selectAll().execute();
+    expect(merges).toHaveLength(1);
+    expect(merges[0]).toMatchObject({ survivor_entity_id: target.id, merged_entity_id: stale.id });
+
+    // Stale entity is tombstoned, not hard-deleted.
     const staleAfter = await db.selectFrom("entities").selectAll().where("id", "=", stale.id).executeTakeFirst();
-    expect(staleAfter).toBeUndefined();
+    expect(staleAfter).toMatchObject({ merged_into_entity_id: target.id });
+    expect(staleAfter?.deleted_at).toBeTruthy();
 
     // Target gained the stale's file-stale mention (ON CONFLICT kept the pre-existing one).
     const targetMentions = await db
@@ -459,6 +606,24 @@ describe("confirmReview", () => {
     const fileIds = targetMentions.map((m) => m.indexed_file_id);
     expect(fileIds).toContain("file-stale");
     expect(fileIds).toContain("file-q");
+
+    const contactPoints = await entityRepo.getContactPointsForEntity(target.id);
+    expect(contactPoints.filter((point) => point.kind === "email")).toHaveLength(1);
+    expect(contactPoints.find((point) => point.kind === "email")).toMatchObject({
+      value: "simran@acme.com",
+      source: "gmail",
+      verified_at: null,
+      last_contacted_at: "2026-01-01T00:00:00.000Z",
+      is_primary: 1,
+    });
+    expect(
+      contactPoints
+        .filter((point) => point.kind === "linkedin")
+        .map((point) => ({ value: point.value, isPrimary: point.is_primary })),
+    ).toEqual([
+      { value: "simran-old", isPrimary: 1 },
+      { value: "simran-new", isPrimary: 0 },
+    ]);
   });
 
   it("aborts with MULTIPLE_STALE_CANDIDATES when two stale entities match", async () => {

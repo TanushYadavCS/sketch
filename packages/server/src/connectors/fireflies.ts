@@ -92,7 +92,11 @@ function summarizeErrorBody(body: string): string {
   return trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed;
 }
 
-function makeFirefliesRequest(getLastRequestTime: () => number, setLastRequestTime: (t: number) => void) {
+function makeFirefliesRequest(
+  getLastRequestTime: () => number,
+  setLastRequestTime: (t: number) => void,
+  minRequestIntervalMs: number = MIN_REQUEST_INTERVAL_MS,
+) {
   return async function firefliesRequest<T>(
     query: string,
     variables: Record<string, unknown>,
@@ -102,8 +106,8 @@ function makeFirefliesRequest(getLastRequestTime: () => number, setLastRequestTi
   ): Promise<T> {
     const now = Date.now();
     const elapsed = now - getLastRequestTime();
-    if (elapsed < MIN_REQUEST_INTERVAL_MS) {
-      await new Promise((resolve) => setTimeout(resolve, MIN_REQUEST_INTERVAL_MS - elapsed));
+    if (elapsed < minRequestIntervalMs) {
+      await new Promise((resolve) => setTimeout(resolve, minRequestIntervalMs - elapsed));
     }
     setLastRequestTime(Date.now());
 
@@ -521,13 +525,23 @@ export function buildCredentialHint(apiKey: string): string | null {
   return apiKey.slice(-6);
 }
 
-export function createFirefliesConnector(): Connector {
+export interface FirefliesConnectorOptions {
+  /**
+   * Minimum spacing between API requests in milliseconds. Defaults to the
+   * production rate limit ({@link MIN_REQUEST_INTERVAL_MS}); tests pass 0 to
+   * avoid real wall-clock waits while still exercising the request path.
+   */
+  minRequestIntervalMs?: number;
+}
+
+export function createFirefliesConnector(options: FirefliesConnectorOptions = {}): Connector {
   let lastRequestTime = 0;
   const firefliesRequest = makeFirefliesRequest(
     () => lastRequestTime,
     (t) => {
       lastRequestTime = t;
     },
+    options.minRequestIntervalMs ?? MIN_REQUEST_INTERVAL_MS,
   );
 
   return {

@@ -113,6 +113,141 @@ describe("createCanUseTool", () => {
       expectDeny(result);
       expect(result.message).toContain("outside your workspace");
     });
+
+    it("denies Read for blocked attachment paths", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/image-without-extension`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Read", { file_path: blockedPath });
+
+      expectDeny(result);
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+      expect(result.message).toContain(blockedPath);
+    });
+
+    it.each(["jpg", "jpeg", "png", "gif", "webp"])(
+      "denies Read for image extension .%s when image reads are disabled",
+      async (extension) => {
+        const logger = createTestLogger();
+        const imagePath = `${WORKSPACE}/attachments/photo.${extension}`;
+        const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: true });
+
+        const result = await agentTool("Read", { file_path: imagePath });
+
+        expectDeny(result);
+        expect(result.message).toContain("Direct image reads are not supported for this model");
+        expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+        expect(result.message).toContain("Do not use Read, Bash, cat, base64, or conversion workarounds");
+        expect(result.message).toContain(imagePath);
+      },
+    );
+
+    it("allows Read for image extensions when image reads are enabled", async () => {
+      const logger = createTestLogger();
+      const imagePath = `${WORKSPACE}/attachments/photo.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: false });
+
+      const result = await agentTool("Read", { file_path: imagePath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("allows Read for non-image extensions when image reads are disabled", async () => {
+      const logger = createTestLogger();
+      const textPath = `${WORKSPACE}/attachments/notes.txt`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: true });
+
+      const result = await agentTool("Read", { file_path: textPath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("allows non-Read file tools for image extensions when image reads are disabled", async () => {
+      const logger = createTestLogger();
+      const imagePath = `${WORKSPACE}/attachments/photo.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockImageReads: true });
+
+      const result = await agentTool("Grep", { path: imagePath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("resolves blocked attachment paths before comparing", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/image.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Read", { file_path: `${WORKSPACE}/attachments/../attachments/image.png` });
+
+      expectDeny(result);
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+    });
+
+    it("allows non-Read file tools for blocked attachment paths", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/image.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Grep", { path: blockedPath });
+
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("denies Bash commands that reference blocked attachment paths", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/image.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Bash", { command: `base64 "${blockedPath}"` });
+
+      expectDeny(result);
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+      expect(result.message).toContain(blockedPath);
+    });
+
+    it("denies Bash commands that reference blocked attachment paths relative to the workspace", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/image.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Bash", { command: "cat ./attachments/image.png" });
+
+      expectDeny(result);
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+    });
+
+    it("denies Bash commands with relative globs that match blocked attachment paths", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/photo.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Bash", { command: "base64 attachments/*.png" });
+
+      expectDeny(result);
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+    });
+
+    it("denies Bash commands with absolute globs that match blocked attachment paths", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/photo.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Bash", { command: `cat ${WORKSPACE}/attachments/photo.*` });
+
+      expectDeny(result);
+      expect(result.message).toContain("Use mcp__sketch__VisualAnalysis");
+    });
+
+    it("allows Bash commands that do not reference blocked attachment paths", async () => {
+      const logger = createTestLogger();
+      const blockedPath = `${WORKSPACE}/attachments/image.png`;
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { blockedReadPaths: [blockedPath] });
+
+      const result = await agentTool("Bash", { command: "cat notes.txt" });
+
+      expect(result.behavior).toBe("allow");
+    });
   });
 
   describe("file tools — ~/.claude access", () => {
@@ -239,7 +374,7 @@ describe("createCanUseTool", () => {
   describe("agent allowlist", () => {
     it("allows tools that are in the agent's allowlist", async () => {
       const logger = createTestLogger();
-      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["Read", "Bash"]);
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { agentAllowedTools: ["Read", "Bash"] });
 
       const readResult = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
       expect(readResult.behavior).toBe("allow");
@@ -250,7 +385,7 @@ describe("createCanUseTool", () => {
 
     it("denies built-in tools that are not in the agent's allowlist", async () => {
       const logger = createTestLogger();
-      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["Read"]);
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { agentAllowedTools: ["Read"] });
 
       const result = await agentTool("Bash", { command: "ls" });
       expectDeny(result);
@@ -259,7 +394,7 @@ describe("createCanUseTool", () => {
 
     it("denies MCP tools that are not in the agent's allowlist", async () => {
       const logger = createTestLogger();
-      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["Read"]);
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { agentAllowedTools: ["Read"] });
 
       const result = await agentTool("mcp__sketch__SendFileToChat", { file_path: `${WORKSPACE}/x` });
       expectDeny(result);
@@ -268,7 +403,9 @@ describe("createCanUseTool", () => {
 
     it("allows MCP tools that are in the agent's allowlist", async () => {
       const logger = createTestLogger();
-      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, ["mcp__sketch__SendFileToChat"]);
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, {
+        agentAllowedTools: ["mcp__sketch__SendFileToChat"],
+      });
 
       const result = await agentTool("mcp__sketch__SendFileToChat", { file_path: `${WORKSPACE}/x` });
       expect(result.behavior).toBe("allow");
@@ -276,7 +413,7 @@ describe("createCanUseTool", () => {
 
     it("treats an empty allowlist as 'block every tool' (admin opted out of all capabilities)", async () => {
       const logger = createTestLogger();
-      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, []);
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { agentAllowedTools: [] });
 
       const builtIn = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
       expect(builtIn.behavior).toBe("deny");
@@ -287,7 +424,7 @@ describe("createCanUseTool", () => {
 
     it("treats null/undefined allowlist as 'no agent restriction' (legacy or non-agent run)", async () => {
       const logger = createTestLogger();
-      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, null);
+      const agentTool = createCanUseTool(WORKSPACE, logger, CLAUDE_DIR, { agentAllowedTools: null });
 
       const builtIn = await agentTool("Read", { file_path: `${WORKSPACE}/notes.md` });
       expect(builtIn.behavior).toBe("allow");

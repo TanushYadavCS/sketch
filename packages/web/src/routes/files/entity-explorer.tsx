@@ -42,7 +42,7 @@ import {
   DropdownMenuTrigger,
 } from "@sketch/ui/components/dropdown-menu";
 import { Input } from "@sketch/ui/components/input";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@sketch/ui/components/sheet";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -588,6 +588,9 @@ function ReviewDetailSheet({ reviewId, onClose }: { reviewId: string | null; onC
           <SheetTitle className="text-base">
             {isLoading ? "Loading..." : row ? `Reconcile: ${row.proposed_name}` : "Review"}
           </SheetTitle>
+          <SheetDescription className="sr-only">
+            Compare the proposed entity against suggested existing matches, then confirm or reject the reconciliation.
+          </SheetDescription>
         </SheetHeader>
         <div className="flex min-h-0 flex-1 flex-col px-4 pb-4 pt-3">
           {isLoading ? (

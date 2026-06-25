@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SyncedItem } from "./types";
+import type { Connector, ConnectorCredentials, EntitySeedCallback, OAuthCredentials, SyncedItem } from "./types";
 
 const LINEAR_API = "https://api.linear.app/graphql";
 const TOKEN_ENDPOINT = "https://api.linear.app/oauth/token";
@@ -41,8 +41,8 @@ interface LinearIssue {
   priorityLabel: string;
   assignee: { name: string; displayName: string } | null;
   labels: { nodes: Array<{ name: string }> };
-  team: { name: string; key: string } | null;
-  project: { name: string } | null;
+  team: { id: string; name: string; key: string } | null;
+  project: { id: string; name: string } | null;
   estimate: number | null;
   dueDate: string | null;
   createdAt: string;
@@ -62,6 +62,19 @@ interface LinearProject {
   teams: { nodes: Array<{ name: string; key: string }> };
   createdAt: string;
   updatedAt: string;
+}
+
+interface LinearMember {
+  id: string;
+  name: string;
+  email: string | null;
+}
+
+interface LinearTeam {
+  id: string;
+  name: string;
+  key: string;
+  members: { pageInfo?: PageInfo; nodes: LinearMember[] };
 }
 
 interface GraphQLResponse<T> {
@@ -158,6 +171,11 @@ const PRIORITY_LABELS: Record<number, string> = {
   4: "Low",
 };
 
+/**
+ * Builds the issue's indexed document. The `parentEntities` references link
+ * issues to their seeded Linear team and, when present, project entities using
+ * the bare Linear object ids emitted by the seed pass.
+ */
 function issueToSyncedItem(issue: LinearIssue): SyncedItem {
   const hasDescription = issue.description && issue.description.trim().length > 0;
 
@@ -200,10 +218,31 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
     sourceCreatedAt: issue.createdAt,
     sourceUpdatedAt: issue.updatedAt,
     assignees: issue.assignee ? [{ name: issue.assignee.displayName }] : [],
+    parentEntities: [
+      ...(issue.team
+        ? [{ source: "linear", sourceId: issue.team.id, contextSnippet: `Linear issue in team: ${issue.team.name}` }]
+        : []),
+      ...(issue.project
+        ? [
+            {
+              source: "linear",
+              sourceId: issue.project.id,
+              contextSnippet: `Linear issue in project: ${issue.project.name}`,
+            },
+          ]
+        : []),
+    ],
     // TODO: populate access scope from team membership + privacy
   };
 }
 
+/**
+ * Builds the project's indexed document. The `parentEntities` self-reference
+ * links this doc to the seeded `project` entity (sourceId is the bare project
+ * id, matching `emitLinearProjectSeed`), so the entity carries its own document
+ * as evidence. The `parent_entity` fact materializes after the project seed,
+ * which creates the entity first (`FACT_REPLAY_ORDER`).
+ */
 function projectToSyncedItem(project: LinearProject): SyncedItem {
   const hasDescription = project.description && project.description.trim().length > 0;
 
@@ -232,7 +271,45 @@ function projectToSyncedItem(project: LinearProject): SyncedItem {
     contentHash: contentHash(content),
     sourceCreatedAt: project.createdAt,
     sourceUpdatedAt: project.updatedAt,
+    parentEntities: [{ source: "linear", sourceId: project.id, contextSnippet: `Linear project: ${project.name}` }],
     // TODO: populate access scope from team membership + privacy
+  };
+}
+
+/**
+ * Builds the team's indexed document and carries membership facts. The team
+ * entity is still emitted through the structural seed callback because Linear
+ * team files are not promotable, while member people and relationships can use
+ * the yielded document's fact pipeline.
+ */
+function teamToSyncedItem(team: LinearTeam): SyncedItem {
+  const memberNames = team.members.nodes.map((member) => member.name).join(", ");
+  const content = `${team.name}\n\nMembers: ${memberNames}`;
+
+  return {
+    providerFileId: `team-${team.id}`,
+    providerUrl: null,
+    fileName: team.name,
+    fileType: "team",
+    contentCategory: "structured",
+    content,
+    sourcePath: null,
+    contentHash: contentHash(content),
+    sourceCreatedAt: null,
+    sourceUpdatedAt: null,
+    personSeeds: team.members.nodes.map((member) => ({
+      name: member.name,
+      email: member.email ?? undefined,
+      subtype: "internal",
+      source: "linear",
+      sourceId: member.id,
+    })),
+    relationships: team.members.nodes.map((member) => ({
+      relationType: "member_of",
+      source: { source: "linear", sourceId: member.id, name: member.name, type: "person" },
+      target: { source: "linear", sourceId: team.id, name: team.name, type: "team" },
+      contextSnippet: `Member of ${team.name}`,
+    })),
   };
 }
 
@@ -285,8 +362,8 @@ query Issues($first: Int!, $after: String, $filter: IssueFilter) {
 			priorityLabel
 			assignee { name displayName }
 			labels { nodes { name } }
-			team { name key }
-			project { name }
+			team { id name key }
+			project { id name }
 			estimate
 			dueDate
 			createdAt
@@ -325,6 +402,62 @@ query Projects($first: Int!, $after: String, $filter: ProjectFilter) {
 	}
 }`;
 
+const TEAMS_QUERY = `
+query Teams($first: Int!, $after: String) {
+	teams(first: $first, after: $after) {
+		pageInfo {
+			hasNextPage
+			endCursor
+		}
+		nodes {
+			id
+			name
+			key
+			members(first: 250) {
+				pageInfo {
+					hasNextPage
+					endCursor
+				}
+				nodes { id name email }
+			}
+		}
+	}
+}`;
+
+const TEAM_MEMBERS_QUERY = `
+query TeamMembers($teamId: String!, $first: Int!, $after: String) {
+	team(id: $teamId) {
+		members(first: $first, after: $after) {
+			pageInfo {
+				hasNextPage
+				endCursor
+			}
+			nodes { id name email }
+		}
+	}
+}`;
+
+/**
+ * Linear does not currently emit accessScope/accessEmails, so seeded Linear
+ * entities inherit org-wide visibility until Linear connector hardening lands.
+ */
+async function emitLinearProjectSeed(project: LinearProject, onEntitySeed: EntitySeedCallback): Promise<void> {
+  await onEntitySeed({
+    name: project.name,
+    sourceType: "project",
+    source: "linear",
+    sourceId: project.id,
+    sourceUrl: project.url,
+    metadata: {
+      state: project.state,
+      lead: project.lead?.displayName ?? null,
+      teams: project.teams.nodes.map((team) => team.name),
+      startDate: project.startDate,
+      targetDate: project.targetDate,
+    },
+  });
+}
+
 export function createLinearConnector(): Connector {
   // Per-connector instance rate limiter state — not shared across concurrent syncs
   let lastRequestTime = 0;
@@ -339,7 +472,7 @@ export function createLinearConnector(): Connector {
     type: "linear",
     perUserAuth: false,
     requiresOAuthClientSetup: false,
-    promotableFileTypes: ["project"],
+    promotableFileTypes: [],
 
     async validateCredentials(credentials) {
       const token = getAccessToken(credentials);
@@ -347,13 +480,14 @@ export function createLinearConnector(): Connector {
       await linearRequest(query, {}, token, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, scopeConfig, cursor, logger }) {
+    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed }) {
       const token = getAccessToken(credentials);
       const allowedTeams = (scopeConfig.teams as string[] | undefined) ?? [];
       const sinceDate = cursor ?? null;
 
       yield* syncIssues(token, sinceDate, allowedTeams, logger, linearRequest);
-      yield* syncProjects(token, sinceDate, logger, linearRequest);
+      yield* syncTeams(token, allowedTeams, logger, linearRequest, onEntitySeed);
+      yield* syncProjects(token, sinceDate, logger, linearRequest, onEntitySeed);
     },
 
     async getCursor({ currentCursor }) {
@@ -417,6 +551,7 @@ async function* syncProjects(
   since: string | null,
   logger: Logger,
   linearRequest: LinearRequestFn,
+  onEntitySeed?: EntitySeedCallback,
 ): AsyncGenerator<SyncedItem> {
   let afterCursor: string | null = null;
   let totalProjects = 0;
@@ -439,6 +574,9 @@ async function* syncProjects(
 
     for (const project of data.projects.nodes) {
       yield projectToSyncedItem(project);
+      if (onEntitySeed) {
+        await emitLinearProjectSeed(project, onEntitySeed);
+      }
       totalProjects++;
     }
 
@@ -447,4 +585,87 @@ async function* syncProjects(
   } while (afterCursor);
 
   logger.info({ totalProjects }, "Projects sync complete");
+}
+
+/**
+ * Fetches any team members beyond the first nested page. The top-level teams
+ * query embeds the first {@link PAGE_SIZE}-capped page of members; large teams
+ * are completed here so every member gets a `person_seed` fact and `member_of`
+ * edge, mirroring the cursor loop used for the teams connection itself.
+ */
+async function fetchRemainingTeamMembers(
+  token: string,
+  teamId: string,
+  initialPageInfo: PageInfo,
+  logger: Logger,
+  linearRequest: LinearRequestFn,
+): Promise<LinearMember[]> {
+  const members: LinearMember[] = [];
+  let afterCursor: string | null = initialPageInfo.hasNextPage ? initialPageInfo.endCursor : null;
+
+  while (afterCursor) {
+    const data = await linearRequest<{
+      team: { members: { pageInfo: PageInfo; nodes: LinearMember[] } } | null;
+    }>(TEAM_MEMBERS_QUERY, { teamId, first: 250, after: afterCursor }, token, logger);
+
+    const page = data.team?.members;
+    if (!page) break;
+
+    members.push(...page.nodes);
+    afterCursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+  }
+
+  return members;
+}
+
+async function* syncTeams(
+  token: string,
+  allowedTeams: string[],
+  logger: Logger,
+  linearRequest: LinearRequestFn,
+  onEntitySeed?: EntitySeedCallback,
+): AsyncGenerator<SyncedItem> {
+  let afterCursor: string | null = null;
+  let totalTeams = 0;
+
+  const allowedTeamKeys = allowedTeams.length > 0 ? new Set(allowedTeams) : null;
+
+  do {
+    const variables: Record<string, unknown> = {
+      first: PAGE_SIZE,
+      after: afterCursor,
+    };
+
+    const data = await linearRequest<{
+      teams: { pageInfo: PageInfo; nodes: LinearTeam[] };
+    }>(TEAMS_QUERY, variables, token, logger);
+
+    for (const team of data.teams.nodes) {
+      if (allowedTeamKeys && !allowedTeamKeys.has(team.key)) {
+        continue;
+      }
+
+      if (team.members.pageInfo?.hasNextPage) {
+        const remaining = await fetchRemainingTeamMembers(token, team.id, team.members.pageInfo, logger, linearRequest);
+        team.members.nodes.push(...remaining);
+      }
+
+      if (onEntitySeed) {
+        await onEntitySeed({
+          name: team.name,
+          sourceType: "team",
+          source: "linear",
+          sourceId: team.id,
+          metadata: { key: team.key },
+        });
+      }
+      yield teamToSyncedItem(team);
+      totalTeams++;
+    }
+
+    afterCursor = data.teams.pageInfo.hasNextPage ? data.teams.pageInfo.endCursor : null;
+    logger.debug({ teamsProcessed: totalTeams, hasMore: !!afterCursor }, "Teams page complete");
+  } while (afterCursor);
+
+  logger.info({ totalTeams }, "Teams sync complete");
 }

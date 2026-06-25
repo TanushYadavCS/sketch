@@ -8,8 +8,9 @@
  * 3. Bash path validation — commands blocked if they reference absolute paths outside
  *    workspace/~/.claude.
  */
-import { resolve } from "node:path";
+import { extname, isAbsolute, matchesGlob, relative, resolve } from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { Logger } from "../logger";
 
 export const PERMITTED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Skill"];
@@ -17,6 +18,14 @@ export const PERMITTED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep",
 export const FILE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"];
 
 export const READ_ONLY_FILE_TOOLS = ["Read", "Glob", "Grep"];
+
+export interface CanUseToolOptions {
+  agentAllowedTools?: string[] | null;
+  blockedReadPaths?: Iterable<string> | null;
+  blockImageReads?: boolean;
+}
+
+const IMAGE_FILE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 
 /**
  * Returns true when filePath is exactly dir or a child of dir.
@@ -27,20 +36,66 @@ function isInsideDir(filePath: string, dir: string): boolean {
   return filePath === dir || filePath.startsWith(`${dir}/`);
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function commandWords(command: string): string[] {
+  return Array.from(
+    command.matchAll(/'([^']*)'|"([^"]*)"|([^\s|&;<>]+)/g),
+    (match) => match[1] ?? match[2] ?? match[3],
+  );
+}
+
+function hasGlobSyntax(value: string): boolean {
+  return /[*?[\]{}]/.test(value);
+}
+
+function isImageFilePath(filePath: string): boolean {
+  return IMAGE_FILE_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
+function matchesBlockedPathPattern(pattern: string, blockedPath: string, relativeBlockedPath: string): boolean {
+  const normalizedPattern = pattern.startsWith("./") ? pattern.slice(2) : pattern;
+  if (isAbsolute(normalizedPattern)) return matchesGlob(blockedPath, normalizedPattern);
+  return matchesGlob(relativeBlockedPath, normalizedPattern);
+}
+
+function commandReferencesPath(command: string, filePath: string, absWorkspace: string): boolean {
+  const candidates = new Set([filePath]);
+  const relativePath = relative(absWorkspace, filePath);
+  if (!relativePath.startsWith("..") && !isAbsolute(relativePath)) {
+    candidates.add(relativePath);
+    candidates.add(`./${relativePath}`);
+  }
+
+  for (const candidate of candidates) {
+    const pattern = new RegExp(`(^|[^\\w./-])${escapeRegExp(candidate)}($|[^\\w./-])`);
+    if (pattern.test(command)) return true;
+  }
+
+  for (const word of commandWords(command)) {
+    if (hasGlobSyntax(word) && matchesBlockedPathPattern(word, filePath, relativePath)) return true;
+  }
+
+  return false;
+}
+
 export function createCanUseTool(
   absWorkspace: string,
   logger: Logger,
   claudeDir: string | undefined,
-  agentAllowedTools?: string[] | null,
+  options: CanUseToolOptions = {},
 ) {
   const absClaudeDir = claudeDir ? resolve(claudeDir) : null;
+  const blockedReadPaths = new Set(Array.from(options.blockedReadPaths ?? [], (path) => resolve(path)));
   /**
    * NULL/undefined = no allowlist (legacy or non-agent run). Empty array =
    * deny every tool. Non-empty array = the canonical allowlist. Distinguishing
    * NULL from `[]` matters: an admin who unselects all tools must not silently
    * grant every MCP tool.
    */
-  const agentAllowlist = agentAllowedTools ? new Set(agentAllowedTools) : null;
+  const agentAllowlist = options.agentAllowedTools ? new Set(options.agentAllowedTools) : null;
 
   return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
     logger.debug({ toolName }, "canUseTool called");
@@ -67,11 +122,32 @@ export function createCanUseTool(
           message: `Access denied: ${filePath} is outside your workspace ${absWorkspace}`,
         };
       }
+
+      if (
+        toolName === "Read" &&
+        (blockedReadPaths.has(filePath) || (options.blockImageReads && isImageFilePath(filePath)))
+      ) {
+        logger.warn({ toolName, filePath }, "Blocked Read on attachment that requires VisualAnalysis");
+        return {
+          behavior: "deny",
+          message: `Direct image reads are not supported for this model. Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this exact path instead: ${filePath}. Do not use Read, Bash, cat, base64, or conversion workarounds for this image.`,
+        };
+      }
     }
 
     // Layer 3: bash path validation
     if (toolName === "Bash") {
       const command = (input.command as string) || "";
+      for (const blockedPath of blockedReadPaths) {
+        if (commandReferencesPath(command, blockedPath, absWorkspace)) {
+          logger.warn({ toolName, blockedPath }, "Blocked Bash command on attachment that requires VisualAnalysis");
+          return {
+            behavior: "deny",
+            message: `Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this path instead of Bash: ${blockedPath}`,
+          };
+        }
+      }
+
       // Temporary broad carveout: CANVAS_CLI is a brokered launcher created by
       // Sketch, and Canvas CLI commands commonly carry JSON/text values that
       // trip the generic path scanner. Revisit with a structured shell parser.

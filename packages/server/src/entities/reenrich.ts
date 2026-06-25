@@ -4,7 +4,7 @@ import type { Logger } from "pino";
 import { createEmbeddingProvider } from "../connectors/embeddings";
 import { floorRetryForDomains } from "../connectors/engagement-floor";
 import { type EnrichmentDeps, type EnrichmentResult, MAX_FILES_PER_RUN, runEnrichment } from "../connectors/enrichment";
-import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
+import { type IndexedFileFactType, PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import type { MaterializeProgress } from "./materialize";
 import {
@@ -454,7 +454,7 @@ async function runPostSweepEngagementFloor(
       .selectFrom("indexed_file_facts")
       .select("subject_email")
       .where("indexed_file_facts.indexed_file_id", "in", fileIds)
-      .where("indexed_file_facts.fact_type", "=", "attendee")
+      .where("indexed_file_facts.fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
       .where("indexed_file_facts.subject_email", "is not", null)
       .execute();
     const domainRows = await db.selectFrom("entity_domains").select("domain").where("kind", "=", "corporate").execute();

@@ -214,6 +214,6 @@ export async function resolveConnectorCredentials(params: {
 
   return {
     credentialSource,
-    credentials: parseCredentials(params.config.credentials, params.appConfig.ENCRYPTION_KEY),
+    credentials: parseCredentials(params.config.credentials),
   };
 }

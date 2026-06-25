@@ -3,9 +3,12 @@ dist/
 .env
 data
 data/
+tmp/
 .claude/
 .codex/
 .agents/
-skills/
-skills-lock.json
+/skills/
+/skills-lock.json
 .worktrees/
+apps/macos/.build/
+apps/macos/.dist/

@@ -9,6 +9,7 @@ import type { TaskScheduler } from "../../scheduler/service";
 import { normalizeScheduleTriggerSteps, normalizeScheduleTriggerStepsJson } from "../../scheduler/trigger-metadata";
 import type { ScheduledTask, TaskContext } from "../../scheduler/types";
 import type { WorkflowStep } from "../../workflows/types";
+import type { SearchableUserRepo } from "./types";
 
 const workflowStepSchema = z.object({
   id: z.string(),
@@ -50,6 +51,14 @@ const workflowStepSchema = z.object({
       "Use type 'canvas' for Canvas-managed external triggers. Use it only when a Canvas skill/MCP has selected a trigger component via search_components; otherwise create a normal schedule trigger fallback.",
     )
     .optional(),
+});
+
+const deliverySchema = z.object({
+  platform: z.enum(["slack", "whatsapp"]).optional(),
+  targetType: z.enum(["dm", "channel", "group", "thread"]).optional(),
+  targetId: z.string().min(1).optional(),
+  threadTs: z.string().min(1).nullable().optional(),
+  mode: z.enum(["deliver", "silent"]).optional(),
 });
 
 const manageScheduledTasksSchema = {
@@ -104,10 +113,16 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
     .describe("Connections between workflow steps (optional in Phase 1)."),
   output_target: z.string().optional().describe("Channel/DM to send final output to."),
   output_platform: z.enum(["slack", "whatsapp"]).optional(),
+  output_thread_ts: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Slack thread timestamp for final output. Use null to deliver top-level in the target channel."),
   output_mode: z
     .enum(["deliver", "silent"])
     .optional()
     .describe("Use 'silent' to record successful runs without sending final output to Slack or WhatsApp."),
+  delivery: deliverySchema.optional().describe("Canonical final-output delivery destination for the workflow."),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
   step_id: z.string().optional().describe("Step ID for updateStepContent action."),
   step_content: z.string().optional().describe("New prompt or script content for updateStepContent action."),
@@ -130,7 +145,15 @@ type ManageScheduledTasksParams = {
   edges?: { id: string; from: string; to: string }[];
   output_target?: string;
   output_platform?: "slack" | "whatsapp";
+  output_thread_ts?: string | null;
   output_mode?: "deliver" | "silent";
+  delivery?: {
+    platform?: "slack" | "whatsapp";
+    targetType?: "dm" | "channel" | "group" | "thread";
+    targetId?: string;
+    threadTs?: string | null;
+    mode?: "deliver" | "silent";
+  };
   run_id?: string;
   step_id?: string;
   step_content?: string;
@@ -142,6 +165,7 @@ export interface ManageScheduledTasksDeps {
   taskContext: TaskContext;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
+  userRepo?: SearchableUserRepo;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
@@ -175,6 +199,82 @@ function resolveScheduleTimezone(paramTz: string | undefined, ctxTz: string | nu
   return "UTC";
 }
 
+function hasOwn<T extends object>(value: T, key: keyof T): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function titleCaseWords(value: string): string {
+  return value.replace(/\b[a-z]/g, (char) => char.toUpperCase());
+}
+
+function formatDisplayName(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (/^[a-z]+(?:[ ._-][a-z]+)*$/.test(trimmed)) {
+    return titleCaseWords(trimmed.replace(/[._-]+/g, " "));
+  }
+  return trimmed;
+}
+
+function taskDisplayName(task: ScheduledTask): string {
+  return task.title?.trim() || task.prompt.trim() || "this automation";
+}
+
+function guardedActionLabel(action: ManageScheduledTasksParams["action"]): string {
+  if (action === "remove") return "delete";
+  if (action === "resume") return "resume";
+  if (action === "pause") return "pause";
+  if (action === "run") return "run";
+  if (action === "getRun") return "inspect";
+  return "update";
+}
+
+async function resolveTaskOwnerName(task: ScheduledTask, userRepo: SearchableUserRepo | undefined): Promise<string> {
+  if (!task.createdBy || !userRepo) return "another user";
+  const owner = await userRepo.findById(task.createdBy).catch(() => undefined);
+  return (
+    formatDisplayName(owner?.name) ??
+    formatDisplayName(owner?.email?.split("@")[0]) ??
+    formatDisplayName(owner?.email) ??
+    "another user"
+  );
+}
+
+async function taskPermissionError(
+  task: ScheduledTask,
+  action: ManageScheduledTasksParams["action"],
+  userRepo: SearchableUserRepo | undefined,
+): Promise<string> {
+  const ownerName = await resolveTaskOwnerName(task, userRepo);
+  return `Error: You can't ${guardedActionLabel(action)} "${taskDisplayName(task)}" because it was created by ${ownerName}.`;
+}
+
+function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContext) {
+  const delivery = params.delivery;
+  let outputPlatform = delivery?.platform ?? params.output_platform;
+  let outputTarget = delivery?.targetId ?? params.output_target;
+  const outputMode = delivery?.mode ?? params.output_mode;
+  let outputThreadTs = params.output_thread_ts;
+  const hasDeliveryTarget = delivery && (delivery.targetId !== undefined || delivery.targetType !== undefined);
+
+  if (delivery && hasOwn(delivery, "threadTs")) {
+    outputThreadTs = delivery.threadTs ?? null;
+  } else if (delivery?.targetType === "thread") {
+    outputTarget ??= ctx.deliveryTarget;
+    outputPlatform ??= ctx.platform;
+    outputThreadTs = ctx.threadTs ?? null;
+  } else if (hasDeliveryTarget) {
+    outputThreadTs = null;
+  }
+
+  return {
+    outputTarget,
+    outputPlatform,
+    outputThreadTs,
+    outputMode,
+  };
+}
+
 export async function handleManageScheduledTasks(
   params: ManageScheduledTasksParams,
   deps: ManageScheduledTasksDeps,
@@ -202,16 +302,15 @@ export async function handleManageScheduledTasks(
     return null;
   };
 
-  // Ownership guard: creator-only for actions that mutate or inspect a specific task.
-  // Unified 404 phrasing ("task not found") for both missing and not-yours — avoids
-  // existence leaks. Admin bypass is deliberately not offered here; admins use the
-  // web UI for tenant-wide ops. Matches the HTTP layer's same-behavior guarantee.
   const OWNERSHIP_GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"];
   let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
-    if (!ctx.createdBy || !task || task.createdBy !== ctx.createdBy) {
+    if (!ctx.createdBy || !task) {
       return text("Error: task not found.");
+    }
+    if (task.createdBy !== ctx.createdBy) {
+      return text(await taskPermissionError(task, action, deps.userRepo));
     }
     guardedTask = task;
   }
@@ -349,6 +448,7 @@ export async function handleManageScheduledTasks(
       }
 
       const sessionMode = "fresh";
+      const deliveryFields = buildDeliveryFields(params, ctx);
 
       // Strip content from steps (stored separately in automation_step_content)
       const steps = params.steps as NonNullable<typeof params.steps>;
@@ -389,9 +489,10 @@ export async function handleManageScheduledTasks(
         description: params.description,
         steps: JSON.stringify(stepsForDb),
         edges: params.edges ? JSON.stringify(params.edges) : null,
-        outputTarget: params.output_target,
-        outputPlatform: params.output_platform,
-        outputMode: params.output_mode,
+        outputTarget: deliveryFields.outputTarget,
+        outputPlatform: deliveryFields.outputPlatform,
+        outputThreadTs: deliveryFields.outputThreadTs,
+        outputMode: deliveryFields.outputMode,
       });
 
       // Store step content
@@ -446,7 +547,15 @@ export async function handleManageScheduledTasks(
       if (params.description !== undefined) updateFields.description = params.description;
       if (params.output_target !== undefined) updateFields.outputTarget = params.output_target;
       if (params.output_platform !== undefined) updateFields.outputPlatform = params.output_platform;
+      if (params.output_thread_ts !== undefined) updateFields.outputThreadTs = params.output_thread_ts;
       if (params.output_mode !== undefined) updateFields.outputMode = params.output_mode;
+      if (params.delivery) {
+        const deliveryFields = buildDeliveryFields(params, ctx);
+        if (deliveryFields.outputTarget !== undefined) updateFields.outputTarget = deliveryFields.outputTarget;
+        if (deliveryFields.outputPlatform !== undefined) updateFields.outputPlatform = deliveryFields.outputPlatform;
+        if (deliveryFields.outputThreadTs !== undefined) updateFields.outputThreadTs = deliveryFields.outputThreadTs;
+        if (deliveryFields.outputMode !== undefined) updateFields.outputMode = deliveryFields.outputMode;
+      }
 
       // Handle steps update
       if (params.steps) {
@@ -651,6 +760,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         taskContext: deps.taskContext,
         stepContentRepo: deps.stepContentRepo,
         automationRunsRepo: deps.automationRunsRepo,
+        userRepo: deps.userRepo,
         loadIntegrationProvider: deps.loadIntegrationProvider,
         queueManager: deps.queueManager,
         activeQueueKey: deps.activeQueueKey,

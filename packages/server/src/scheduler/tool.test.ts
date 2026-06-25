@@ -34,7 +34,15 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     edges: null,
     outputTarget: null,
     outputPlatform: null,
+    outputThreadTs: null,
     outputMode: "deliver",
+    delivery: {
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C123",
+      threadTs: null,
+      mode: "deliver",
+    },
     ...overrides,
   };
 }
@@ -69,6 +77,17 @@ function makeMockStepContentRepo() {
     deleteByTaskId: vi.fn().mockResolvedValue(undefined),
     deleteOrphanedSteps: vi.fn().mockResolvedValue(undefined),
   } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["stepContentRepo"]>;
+}
+
+function makeMockUserRepo(
+  overrides: Partial<NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["userRepo"]>> = {},
+) {
+  return {
+    findById: vi.fn().mockResolvedValue({ id: "U_OTHER", name: "roopak", email: "roopak@canvasx.ai" }),
+    list: vi.fn().mockResolvedValue([]),
+    getAllEmailsForUser: vi.fn().mockResolvedValue([]),
+    ...overrides,
+  } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["userRepo"]>;
 }
 
 const dmContext: TaskContext = {
@@ -304,6 +323,32 @@ describe("handleManageScheduledTasks — add", () => {
       { scheduler, stepContentRepo, taskContext: channelThreadContext },
     );
     expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ threadTs: "1234567890.123456" }));
+  });
+
+  it("does not default workflow delivery to the current Slack thread", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ outputThreadTs: undefined }));
+  });
+
+  it("supports explicit delivery to the current Slack thread", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "add",
+        prompt: "Do it",
+        schedule_type: "cron",
+        schedule_value: "0 9 * * 1",
+        delivery: { targetType: "thread" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({ outputThreadTs: "1234567890.123456" }));
   });
 
   it("creates simple prompt automations as Sketch-mode agent steps", async () => {
@@ -633,6 +678,89 @@ describe("handleManageScheduledTasks — update", () => {
     );
   });
 
+  it("can clear Slack thread delivery without changing the channel target", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { platform: "slack", targetType: "channel", targetId: "C456", threadTs: null },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputPlatform: "slack",
+        outputTarget: "C456",
+        outputThreadTs: null,
+      }),
+    );
+  });
+
+  it("clears Slack thread delivery when retargeting to a channel", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { platform: "slack", targetType: "channel", targetId: "COPS" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputPlatform: "slack",
+        outputTarget: "COPS",
+        outputThreadTs: null,
+      }),
+    );
+  });
+
+  it("does not clear Slack thread delivery for mode-only delivery updates", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { mode: "silent" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputMode: "silent",
+      }),
+    );
+    expect((scheduler.updateTask as ReturnType<typeof vi.fn>).mock.calls[0][1]).not.toHaveProperty("outputThreadTs");
+  });
+
+  it("sets the current channel target when updating delivery to the current thread", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        delivery: { targetType: "thread" },
+      },
+      { scheduler, stepContentRepo, taskContext: channelThreadContext },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        outputPlatform: "slack",
+        outputTarget: "C456",
+        outputThreadTs: "1234567890.123456",
+      }),
+    );
+  });
+
   it("normalizes schedule fields when updating steps to a Canvas-managed trigger", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
@@ -917,11 +1045,13 @@ describe("handleManageScheduledTasks — ownership", () => {
       const result = await handleManageScheduledTasks(buildParams(action), {
         scheduler,
         stepContentRepo,
-        taskContext: dmContext, // createdBy: "U123"
+        userRepo: makeMockUserRepo(),
+        taskContext: dmContext,
       });
 
-      expect(result.content[0].text).toBe("Error: task not found.");
-      // No mutating / side-effecting operation should have fired.
+      expect(result.content[0].text).toBe(
+        `Error: You can't ${action === "remove" ? "delete" : action === "getRun" ? "inspect" : action === "updateStepContent" ? "update" : action} "Do a thing" because it was created by Roopak.`,
+      );
       expect(scheduler.updateTask).not.toHaveBeenCalled();
       expect(scheduler.removeTask).not.toHaveBeenCalled();
       expect(scheduler.pauseTask).not.toHaveBeenCalled();
@@ -940,10 +1070,31 @@ describe("handleManageScheduledTasks — ownership", () => {
         taskContext: dmContext,
       });
 
-      // Same phrasing as the "not yours" branch — avoids existence leak.
       expect(result.content[0].text).toBe("Error: task not found.");
     });
   }
+
+  it("falls back when the task owner cannot be resolved", async () => {
+    const otherUsersTask = makeTask({ createdBy: "U_OTHER", title: "AWS Daily Cost Chart" });
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(otherUsersTask),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "pause", task_id: "task-1" },
+      {
+        scheduler,
+        stepContentRepo,
+        userRepo: makeMockUserRepo({ findById: vi.fn().mockResolvedValue(undefined) }),
+        taskContext: dmContext,
+      },
+    );
+
+    expect(result.content[0].text).toBe(
+      'Error: You can\'t pause "AWS Daily Cost Chart" because it was created by another user.',
+    );
+    expect(scheduler.pauseTask).not.toHaveBeenCalled();
+  });
 
   it("allows a guarded action when the caller owns the task", async () => {
     const ownTask = makeTask({ createdBy: "U123" });

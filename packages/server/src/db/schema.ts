@@ -76,6 +76,9 @@ export interface SettingsTable {
   smtp_secure: Generated<number>;
   google_oauth_client_id: string | null;
   google_oauth_client_secret: string | null;
+  microsoft_oauth_client_id: string | null;
+  microsoft_oauth_client_secret: string | null;
+  microsoft_oauth_tenant: string | null;
   gemini_api_key: string | null;
   enrichment_enabled: Generated<number>;
   admin_can_read_all_files: Generated<number>;
@@ -111,6 +114,8 @@ export interface IndexedFilesTable {
   id: string;
   connector_config_id: string;
   provider_file_id: string;
+  provider_message_id: string | null;
+  thread_id: string | null;
   provider_url: string | null;
   file_name: string;
   file_type: string | null;
@@ -119,6 +124,7 @@ export interface IndexedFilesTable {
   summary: string | null;
   source: string;
   source_path: string | null;
+  rollup_group_id: string | null;
   content_hash: string | null;
   is_archived: Generated<number>;
   source_created_at: string | null;
@@ -136,6 +142,43 @@ export interface IndexedFilesTable {
   summary_attempts: Generated<number>;
   summary_next_retry_at: string | null;
   share_with_everyone: Generated<number>;
+}
+
+export interface EmailMessageEnvelopesTable {
+  indexed_file_id: string;
+  connector_config_id: string;
+  provider_file_id: string;
+  provider_message_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  sent_at: string | null;
+  from_json: string;
+  to_json: string;
+  cc_json: string;
+  owner_email: string | null;
+  provider_url: string | null;
+  updated_at: Generated<string>;
+}
+
+export interface EmailSuppressedMessagesTable {
+  id: string;
+  connector_config_id: string;
+  provider_file_id: string;
+  provider_message_id: string | null;
+  thread_id: string | null;
+  reason: string;
+  observed_at: string;
+}
+
+export interface EmailThreadSummariesTable {
+  connector_config_id: string;
+  thread_id: string;
+  summary: string;
+  message_count: number;
+  basis_first_sent_at: string | null;
+  basis_last_sent_at: string | null;
+  basis_hash: string;
+  updated_at: Generated<string>;
 }
 
 export interface ChunkEmbeddingsTable {
@@ -229,10 +272,38 @@ export interface ApiTokensTable {
   name: string;
   token_hash: string;
   prefix: string;
+  kind: Generated<string>;
+  client_id: string | null;
+  scopes: string | null;
+  refresh_token_hash: string | null;
   created_at: Generated<string>;
   last_used_at: string | null;
   expires_at: string | null;
   revoked_at: string | null;
+}
+
+export interface OAuthClientsTable {
+  client_id: string;
+  client_secret_hash: string | null;
+  client_name: string | null;
+  redirect_uris: string;
+  grant_types: string;
+  scopes: string;
+  token_endpoint_auth_method: string;
+  created_at: Generated<string>;
+}
+
+export interface OAuthAuthorizationCodesTable {
+  code_hash: string;
+  client_id: string;
+  user_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scopes: string;
+  resource: string | null;
+  expires_at: string;
+  consumed_at: string | null;
+  created_at: Generated<string>;
 }
 
 export interface ExternalMcpToolCallsTable {
@@ -243,6 +314,77 @@ export interface ExternalMcpToolCallsTable {
   success: number;
   duration_ms: number;
   called_at: Generated<string>;
+}
+
+export interface LocalDevicesTable {
+  id: string;
+  user_id: string;
+  name: string;
+  platform: string;
+  token_hash: string;
+  prefix: string;
+  status: Generated<string>;
+  last_seen_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  revoked_at: string | null;
+}
+
+export interface LocalDeviceToolCallsTable {
+  id: string;
+  device_id: string;
+  user_id: string;
+  tool_name: string;
+  command: string;
+  cwd: string | null;
+  success: number;
+  exit_code: number | null;
+  timed_out: number;
+  duration_ms: number;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  stdout_truncated: number;
+  stderr_truncated: number;
+  error_message: string | null;
+  called_at: Generated<string>;
+}
+
+export interface LocalClaudeSessionsTable {
+  id: string;
+  user_id: string;
+  device_id: string;
+  tmux_session_name: string;
+  title: string;
+  cwd: string | null;
+  status: string;
+  event_token_hash: string;
+  origin_platform: string | null;
+  origin_context_type: string | null;
+  origin_delivery_target: string | null;
+  origin_thread_ts: string | null;
+  origin_workspace_key: string | null;
+  origin_workspace_dir: string | null;
+  origin_active_queue_key: string | null;
+  origin_conversation_id: number | null;
+  origin_provider_thread_id: string | null;
+  origin_agent_instructions: string | null;
+  origin_agent_allowed_tools: string | null;
+  origin_org_context_enabled: number | null;
+  last_event_type: string | null;
+  last_event_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  ended_at: string | null;
+}
+
+export interface LocalClaudeSessionEventsTable {
+  id: string;
+  session_id: string;
+  event_type: string;
+  status: string;
+  message: string | null;
+  payload: string;
+  created_at: Generated<string>;
 }
 
 export interface AgentEnvironmentVariablesTable {
@@ -297,6 +439,16 @@ export interface ConversationsTable {
   updated_at: Generated<string>;
 }
 
+export interface ConversationCursorsTable {
+  id: Generated<number>;
+  conversation_id: number;
+  scope_type: string;
+  scope_key: string;
+  last_seen_message_id: number | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ConversationMessagesTable {
   id: Generated<number>;
   conversation_id: number;
@@ -308,6 +460,9 @@ export interface ConversationMessagesTable {
   addressed_to_sketch: Generated<number>;
   text: Generated<string>;
   attachments: string | null;
+  provider_thread_id: string | null;
+  provider_parent_message_id: string | null;
+  is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
   received_at: string;
   created_at: Generated<string>;
@@ -335,6 +490,7 @@ export interface ScheduledTasksTable {
   edges: string | null;
   output_target: string | null;
   output_platform: string | null;
+  output_thread_ts: string | null;
   output_mode: Generated<string>;
 }
 
@@ -355,6 +511,55 @@ export interface AutomationStepContentTable {
   content_type: string;
   content: string;
   apps: string | null;
+  updated_at: Generated<string>;
+}
+
+export interface AgentOutputsTable {
+  id: string;
+  agent_key: string;
+  user_id: string;
+  output_date: string;
+  timezone: string;
+  status: string;
+  trigger_type: string;
+  agent_version: string;
+  agent_run_id: string | null;
+  masthead_json: string | null;
+  raw_payload_json: string | null;
+  error_message: string | null;
+  generated_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface AgentOutputItemsTable {
+  id: string;
+  agent_output_id: string;
+  section_key: string;
+  title: string;
+  summary: string;
+  priority: string;
+  label: string | null;
+  display_ref: string | null;
+  action_type: string | null;
+  action_label: string | null;
+  action_prompt: string | null;
+  knowledge_refs_json: string;
+  source_url: string | null;
+  sort_order: number;
+  created_at: Generated<string>;
+}
+
+export interface AgentUserConfigsTable {
+  agent_key: string;
+  user_id: string;
+  enabled: Generated<number>;
+  schedule_hour: Generated<number>;
+  schedule_minute: Generated<number>;
+  timezone: string | null;
+  max_items_per_section: Generated<number>;
+  prefs_json: string | null;
+  created_at: Generated<string>;
   updated_at: Generated<string>;
 }
 
@@ -388,6 +593,20 @@ export interface EntitiesTable {
   updated_at: string;
   ai_brief: string | null;
   share_with_everyone: Generated<number>;
+  deleted_at: string | null;
+  merged_into_entity_id: string | null;
+}
+
+export interface EntityMergesTable {
+  id: string;
+  survivor_entity_id: string;
+  merged_entity_id: string;
+  entity_type: string;
+  moves: string;
+  merged_by_user_id: string;
+  merged_at: Generated<string>;
+  unmerged_at: string | null;
+  unmerged_by_user_id: string | null;
 }
 
 export interface EntityShareEmailsTable {
@@ -397,6 +616,17 @@ export interface EntityShareEmailsTable {
   granted_at: Generated<string>;
 }
 
+export interface CrmObjectSummariesTable {
+  connector_config_id: string;
+  group_id: string;
+  summary: string;
+  activity_count: number;
+  basis_first_at: string | null;
+  basis_last_at: string | null;
+  basis_hash: string;
+  updated_at: Generated<string>;
+}
+
 export interface EntitySourceRefsTable {
   id: string;
   entity_id: string;
@@ -404,6 +634,23 @@ export interface EntitySourceRefsTable {
   source_id: string;
   source_url: string | null;
   last_seen_at: string;
+}
+
+export interface EntityContactPointsTable {
+  id: string;
+  entity_id: string;
+  kind: string;
+  value: string;
+  display_value: string | null;
+  label: string | null;
+  is_primary: Generated<number>;
+  source: string;
+  connector_config_id: string | null;
+  created_by_user_id: string | null;
+  verified_at: string | null;
+  last_contacted_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface EntityMentionsTable {
@@ -426,6 +673,7 @@ export interface AgentRunsTable {
   platform: string;
   context_type: string;
   cost_usd: number;
+  aux_cost_usd: Generated<number>;
   is_error: Generated<number>;
   duration_ms: number | null;
   created_at: Generated<string>;
@@ -478,6 +726,37 @@ export interface EntityDomainsTable {
   created_at: Generated<string>;
 }
 
+export interface EntityProjectBindingsTable {
+  id: string;
+  entity_id: string;
+  source: string;
+  container_id: string;
+  container_kind: string;
+  label: string | null;
+  connector_config_id: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
+export interface EntityProjectMemberOverridesTable {
+  id: string;
+  entity_id: string;
+  indexed_file_id: string;
+  mode: string;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
+export interface EntityCreationSuppressionsTable {
+  id: string;
+  normalized_name: string;
+  entity_type: string;
+  original_entity_id: string | null;
+  reason: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
 export interface EntityRelationshipsTable {
   id: string;
   source_entity_id: string;
@@ -508,6 +787,8 @@ export interface EntityReviewQueueTable {
   proposed_name: string;
   normalized_name: string;
   entity_type: string;
+  source: string | null;
+  source_id: string | null;
   proposed_email: string | null;
   candidate_entity_id: string | null;
   candidate_score: number | null;
@@ -524,6 +805,8 @@ export interface EntityReviewQueueTable {
   resolved_by: string | null;
   resolved_at: string | null;
   resolved_entity_id: string | null;
+  seed_source: string | null;
+  seed_source_id: string | null;
 }
 
 export interface EntityReviewEvidenceTable {
@@ -582,6 +865,10 @@ export interface DB {
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;
   indexed_files: IndexedFilesTable;
+  email_message_envelopes: EmailMessageEnvelopesTable;
+  email_suppressed_messages: EmailSuppressedMessagesTable;
+  email_thread_summaries: EmailThreadSummariesTable;
+  crm_object_summaries: CrmObjectSummariesTable;
   access_scopes: AccessScopesTable;
   access_scope_members: AccessScopeMembersTable;
   connector_files: ConnectorFilesTable;
@@ -595,20 +882,32 @@ export interface DB {
   email_verification_tokens: EmailVerificationTokensTable;
   magic_link_tokens: MagicLinkTokensTable;
   api_tokens: ApiTokensTable;
+  oauth_clients: OAuthClientsTable;
+  oauth_authorization_codes: OAuthAuthorizationCodesTable;
   external_mcp_tool_calls: ExternalMcpToolCallsTable;
+  local_devices: LocalDevicesTable;
+  local_device_tool_calls: LocalDeviceToolCallsTable;
+  local_claude_sessions: LocalClaudeSessionsTable;
+  local_claude_session_events: LocalClaudeSessionEventsTable;
   agent_environment_variables: AgentEnvironmentVariablesTable;
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
   conversations: ConversationsTable;
+  conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
+  agent_outputs: AgentOutputsTable;
+  agent_output_items: AgentOutputItemsTable;
+  agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
+  entity_merges: EntityMergesTable;
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
+  entity_contact_points: EntityContactPointsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;
@@ -619,6 +918,9 @@ export interface DB {
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
   entity_domains: EntityDomainsTable;
+  entity_project_bindings: EntityProjectBindingsTable;
+  entity_project_member_overrides: EntityProjectMemberOverridesTable;
+  entity_creation_suppressions: EntityCreationSuppressionsTable;
   entity_relationships: EntityRelationshipsTable;
   entity_relationship_evidence: EntityRelationshipEvidenceTable;
 }

@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
 import type { NameResolution, NameResolver } from "./types";
@@ -41,7 +42,7 @@ function parseAliases(aliases: string | null): string[] {
  * sync run, preserving the previous dispatcher semantics.
  */
 export async function buildSyncNameResolver(db: Kysely<DB>): Promise<NameResolver> {
-  const allEntities = await db.selectFrom("entities").selectAll().execute();
+  const allEntities = await db.selectFrom("entities").selectAll().where(whereLiveEntity()).execute();
   const personEmailByName = createAmbiguityAwareMap<string, { email: string; entityId: string }>();
   for (const p of allEntities.filter((e) => e.source_type === "person")) {
     const email = readPersonEmail(p.metadata);

@@ -17,6 +17,7 @@ import pino, { type Logger } from "pino";
 import type {
   Connector,
   ConnectorCredentials,
+  EntitySeed,
   EntitySeedCallback,
   OAuthCredentials,
   PersonEntitySeedCallback,
@@ -218,6 +219,7 @@ function taskToSyncedItem(
   spaceId: string,
   folderName: string | undefined,
   folderId: string | undefined,
+  listProjectParent: { id: string; name: string } | undefined,
   accessScope?: SyncedItem["accessScope"],
 ): SyncedItem {
   const hasDescription = task.description && task.description.trim().length > 0;
@@ -248,6 +250,13 @@ function taskToSyncedItem(
   if (folderId && folderName) {
     parentEntities.push({ source: "clickup", sourceId: folderId, contextSnippet: `In folder: ${folderName}` });
   }
+  if (listProjectParent) {
+    parentEntities.push({
+      source: "clickup",
+      sourceId: listProjectParent.id,
+      contextSnippet: `In list: ${listProjectParent.name}`,
+    });
+  }
 
   return {
     providerFileId: task.id,
@@ -266,6 +275,28 @@ function taskToSyncedItem(
     authorName: task.creator?.username,
     authorSourceId: task.creator?.id === undefined ? undefined : `user:${String(task.creator.id)}`,
     parentEntities,
+  };
+}
+
+function clickupProjectSeed(params: {
+  node: ClickUpFolder | ClickUpList;
+  workspaceName: string;
+  workspaceId: string;
+  spaceName: string;
+  spaceId: string;
+}): EntitySeed {
+  return {
+    name: params.node.name,
+    sourceType: "project",
+    source: "clickup",
+    sourceId: params.node.id,
+    metadata: {
+      workspaceName: params.workspaceName,
+      workspaceId: params.workspaceId,
+      spaceName: params.spaceName,
+      spaceId: params.spaceId,
+      path: `${params.workspaceName} / ${params.spaceName} / ${params.node.name}`,
+    },
   };
 }
 
@@ -468,26 +499,20 @@ export function createClickUpConnector(): Connector {
             folders: ClickUpFolder[];
           };
           for (const folder of foldersRes.folders) {
-            // Seed folder as entity with workspace + space context
-            if (onEntitySeed) {
-              await onEntitySeed({
-                name: folder.name,
-                sourceType: "clickup_folder",
-                source: "clickup",
-                sourceId: folder.id,
-                metadata: {
+            const listsRes = (await clickupRequest(`/folder/${folder.id}/list`, token, logger)) as {
+              lists: ClickUpList[];
+            };
+            if (onEntitySeed && listsRes.lists.length > 0) {
+              await onEntitySeed(
+                clickupProjectSeed({
+                  node: folder,
                   workspaceName,
                   workspaceId: team.id,
                   spaceName: space.name,
                   spaceId: space.id,
-                  path: `${workspaceName} / ${space.name} / ${folder.name}`,
-                },
-              });
+                }),
+              );
             }
-
-            const listsRes = (await clickupRequest(`/folder/${folder.id}/list`, token, logger)) as {
-              lists: ClickUpList[];
-            };
             for (const list of listsRes.lists) {
               yield* fetchTasksFromList(
                 list.id,
@@ -497,6 +522,7 @@ export function createClickUpConnector(): Connector {
                 space.id,
                 folder.name,
                 folder.id,
+                undefined,
                 token,
                 logger,
                 spaceScope,
@@ -510,6 +536,17 @@ export function createClickUpConnector(): Connector {
             lists: ClickUpList[];
           };
           for (const list of folderlessListsRes.lists) {
+            if (onEntitySeed) {
+              await onEntitySeed(
+                clickupProjectSeed({
+                  node: list,
+                  workspaceName,
+                  workspaceId: team.id,
+                  spaceName: space.name,
+                  spaceId: space.id,
+                }),
+              );
+            }
             yield* fetchTasksFromList(
               list.id,
               workspaceName,
@@ -518,6 +555,7 @@ export function createClickUpConnector(): Connector {
               space.id,
               undefined,
               undefined,
+              { id: list.id, name: list.name },
               token,
               logger,
               spaceScope,
@@ -580,6 +618,7 @@ async function* fetchTasksFromList(
   spaceId: string,
   folderName: string | undefined,
   folderId: string | undefined,
+  listProjectParent: { id: string; name: string } | undefined,
   token: string,
   logger: Logger,
   accessScope?: SyncedItem["accessScope"],
@@ -602,7 +641,17 @@ async function* fetchTasksFromList(
           }
         }
       }
-      yield taskToSyncedItem(task, workspaceName, workspaceId, spaceName, spaceId, folderName, folderId, accessScope);
+      yield taskToSyncedItem(
+        task,
+        workspaceName,
+        workspaceId,
+        spaceName,
+        spaceId,
+        folderName,
+        folderId,
+        listProjectParent,
+        accessScope,
+      );
     }
   } catch (err) {
     logger.warn({ err, listId }, "Failed to fetch tasks from list");

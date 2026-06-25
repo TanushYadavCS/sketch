@@ -4,7 +4,7 @@ import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
 import { z } from "zod";
 import { type BufferedMessage, buildSketchContext } from "../agent/prompt";
-import type { AgentResult, McpServerConfig, ProgressEvent, RunAgentParams } from "../agent/runner";
+import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { ensureChannelWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -68,7 +68,7 @@ interface AgentRunRouteDeps {
   inboxMessagesRepo: InboxMessagesRepo;
   getSlack?: () => SlackBot | null;
   whatsapp?: WhatsAppBot;
-  runAgent: (params: RunAgentParams) => Promise<AgentResult>;
+  runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   scheduler?: TaskScheduler;
@@ -85,7 +85,7 @@ function badRequest(code: string, message: string) {
   return { error: { code, message } };
 }
 
-function runResultBody(result: AgentResult, extra: Record<string, unknown>) {
+function runResultBody(result: RunAgentResult, extra: Record<string, unknown>) {
   return {
     ok: true,
     status: "completed",
@@ -95,13 +95,15 @@ function runResultBody(result: AgentResult, extra: Record<string, unknown>) {
     pendingUploads: result.pendingUploads,
     usage: {
       costUsd: result.costUsd,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      cacheReadTokens: result.cacheReadTokens,
-      cacheCreationTokens: result.cacheCreationTokens,
-      webSearchRequests: result.webSearchRequests,
-      webFetchRequests: result.webFetchRequests,
-      model: result.model,
+      auxCostUsd: result.auxCostUsd,
+      totalCostUsd: result.costUsd + result.auxCostUsd,
+      inputTokens: result.rawUsage.inputTokens,
+      outputTokens: result.rawUsage.outputTokens,
+      cacheReadTokens: result.rawUsage.cacheReadTokens,
+      cacheCreationTokens: result.rawUsage.cacheCreationTokens,
+      webSearchRequests: result.rawUsage.webSearchRequests,
+      webFetchRequests: result.rawUsage.webFetchRequests,
+      model: result.rawUsage.model,
     },
     ...extra,
   };
@@ -148,6 +150,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
         userName: requester.name,
         userEmail: requester.email,
         logger: deps.logger,
+        getSlack: deps.getSlack,
         onProgressEvent: async (event: ProgressEvent) => {
           await writeEvent("progress", event);
         },

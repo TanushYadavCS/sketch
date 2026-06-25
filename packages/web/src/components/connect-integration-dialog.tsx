@@ -3,9 +3,9 @@
  * Reads auth fields and connect steps from the integration registry,
  * so adding a new integration requires zero dialog changes.
  *
- * Google Drive uses an OAuth redirect flow:
- * 1. Admin configures client_id + client_secret (one-time)
- * 2. "Connect with Google" redirects to Google's consent screen
+ * OAuth redirect connectors use this flow:
+ * 1. Admin configures client_id + client_secret when provider setup is required
+ * 2. The user redirects to the provider's consent screen
  * 3. Callback auto-creates connector and triggers sync
  *
  * Other integrations connect immediately after credential validation.
@@ -37,6 +37,7 @@ import {
 } from "@sketch/ui/components/dialog";
 import { Input } from "@sketch/ui/components/input";
 import { Label } from "@sketch/ui/components/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Textarea } from "@sketch/ui/components/textarea";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -76,8 +77,10 @@ export function ConnectIntegrationDialog({
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
+  // Zoho CRM (and any future multi-DC OAuth connector) picks a data center first.
+  const [region, setRegion] = useState<string>("com");
 
-  // Google Drive OAuth state
+  // OAuth state
   const [step, setStep] = useState<"credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "oauth-config">(
     "credentials",
   );
@@ -101,13 +104,24 @@ export function ConnectIntegrationDialog({
   const [canvasPopupOpened, setCanvasPopupOpened] = useState(false);
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
+  const isZoho = integration?.type === "zoho_crm";
+  const isMicrosoft = integration?.type === "outlook" || integration?.type === "teams";
+  const canvasSupported =
+    integration?.type === "google_drive" ||
+    integration?.type === "fireflies" ||
+    integration?.type === "clickup" ||
+    integration?.type === "notion" ||
+    integration?.type === "linear";
+  const oauthProviderName = isMicrosoft ? "Microsoft" : "Google";
+  const oauthCredentialConsoleLabel = isMicrosoft ? "Microsoft Entra" : "Google Cloud Console";
+  const oauthCallbackPath = isMicrosoft ? "/api/oauth/microsoft/callback" : "/api/oauth/google/callback";
 
   const credentialSource = useQuery({
     queryKey: ["connector-credential-source"],
     queryFn: () => api.integrations.credentialSource(),
     enabled: open,
   });
-  const isCanvasMode = credentialSource.data?.mode === "canvas";
+  const isCanvasMode = credentialSource.data?.mode === "canvas" && canvasSupported;
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -143,39 +157,58 @@ export function ConnectIntegrationDialog({
     };
   }, [notionBrowseId]);
 
-  // Check if Google OAuth is configured (for OAuth redirect integrations)
+  // Check if the provider's OAuth is configured (for OAuth redirect integrations)
   const oauthStatus = useQuery({
-    queryKey: ["google-oauth-status"],
-    queryFn: () => api.googleOAuth.status(),
+    queryKey: [isZoho ? "zoho-oauth-status" : isMicrosoft ? "microsoft-oauth-status" : "google-oauth-status"],
+    queryFn: () =>
+      isZoho ? api.zohoOAuth.status() : isMicrosoft ? api.microsoftOAuth.status() : api.googleOAuth.status(),
     enabled: open && isOAuthRedirect && !isCanvasMode,
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
+  const microsoftUsesEnvClient =
+    isMicrosoft &&
+    oauthStatus.data !== undefined &&
+    "envConfigured" in oauthStatus.data &&
+    oauthStatus.data.envConfigured === true &&
+    (!("settingsConfigured" in oauthStatus.data) || oauthStatus.data.settingsConfigured !== true);
+  const needsClientSetup = integration?.requiresOAuthClientSetup === true || (isMicrosoft && !microsoftUsesEnvClient);
 
-  // For OAuth redirect: start with oauth-config step if not configured
+  // For OAuth redirect: start with oauth-config step if client setup is required and missing.
   useEffect(() => {
+    if (open && isCanvasMode) {
+      setStep("credentials");
+      return;
+    }
     if (open && isOAuthRedirect) {
       if (oauthStatus.isSuccess) {
-        setStep(isOAuthConfigured ? "credentials" : "oauth-config");
+        setStep(needsClientSetup && !isOAuthConfigured ? "oauth-config" : "credentials");
       }
     }
-  }, [open, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured]);
+  }, [open, isCanvasMode, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured, needsClientSetup]);
 
-  /** Save Google OAuth client_id + client_secret. */
+  /** Save provider OAuth client_id + client_secret. */
   const configureOAuthMutation = useMutation({
     mutationFn: async () => {
       const clientId = fieldValues.client_id?.trim();
       const clientSecret = fieldValues.client_secret?.trim();
-      if (!clientId || !clientSecret) throw new Error("Client ID and Secret are required");
-      await api.googleOAuth.configure(clientId, clientSecret);
+      if (isMicrosoft) {
+        if (!clientId || !clientSecret) throw new Error("Application (client) ID and Client Secret are required");
+        const tenant = fieldValues.tenant?.trim();
+        if (!tenant) throw new Error("Directory (tenant) ID is required");
+        await api.microsoftOAuth.configure(clientId, clientSecret, tenant);
+      } else {
+        if (!clientId || !clientSecret) throw new Error("Client ID and Secret are required");
+        await api.googleOAuth.configure(clientId, clientSecret);
+      }
     },
     onSuccess: () => {
-      toast.success("Google OAuth configured.");
+      toast.success(`${oauthProviderName} OAuth configured.`);
       oauthStatus.refetch();
       setStep("credentials");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to configure Google OAuth.");
+      toast.error(error.message || `Failed to configure ${oauthProviderName} OAuth.`);
     },
   });
 
@@ -428,8 +461,22 @@ export function ConnectIntegrationDialog({
   };
 
   const handleConnectWithGoogle = () => {
-    const url = api.googleOAuth.authorizeUrl();
+    const url = api.googleOAuth.authorizeUrl(integration?.type);
     window.open(url, "_self");
+  };
+
+  const handleConnectWithZoho = () => {
+    const url = api.zohoOAuth.authorizeUrl(region);
+    window.open(url, "_self");
+  };
+
+  const handleConnectWithMicrosoft = () => {
+    window.open(api.microsoftOAuth.authorizeUrl(integration?.type), "_self");
+  };
+
+  const handleGrantMicrosoftAdminConsent = () => {
+    if (!integration?.type) return;
+    window.open(api.microsoftOAuth.adminConsentUrl(integration.type), "_self");
   };
 
   const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
@@ -454,6 +501,9 @@ export function ConnectIntegrationDialog({
   if (!integration) return null;
 
   const isMyDriveMode = sharedDrives.length === 0;
+  const oauthRedirectUri = `${oauthStatus.data?.baseUrl || window.location.origin}${oauthCallbackPath}`;
+  const oauthClientSetupSteps = integration.oauthClientSetupSteps ?? integration.connectSteps;
+  const oauthClientCredentialUrl = integration.oauthClientCredentialUrl ?? integration.credentialUrl;
 
   return (
     <Dialog
@@ -492,20 +542,21 @@ export function ConnectIntegrationDialog({
                 Configure {integration.name}
               </DialogTitle>
               <DialogDescription>
-                One-time setup: enter your Google OAuth credentials. After this, users can connect with one click.
+                One-time setup: enter your {oauthProviderName} OAuth credentials. After this, users can connect with one
+                click.
               </DialogDescription>
             </DialogHeader>
 
             <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
-              {integration.connectSteps.map((s) => (
+              {oauthClientSetupSteps.map((s) => (
                 <li key={s}>{s}</li>
               ))}
             </ol>
 
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" asChild>
-                <a href={integration.credentialUrl} target="_blank" rel="noopener noreferrer">
-                  Google Cloud Console
+                <a href={oauthClientCredentialUrl} target="_blank" rel="noopener noreferrer">
+                  {oauthCredentialConsoleLabel}
                   <ArrowSquareOutIcon className="size-3.5" />
                 </a>
               </Button>
@@ -533,11 +584,9 @@ export function ConnectIntegrationDialog({
 
             <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
               <p className="text-[11px] text-muted-foreground">
-                <strong>Redirect URI</strong> — add this to your Google OAuth client's authorized redirect URIs:
+                <strong>Redirect URI</strong> — add this to your {oauthProviderName} OAuth client's redirect URIs:
               </p>
-              <code className="mt-1 block text-[11px] text-foreground">
-                {oauthStatus.data?.baseUrl || window.location.origin}/api/oauth/google/callback
-              </code>
+              <code className="mt-1 block text-[11px] text-foreground">{oauthRedirectUri}</code>
             </div>
 
             <DialogFooter>
@@ -601,6 +650,116 @@ export function ConnectIntegrationDialog({
               </Button>
             </div>
           </>
+        ) : step === "credentials" && isOAuthRedirect && isZoho ? (
+          /* OAuth redirect (Zoho): data-center picker + connect button */
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Connect {integration.name}
+              </DialogTitle>
+              <DialogDescription>
+                Choose your Zoho data center, then sign in to authorize read-only access to your CRM.
+              </DialogDescription>
+            </DialogHeader>
+
+            <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
+              {integration.connectSteps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="zoho-region" className="text-xs">
+                Data center
+              </Label>
+              <Select value={region} onValueChange={setRegion}>
+                <SelectTrigger id="zoho-region">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(integration.regionOptions ?? []).map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                Match the domain of your Zoho CRM URL (e.g. crm.zoho.com → United States).
+              </p>
+            </div>
+
+            {isOAuthConfigured ? (
+              <Button size="lg" className="w-full gap-2" onClick={handleConnectWithZoho}>
+                <ConnectorLogo type="zoho_crm" size={16} className="text-white" />
+                Connect with Zoho
+              </Button>
+            ) : (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                Zoho OAuth isn't configured on the server yet. Set <code>ZOHO_CLIENT_ID</code> and{" "}
+                <code>ZOHO_CLIENT_SECRET</code> in the environment, then reload.
+              </div>
+            )}
+          </>
+        ) : step === "credentials" && isOAuthRedirect && isMicrosoft ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Connect {integration.name}
+              </DialogTitle>
+              <DialogDescription>
+                Sign in with your Microsoft account to authorize read-only access to {integration.name}.
+              </DialogDescription>
+            </DialogHeader>
+
+            <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
+              {integration.connectSteps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+
+            {isOAuthConfigured ? (
+              <>
+                <Button size="lg" className="w-full gap-2" onClick={handleConnectWithMicrosoft}>
+                  <ConnectorLogo type={integration.type} size={16} className="text-white" />
+                  Connect with Microsoft
+                </Button>
+                {isMicrosoft && (
+                  <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                    Teammates seeing a "needs admin approval" error? A Microsoft admin can{" "}
+                    <button
+                      type="button"
+                      onClick={handleGrantMicrosoftAdminConsent}
+                      className="font-medium text-foreground underline-offset-2 hover:underline"
+                    >
+                      grant admin consent for your organization
+                    </button>{" "}
+                    once so everyone can connect.
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                Microsoft OAuth isn't configured on the server yet. Set <code>MICROSOFT_CLIENT_ID</code> and{" "}
+                <code>MICROSOFT_CLIENT_SECRET</code> in the environment or configure the Microsoft OAuth client in
+                settings.
+              </div>
+            )}
+
+            {isAdmin && needsClientSetup && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setStep("oauth-config")}
+                  className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Reconfigure OAuth
+                </button>
+              </div>
+            )}
+          </>
         ) : step === "credentials" && isOAuthRedirect ? (
           /* OAuth redirect: "Connect with Google" button */
           <>
@@ -610,7 +769,7 @@ export function ConnectIntegrationDialog({
                 Connect {integration.name}
               </DialogTitle>
               <DialogDescription>
-                Sign in with your Google account to connect your Drive. Files will be synced automatically.
+                Sign in with your Google account to authorize read-only access to {integration.name}.
               </DialogDescription>
             </DialogHeader>
 
@@ -621,7 +780,7 @@ export function ConnectIntegrationDialog({
               </Button>
 
               <p className="text-center text-[11px] text-muted-foreground">
-                You'll be redirected to Google to authorize read-only access to your Drive.
+                You'll be redirected to Google to authorize read-only access to your {integration.name}.
               </p>
             </div>
 

@@ -68,6 +68,11 @@ describe("Scheduled Tasks API", () => {
     const groups = createWhatsAppGroupRepository(db);
 
     const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
+    const recipient = await users.create({
+      name: "Recipient Person",
+      email: "recipient@test.com",
+      slackUserId: "URECIPIENT",
+    });
 
     await db
       .insertInto("channels")
@@ -100,6 +105,7 @@ describe("Scheduled Tasks API", () => {
       created_by: member.id,
       status: "active",
       next_run_at: null,
+      output_target: recipient.slack_user_id,
     });
     await tasks.add({
       id: "task-group",
@@ -139,6 +145,7 @@ describe("Scheduled Tasks API", () => {
     const whatsappTask = body.tasks.find((task: { id: string }) => task.id === "task-group");
     expect(slackTask.creatorName).toBe("Alice Member");
     expect(slackTask.targetKindLabel).toBe("Slack channel");
+    expect(slackTask.delivery.label).toBe("Recipient Person");
     expect(whatsappTask.targetKindLabel).toBe("WhatsApp group");
     expect(whatsappTask.canResume).toBe(true);
   });

@@ -3,7 +3,7 @@
  *
  * Create: pnpm worktree:create <branch>
  *   - Creates ../sketch-<branch> worktree on a new branch tracking origin/main
- *   - Symlinks .env from main repo, inits .planning submodule (skips if no access)
+ *   - Copies .env from main repo with worktree-local data paths, inits .planning submodule (skips if no access)
  *   - Installs dependencies
  *
  * Remove: pnpm worktree:remove <branch>
@@ -14,7 +14,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +23,32 @@ const MAIN_REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function run(cmd: string, cwd?: string) {
   console.log(`$ ${cmd}`);
   execSync(cmd, { stdio: "inherit", cwd });
+}
+
+function envValue(value: string): string {
+  return /[\s#"'\\]/.test(value) ? JSON.stringify(value) : value;
+}
+
+function setEnvValue(env: string, key: string, value: string): string {
+  const line = `${key}=${envValue(value)}`;
+  const pattern = new RegExp(`^${key}=.*$`, "m");
+  return pattern.test(env) ? env.replace(pattern, line) : `${env.trimEnd()}\n${line}\n`;
+}
+
+function createWorktreeEnv(worktreeDir: string) {
+  const sourceEnv = resolve(MAIN_REPO, ".env");
+  const targetEnv = resolve(worktreeDir, ".env");
+  const dataDir = resolve(worktreeDir, "data");
+
+  if (!existsSync(sourceEnv)) {
+    console.log("No .env found in main repo; create one from .env.example before running dev.");
+    return;
+  }
+
+  let env = readFileSync(sourceEnv, "utf8");
+  env = setEnvValue(env, "DATA_DIR", dataDir);
+  env = setEnvValue(env, "SQLITE_PATH", resolve(dataDir, "sketch.db"));
+  writeFileSync(targetEnv, env);
 }
 
 function create(branch: string) {
@@ -36,8 +62,8 @@ function create(branch: string) {
   console.log(`Creating worktree at ${worktreeDir} on branch '${branch}'...\n`);
   run(`git worktree add -b ${branch} ${worktreeDir} origin/main`);
 
-  console.log("\nSymlinking .env...");
-  symlinkSync(resolve(MAIN_REPO, ".env"), resolve(worktreeDir, ".env"));
+  console.log("\nCreating worktree-local .env...");
+  createWorktreeEnv(worktreeDir);
 
   console.log("Initializing .planning submodule...");
   try {
