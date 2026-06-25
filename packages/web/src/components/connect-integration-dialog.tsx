@@ -268,10 +268,7 @@ export function ConnectIntegrationDialog({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
       if (isCanvasMode && managedConnectorId) {
-        return api.integrations.updateScope(managedConnectorId, {
-          workspaces: Array.from(selectedWorkspaceIds),
-          spaces: Array.from(selectedSpaceIds),
-        });
+        return api.integrations.updateScope(managedConnectorId, { rootPages: Array.from(selectedNotionPageIds) });
       }
       const credentials = buildCredentials();
       const scopeConfig = { rootPages: Array.from(selectedNotionPageIds) };
@@ -296,11 +293,14 @@ export function ConnectIntegrationDialog({
   const connectWithClickUpMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      const credentials = buildCredentials();
       const scopeConfig = {
         workspaces: Array.from(selectedWorkspaceIds),
         spaces: Array.from(selectedSpaceIds),
       };
+      if (isCanvasMode && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, scopeConfig);
+      }
+      const credentials = buildCredentials();
       return api.integrations.connect({
         connectorType: integration.type,
         authType: integration.authType,
