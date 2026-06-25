@@ -107,4 +107,53 @@ describe("entity review seed rows", () => {
     const rows = await db.selectFrom("entity_review_queue").selectAll().execute();
     expect(rows).toHaveLength(1);
   });
+
+  it("keeps normalized_name unchanged when both base and fallback handles collide", async () => {
+    const target = await repo.upsertSeedReviewRow({
+      proposedName: "Alpha",
+      normalizedName: normalizeName("Alpha"),
+      entityType: "project",
+      seedSource: "linear",
+      seedSourceId: "P1",
+      candidateEntityId: null,
+      triggeredByUserId: USER_ID,
+    });
+
+    await repo.upsertSeedReviewRow({
+      proposedName: "Sketch",
+      normalizedName: normalizeName("Sketch"),
+      entityType: "project",
+      seedSource: "linear",
+      seedSourceId: "P2",
+      candidateEntityId: null,
+      triggeredByUserId: USER_ID,
+    });
+
+    await repo.upsertSeedReviewRow({
+      proposedName: "Occupies Fallback",
+      normalizedName: `${normalizeName("Sketch")}:linear:P1`,
+      entityType: "project",
+      seedSource: "linear",
+      seedSourceId: "P3",
+      candidateEntityId: null,
+      triggeredByUserId: USER_ID,
+    });
+
+    const renamed = await repo.upsertSeedReviewRow({
+      proposedName: "Sketch",
+      normalizedName: normalizeName("Sketch"),
+      entityType: "project",
+      seedSource: "linear",
+      seedSourceId: "P1",
+      candidateEntityId: null,
+      triggeredByUserId: USER_ID,
+    });
+
+    expect(renamed.row.id).toBe(target.row.id);
+    expect(renamed.row.proposed_name).toBe("Sketch");
+    expect(renamed.row.normalized_name).toBe("alpha");
+
+    const rows = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(rows).toHaveLength(3);
+  });
 });

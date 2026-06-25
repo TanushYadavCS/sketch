@@ -301,21 +301,27 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
 
       const now = new Date().toISOString();
       if (existing) {
-        const normalizedNameCollision = await db
-          .selectFrom("entity_review_queue")
-          .select(["id"])
-          .where("normalized_name", "=", input.normalizedName)
-          .where("entity_type", "=", input.entityType)
-          .where("id", "!=", existing.id)
-          .executeTakeFirst();
-        const normalizedName = normalizedNameCollision
-          ? `${input.normalizedName}:${input.seedSource}:${input.seedSourceId}`
-          : input.normalizedName;
+        const isTaken = async (candidate: string): Promise<boolean> => {
+          const collision = await db
+            .selectFrom("entity_review_queue")
+            .select(["id"])
+            .where("normalized_name", "=", candidate)
+            .where("entity_type", "=", input.entityType)
+            .where("id", "!=", existing.id)
+            .executeTakeFirst();
+          return Boolean(collision);
+        };
+        const fallback = `${input.normalizedName}:${input.seedSource}:${input.seedSourceId}`;
+        const normalizedName = !(await isTaken(input.normalizedName))
+          ? input.normalizedName
+          : !(await isTaken(fallback))
+            ? fallback
+            : undefined;
         await db
           .updateTable("entity_review_queue")
           .set({
             proposed_name: input.proposedName,
-            normalized_name: normalizedName,
+            ...(normalizedName !== undefined ? { normalized_name: normalizedName } : {}),
             candidate_entity_id: input.candidateEntityId,
             candidate_score: null,
             candidate_reason: null,
