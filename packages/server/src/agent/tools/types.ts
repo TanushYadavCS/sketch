@@ -1,4 +1,4 @@
-import type { WebChatIntegrationConnectionData } from "@sketch/shared";
+import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
@@ -16,7 +16,7 @@ import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
 import type { AuxCostCollector } from "../aux-cost";
-import type { DailyBriefWriter } from "./daily-brief";
+import type { AgentOutputWriter } from "./agent-output";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -69,9 +69,24 @@ export class IntegrationConnectionCollector {
   }
 }
 
+export class AutomationArtifactCollector {
+  private pending: AutomationArtifact[] = [];
+
+  collect(artifact: AutomationArtifact): void {
+    this.pending.push(artifact);
+  }
+
+  drain(): AutomationArtifact[] {
+    const artifacts = [...this.pending];
+    this.pending = [];
+    return artifacts;
+  }
+}
+
 export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
   integrationConnectionCollector?: IntegrationConnectionCollector;
+  automationArtifactCollector?: AutomationArtifactCollector;
   workspaceDir: string;
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -114,7 +129,7 @@ export interface SketchMcpDeps {
   };
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
-  dailyBriefWriter?: DailyBriefWriter;
+  agentOutputWriter?: AgentOutputWriter;
   originOrgContextEnabled?: boolean;
   publicMcp?: {
     userEmails?: string[];

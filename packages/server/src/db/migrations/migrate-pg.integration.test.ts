@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 100;
+const EXPECTED_MIGRATION_COUNT = 105;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -133,6 +133,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[97]).toBe("102-entity-creation-suppressions");
     expect(names[98]).toBe("103-daily-briefs");
     expect(names[99]).toBe("104-daily-brief-item-metadata");
+    expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
+    expect(names[101]).toBe("106-agents");
+    expect(names[102]).toBe("107-scheduled-task-builder-revisions");
+    expect(names[103]).toBe("108-scheduled-task-origin-chat");
+    expect(names[104]).toBe("109-scheduled-task-origin-message-id");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -433,13 +438,21 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
-  it("creates daily brief tables", async () => {
-    for (const table of ["daily_briefs", "daily_brief_items", "daily_brief_configs"]) {
+  it("creates generic agent tables and retires the daily brief tables", async () => {
+    for (const table of ["agent_outputs", "agent_output_items", "agent_user_configs"]) {
       const result = await sql<{ table_name: string }>`
         SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
       `.execute(db);
       expect(result.rows).toHaveLength(1);
+    }
+
+    for (const table of ["daily_briefs", "daily_brief_items", "daily_brief_configs"]) {
+      const result = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(0);
     }
   });
 

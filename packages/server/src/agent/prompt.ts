@@ -349,6 +349,15 @@ export function buildSystemContext(params: {
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
   );
 
+  if (params.platform === "web") {
+    sections.push(
+      "",
+      "## Web Chat Automations",
+      "",
+      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste or link to the builder URL unless the user explicitly asks for the literal URL.",
+    );
+  }
+
   sections.push(
     "",
     "## Integration Connections",

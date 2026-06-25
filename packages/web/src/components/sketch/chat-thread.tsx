@@ -1,4 +1,5 @@
 import { AppIcon } from "@/components/connections/app-icon";
+import type { AutomationArtifact } from "@/lib/api";
 import {
   BrainIcon,
   CaretDownIcon,
@@ -41,6 +42,7 @@ import {
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AutomationArtifactCard } from "./automation-artifact-card";
 import { SketchMessage, UserMessage } from "./chat-message";
 
 export interface ChatThreadFile {
@@ -105,6 +107,7 @@ export interface ChatThreadMessage {
   text?: string;
   createdAt?: string;
   files?: ChatThreadFile[];
+  automations?: AutomationArtifact[];
   integrationConnections?: ChatThreadIntegrationConnection[];
   timeline?: ChatThreadTimelineEntry[];
   progressItems?: ChatThreadProgressItem[];
@@ -119,6 +122,7 @@ export interface ChatThreadProps {
   className?: string;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  conversationId?: string;
 }
 
 const markdownPlugins = [remarkGfm];
@@ -628,6 +632,7 @@ export function ChatThread({
   className,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  conversationId,
 }: ChatThreadProps) {
   if (messages.length === 0 && !busy && !error) return null;
   const showBusy = busy && messages.at(-1)?.role !== "assistant";
@@ -641,6 +646,7 @@ export function ChatThread({
           active={busy && index === messages.length - 1}
           integrationConnectionStatuses={integrationConnectionStatuses}
           onConnectIntegration={onConnectIntegration}
+          conversationId={conversationId}
         />
       ))}
 
@@ -667,16 +673,18 @@ function MessageRow({
   active,
   integrationConnectionStatuses,
   onConnectIntegration,
+  conversationId,
 }: {
   message: ChatThreadMessage;
   active: boolean;
   integrationConnectionStatuses: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  conversationId?: string;
 }) {
   if (message.role === "user") {
     return (
       <UserMessage footer={<MessageTimestamp createdAt={message.createdAt} align="right" />}>
-        <MessageContent message={message} />
+        <MessageContent message={message} conversationId={conversationId} />
       </UserMessage>
     );
   }
@@ -688,15 +696,17 @@ function MessageRow({
         active={active}
         integrationConnectionStatuses={integrationConnectionStatuses}
         onConnectIntegration={onConnectIntegration}
+        conversationId={conversationId}
       />
     </SketchMessage>
-  ) : message.text || message.files?.length || message.integrationConnections?.length ? (
+  ) : message.text || message.files?.length || message.automations?.length || message.integrationConnections?.length ? (
     <SketchMessage streaming={active} footer={<AssistantMessageFooter message={message} active={active} />}>
       <MessageContent
         message={message}
         inProgress={active}
         integrationConnectionStatuses={integrationConnectionStatuses}
         onConnectIntegration={onConnectIntegration}
+        conversationId={conversationId}
       />
     </SketchMessage>
   ) : null;
@@ -781,15 +791,18 @@ function MessageContent({
   inProgress = false,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  conversationId,
 }: {
   message: ChatThreadMessage;
   inProgress?: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  conversationId?: string;
 }) {
   const copyBlocks = message.role === "assistant";
   const hasConnections = Boolean(message.integrationConnections?.length);
-  if (!message.files?.length && !hasConnections) {
+  const hasAutomations = Boolean(message.automations?.length);
+  if (!message.files?.length && !hasAutomations && !hasConnections) {
     return message.text ? (
       <MarkdownMessage text={message.text} inProgress={inProgress} copyBlocks={copyBlocks} />
     ) : null;
@@ -799,6 +812,9 @@ function MessageContent({
     <div className="min-w-0 space-y-[10px]">
       {message.text ? <MarkdownMessage text={message.text} inProgress={inProgress} copyBlocks={copyBlocks} /> : null}
       {message.files?.length ? <FileAttachments files={message.files} /> : null}
+      {message.automations?.length ? (
+        <AutomationArtifactCards automations={message.automations} conversationId={conversationId} />
+      ) : null}
       {message.integrationConnections?.length ? (
         <IntegrationConnectionCards
           connections={message.integrationConnections}
@@ -806,6 +822,27 @@ function MessageContent({
           onConnect={onConnectIntegration}
         />
       ) : null}
+    </div>
+  );
+}
+
+function AutomationArtifactCards({
+  automations,
+  conversationId,
+}: {
+  automations: AutomationArtifact[];
+  conversationId?: string;
+}) {
+  return (
+    <div className="flex max-w-[640px] flex-col gap-[8px]">
+      {automations.map((artifact) => (
+        <AutomationArtifactCard
+          key={artifact.taskId}
+          artifact={artifact}
+          conversationId={conversationId}
+          className="mt-0 max-w-none"
+        />
+      ))}
     </div>
   );
 }
@@ -1004,11 +1041,13 @@ function TimelineMessage({
   active,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  conversationId,
 }: {
   message: ChatThreadMessage;
   active: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  conversationId?: string;
 }) {
   const entries = useMemo(() => timelineRenderEntriesForMessage(message), [message]);
   const blocks = useMemo(() => timelineRenderBlocksForEntries(entries), [entries]);
@@ -1030,6 +1069,11 @@ function TimelineMessage({
         {message.files?.length ? (
           <div className="mt-[10px]">
             <FileAttachments files={message.files} />
+          </div>
+        ) : null}
+        {message.automations?.length ? (
+          <div className="mt-[10px]">
+            <AutomationArtifactCards automations={message.automations} conversationId={conversationId} />
           </div>
         ) : null}
         {message.integrationConnections?.length ? (
@@ -1059,6 +1103,11 @@ function TimelineMessage({
       {message.files?.length ? (
         <div className="mt-[10px] pl-[30px]">
           <FileAttachments files={message.files} />
+        </div>
+      ) : null}
+      {message.automations?.length ? (
+        <div className="mt-[10px] pl-[30px]">
+          <AutomationArtifactCards automations={message.automations} conversationId={conversationId} />
         </div>
       ) : null}
       {message.integrationConnections?.length ? (

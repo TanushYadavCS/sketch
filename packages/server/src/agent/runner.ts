@@ -10,7 +10,7 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
-import type { WebChatIntegrationConnectionData } from "@sketch/shared";
+import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -41,8 +41,13 @@ import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
-import { IntegrationConnectionCollector, UploadCollector, createSketchMcpServer } from "./sketch-tools";
-import type { DailyBriefWriter } from "./tools/daily-brief";
+import {
+  AutomationArtifactCollector,
+  IntegrationConnectionCollector,
+  UploadCollector,
+  createSketchMcpServer,
+} from "./sketch-tools";
+import type { AgentOutputWriter } from "./tools/agent-output";
 
 /**
  * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
@@ -77,6 +82,7 @@ export type ProgressEvent = ToolUseProgressEvent | IntermediateTextProgressEvent
 export interface RunTrace {
   progressEvents: ProgressEvent[];
   finalText: string | null;
+  automationArtifacts: AutomationArtifact[];
 }
 
 /**
@@ -218,7 +224,7 @@ export interface RunAgentParams {
   seedAuxCalls?: AuxLlmCall[];
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
-  dailyBriefWriter?: DailyBriefWriter;
+  agentOutputWriter?: AgentOutputWriter;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
@@ -376,10 +382,12 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
 
   const uploadCollector = new UploadCollector();
   const integrationConnectionCollector = new IntegrationConnectionCollector();
+  const automationArtifactCollector = new AutomationArtifactCollector();
   const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
     integrationConnectionCollector,
+    automationArtifactCollector,
     auxCostCollector,
     workspaceDir: absWorkspace,
     db: params.db,
@@ -415,7 +423,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     conversationContext: params.conversationContext,
     agentInstructions: params.agentInstructions,
     agentAllowedTools: params.agentAllowedTools,
-    dailyBriefWriter: params.dailyBriefWriter,
+    agentOutputWriter: params.agentOutputWriter,
     originOrgContextEnabled: params.claudeConfigDir !== undefined,
   });
 
@@ -728,6 +736,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     responseSurface === "web"
       ? drainedIntegrationConnections
       : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
+  const automationArtifacts = automationArtifactCollector.drain();
   const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
   const auxCostUsd = sumAuxCost(auxLlmCalls);
   logger.info(
@@ -738,13 +747,14 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       auxCostUsd,
       pendingUploads: pendingUploads.length,
       pendingIntegrationConnections: pendingIntegrationConnections.length,
+      automationArtifacts: automationArtifacts.length,
     },
     "Agent run completed",
   );
   const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
-    messageSent: finalText !== null || pendingIntegrationConnections.length > 0,
+    messageSent: finalText !== null || pendingIntegrationConnections.length > 0 || automationArtifacts.length > 0,
     sessionId,
     costUsd: sdkCostUsd,
     auxCostUsd,
@@ -753,6 +763,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     trace: {
       progressEvents,
       finalText,
+      automationArtifacts,
     },
     rawUsage: {
       model,

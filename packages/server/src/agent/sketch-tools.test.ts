@@ -5,6 +5,7 @@ import type { Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsersTable } from "../db/schema";
 import {
+  AutomationArtifactCollector,
   UploadCollector,
   createSketchMcpServer,
   handleGetTeamDirectory,
@@ -117,6 +118,74 @@ describe("createSketchMcpServer", () => {
     expect(tools.SearchIntegrationApps).toBeUndefined();
   });
 
+  it("forwards automation artifacts from the scheduled task tool", async () => {
+    const uploadCollector = new UploadCollector();
+    const automationArtifactCollector = new AutomationArtifactCollector();
+    const stepContentRepo = { upsert: vi.fn().mockResolvedValue(undefined) };
+    const scheduler = {
+      addTask: vi.fn().mockResolvedValue({
+        id: "new-task",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        prompt: "Daily account brief",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: "user-1",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        title: null,
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: {
+          platform: "slack",
+          targetType: "dm",
+          targetId: "D123",
+          threadTs: null,
+          mode: "deliver",
+        },
+      }),
+    };
+    const server = createSketchMcpServer({
+      uploadCollector,
+      automationArtifactCollector,
+      workspaceDir: tmpDir,
+      scheduler: scheduler as never,
+      stepContentRepo: stepContentRepo as never,
+      taskContext: { platform: "slack", contextType: "dm", deliveryTarget: "D123", createdBy: "user-1" },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<string, { handler: (input: Record<string, unknown>) => Promise<unknown> }>;
+      }
+    )._registeredTools;
+
+    await tools.ManageScheduledTasks.handler({
+      action: "add",
+      prompt: "Daily account brief",
+      schedule_type: "cron",
+      schedule_value: "0 9 * * 1",
+    });
+
+    expect(automationArtifactCollector.drain()).toEqual([
+      expect.objectContaining({
+        taskId: "new-task",
+        builderUrl: "http://localhost:3000/scheduled-tasks/new-task/edit",
+      }),
+    ]);
+  });
+
   it("SearchChatHistory searches the scoped conversation", async () => {
     const collector = new UploadCollector();
     const searchMessages = vi.fn().mockResolvedValue({
@@ -175,6 +244,67 @@ describe("createSketchMcpServer", () => {
     });
     expect(JSON.parse(result.content[0].text)).toMatchObject({
       messages: [{ id: 7, rank: 0.5, text: "launch budget approved", providerThreadId: "thread-1" }],
+      hasMore: false,
+    });
+  });
+
+  it("ReadChatHistory caps reads at the current conversation message cursor", async () => {
+    const collector = new UploadCollector();
+    const listMessages = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          id: 7,
+          conversationId: 1,
+          providerMessageId: "m1",
+          senderJid: "U1",
+          senderName: "Alice",
+          senderUserId: "user-1",
+          isBot: false,
+          addressedToSketch: false,
+          text: "launch budget approved",
+          attachments: [],
+          providerThreadId: "thread-1",
+          providerParentMessageId: null,
+          isThreadReply: false,
+          providerTimestamp: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ],
+      hasMore: false,
+    });
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      conversationRepo: { listMessages } as never,
+      conversationContext: { conversationId: 1, currentMessageId: 12, providerThreadId: "thread-1" },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (input: {
+              beforeMessageId?: number;
+              scope?: "conversation" | "current_thread";
+            }) => Promise<{ content: { text: string }[] }>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    const result = await tools.ReadChatHistory.handler({ beforeMessageId: 99, scope: "current_thread" });
+
+    expect(listMessages).toHaveBeenCalledWith(1, {
+      afterMessageId: undefined,
+      beforeMessageId: 12,
+      limit: undefined,
+      order: undefined,
+      includeBotMessages: undefined,
+      providerThreadId: "thread-1",
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      messages: [{ id: 7, text: "launch budget approved", providerThreadId: "thread-1" }],
       hasMore: false,
     });
   });

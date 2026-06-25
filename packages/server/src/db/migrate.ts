@@ -104,6 +104,11 @@ import * as m101 from "./migrations/101-entity-project-member-overrides";
 import * as m102 from "./migrations/102-entity-creation-suppressions";
 import * as m103 from "./migrations/103-daily-briefs";
 import * as m104 from "./migrations/104-daily-brief-item-metadata";
+import * as m105 from "./migrations/105-normalize-indexed-file-source-timestamps";
+import * as m106 from "./migrations/106-agents";
+import * as m107 from "./migrations/107-scheduled-task-builder-revisions";
+import * as m108 from "./migrations/108-scheduled-task-origin-chat";
+import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -212,6 +217,11 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "102-entity-creation-suppressions": m102,
           "103-daily-briefs": m103,
           "104-daily-brief-item-metadata": m104,
+          "105-normalize-indexed-file-source-timestamps": m105,
+          "106-agents": m106,
+          "107-scheduled-task-builder-revisions": m107,
+          "108-scheduled-task-origin-chat": m108,
+          "109-scheduled-task-origin-message-id": m109,
         };
       },
     },

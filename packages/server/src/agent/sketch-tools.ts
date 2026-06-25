@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
-import { createWriteDailyBriefTool } from "./tools/daily-brief";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
@@ -12,7 +12,12 @@ import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
-import { IntegrationConnectionCollector, type SketchMcpDeps, UploadCollector } from "./tools/types";
+import {
+  AutomationArtifactCollector,
+  IntegrationConnectionCollector,
+  type SketchMcpDeps,
+  UploadCollector,
+} from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
 
@@ -22,6 +27,7 @@ export { handleManageScheduledTasks } from "./tools/scheduled-tasks";
 export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
 export { UploadCollector };
 export { IntegrationConnectionCollector };
+export { AutomationArtifactCollector };
 export type { SketchMcpDeps };
 
 export function createSketchMcpServer(deps: SketchMcpDeps) {
@@ -44,11 +50,12 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
       queueManager: deps.queueManager,
       activeQueueKey: deps.activeQueueKey,
       config: deps.toolConfig,
+      automationArtifactCollector: deps.automationArtifactCollector,
     }),
     ...createTeamTools(deps),
     ...createMessagingTools(deps),
     ...createInboxWorkflowTools(deps),
-    createWriteDailyBriefTool(deps.dailyBriefWriter),
+    createWriteAgentOutputTool(deps.agentOutputWriter),
     ...(deps.transcriptionEnabled
       ? [
           createTranscribeAudioTool({

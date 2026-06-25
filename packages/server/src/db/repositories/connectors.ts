@@ -13,6 +13,7 @@ import { sql } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
+import { normalizeSourceTimestampForStorage } from "../../timestamps";
 import type { DB } from "../schema";
 
 /**
@@ -383,6 +384,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       rollupGroupId?: string | null;
     }) {
       const now = new Date().toISOString();
+      const sourceCreatedAt = normalizeSourceTimestampForStorage(data.sourceCreatedAt);
+      const sourceUpdatedAt = normalizeSourceTimestampForStorage(data.sourceUpdatedAt);
 
       const existing = data.providerMessageId
         ? await db
@@ -411,6 +414,12 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       if (existing) {
         const contentChanged = data.contentHash !== existing.content_hash;
         const categoryChanged = data.contentCategory !== existing.content_category;
+        const sourceVersionChanged =
+          data.contentHash === null &&
+          existing.content_hash === null &&
+          data.content === null &&
+          existing.content === null &&
+          sourceUpdatedAt !== existing.source_updated_at;
         const updates: Record<string, unknown> = {
           provider_file_id: data.providerFileId,
           provider_message_id: data.providerMessageId ?? null,
@@ -423,13 +432,13 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           source_path: data.sourcePath,
           content_hash: data.contentHash,
           is_archived: 0,
-          source_created_at: data.sourceCreatedAt,
-          source_updated_at: data.sourceUpdatedAt,
+          source_created_at: sourceCreatedAt,
+          source_updated_at: sourceUpdatedAt,
           rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
-        if (contentChanged || categoryChanged) {
+        if (contentChanged || categoryChanged || sourceVersionChanged) {
           updates.embedding_status = "pending";
           updates.summary_status = "pending";
           updates.embedding_attempts = 0;
@@ -440,7 +449,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
         await db.updateTable("indexed_files").set(updates).where("id", "=", existing.id).execute();
 
-        return { id: existing.id, created: false, contentChanged, categoryChanged };
+        return { id: existing.id, created: false, contentChanged, categoryChanged, sourceVersionChanged };
       }
 
       const id = randomUUID();
@@ -460,8 +469,8 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           source: data.source,
           source_path: data.sourcePath,
           content_hash: data.contentHash,
-          source_created_at: data.sourceCreatedAt,
-          source_updated_at: data.sourceUpdatedAt,
+          source_created_at: sourceCreatedAt,
+          source_updated_at: sourceUpdatedAt,
           rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
           mime_type: data.mimeType ?? null,
@@ -470,7 +479,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         })
         .execute();
 
-      return { id, created: true, contentChanged: false, categoryChanged: false };
+      return { id, created: true, contentChanged: false, categoryChanged: false, sourceVersionChanged: false };
     },
 
     /** Link a connector to a file (many-to-many). Idempotent. */

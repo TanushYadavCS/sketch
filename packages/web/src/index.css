@@ -339,11 +339,111 @@
   animation: sketch-response-fading 2s ease-in-out infinite;
 }
 
+.automation-builder-flow .react-flow__pane {
+  cursor: grab;
+}
+
+.automation-builder-flow .react-flow__pane:active {
+  cursor: grabbing;
+}
+
+.automation-builder-flow .react-flow__node {
+  outline: none;
+}
+
+.automation-builder-flow .react-flow__node:focus-visible .automation-node-shell {
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--brand-accent) 72%, transparent), 0 18px 38px rgba(0, 0, 0, 0.52);
+}
+
+.automation-builder-flow .react-flow__edge-path {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.automation-builder-flow .react-flow__edge:hover .react-flow__edge-path {
+  stroke: #7b86aa;
+}
+
+.automation-builder-flow .react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: 7 8;
+  animation: automation-edge-flow 0.9s linear infinite;
+}
+
+.automation-builder-handle.react-flow__handle {
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: #101010;
+  box-shadow: 0 0 0 2px #050505;
+  opacity: 0.58;
+  transition: opacity 150ms ease, border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
+}
+
+.group\/node:hover .automation-builder-handle.react-flow__handle {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: #141414;
+  opacity: 0.8;
+}
+
+.automation-builder-handle.react-flow__handle.connectingto,
+.automation-builder-handle.react-flow__handle.connectingfrom {
+  border-color: #6b7dfa;
+  background: #6b7dfa;
+  opacity: 1;
+}
+
+.automation-builder-handle.react-flow__handle-left:hover {
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.automation-builder-handle.react-flow__handle-right:hover {
+  transform: translate(50%, -50%) scale(1.08);
+}
+
+.automation-builder-controls.react-flow__controls {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(10, 10, 10, 0.88);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(12px);
+}
+
+.automation-builder-controls .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  fill: currentColor;
+}
+
+.automation-builder-controls .react-flow__controls-button:last-child {
+  border-bottom: 0;
+}
+
+.automation-builder-controls .react-flow__controls-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.automation-builder-controls .react-flow__controls-button svg {
+  max-width: 14px;
+  max-height: 14px;
+}
+
+@keyframes automation-edge-flow {
+  to {
+    stroke-dashoffset: -15;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sketch-timeline-window,
   .sketch-timeline-window-track,
   .sketch-timeline-entry,
-  .sketch-collapsible-timeline-content {
+  .sketch-collapsible-timeline-content,
+  .automation-builder-flow .react-flow__edge.animated .react-flow__edge-path {
     animation: none !important;
     transition: none;
   }

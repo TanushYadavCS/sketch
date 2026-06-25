@@ -26,6 +26,7 @@ const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
 // Stub the heavy enrichment/sync work to keep tests fast
 vi.mock("./enrichment", () => ({
   runEnrichment: vi.fn().mockResolvedValue({ filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] }),
+  isEnrichmentActive: vi.fn(() => false),
   clearEnrichmentData: vi.fn(),
 }));
 
@@ -77,6 +78,7 @@ describe("startSyncScheduler", () => {
   const logger = createTestLogger();
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (db) {
       try {
         await db.destroy();
@@ -199,6 +201,34 @@ describe("recoverStaleEnrichments", () => {
       .selectFrom("indexed_files")
       .select("embedding_status")
       .where("id", "=", "file-fresh")
+      .executeTakeFirst();
+    expect(row?.embedding_status).toBe("processing");
+  });
+
+  it("does not recover processing files while enrichment is active", async () => {
+    db = await createTestDb();
+    const { isEnrichmentActive } = await import("./enrichment");
+    vi.mocked(isEnrichmentActive).mockReturnValueOnce(true);
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-recover",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await insertFile(db, "file-active", { embeddingStatus: "processing", syncedAt: twoHoursAgo });
+
+    await recoverStaleEnrichments(db, logger);
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select("embedding_status")
+      .where("id", "=", "file-active")
       .executeTakeFirst();
     expect(row?.embedding_status).toBe("processing");
   });
@@ -463,7 +493,13 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
       connectorConfigId: "gmail-a",
     });
 
-    expect(second).toEqual({ id: first.id, created: false, contentChanged: true, categoryChanged: false });
+    expect(second).toEqual({
+      id: first.id,
+      created: false,
+      contentChanged: true,
+      categoryChanged: false,
+      sourceVersionChanged: false,
+    });
 
     const rows = await db
       .selectFrom("indexed_files")
@@ -594,6 +630,15 @@ describe("runAllSyncs (Fix A + Fix C)", () => {
       .executeTakeFirstOrThrow();
     expect(row.sync_status).toBe("error");
     expect(row.error_message).toMatch(/auto-recovered/);
+  });
+
+  it("does not run enrichment inline, so ingestion can return without waiting on backlog processing", async () => {
+    db = await createTestDb();
+    const { runEnrichment } = await import("./enrichment");
+
+    await runAllSyncs(db, logger);
+
+    expect(runEnrichment).not.toHaveBeenCalled();
   });
 });
 
@@ -939,6 +984,86 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     expect(result.itemsUpdated).toBe(1);
     expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
     expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-clear-enrichment");
+  });
+
+  it("clears enrichment data when a hashless contentless file source timestamp changes", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-hashless-source-change",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-hashless-source-change",
+        connector_config_id: "connector-hashless-source-change",
+        provider_file_id: "provider-hashless-source-change",
+        file_name: "image.png",
+        file_type: "image",
+        content_category: "document",
+        source: "google_drive",
+        source_path: "/image.png",
+        provider_url: null,
+        content: null,
+        summary: "old summary",
+        context_note: null,
+        access_scope_id: null,
+        content_hash: null,
+        source_updated_at: "2026-01-01T00:00:00.000Z",
+        synced_at: new Date().toISOString(),
+        embedding_status: "processing",
+        summary_status: "done",
+        mime_type: "image/png",
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "provider-hashless-source-change",
+        providerUrl: null,
+        fileName: "image.png",
+        fileType: "image",
+        contentCategory: "document" as const,
+        content: null,
+        sourcePath: "/image.png",
+        contentHash: null,
+        sourceCreatedAt: null,
+        sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+        mimeType: "image/png",
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+    vi.mocked(clearEnrichmentData).mockClear();
+
+    const result = await runConnectorSync(db, "connector-hashless-source-change", logger);
+
+    expect(result.itemsProcessed).toBe(1);
+    expect(result.itemsUpdated).toBe(1);
+    expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
+    expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-hashless-source-change");
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary_status", "source_updated_at"])
+      .where("id", "=", "file-hashless-source-change")
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({
+      embedding_status: "pending",
+      summary_status: "pending",
+      source_updated_at: "2026-01-02T00:00:00.000Z",
+    });
   });
 
   it("clears enrichment data when an existing file's content category changes with the same hash", async () => {

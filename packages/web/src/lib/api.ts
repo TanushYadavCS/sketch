@@ -7,14 +7,33 @@ import type { SkillCategory } from "@/lib/skills-data";
 import type {
   AgentEnvironmentShareTargetInput,
   AgentEnvironmentVariableRecord,
+  AutomationArtifact,
+  AutomationBuilderSaveRequest,
+  AutomationDefinition,
+  AutomationRun,
+  AutomationStepContent,
   FileMetadata,
   IntegrationApp,
   IntegrationConnection,
   LlmProvider,
   McpServerRecord,
   PageInfo,
+  StepOutput,
   WebChatIntegrationConnectionData,
+  WorkflowEdge,
+  WorkflowStep,
 } from "@sketch/shared";
+
+export type {
+  AutomationArtifact,
+  AutomationBuilderSaveRequest,
+  AutomationDefinition,
+  AutomationRun,
+  AutomationStepContent,
+  StepOutput,
+  WorkflowEdge,
+  WorkflowStep,
+};
 
 export type WorkspaceScope = "personal" | "org";
 
@@ -100,6 +119,12 @@ export interface ScheduledTaskListItem {
   canDelete: boolean;
   title: string | null;
   description: string | null;
+  originChat: {
+    platform: "web" | "slack" | "whatsapp";
+    conversationId: string;
+    providerThreadId: string | null;
+    currentMessageId: number | null;
+  } | null;
   steps: string | null;
   stepCount: number;
   triggerConfig: WorkflowTriggerConfig | null;
@@ -117,6 +142,14 @@ export interface ScheduledTaskListItem {
   };
   lastRunStatus: string | null;
   runCount: number;
+}
+
+export interface ScheduledTaskOriginChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  senderName: string;
+  text: string;
+  createdAt: string;
 }
 
 export interface WorkflowTriggerConfig {
@@ -968,6 +1001,91 @@ export interface DailyBriefResponse {
   running: boolean;
   briefDate: string;
   timezone: string;
+  /** Section keys currently enabled in the user's config. Disabled sections are hidden on Home. */
+  enabledSections?: string[];
+}
+
+export interface AgentSummary {
+  key: string;
+  title: string;
+  tagline: string;
+  description: string;
+  category: string;
+  version: string;
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+}
+
+export interface AgentSectionConfig {
+  key: string;
+  title: string;
+  enabled: boolean;
+}
+
+export interface AgentConfig {
+  agentKey: string;
+  title: string;
+  tagline: string;
+  description: string;
+  enabled: boolean;
+  scheduleHour: number;
+  scheduleMinute: number;
+  timezone: string | null;
+  maxItemsPerSection: number;
+  itemsPerSectionRange: { min: number; max: number };
+  focus: string | null;
+  sections: AgentSectionConfig[];
+}
+
+/** Generic output item for any prebuilt agent. `sectionKey` is whatever the agent defines. */
+export interface AgentOutputItem {
+  id: string;
+  sectionKey: string;
+  title: string;
+  summary: string;
+  priority: "high" | "medium" | "low";
+  label: string;
+  displayRef: string | null;
+  actionType: string | null;
+  actionLabel: string | null;
+  actionPrompt: string | null;
+  sourceUrl: string | null;
+  knowledgeRefs: DailyBriefKnowledgeRefs;
+  sortOrder: number;
+}
+
+export interface AgentOutput {
+  id: string;
+  agentKey: string;
+  userId: string;
+  outputDate: string;
+  timezone: string;
+  status: string;
+  generatedAt: string | null;
+  masthead: {
+    title: string;
+    summary: string;
+    generatedFor?: string;
+  } | null;
+  sections: Record<string, AgentOutputItem[]>;
+}
+
+export interface AgentDetailResponse {
+  agent: AgentConfig;
+  output: AgentOutput | null;
+  running: boolean;
+  outputDate: string;
+  timezone: string;
+}
+
+export interface AgentConfigPatch {
+  enabled?: boolean;
+  scheduleHour?: number;
+  scheduleMinute?: number;
+  maxItemsPerSection?: number;
+  sections?: Record<string, boolean>;
+  focus?: string | null;
 }
 
 export type WebChatMessagePart =
@@ -1000,10 +1118,19 @@ export type WebChatMessagePart =
         sizeBytes?: number;
       };
     }
+  | { type: "data-automation"; id: string; data: AutomationArtifact }
   | {
       type: "data-integration-connection";
       id: string;
       data: WebChatIntegrationConnectionData;
+    }
+  | {
+      type: "data-interruption";
+      id: string;
+      data: {
+        label: string;
+        detail?: string;
+      };
     };
 
 export interface WebChatStoredMessage {
@@ -1056,6 +1183,26 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body ?? {}),
       });
+    },
+  },
+  agents: {
+    list() {
+      return request<{ agents: AgentSummary[] }>("/api/agents");
+    },
+    get(agentKey: string) {
+      return request<AgentDetailResponse>(`/api/agents/${agentKey}`);
+    },
+    updateConfig(agentKey: string, patch: AgentConfigPatch) {
+      return request<{ agent: AgentConfig }>(`/api/agents/${agentKey}/config`, {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      });
+    },
+    run(agentKey: string) {
+      return request<{ generation: { id: string; status: string; outputDate: string } | null }>(
+        `/api/agents/${agentKey}/runs`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
     },
   },
   webChat: {
@@ -1757,6 +1904,33 @@ export const api = {
     async getRun(taskId: string, runId: string) {
       const res = await request<{ run: AutomationRunItem }>(`/api/scheduled-tasks/${taskId}/runs/${runId}`);
       return res.run;
+    },
+    async get(taskId: string) {
+      const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`);
+      return res.automation;
+    },
+    originChatMessages(taskId: string) {
+      return request<{ messages: ScheduledTaskOriginChatMessage[] }>(
+        `/api/scheduled-tasks/${taskId}/origin-chat/messages`,
+      );
+    },
+    async save(taskId: string, body: AutomationBuilderSaveRequest) {
+      const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      return res.automation;
+    },
+    run(taskId: string) {
+      return request<{ status: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
+        method: "POST",
+      });
+    },
+    testStep(taskId: string, stepId: string, body: { input?: unknown; useLatestUpstreamOutput?: boolean } = {}) {
+      return request<{ run: unknown }>(`/api/scheduled-tasks/${taskId}/steps/${stepId}/runs`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
     },
     async getStepContent(taskId: string) {
       const res = await request<{ stepContent: AutomationStepContentItem[] }>(

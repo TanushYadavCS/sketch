@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
-import type { WebChatIntegrationConnectionData, WebChatProgressData, WebProgressItem } from "@sketch/shared";
+import {
+  type AutomationArtifact,
+  type WebChatIntegrationConnectionData,
+  type WebChatProgressData,
+  type WebProgressItem,
+  type WorkflowEdge,
+  type WorkflowStep,
+  automationArtifactSchema,
+  workflowEdgeSchema,
+  workflowStepSchema,
+} from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
@@ -12,7 +22,7 @@ import { ensureWorkspace } from "../agent/workspace";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
-import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
@@ -35,6 +45,7 @@ import {
 } from "../progress-settings";
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
+import type { ScheduledTask } from "../scheduler/types";
 import { transcribeAudioFile } from "../transcription/service";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -123,6 +134,7 @@ const WEB_CHAT_INTERRUPTION_DATA = {
 type WebChatTranscriptPart =
   | { type: "text"; text: string }
   | { type: "data-file"; id: string; data: WebChatFile }
+  | { type: "data-automation"; id: string; data: AutomationArtifact }
   | { type: "data-integration-connection"; id: string; data: WebChatIntegrationConnectionData }
   | { type: "data-interruption"; id: string; data: WebChatInterruptionData };
 type WebChatProgressTranscriptPart = { type: "data-progress"; id: string; data: WebChatProgressData };
@@ -157,11 +169,14 @@ interface ParsedWebChatAttachment {
   file: WebChatFile;
 }
 
+type AutomationBuilderContext = { task: ScheduledTask; stepContentRows: StepContentRow[] } | null;
+
 type WebChatUiChunk =
   | { type: "start"; messageMetadata?: { createdAt: string } }
   | { type: "start-step" }
   | { type: "data-progress"; id: string; data: WebChatProgressData }
   | { type: "data-file"; id: string; data: WebChatFile }
+  | { type: "data-automation"; id: string; data: AutomationArtifact }
   | { type: "data-integration-connection"; id: string; data: WebChatIntegrationConnectionData }
   | { type: "data-interruption"; id: string; data: WebChatInterruptionData }
   | { type: "text-start"; id: string }
@@ -240,6 +255,210 @@ function extractLatestUserMessage(body: unknown): LatestUserMessage | null {
     if (text) return { id: extractMessageId(message), text };
   }
   return null;
+}
+
+function extractAutomationTaskId(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  const taskId = typeof body.automationTaskId === "string" ? body.automationTaskId.trim() : "";
+  return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
+}
+
+async function resolveAutomationBuilderContext(params: {
+  deps: WebChatRouteDeps;
+  currentUserId: string;
+  role: string | undefined;
+  automationTaskId: string | null;
+  logger: Logger;
+}): Promise<AutomationBuilderContext> {
+  if (!params.automationTaskId || !params.deps.scheduler?.getTaskById) {
+    return null;
+  }
+
+  const task = await params.deps.scheduler.getTaskById(params.automationTaskId).catch((err) => {
+    params.logger.warn({ err, taskId: params.automationTaskId }, "Failed to resolve automation builder context");
+    return null;
+  });
+  if (!task || (params.role !== "admin" && task.createdBy !== params.currentUserId)) {
+    return null;
+  }
+
+  const stepContentRows = params.deps.stepContentRepo
+    ? await params.deps.stepContentRepo.getByTask(task.id).catch((err) => {
+        params.logger.warn({ err, taskId: task.id }, "Failed to load automation builder step content");
+        return [] as StepContentRow[];
+      })
+    : [];
+  return { task, stepContentRows };
+}
+
+function parseBuilderSteps(value: string | null): WorkflowStep[] {
+  if (!value) return [];
+  try {
+    const parsed = workflowStepSchema.array().safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseBuilderEdges(value: string | null): WorkflowEdge[] {
+  if (!value) return [];
+  try {
+    const parsed = workflowEdgeSchema.array().safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseBuilderApps(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function builderContextText(value: string | null | undefined, maxLength = 500): string {
+  const normalized = (value ?? "")
+    .replace(/<\/?automation_builder>/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function builderDeliverySummary(task: ScheduledTask): string {
+  const delivery = task.delivery;
+  const target = builderContextText(delivery.targetId, 160);
+  const thread = delivery.threadTs ? ` thread=${builderContextText(delivery.threadTs, 80)}` : "";
+  return `${delivery.platform} ${delivery.targetType} ${target}${thread} mode=${delivery.mode}`;
+}
+
+function builderStepSummary(step: WorkflowStep, content: StepContentRow | undefined): string {
+  const parts = [`- ${builderContextText(step.id, 80)} [${step.type}]: ${builderContextText(step.label, 160)}`];
+  if (step.type === "trigger" && step.triggerConfig) {
+    parts.push(`trigger: ${builderContextText(JSON.stringify(step.triggerConfig), 260)}`);
+  }
+  if (content) {
+    const kind = content.content_type === "script" ? "script" : "prompt";
+    parts.push(`${kind}: ${builderContextText(content.content, 360)}`);
+    const apps = parseBuilderApps(content.apps);
+    if (apps.length > 0) parts.push(`apps: ${apps.map((app) => builderContextText(app, 60)).join(", ")}`);
+  }
+  return parts.join(" | ");
+}
+
+function automationBuilderContextLines(context: Exclude<AutomationBuilderContext, null>): string[] {
+  const { task, stepContentRows } = context;
+  const steps = parseBuilderSteps(task.steps);
+  const edges = parseBuilderEdges(task.edges);
+  const contentByStep = new Map(stepContentRows.map((row) => [row.step_id, row]));
+  const lines = [
+    "<automation_builder>",
+    `task_id: ${task.id}`,
+    "The user is working on the automation currently open in the builder.",
+    "Treat requests like 'this automation' or 'make it stricter' as applying to this task.",
+    "Apply automation changes with ManageScheduledTasks instead of asking the user to edit the builder directly.",
+    "current_automation:",
+    `title: ${builderContextText(task.title ?? task.prompt, 240)}`,
+    `status: ${task.status}`,
+    `schedule: ${task.scheduleType} ${builderContextText(task.scheduleValue, 160)} (${task.timezone})`,
+    `delivery: ${builderDeliverySummary(task)}`,
+  ];
+  const description = builderContextText(task.description, 500);
+  if (description) lines.push(`description: ${description}`);
+  lines.push(`prompt: ${builderContextText(task.prompt, 700)}`);
+
+  if (steps.length > 0) {
+    lines.push("steps:");
+    for (const step of steps.slice(0, 12)) {
+      lines.push(builderStepSummary(step, contentByStep.get(step.id)));
+    }
+    if (steps.length > 12) lines.push(`- ... ${steps.length - 12} more steps`);
+  }
+
+  if (edges.length > 0) {
+    lines.push(`edges: ${edges.map((edge) => `${edge.from}->${edge.to}`).join(", ")}`);
+  }
+
+  return lines;
+}
+
+function webChatCurrentMessage(message: string, automationBuilderContext: AutomationBuilderContext): string {
+  if (!automationBuilderContext) return message;
+  const lines = [...automationBuilderContextLines(automationBuilderContext), "</automation_builder>"];
+  return [...lines, "", message].join("\n");
+}
+
+const AUTOMATION_CARD_INTRO_TEXT = "All set - here's the automation.";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function safeUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+function automationBuilderReferences(artifact: AutomationArtifact): string[] {
+  const references = new Set<string>();
+  const builderUrl = artifact.builderUrl.trim();
+  if (builderUrl) references.add(builderUrl);
+  references.add(`/scheduled-tasks/${encodeURIComponent(artifact.taskId)}/edit`);
+
+  const absoluteBuilderUrl = safeUrl(builderUrl);
+  if (absoluteBuilderUrl) {
+    references.add(`${absoluteBuilderUrl.pathname}${absoluteBuilderUrl.search}${absoluteBuilderUrl.hash}`);
+  }
+
+  return Array.from(references).filter((reference) => reference.length > 0);
+}
+
+function stripAutomationBuilderReferences(text: string, artifacts: AutomationArtifact[]): string {
+  let stripped = text;
+  for (const artifact of artifacts) {
+    for (const reference of automationBuilderReferences(artifact)) {
+      const pattern = escapeRegExp(reference);
+      stripped = stripped
+        .replace(new RegExp(`\\[[^\\]]*\\]\\(${pattern}\\)`, "gi"), "")
+        .replace(new RegExp(`<${pattern}>`, "gi"), "")
+        .replace(new RegExp(pattern, "gi"), "");
+    }
+  }
+
+  return stripped
+    .replace(/^[ \t]*(?:open|view|edit|builder|link)(?: the)?(?: automation| builder)?[: -]*$/gim, "")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function looksLikeAutomationToolDump(text: string): boolean {
+  return (
+    /^Automation created:\s*[{[]/s.test(text) ||
+    (/^Automation created:/i.test(text) && /"(?:id|prompt|scheduleType|schedule_type|deliveryTarget)"/.test(text))
+  );
+}
+
+function normalizeAutomationAssistantText(text: string, artifacts: AutomationArtifact[]): string {
+  if (artifacts.length === 0) return text;
+
+  const stripped = stripAutomationBuilderReferences(text, artifacts)
+    .replace(/\s+(?:open|view|edit|builder|link)(?: the)?(?: automation| builder)?[: -]*$/i, "")
+    .trim();
+  if (!stripped || /^Automation created:?\.?$/i.test(stripped) || looksLikeAutomationToolDump(stripped)) {
+    return AUTOMATION_CARD_INTRO_TEXT;
+  }
+
+  return stripped;
 }
 
 function relativeWorkspacePath(workspaceDir: string, filePath: string): string | null {
@@ -525,6 +744,10 @@ function sanitizeTranscriptPart(part: unknown): WebChatStoredPart | null {
     const data = sanitizeIntegrationConnectionData(part.data);
     return data ? { type: "data-integration-connection", id: part.id, data } : null;
   }
+  if (part.type === "data-automation" && typeof part.id === "string") {
+    const artifact = automationArtifactSchema.safeParse(part.data);
+    return artifact.success ? { type: "data-automation", id: part.id, data: artifact.data } : null;
+  }
   if (part.type !== "data-file" || typeof part.id !== "string" || !isRecord(part.data)) return null;
 
   const { name, url, mediaType, sizeBytes } = part.data;
@@ -717,15 +940,27 @@ function createProgressTranscriptMessage(
   };
 }
 
+function isPendingProgressTranscriptMessage(message: WebChatTranscriptMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    message.parts.length > 0 &&
+    message.parts.every((part) => part.type === "data-progress")
+  );
+}
+
 function createAssistantTranscriptMessage(
   finalText: string,
   files: Array<{ id: string; data: WebChatFile }>,
+  automations: Array<{ id: string; data: AutomationArtifact }> = [],
   integrationConnections: Array<{ id: string; data: WebChatIntegrationConnectionData }> = [],
 ): WebChatTranscriptMessage | null {
   const parts: WebChatTranscriptPart[] = [];
   if (finalText) parts.push({ type: "text", text: finalText });
   for (const file of files) {
     parts.push({ type: "data-file", id: file.id, data: file.data });
+  }
+  for (const automation of automations) {
+    parts.push({ type: "data-automation", id: automation.id, data: automation.data });
   }
   for (const connection of integrationConnections) {
     parts.push({ type: "data-integration-connection", id: connection.id, data: connection.data });
@@ -855,6 +1090,25 @@ async function completeWebChatProgressMessage(
   });
 }
 
+async function interruptLatestPendingWebChatProgress(
+  config: Config,
+  workspaceDir: string,
+  userId: string,
+  logger: Logger,
+  conversationId: string,
+): Promise<boolean> {
+  return withWebChatTranscriptLock(userId, conversationId, async () => {
+    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
+    const latest = existing.at(-1);
+    if (!latest || !isPendingProgressTranscriptMessage(latest)) return false;
+
+    const next = [...existing];
+    next[next.length - 1] = createInterruptedAssistantTranscriptMessage("");
+    await writeWebChatTranscript(config, userId, conversationId, next);
+    return true;
+  });
+}
+
 function textFromTranscriptMessage(message: WebChatTranscriptMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
@@ -932,6 +1186,30 @@ async function resolveWebChatDmContext(
   }
 
   return null;
+}
+
+function automationBuilderTaskContext(params: {
+  context: Exclude<AutomationBuilderContext, null>;
+  currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
+  role: string | undefined;
+  conversationId: string;
+}) {
+  const task = params.context.task;
+  return {
+    platform: task.platform,
+    contextType: task.contextType,
+    deliveryTarget: task.deliveryTarget,
+    createdBy: params.currentUser.id,
+    creatorTimezone: params.currentUser.timezone,
+    threadTs: task.threadTs ?? undefined,
+    canManageAnyTask: params.role === "admin",
+    origin: {
+      platform: "web" as const,
+      conversationId: params.conversationId,
+      providerThreadId: null,
+      currentMessageId: null,
+    },
+  };
 }
 
 export function webChatRoutes(deps: WebChatRouteDeps) {
@@ -1016,7 +1294,20 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       return c.json(badRequest("VALIDATION_ERROR", "Conversation id is invalid"), 400);
     }
 
-    return c.json({ success: true, interrupted: interruptActiveWebChatRun(currentUser.id, conversationId) });
+    const interruptedActiveRun = interruptActiveWebChatRun(currentUser.id, conversationId);
+    if (interruptedActiveRun) {
+      return c.json({ success: true, interrupted: true });
+    }
+
+    const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    const interruptedPendingTranscript = await interruptLatestPendingWebChatProgress(
+      deps.config,
+      workspaceDir,
+      currentUser.id,
+      deps.logger,
+      conversationId,
+    );
+    return c.json({ success: true, interrupted: interruptedPendingTranscript });
   });
 
   routes.get("/messages", async (c) => {
@@ -1205,6 +1496,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const settingsRow = await deps.settings.get();
     const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
     const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    const automationTaskId = extractAutomationTaskId(body);
     const rawAttachments = isRecord(body) && Array.isArray(body.attachments) ? body.attachments : [];
     let parsedAttachments: ParsedWebChatAttachment[];
     try {
@@ -1222,7 +1514,37 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }));
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
-    const deliveryPlatform = dmContext?.platform ?? "slack";
+    const automationBuilderContext = await resolveAutomationBuilderContext({
+      deps,
+      currentUserId: currentUser.id,
+      role: c.get("role"),
+      automationTaskId,
+      logger: deps.logger,
+    });
+    const taskContext = automationBuilderContext
+      ? automationBuilderTaskContext({
+          context: automationBuilderContext,
+          currentUser,
+          role: c.get("role"),
+          conversationId,
+        })
+      : dmContext
+        ? {
+            platform: dmContext.platform,
+            contextType: "dm" as const,
+            deliveryTarget: dmContext.deliveryTarget,
+            createdBy: currentUser.id,
+            creatorTimezone: currentUser.timezone,
+            canManageAnyTask: c.get("role") === "admin",
+            origin: {
+              platform: "web" as const,
+              conversationId,
+              providerThreadId: null,
+              currentMessageId: null,
+            },
+          }
+        : null;
+    const deliveryPlatform = taskContext?.platform ?? "slack";
     const abortController = new AbortController();
     const baseProgressSettings = resolveProgressDisplaySettings(currentUser);
     const progressMode = resolveWebChatProgressRendererMode(
@@ -1246,7 +1568,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const userMessage = buildSketchContext({
       messages: [],
       currentUserName: currentUser.name,
-      currentMessage: message,
+      currentMessage: webChatCurrentMessage(message, automationBuilderContext),
       currentUserEmail: currentUser.email,
       currentUserPhone: currentUser.whatsapp_number,
       workspaceDir,
@@ -1265,6 +1587,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       let currentTextPart = "";
       let bufferTextDeltas = false;
       let bufferedTextDeltas = "";
+      let sawAutomationTool = false;
+      let bufferedTextAfterAutomationTool = "";
 
       const startTextPart = () => {
         textPartId = `text-${textPartIndex}`;
@@ -1349,6 +1673,10 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               contextType: "dm",
               onProgressEvent: async (event) => {
                 if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
+                if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
+                  sawAutomationTool = true;
+                  closeTextPart();
+                }
                 progressRenderer.renderEvent(event);
                 const lines = progressRenderer.getLines();
                 const progressData = createWebProgressData(event, progressSettings, progressMode, lines);
@@ -1371,6 +1699,10 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                 }
               },
               onTextDelta: async (delta) => {
+                if (sawAutomationTool) {
+                  bufferedTextAfterAutomationTool += delta;
+                  return;
+                }
                 writeOrBufferTextDelta(delta);
               },
               onSessionId: async () => {},
@@ -1391,17 +1723,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               currentUserId: currentUser.id,
               sendDm: deps.sendDm,
               ...(attachments.length > 0 ? { attachments } : {}),
-              ...(dmContext
-                ? {
-                    taskContext: {
-                      platform: dmContext.platform,
-                      contextType: "dm" as const,
-                      deliveryTarget: dmContext.deliveryTarget,
-                      createdBy: currentUser.id,
-                      creatorTimezone: currentUser.timezone,
-                    },
-                  }
-                : {}),
+              ...(taskContext ? { taskContext } : {}),
             }),
           ),
         );
@@ -1427,8 +1749,15 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...(result.pendingIntegrationConnections ?? []),
           ...deterministicIntegrationCards,
         ]);
-        const finalText = sanitizeIntegrationConnectionText(result.trace.finalText, integrationCards) ?? "";
-        if (integrationCards.length === 0) {
+        const automationArtifacts = result.trace.automationArtifacts ?? [];
+        const rawFinalText = result.trace.finalText?.trim()
+          ? result.trace.finalText
+          : sawAutomationTool
+            ? bufferedTextAfterAutomationTool
+            : bufferedTextDeltas;
+        const automationText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
+        const finalText = sanitizeIntegrationConnectionText(automationText, integrationCards) ?? "";
+        if (integrationCards.length === 0 && automationArtifacts.length === 0) {
           writeBufferedTextDeltas();
         } else {
           bufferedTextDeltas = "";
@@ -1443,6 +1772,11 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           write({ type: "data-integration-connection", id, data: connection });
           return { id, data: connection };
         });
+        const automationParts = automationArtifacts.map((artifact, index) => {
+          const id = `automation-${index}`;
+          write({ type: "data-automation", id, data: artifact });
+          return { id, data: artifact };
+        });
         await completeWebChatProgressMessage(
           deps.config,
           workspaceDir,
@@ -1450,7 +1784,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           deps.logger,
           conversationId,
           progressMessageId,
-          createAssistantTranscriptMessage(finalText, fileParts, integrationConnectionParts),
+          createAssistantTranscriptMessage(finalText, fileParts, automationParts, integrationConnectionParts),
         );
       } catch (err) {
         if (abortController.signal.aborted) {

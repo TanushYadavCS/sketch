@@ -19,6 +19,7 @@ import {
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
+import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   type ReasoningTextCommand,
   type ToolProgressCommand,
@@ -478,6 +479,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             deliveryTarget: deliveryJid,
             createdBy: user.id,
             creatorTimezone: user.timezone,
+            origin: {
+              platform: "whatsapp" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           };
 
           const result = await runAgent({
@@ -523,7 +530,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
           const finalText = appendIntegrationConnectionLinks(
-            result.trace.finalText,
+            appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
             result.pendingIntegrationConnections,
             "whatsapp",
             toolConfig,
@@ -803,6 +810,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
             creatorTimezone: user?.timezone ?? null,
+            origin: {
+              platform: "whatsapp" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -820,8 +833,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
+        const textWithAutomationLinks = user
+          ? appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? [])
+          : result.trace.finalText;
         const finalText = appendIntegrationConnectionLinks(
-          result.trace.finalText,
+          textWithAutomationLinks,
           result.pendingIntegrationConnections,
           "whatsapp",
           toolConfig,

@@ -24,6 +24,7 @@ import {
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
+import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   REASONING_TEXT_OPTIONS,
   type ReasoningTextCommand,
@@ -672,6 +673,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             deliveryTarget: message.channelId,
             createdBy: user.id,
             creatorTimezone: user.timezone,
+            origin: {
+              platform: "slack" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -688,7 +695,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         });
 
         const finalText = appendIntegrationConnectionLinks(
-          result.trace.finalText,
+          appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
           result.pendingIntegrationConnections,
           "slack",
           toolConfig,
@@ -1002,6 +1009,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             createdBy: user.id,
             creatorTimezone: user.timezone,
             threadTs: message.threadTs ? threadTs : undefined,
+            origin: {
+              platform: "slack" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: threadTs,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -1023,7 +1036,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         });
 
         const finalText = appendIntegrationConnectionLinks(
-          result.trace.finalText,
+          appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
           result.pendingIntegrationConnections,
           "slack",
           toolConfig,

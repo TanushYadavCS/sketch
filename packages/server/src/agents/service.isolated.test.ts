@@ -1,20 +1,16 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  DAILY_BRIEF_AGENT_KEY,
-  DAILY_BRIEF_AGENT_VERSION,
-  type DailyBriefItemInput,
-  createDailyBriefRepository,
-} from "../db/repositories/daily-briefs";
+import { type AgentOutputItemInput, createAgentOutputRepository } from "../db/repositories/agent-outputs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import { DailyBriefService, type DailyBriefServiceDeps } from "./service";
+import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
+import { AgentRunService, type AgentRunServiceDeps } from "./service";
 
 const NOW = new Date("2026-06-15T08:05:00.000Z");
-const BRIEF_DATE = "2026-06-15";
+const OUTPUT_DATE = "2026-06-15";
 
 function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManager {
   return {
@@ -26,11 +22,11 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
   } as unknown as QueueManager;
 }
 
-function createService(db: Kysely<DB>, tasks: Array<() => Promise<void>>): DailyBriefService {
+function createService(db: Kysely<DB>, tasks: Array<() => Promise<void>>): AgentRunService {
   const runAgent = vi.fn(async () => {
     throw new Error("runAgent should not be called by these tests");
-  }) as unknown as DailyBriefServiceDeps["runAgent"];
-  return new DailyBriefService({
+  }) as unknown as AgentRunServiceDeps["runAgent"];
+  return new AgentRunService({
     db,
     config: createTestConfig(),
     logger: createTestLogger(),
@@ -44,12 +40,12 @@ function createService(db: Kysely<DB>, tasks: Array<() => Promise<void>>): Daily
 function createWritingService(
   db: Kysely<DB>,
   tasks: Array<() => Promise<void>>,
-  item: DailyBriefItemInput,
-): DailyBriefService {
+  item: AgentOutputItemInput,
+): AgentRunService {
   const runAgent = vi.fn(async (params) => {
-    if (!params.dailyBriefWriter) throw new Error("dailyBriefWriter missing");
-    await params.dailyBriefWriter.write({
-      briefDate: BRIEF_DATE,
+    if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+    await params.agentOutputWriter.write({
+      outputDate: OUTPUT_DATE,
       timezone: "UTC",
       masthead: { title: "Daily Brief", summary: "Summary" },
       rawPayload: {},
@@ -57,7 +53,7 @@ function createWritingService(
     });
     return {
       messageSent: true,
-      sessionId: "daily-brief-session",
+      sessionId: "agent-session",
       costUsd: 0,
       pendingUploads: [],
       durationMs: 0,
@@ -85,8 +81,8 @@ function createWritingService(
       rawUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
       trace: { progressEvents: [], finalText: "Done" },
     };
-  }) as unknown as DailyBriefServiceDeps["runAgent"];
-  return new DailyBriefService({
+  }) as unknown as AgentRunServiceDeps["runAgent"];
+  return new AgentRunService({
     db,
     config: createTestConfig(),
     logger: createTestLogger(),
@@ -100,17 +96,17 @@ function createWritingService(
 async function seedIndexedFile(db: Kysely<DB>, params: { id: string; providerUrl: string | null }): Promise<void> {
   await db
     .insertInto("users")
-    .values({ id: "daily-brief-owner", name: "Daily Brief Owner" })
+    .values({ id: "agent-owner", name: "Agent Owner" })
     .onConflict((oc) => oc.column("id").doNothing())
     .execute();
   await db
     .insertInto("connector_configs")
     .values({
-      id: "daily-brief-connector",
+      id: "agent-connector",
       connector_type: "google-drive",
       auth_type: "oauth",
       credentials: "{}",
-      created_by: "daily-brief-owner",
+      created_by: "agent-owner",
     })
     .onConflict((oc) => oc.column("id").doNothing())
     .execute();
@@ -118,7 +114,7 @@ async function seedIndexedFile(db: Kysely<DB>, params: { id: string; providerUrl
     .insertInto("indexed_files")
     .values({
       id: params.id,
-      connector_config_id: "daily-brief-connector",
+      connector_config_id: "agent-connector",
       provider_file_id: `provider-${params.id}`,
       file_name: `${params.id}.md`,
       file_type: "document",
@@ -126,7 +122,7 @@ async function seedIndexedFile(db: Kysely<DB>, params: { id: string; providerUrl
       source: "google-drive",
       source_path: null,
       provider_url: params.providerUrl,
-      content: "Daily brief source content",
+      content: "Agent source content",
       summary: null,
       context_note: null,
       access_scope_id: null,
@@ -139,7 +135,7 @@ async function seedIndexedFile(db: Kysely<DB>, params: { id: string; providerUrl
     .execute();
 }
 
-function dailyBriefItem(overrides: Partial<DailyBriefItemInput> = {}): DailyBriefItemInput {
+function briefItem(overrides: Partial<AgentOutputItemInput> = {}): AgentOutputItemInput {
   return {
     sectionKey: "todos",
     title: "Follow up with customer",
@@ -152,7 +148,7 @@ function dailyBriefItem(overrides: Partial<DailyBriefItemInput> = {}): DailyBrie
   };
 }
 
-describe("DailyBriefService", () => {
+describe("AgentRunService", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
@@ -166,21 +162,21 @@ describe("DailyBriefService", () => {
     await db.destroy();
   });
 
-  it("supersedes stale running briefs instead of returning them forever", async () => {
+  it("supersedes stale running outputs instead of returning them forever", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
     const staleAt = new Date(NOW.getTime() - 31 * 60 * 1000).toISOString();
     await db
-      .insertInto("daily_briefs")
+      .insertInto("agent_outputs")
       .values({
-        id: "stale-brief",
+        id: "stale-output",
+        agent_key: DAILY_BRIEF_AGENT_KEY,
         user_id: user.id,
-        brief_date: BRIEF_DATE,
+        output_date: OUTPUT_DATE,
         timezone: "UTC",
         status: "running",
         trigger_type: "manual",
-        agent_key: DAILY_BRIEF_AGENT_KEY,
         agent_version: DAILY_BRIEF_AGENT_VERSION,
         created_at: staleAt,
         updated_at: staleAt,
@@ -189,43 +185,44 @@ describe("DailyBriefService", () => {
 
     const service = createService(db, tasks);
     const replacement = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
-      briefDate: BRIEF_DATE,
+      outputDate: OUTPUT_DATE,
       triggerType: "manual",
     });
 
-    const stale = await db.selectFrom("daily_briefs").selectAll().where("id", "=", "stale-brief").executeTakeFirst();
+    const stale = await db.selectFrom("agent_outputs").selectAll().where("id", "=", "stale-output").executeTakeFirst();
     const running = await db
-      .selectFrom("daily_briefs")
+      .selectFrom("agent_outputs")
       .selectAll()
       .where("user_id", "=", user.id)
-      .where("brief_date", "=", BRIEF_DATE)
+      .where("output_date", "=", OUTPUT_DATE)
       .where("status", "=", "running")
       .execute();
 
     expect(stale?.status).toBe("failed");
-    expect(stale?.error_message).toBe("Brief generation expired after being left running.");
-    expect(replacement?.id).not.toBe("stale-brief");
+    expect(stale?.error_message).toBe("Generation expired after being left running.");
+    expect(replacement?.id).not.toBe("stale-output");
     expect(running).toHaveLength(1);
     expect(running[0].id).toBe(replacement?.id);
     expect(tasks).toHaveLength(1);
   });
 
-  it("does not report stale running briefs as active on latest reads", async () => {
+  it("does not report stale running outputs as active on latest reads", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
     const staleAt = new Date(NOW.getTime() - 31 * 60 * 1000).toISOString();
     await db
-      .insertInto("daily_briefs")
+      .insertInto("agent_outputs")
       .values({
-        id: "stale-brief",
+        id: "stale-output",
+        agent_key: DAILY_BRIEF_AGENT_KEY,
         user_id: user.id,
-        brief_date: BRIEF_DATE,
+        output_date: OUTPUT_DATE,
         timezone: "UTC",
         status: "running",
         trigger_type: "manual",
-        agent_key: DAILY_BRIEF_AGENT_KEY,
         agent_version: DAILY_BRIEF_AGENT_VERSION,
         created_at: staleAt,
         updated_at: staleAt,
@@ -233,34 +230,38 @@ describe("DailyBriefService", () => {
       .execute();
 
     const service = createService(db, tasks);
-    const latest = await service.getLatestForUser(user.id, BRIEF_DATE);
+    const latest = await service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, user.id, OUTPUT_DATE);
 
     expect(latest.running).toBe(false);
-    expect(latest.brief).toBeNull();
+    expect(latest.output).toBeNull();
   });
 
-  it("coalesces duplicate running brief creation for the same user and date", async () => {
+  it("coalesces duplicate running output creation for the same agent, user, and date", async () => {
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
-    const repo = createDailyBriefRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const repo = createAgentOutputRepository(db);
 
     const first = await repo.createRunning({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      agentVersion: DAILY_BRIEF_AGENT_VERSION,
       userId: user.id,
-      briefDate: BRIEF_DATE,
+      outputDate: OUTPUT_DATE,
       timezone: "UTC",
       triggerType: "manual",
     });
     const second = await repo.createRunning({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      agentVersion: DAILY_BRIEF_AGENT_VERSION,
       userId: user.id,
-      briefDate: BRIEF_DATE,
+      outputDate: OUTPUT_DATE,
       timezone: "UTC",
       triggerType: "manual",
     });
     const running = await db
-      .selectFrom("daily_briefs")
+      .selectFrom("agent_outputs")
       .selectAll()
       .where("user_id", "=", user.id)
-      .where("brief_date", "=", BRIEF_DATE)
+      .where("output_date", "=", OUTPUT_DATE)
       .where("status", "=", "running")
       .execute();
 
@@ -270,31 +271,31 @@ describe("DailyBriefService", () => {
     expect(running).toHaveLength(1);
   });
 
-  it("rejects stale writer completion after a running brief has been superseded", async () => {
+  it("rejects stale writer completion after a running output has been superseded", async () => {
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
-    const repo = createDailyBriefRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const repo = createAgentOutputRepository(db);
     await db
-      .insertInto("daily_briefs")
+      .insertInto("agent_outputs")
       .values({
-        id: "superseded-brief",
+        id: "superseded-output",
+        agent_key: DAILY_BRIEF_AGENT_KEY,
         user_id: user.id,
-        brief_date: BRIEF_DATE,
+        output_date: OUTPUT_DATE,
         timezone: "UTC",
         status: "failed",
         trigger_type: "manual",
-        agent_key: DAILY_BRIEF_AGENT_KEY,
         agent_version: DAILY_BRIEF_AGENT_VERSION,
-        error_message: "Brief generation expired after being left running.",
+        error_message: "Generation expired after being left running.",
         created_at: new Date(NOW.getTime() - 31 * 60 * 1000).toISOString(),
         updated_at: new Date().toISOString(),
       })
       .execute();
     await db
-      .insertInto("daily_brief_items")
+      .insertInto("agent_output_items")
       .values({
         id: "existing-item",
-        daily_brief_id: "superseded-brief",
+        agent_output_id: "superseded-output",
         section_key: "todos",
         title: "Existing item",
         summary: "Existing summary",
@@ -312,96 +313,98 @@ describe("DailyBriefService", () => {
       .execute();
 
     await expect(
-      repo.completeBrief({
-        briefId: "superseded-brief",
+      repo.completeOutput({
+        outputId: "superseded-output",
         masthead: { title: "Daily Brief", summary: "Summary" },
         rawPayload: {},
-        items: [dailyBriefItem({ title: "Late stale item" })],
+        items: [briefItem({ title: "Late stale item" })],
       }),
-    ).rejects.toThrow("Daily Brief generation is no longer running.");
+    ).rejects.toThrow("Agent output generation is no longer running.");
 
-    const brief = await db
-      .selectFrom("daily_briefs")
+    const output = await db
+      .selectFrom("agent_outputs")
       .select(["status", "generated_at"])
-      .where("id", "=", "superseded-brief")
+      .where("id", "=", "superseded-output")
       .executeTakeFirstOrThrow();
     const items = await db
-      .selectFrom("daily_brief_items")
+      .selectFrom("agent_output_items")
       .select(["id", "title"])
-      .where("daily_brief_id", "=", "superseded-brief")
+      .where("agent_output_id", "=", "superseded-output")
       .execute();
 
-    expect(brief.status).toBe("failed");
-    expect(brief.generated_at).toBeNull();
+    expect(output.status).toBe("failed");
+    expect(output.generated_at).toBeNull();
     expect(items).toEqual([{ id: "existing-item", title: "Existing item" }]);
   });
 
   it("uses referenced file provider URLs instead of agent-provided source URLs", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
     await seedIndexedFile(db, { id: "safe-source-file", providerUrl: "https://docs.example.com/source" });
     const service = createWritingService(
       db,
       tasks,
-      dailyBriefItem({
+      briefItem({
         sourceUrl: "javascript:alert(1)",
         knowledgeRefs: { entityIds: [], fileIds: ["safe-source-file"] },
       }),
     );
 
     const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
-      briefDate: BRIEF_DATE,
+      outputDate: OUTPUT_DATE,
       triggerType: "manual",
     });
-    if (!row) throw new Error("Expected a generated daily brief row");
+    if (!row) throw new Error("Expected a generated output row");
     await tasks[0]();
-    const brief = await service.getByIdForUser(row.id, user.id);
+    const output = await service.getByIdForUser(DAILY_BRIEF_AGENT_KEY, row.id, user.id);
 
-    expect(brief?.sections.todos[0].sourceUrl).toBe("https://docs.example.com/source");
+    expect(output?.sections.todos[0].sourceUrl).toBe("https://docs.example.com/source");
   });
 
   it("drops agent-provided source URLs when referenced files have no provider URL", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
     await seedIndexedFile(db, { id: "source-file-without-url", providerUrl: null });
     const service = createWritingService(
       db,
       tasks,
-      dailyBriefItem({
+      briefItem({
         sourceUrl: "https://phishing.example.com/source",
         knowledgeRefs: { entityIds: [], fileIds: ["source-file-without-url"] },
       }),
     );
 
     const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
-      briefDate: BRIEF_DATE,
+      outputDate: OUTPUT_DATE,
       triggerType: "manual",
     });
-    if (!row) throw new Error("Expected a generated daily brief row");
+    if (!row) throw new Error("Expected a generated output row");
     await tasks[0]();
-    const brief = await service.getByIdForUser(row.id, user.id);
+    const output = await service.getByIdForUser(DAILY_BRIEF_AGENT_KEY, row.id, user.id);
 
-    expect(brief?.sections.todos[0].sourceUrl).toBeNull();
+    expect(output?.sections.todos[0].sourceUrl).toBeNull();
   });
 
   it("suppresses recent failed scheduled attempts during the schedule window", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
     await db
-      .insertInto("daily_briefs")
+      .insertInto("agent_outputs")
       .values({
-        id: "failed-scheduled-brief",
+        id: "failed-scheduled-output",
+        agent_key: DAILY_BRIEF_AGENT_KEY,
         user_id: user.id,
-        brief_date: BRIEF_DATE,
+        output_date: OUTPUT_DATE,
         timezone: "UTC",
         status: "failed",
         trigger_type: "scheduled",
-        agent_key: DAILY_BRIEF_AGENT_KEY,
         agent_version: DAILY_BRIEF_AGENT_VERSION,
         error_message: "Agent failed",
         created_at: new Date(NOW.getTime() - 60 * 1000).toISOString(),
@@ -411,24 +414,55 @@ describe("DailyBriefService", () => {
 
     const service = createService(db, tasks);
     const userRow = await users.findById(user.id);
-    const shouldGenerate = await service.shouldGenerateForUser(userRow ?? user, NOW);
+    const shouldGenerate = await service.shouldGenerateForUser(dailyBriefDefinition, userRow ?? user, NOW);
     const request = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
-      briefDate: BRIEF_DATE,
+      outputDate: OUTPUT_DATE,
       triggerType: "scheduled",
       skipIfCompleted: true,
     });
 
     const rows = await db
-      .selectFrom("daily_briefs")
+      .selectFrom("agent_outputs")
       .select(["id", "status"])
       .where("user_id", "=", user.id)
-      .where("brief_date", "=", BRIEF_DATE)
+      .where("output_date", "=", OUTPUT_DATE)
       .execute();
 
     expect(shouldGenerate).toBeNull();
-    expect(request?.id).toBe("failed-scheduled-brief");
-    expect(rows).toEqual([{ id: "failed-scheduled-brief", status: "failed" }]);
+    expect(request?.id).toBe("failed-scheduled-output");
+    expect(rows).toEqual([{ id: "failed-scheduled-output", status: "failed" }]);
     expect(tasks).toHaveLength(0);
+  });
+
+  it("persists section toggles and focus, and disables the agent when reconfigured", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const service = createService(db, []);
+
+    const updated = await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      enabled: false,
+      scheduleHour: 9,
+      sections: { customer_updates: false },
+      focus: "  Prioritize enterprise accounts  ",
+    });
+
+    expect(updated?.enabled).toBe(false);
+    expect(updated?.scheduleHour).toBe(9);
+    expect(updated?.focus).toBe("Prioritize enterprise accounts");
+    const customer = updated?.sections.find((s) => s.key === "customer_updates");
+    const todos = updated?.sections.find((s) => s.key === "todos");
+    expect(customer?.enabled).toBe(false);
+    expect(todos?.enabled).toBe(true);
+
+    const reread = await service.getConfigView(DAILY_BRIEF_AGENT_KEY, user.id);
+    expect(reread?.enabled).toBe(false);
+    expect(reread?.focus).toBe("Prioritize enterprise accounts");
+    expect(reread?.sections.find((s) => s.key === "customer_updates")?.enabled).toBe(false);
+
+    const latest = await service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, user.id);
+    expect(latest.enabledSections).toContain("todos");
+    expect(latest.enabledSections).not.toContain("customer_updates");
   });
 });

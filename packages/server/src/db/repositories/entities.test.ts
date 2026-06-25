@@ -20,7 +20,12 @@ async function seedConnectorConfig(db: Kysely<DB>, id = "config-test"): Promise<
     .execute();
 }
 
-async function seedIndexedFile(db: Kysely<DB>, id: string, connectorId = "config-test"): Promise<void> {
+async function seedIndexedFile(
+  db: Kysely<DB>,
+  id: string,
+  connectorId = "config-test",
+  opts: { sourceCreatedAt?: string | null; sourceUpdatedAt?: string | null } = {},
+): Promise<void> {
   await db
     .insertInto("indexed_files")
     .values({
@@ -38,8 +43,8 @@ async function seedIndexedFile(db: Kysely<DB>, id: string, connectorId = "config
       context_note: null,
       access_scope_id: null,
       content_hash: null,
-      source_updated_at: null,
-      source_created_at: null,
+      source_updated_at: opts.sourceUpdatedAt ?? null,
+      source_created_at: opts.sourceCreatedAt ?? null,
       synced_at: new Date().toISOString(),
       embedding_status: "pending",
     })
@@ -200,6 +205,158 @@ describe("createEntityRepository createMention", () => {
     expect(remaining).toEqual([{ confidence: "EXTRACTED", relation: "attended" }]);
 
     await db.destroy();
+  });
+});
+
+describe("createEntityRepository hotness", () => {
+  let db: Kysely<DB>;
+  let repo: ReturnType<typeof createEntityRepository>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    repo = createEntityRepository(db);
+    await seedConnectorConfig(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("uses source activity rather than mention enrichment time", async () => {
+    const recentSourceAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const oldSourceAt = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    await seedIndexedFile(db, "recent-source", "config-test", {
+      sourceCreatedAt: recentSourceAt,
+      sourceUpdatedAt: recentSourceAt,
+    });
+    await seedIndexedFile(db, "old-source", "config-test", {
+      sourceCreatedAt: oldSourceAt,
+      sourceUpdatedAt: oldSourceAt,
+    });
+
+    const recentEntity = await repo.upsertPersonEntity({
+      name: "Recent Entity",
+      email: "recent@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:recent",
+    });
+    const oldEntity = await repo.upsertPersonEntity({
+      name: "Old Entity",
+      email: "old@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:old",
+    });
+
+    await repo.createMention({
+      entityId: recentEntity.id,
+      indexedFileId: "recent-source",
+      confidence: "EXTRACTED",
+      source: "seed",
+      relation: "mentioned",
+    });
+    await repo.createMention({
+      entityId: oldEntity.id,
+      indexedFileId: "old-source",
+      confidence: "EXTRACTED",
+      source: "seed",
+      relation: "mentioned",
+    });
+
+    await repo.updateHotness(recentEntity.id);
+    await repo.updateHotness(oldEntity.id);
+
+    const rows = await db
+      .selectFrom("entities")
+      .select(["id", "hotness"])
+      .where("id", "in", [recentEntity.id, oldEntity.id])
+      .execute();
+    const hotnessById = new Map(rows.map((row) => [row.id, row.hotness]));
+
+    expect(hotnessById.get(recentEntity.id)).toBeGreaterThan(0.2);
+    expect(hotnessById.get(oldEntity.id)).toBeLessThan(0.01);
+  });
+
+  it("falls back from ISO-shaped invalid source_updated_at to valid source_created_at", async () => {
+    const recentSourceAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const oldMentionAt = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    await seedIndexedFile(db, "mixed-source", "config-test", {
+      sourceCreatedAt: recentSourceAt,
+      sourceUpdatedAt: "0000-00-00T00:00:00.000Z",
+    });
+    const entity = await repo.upsertPersonEntity({
+      name: "Fallback Entity",
+      email: "fallback@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:fallback",
+    });
+
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "mention-fallback",
+        entity_id: entity.id,
+        indexed_file_id: "mixed-source",
+        chunk_index: null,
+        context_snippet: null,
+        confidence: "EXTRACTED",
+        source: "seed",
+        relation: "mentioned",
+        mentioned_at: oldMentionAt,
+      })
+      .execute();
+
+    await repo.updateHotness(entity.id);
+
+    const row = await db
+      .selectFrom("entities")
+      .select(["hotness"])
+      .where("id", "=", entity.id)
+      .executeTakeFirstOrThrow();
+    expect(row.hotness).toBeGreaterThan(0.4);
+  });
+
+  it("parses noncanonical source timestamps on the fallback path", async () => {
+    const recentSourceAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().replace("Z", "+05:30");
+    const oldSourceAt = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const oldMentionAt = oldSourceAt;
+    await seedIndexedFile(db, "legacy-offset-source", "config-test", {
+      sourceCreatedAt: oldSourceAt,
+      sourceUpdatedAt: recentSourceAt,
+    });
+    const entity = await repo.upsertPersonEntity({
+      name: "Legacy Offset Entity",
+      email: "legacy-offset@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:legacy-offset",
+    });
+
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "mention-legacy-offset",
+        entity_id: entity.id,
+        indexed_file_id: "legacy-offset-source",
+        chunk_index: null,
+        context_snippet: null,
+        confidence: "EXTRACTED",
+        source: "seed",
+        relation: "mentioned",
+        mentioned_at: oldMentionAt,
+      })
+      .execute();
+
+    await repo.updateHotness(entity.id);
+
+    const row = await db
+      .selectFrom("entities")
+      .select(["hotness"])
+      .where("id", "=", entity.id)
+      .executeTakeFirstOrThrow();
+    expect(row.hotness).toBeGreaterThan(0.4);
   });
 });
 
