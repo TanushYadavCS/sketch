@@ -1,7 +1,7 @@
 import { redirect } from "@tanstack/react-router";
 
 export function managedLoginUrl(managedUrl: string, returnTo?: string | null): string {
-  const url = new URL("/login", `${managedUrl.replace(/\/+$/, "")}/`);
+  const url = new URL(`${managedUrl.replace(/\/+$/, "")}/login`);
   if (returnTo) url.searchParams.set("return_to", returnTo);
   return url.toString();
 }

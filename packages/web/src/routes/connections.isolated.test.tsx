@@ -2,7 +2,7 @@ import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAuth = vi.hoisted(() => ({
   value: { role: "admin" as "admin" | "member", displayName: "Admin", displayIdentifier: "admin@test.com" },
@@ -57,6 +57,11 @@ function setupCommonHandlers(connections: unknown[] = []) {
 }
 
 describe("ConnectionsPage direct connect", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     mockAuth.value = { role: "admin", displayName: "Admin", displayIdentifier: "admin@test.com" };
     window.history.replaceState({}, "", "/integrations");
@@ -177,6 +182,38 @@ describe("ConnectionsPage direct connect", () => {
 
     expect(await screen.findByText("GitHub is connected")).toBeInTheDocument();
     expect(intent).not.toHaveBeenCalled();
+  });
+
+  it("keeps polling callback verification until the provider returns the connection", async () => {
+    const connection = {
+      id: "secrets:user-1:github:github",
+      providerId: "provider-1",
+      source: "canvas_user_secrets",
+      appId: "github",
+      appName: "GitHub",
+      status: "active",
+      accessLevel: "personal",
+      isOwnedByViewer: true,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+    let connectionRequests = 0;
+    setupCommonHandlers();
+    window.history.replaceState({}, "", "/integrations?verify_connected=github");
+
+    server.use(
+      http.get("/api/mcp-servers/provider-1/connections", () => {
+        connectionRequests += 1;
+        return HttpResponse.json({ connections: connectionRequests >= 3 ? [connection] : [] });
+      }),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+
+    expect(await screen.findByText("Checking GitHub")).toBeInTheDocument();
+    await waitFor(() => expect(connectionRequests).toBeGreaterThanOrEqual(3), { timeout: 5000 });
+
+    expect(await screen.findByText("GitHub is connected")).toBeInTheDocument();
+    expect(connectionRequests).toBeGreaterThanOrEqual(3);
   });
 
   it("shows callback errors without starting a new intent", async () => {

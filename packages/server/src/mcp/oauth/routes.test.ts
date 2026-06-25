@@ -201,7 +201,7 @@ describe("MCP OAuth routes", () => {
       db,
       createTestConfig({
         BASE_URL,
-        MANAGED_URL: "https://app.getsketch.ai",
+        MANAGED_URL: "https://app.getsketch.ai/platform/",
         MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
       }),
       { logger: createTestLogger() },
@@ -222,7 +222,7 @@ describe("MCP OAuth routes", () => {
 
     expect(res.status).toBe(302);
     const location = new URL(res.headers.get("location") ?? "");
-    expect(location.origin + location.pathname).toBe("https://app.getsketch.ai/login");
+    expect(location.origin + location.pathname).toBe("https://app.getsketch.ai/platform/login");
     const returnTo = new URL(location.searchParams.get("return_to") ?? "");
     expect(returnTo.origin + returnTo.pathname).toBe(`${BASE_URL}/oauth/authorize`);
     expect(returnTo.searchParams.get("client_id")).toBe(client.client_id);

@@ -671,8 +671,12 @@ describe("chat route", () => {
     const user = userEvent.setup();
     let connectionStarted = false;
     let connectionVerified = false;
-    const popup = { closed: false, close: vi.fn() };
-    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const events: string[] = [];
+    const popup = { closed: false, close: vi.fn(), location: { href: "" } };
+    vi.spyOn(window, "open").mockImplementation(() => {
+      events.push("popup");
+      return popup as unknown as Window;
+    });
     mocks.search = {};
     mockChatMessages = [
       {
@@ -708,6 +712,8 @@ describe("chat route", () => {
       },
     ]);
     mocks.createConnectionIntent.mockImplementation(async () => {
+      expect(events).toEqual(["popup"]);
+      events.push("intent");
       connectionStarted = true;
       return { app: { id: "github", name: "GitHub", description: "Code hosting" }, redirectUrl: "about:blank" };
     });
@@ -744,6 +750,7 @@ describe("chat route", () => {
     );
     expect(mocks.listApps).not.toHaveBeenCalled();
     expect(window.open).toHaveBeenCalledWith("about:blank", "_blank", "width=600,height=700");
+    expect(popup.location.href).toBe("about:blank");
     expect(screen.queryByRole("dialog", { name: "Connect GitHub" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connecting", hidden: true })).toBeDisabled();
 
@@ -756,6 +763,8 @@ describe("chat route", () => {
 
   it("keeps integration cards disabled while the provider configuration is loading", async () => {
     const user = userEvent.setup();
+    const popup = { closed: false, close: vi.fn(), location: { href: "" } };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     const servers =
       deferred<
         Array<{

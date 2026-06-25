@@ -58,6 +58,15 @@ describe("integration connection links", () => {
     );
   });
 
+  it("uses plain setup copy when BASE_URL is malformed", () => {
+    expect(formatIntegrationConnectionLinks([githubCard], "whatsapp", { BASE_URL: "localhost:3000", PORT: 3000 })).toBe(
+      "To continue, open Integrations in Sketch to connect GitHub.",
+    );
+    expect(
+      formatIntegrationConnectionLinks([githubCard], "slack", { BASE_URL: "sketch.example.com", PORT: 3000 }),
+    ).toBe("To continue, open Integrations in Sketch to connect GitHub.");
+  });
+
   it("appends link text and ignores connected cards", () => {
     expect(
       appendIntegrationConnectionLinks(

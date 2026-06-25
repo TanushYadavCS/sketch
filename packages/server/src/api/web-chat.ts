@@ -5,7 +5,7 @@ import type { WebChatIntegrationConnectionData, WebChatProgressData, WebProgress
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
-import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
+import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
@@ -761,6 +761,23 @@ async function deterministicIntegrationCardsForWebChat(params: {
   }
 }
 
+function shouldBufferWebChatTextAfterProgress(event: ProgressEvent): boolean {
+  if (event.kind !== "tool_use") return false;
+  const toolName = event.toolName.toLowerCase().replace(/_/g, "-");
+  if (toolName === "bash") {
+    const command = typeof event.input.command === "string" ? event.input.command : "";
+    return /\$\{?CANVAS_CLI\}?/.test(command);
+  }
+  return (
+    toolName.includes("canvas") ||
+    toolName.includes("pipedream") ||
+    toolName.includes("search-app") ||
+    toolName.includes("direct-execute-action") ||
+    toolName.includes("fetch-remote-options") ||
+    toolName.includes("create-sketch-trigger-workflow")
+  );
+}
+
 async function appendWebChatPendingTurn(
   config: Config,
   workspaceDir: string,
@@ -1246,6 +1263,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       let progressPartIndex = 0;
       let wroteOffProgress = false;
       let currentTextPart = "";
+      let bufferTextDeltas = false;
+      let bufferedTextDeltas = "";
 
       const startTextPart = () => {
         textPartId = `text-${textPartIndex}`;
@@ -1267,6 +1286,22 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         if (!textPartId) return;
         currentTextPart += delta;
         write({ type: "text-delta", id: textPartId, delta });
+      };
+
+      const writeBufferedTextDeltas = () => {
+        if (!bufferedTextDeltas) return;
+        const text = bufferedTextDeltas;
+        bufferedTextDeltas = "";
+        writeTextDelta(text);
+      };
+
+      const writeOrBufferTextDelta = (delta: string) => {
+        if (!delta) return;
+        if (bufferTextDeltas) {
+          bufferedTextDeltas += delta;
+          return;
+        }
+        writeTextDelta(delta);
       };
 
       const writeFinalText = (finalText: string) => {
@@ -1313,6 +1348,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               responseSurface: "web",
               contextType: "dm",
               onProgressEvent: async (event) => {
+                if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
                 progressRenderer.renderEvent(event);
                 const lines = progressRenderer.getLines();
                 const progressData = createWebProgressData(event, progressSettings, progressMode, lines);
@@ -1335,7 +1371,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                 }
               },
               onTextDelta: async (delta) => {
-                writeTextDelta(delta);
+                writeOrBufferTextDelta(delta);
               },
               onSessionId: async () => {},
               abortController,
@@ -1392,6 +1428,11 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...deterministicIntegrationCards,
         ]);
         const finalText = sanitizeIntegrationConnectionText(result.trace.finalText, integrationCards) ?? "";
+        if (integrationCards.length === 0) {
+          writeBufferedTextDeltas();
+        } else {
+          bufferedTextDeltas = "";
+        }
         writeFinalText(finalText);
 
         for (const file of fileParts) {
@@ -1413,6 +1454,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         );
       } catch (err) {
         if (abortController.signal.aborted) {
+          writeBufferedTextDeltas();
           const interruptedText = currentTextPart.trim();
           closeTextPart();
           write({ type: "data-interruption", id: "interruption", data: WEB_CHAT_INTERRUPTION_DATA });
@@ -1428,6 +1470,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           return;
         }
         const message = errorMessage(err);
+        writeBufferedTextDeltas();
         closeTextPart();
         deps.logger.warn({ err }, "Web chat run failed");
         await completeWebChatProgressMessage(

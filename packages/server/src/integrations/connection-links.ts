@@ -10,10 +10,19 @@ export interface IntegrationConnectionLinkConfig {
 
 const INTEGRATION_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 
-function baseUrl(config: IntegrationConnectionLinkConfig): string {
+function configuredBaseUrl(config: IntegrationConnectionLinkConfig): string | null {
   const configured = config.BASE_URL?.trim().replace(/\/+$/, "");
-  if (configured) return configured;
-  return `http://localhost:${config.PORT}`;
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    return url.protocol === "http:" || url.protocol === "https:" ? configured : null;
+  } catch {
+    return null;
+  }
+}
+
+function baseUrl(config: IntegrationConnectionLinkConfig): string {
+  return configuredBaseUrl(config) ?? `http://localhost:${config.PORT}`;
 }
 
 function safeSlackLabel(value: string): string {
@@ -27,7 +36,7 @@ function missingConnectionCards(
 }
 
 function hasConfiguredBaseUrl(config: IntegrationConnectionLinkConfig): boolean {
-  return Boolean(config.BASE_URL?.trim());
+  return configuredBaseUrl(config) !== null;
 }
 
 function fallbackConnectionInstructions(

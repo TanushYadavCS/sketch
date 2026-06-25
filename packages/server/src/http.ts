@@ -68,6 +68,7 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
@@ -500,7 +501,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   // Managed login redirect: runs before SPA static serving so unauthenticated
   // requests never load the OSS login page. Must be outside the existsSync
   // check so it works even when web assets aren't built (e.g. CI).
-  if (config.MANAGED_URL) {
+  const managedUrl = config.MANAGED_URL;
+  if (managedUrl) {
     app.use("*", async (c, next) => {
       const path = c.req.path;
       if (path.startsWith("/api/") || path === "/health") {
@@ -514,7 +516,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         !!(await verifyJwt(platformToken, config.MANAGED_AUTH_SECRET));
 
       if (!isValidPlatformSession) {
-        const loginUrl = new URL("/login", config.MANAGED_URL);
+        const loginUrl = createManagedLoginUrl(managedUrl);
         const requestUrl = new URL(c.req.url);
         const returnTo =
           path === "/login"

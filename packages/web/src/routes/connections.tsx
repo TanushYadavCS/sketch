@@ -105,6 +105,8 @@ function ConnectionsCallback() {
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
 const INTEGRATION_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+const VERIFY_CONNECTION_GRACE_MS = 30_000;
+const VERIFY_CONNECTION_POLL_MS = 1500;
 const APP_NAME_OVERRIDES: Record<string, string> = {
   github: "GitHub",
   gitlab: "GitLab",
@@ -299,6 +301,7 @@ export function ConnectionsPage() {
   });
   const [directConnectState, setDirectConnectState] = useState<DirectConnectState>({ kind: "idle" });
   const directConnectRequestRef = useRef<string | null>(null);
+  const verifyConnectedStartedAtRef = useRef<number | null>(null);
 
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],
@@ -375,16 +378,18 @@ export function ConnectionsPage() {
 
     if (verifyConnectedAppId) {
       setActiveTab("applications");
+      const verifyStartedAt = verifyConnectedStartedAtRef.current ?? Date.now();
+      verifyConnectedStartedAtRef.current = verifyStartedAt;
 
       if (serversQuery.isLoading || (provider && connectionsQuery.isLoading)) {
         setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
         return;
       }
 
-      removeSearchParams(["verify_connected", "connected"]);
-      setVerifyConnectedAppId(null);
-
       if (!provider) {
+        removeSearchParams(["verify_connected", "connected"]);
+        setVerifyConnectedAppId(null);
+        verifyConnectedStartedAtRef.current = null;
         setDirectConnectState({
           kind: "error",
           appId: verifyConnectedAppId,
@@ -393,19 +398,61 @@ export function ConnectionsPage() {
         return;
       }
 
-      const connection = connectionsQuery.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
-      if (connection && isOwnedOrPersonalAppConnection(connection)) {
+      const completeVerification = (connection: IntegrationConnection) => {
+        removeSearchParams(["verify_connected", "connected"]);
+        setVerifyConnectedAppId(null);
+        verifyConnectedStartedAtRef.current = null;
         setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
         toast.success(`${connection.appName} connected`);
         invalidateConnections();
+      };
+
+      const failVerification = (message: string) => {
+        removeSearchParams(["verify_connected", "connected"]);
+        setVerifyConnectedAppId(null);
+        verifyConnectedStartedAtRef.current = null;
+        setDirectConnectState({
+          kind: "error",
+          appId: verifyConnectedAppId,
+          message,
+        });
+      };
+
+      const connection = connectionsQuery.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
+      if (connection && isOwnedOrPersonalAppConnection(connection)) {
+        completeVerification(connection);
         return;
       }
 
-      setDirectConnectState({
-        kind: "error",
-        appId: verifyConnectedAppId,
-        message: "Sketch could not verify the connection. Please try connecting again.",
-      });
+      if (Date.now() - verifyStartedAt < VERIFY_CONNECTION_GRACE_MS) {
+        setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
+        let cancelled = false;
+        let timeoutId: number | undefined;
+        const poll = () => {
+          timeoutId = window.setTimeout(async () => {
+            const result = await connectionsQuery.refetch();
+            if (cancelled) return;
+            const refreshedConnection = result.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
+            if (refreshedConnection && isOwnedOrPersonalAppConnection(refreshedConnection)) {
+              completeVerification(refreshedConnection);
+              return;
+            }
+            if (Date.now() - verifyStartedAt >= VERIFY_CONNECTION_GRACE_MS) {
+              failVerification("Sketch could not verify the connection. Please try connecting again.");
+              return;
+            }
+            setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
+            poll();
+          }, VERIFY_CONNECTION_POLL_MS);
+        };
+        poll();
+        return () => {
+          cancelled = true;
+          if (timeoutId) window.clearTimeout(timeoutId);
+        };
+      }
+
+      failVerification("Sketch could not verify the connection. Please try connecting again.");
       return;
     }
 
@@ -422,6 +469,7 @@ export function ConnectionsPage() {
     serversQuery.isLoading,
     connectionsQuery.isLoading,
     connectionsQuery.data,
+    connectionsQuery.refetch,
     invalidateConnections,
   ]);
 

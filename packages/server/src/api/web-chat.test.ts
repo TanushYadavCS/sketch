@@ -304,6 +304,53 @@ describe("web chat API", () => {
     });
   });
 
+  it("buffers integration-related streamed text until setup instructions can be sanitized", async () => {
+    await seedAdmin(db);
+    const card = {
+      requestId: "integration-req-1",
+      appId: "github",
+      appName: "GitHub",
+      reason: "Connect GitHub so Sketch can inspect repository issues.",
+    };
+    const rawText =
+      "GitHub is not connected.\n\n" +
+      "You'll need to connect it in Settings -> Integrations using the GitHub OAuth flow.";
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__direct_execute_action",
+        input: { componentKey: "github-create-issue" },
+      });
+      await params.onTextDelta?.(rawText);
+      return {
+        ...makeAgentResult(rawText),
+        pendingIntegrationConnections: [card],
+      };
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-buffered-integrations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Create a GitHub issue" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("GitHub is not connected.");
+    expect(text).not.toContain("Settings");
+    expect(text).not.toContain("OAuth flow");
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
+      type: "data-integration-connection",
+      data: card,
+    });
+  });
+
   it("streams connected account cards from provider state for account enquiries", async () => {
     const admin = await seedAdmin(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult("You have GitHub connected."));

@@ -9,6 +9,7 @@ describe("managed redirect helpers", () => {
   it("builds the platform login URL without duplicate slashes", () => {
     expect(managedLoginUrl("https://app.getsketch.ai")).toBe("https://app.getsketch.ai/login");
     expect(managedLoginUrl("https://app.getsketch.ai/")).toBe("https://app.getsketch.ai/login");
+    expect(managedLoginUrl("https://app.getsketch.ai/platform/")).toBe("https://app.getsketch.ai/platform/login");
   });
 
   it("preserves a return target when provided", () => {

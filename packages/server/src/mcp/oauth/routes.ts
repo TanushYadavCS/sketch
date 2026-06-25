@@ -30,6 +30,7 @@ import { createOAuthClientRepository, parseOAuthClientJson } from "../../db/repo
 import type { createSettingsRepository } from "../../db/repositories/settings";
 import type { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
+import { createManagedLoginUrl } from "../../managed-url";
 import { createTokenBucketRateLimiter } from "../server/rate-limit";
 
 const MCP_SCOPE = "mcp:read";
@@ -301,7 +302,7 @@ export function mcpOAuthRoutes(params: {
     if (!user) {
       const returnTo = `${new URL(c.req.url).pathname}${new URL(c.req.url).search}`;
       if (params.config.MANAGED_URL) {
-        const loginUrl = new URL("/login", params.config.MANAGED_URL);
+        const loginUrl = createManagedLoginUrl(params.config.MANAGED_URL);
         loginUrl.searchParams.set("return_to", new URL(returnTo, baseUrl).toString());
         return c.redirect(loginUrl.toString());
       }

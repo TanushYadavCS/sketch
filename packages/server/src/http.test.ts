@@ -158,7 +158,7 @@ describe("managed login redirect", () => {
     const app = createApp(
       db,
       createTestConfig({
-        MANAGED_URL: "https://app.getsketch.ai",
+        MANAGED_URL: "https://app.getsketch.ai/platform/",
         MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
       }),
     );
@@ -166,7 +166,7 @@ describe("managed login redirect", () => {
     const res = await app.request("/integrations?connect=github");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      `https://app.getsketch.ai/login?return_to=${encodeURIComponent("/integrations?connect=github")}`,
+      `https://app.getsketch.ai/platform/login?return_to=${encodeURIComponent("/integrations?connect=github")}`,
     );
   });
 

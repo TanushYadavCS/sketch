@@ -66,7 +66,7 @@ describe("AddIntegrationDialog", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const onSuccess = vi.fn();
-    const popup = { closed: false, close: vi.fn() };
+    const popup = { closed: false, close: vi.fn(), location: { href: "" } };
 
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
 
@@ -118,6 +118,10 @@ describe("AddIntegrationDialog", () => {
 
     popup.closed = true;
     vi.advanceTimersByTime(500);
+    expect(screen.getByText("Waiting for authorization...")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Authorization cancelled" })).not.toBeInTheDocument();
+
+    vi.advanceTimersByTime(30_000);
 
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Authorization cancelled" })).toBeInTheDocument();

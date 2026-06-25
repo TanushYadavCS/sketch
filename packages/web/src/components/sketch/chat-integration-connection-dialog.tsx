@@ -5,6 +5,9 @@ import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 import type { ChatThreadIntegrationConnection, ChatThreadIntegrationConnectionStatus } from "./chat-thread";
 
+const OAUTH_POPUP_CLOSED_GRACE_MS = 30_000;
+const OAUTH_POLL_MS = 1500;
+
 function fallbackApp(connection: ChatThreadIntegrationConnection): IntegrationApp {
   return {
     id: connection.appId,
@@ -18,6 +21,7 @@ export function ChatIntegrationConnectionFrame({
   open,
   providerId,
   connection,
+  popupWindow,
   onOpenChange,
   onStatusChange,
   onConnected,
@@ -25,6 +29,7 @@ export function ChatIntegrationConnectionFrame({
   open: boolean;
   providerId: string | null;
   connection: ChatThreadIntegrationConnection | null;
+  popupWindow: Window | null;
   onOpenChange: (open: boolean) => void;
   onStatusChange: (requestId: string, status: ChatThreadIntegrationConnectionStatus) => void;
   onConnected: () => void;
@@ -55,7 +60,8 @@ export function ChatIntegrationConnectionFrame({
     let cancelled = false;
     let intervalId: number | null = null;
     let timeoutId: number | null = null;
-    let popup: Window | null = null;
+    const popup = popupWindow;
+    let popupClosedAt: number | null = null;
 
     const updateStatus = (status: ChatThreadIntegrationConnectionStatus) => {
       latestStatusRef.current = status;
@@ -89,6 +95,7 @@ export function ChatIntegrationConnectionFrame({
       if (cancelled || requestRef.current !== requestId || connectedRef.current) return;
       if (intervalId !== null) window.clearInterval(intervalId);
       if (timeoutId !== null) window.clearTimeout(timeoutId);
+      if (popup && !popup.closed) popup.close();
       updateStatus("error");
       toast.error(message);
       closeConnection();
@@ -102,14 +109,19 @@ export function ChatIntegrationConnectionFrame({
             return;
           }
           if (popup?.closed) {
-            fail("Connection was not completed. Please try again.");
+            popupClosedAt ??= Date.now();
+            if (Date.now() - popupClosedAt >= OAUTH_POPUP_CLOSED_GRACE_MS) {
+              fail("Connection was not completed. Please try again.");
+            }
+          } else {
+            popupClosedAt = null;
           }
         } catch {
           if (!cancelled) updateStatus("connecting");
         }
       };
 
-      intervalId = window.setInterval(() => void check(), 1500);
+      intervalId = window.setInterval(() => void check(), OAUTH_POLL_MS);
       timeoutId = window.setTimeout(
         () => fail("Sketch could not verify the connection. Try again from the connection card."),
         5 * 60 * 1000,
@@ -127,11 +139,11 @@ export function ChatIntegrationConnectionFrame({
         const result = await api.mcpServers.createConnectionIntent(providerId, app.id, callbackUrl, app);
         if (cancelled || requestRef.current !== requestId) return;
         activeAppRef.current = result.app;
-        popup = window.open(result.redirectUrl, "_blank", "width=600,height=700");
         if (!popup || popup.closed) {
           fail("Sketch could not open the connection window. Allow popups and try again.");
           return;
         }
+        popup.location.href = result.redirectUrl;
         startPolling(result.app);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to start the connection.";
@@ -167,7 +179,7 @@ export function ChatIntegrationConnectionFrame({
         onStatusChange(connection.requestId, "idle");
       }
     };
-  }, [open, providerId, connection, onConnected, onOpenChange, onStatusChange]);
+  }, [open, providerId, connection, popupWindow, onConnected, onOpenChange, onStatusChange]);
 
   return null;
 }
