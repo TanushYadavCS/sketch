@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 102;
+const EXPECTED_MIGRATION_COUNT = 105;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -158,6 +158,9 @@ describe("runMigrations — full sequence", () => {
     expect(names[99]).toBe("104-daily-brief-item-metadata");
     expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
     expect(names[101]).toBe("106-agents");
+    expect(names[102]).toBe("107-scheduled-task-builder-revisions");
+    expect(names[103]).toBe("108-scheduled-task-origin-chat");
+    expect(names[104]).toBe("109-scheduled-task-origin-message-id");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -510,5 +513,35 @@ describe("runMigrations — incremental upgrade", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
     expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
+  });
+
+  it("finishes the scheduled task revision migration when its columns already exist", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await sql`
+      DELETE FROM kysely_migration
+      WHERE name IN (
+        '107-scheduled-task-builder-revisions',
+        '108-scheduled-task-origin-chat',
+        '109-scheduled-task-origin-message-id'
+      )
+    `.execute(db);
+
+    await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
+
+    const rows = await sql<{ name: string }>`
+      SELECT name FROM kysely_migration
+      WHERE name IN (
+        '107-scheduled-task-builder-revisions',
+        '108-scheduled-task-origin-chat',
+        '109-scheduled-task-origin-message-id'
+      )
+      ORDER BY name ASC
+    `.execute(db);
+    expect(rows.rows).toEqual([
+      { name: "107-scheduled-task-builder-revisions" },
+      { name: "108-scheduled-task-origin-chat" },
+      { name: "109-scheduled-task-origin-message-id" },
+    ]);
   });
 });

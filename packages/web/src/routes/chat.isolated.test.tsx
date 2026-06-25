@@ -179,6 +179,41 @@ describe("chat route", () => {
     ]);
   });
 
+  it("extracts automation cards from assistant data parts", () => {
+    const artifact = {
+      taskId: "task-123",
+      kind: "New automation",
+      title: "Send weekly customer brief",
+      description: "Summarizes customer updates every Monday.",
+      tags: ["Scheduled", "Slack"],
+      scheduleLabel: "Cron: 0 9 * * 1 (Asia/Kolkata)",
+      deliveryLabel: "Slack DM",
+      builderUrl: "/scheduled-tasks/task-123/edit",
+      status: "active" as const,
+    };
+    const messages = buildChatThreadMessages([
+      {
+        id: "a1",
+        role: "assistant",
+        createdAt: "2026-05-26T10:03:00.000Z",
+        parts: [
+          { type: "text", text: "Automation created." },
+          { type: "data-automation", id: "automation-0", data: artifact },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: "a1",
+        role: "assistant",
+        text: "Automation created.",
+        createdAt: "2026-05-26T10:03:00.000Z",
+        automations: [artifact],
+      },
+    ]);
+  });
+
   it("extracts structured assistant progress from AI SDK data parts before final text arrives", () => {
     const messages = buildChatThreadMessages([
       {

@@ -352,6 +352,10 @@ export function buildSystemContext(params: {
   if (params.platform === "web") {
     sections.push(
       "",
+      "## Web Chat Automations",
+      "",
+      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste or link to the builder URL unless the user explicitly asks for the literal URL.",
+      "",
       "## Web Chat Integration Connections",
       "",
       "When the user asks to connect an integration, asks which accounts are connected, or when a task needs a specific app account, use the integration search-apps capability to resolve the provider app and connected status.",

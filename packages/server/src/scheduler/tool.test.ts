@@ -30,6 +30,7 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     createdAt: "2025-01-01T00:00:00.000Z",
     title: null,
     description: null,
+    originChat: null,
     steps: null,
     edges: null,
     outputTarget: null,
@@ -60,6 +61,7 @@ function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskSchedule
     resumeTask: vi.fn().mockResolvedValue(undefined),
     executeTaskById: vi.fn().mockResolvedValue(undefined),
     enqueueTaskById: vi.fn().mockResolvedValue(undefined),
+    touchTaskRevision: vi.fn().mockResolvedValue(undefined),
     start: vi.fn(),
     stop: vi.fn(),
     scheduleTask: vi.fn(),
@@ -376,6 +378,57 @@ describe("handleManageScheduledTasks — add", () => {
     expect(result.content[0].text).toContain("Automation created:");
   });
 
+  it("collects structured automation artifacts for successful adds", async () => {
+    const task = makeTask({ id: "new-task", title: "Daily account brief", prompt: "Daily account brief" });
+    const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(task) });
+    const automationArtifactCollector = {
+      collect: vi.fn(),
+      drain: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationArtifactCollector"]>;
+    const result = await handleManageScheduledTasks(
+      { action: "add", prompt: "Daily account brief", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+        automationArtifactCollector,
+      },
+    );
+
+    expect(result.content[0].text).not.toContain("builderUrl");
+    expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "new-task",
+        title: "Daily account brief",
+        builderUrl: "http://localhost:3000/scheduled-tasks/new-task/edit",
+        status: "active",
+      }),
+    );
+  });
+
+  it("passes origin chat metadata when creating automations", async () => {
+    const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(makeTask({ id: "origin-task" })) });
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: {
+          ...dmContext,
+          origin: { platform: "web", conversationId: "chat-alpha", providerThreadId: null, currentMessageId: null },
+        },
+      },
+    );
+
+    expect(scheduler.addTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        originPlatform: "web",
+        originConversationId: "chat-alpha",
+        originProviderThreadId: null,
+      }),
+    );
+  });
+
   it("persists agent step prompts via stepContentRepo for multi-step workflows", async () => {
     const localRepo = makeMockStepContentRepo();
     const scheduler = makeMockScheduler({ addTask: vi.fn().mockResolvedValue(makeTask({ id: "wf-1" })) });
@@ -588,6 +641,52 @@ describe("handleManageScheduledTasks — broker-capability gate", () => {
     expect(scheduler.updateTask).not.toHaveBeenCalled();
     expect(localRepo.upsert).not.toHaveBeenCalled();
     expect(localRepo.deleteOrphanedSteps).not.toHaveBeenCalled();
+  });
+
+  it("rejects workflow graphs with fan-out before creating a task", async () => {
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Fan out",
+        schedule_type: "cron",
+        schedule_value: "0 9 * * 1",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Schedule",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "schedule" },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "First",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "First prompt.",
+          },
+          {
+            id: "agent2",
+            type: "agent",
+            label: "Second",
+            icon: "sketch-ai",
+            position: { x: 0, y: 200 },
+            agentPrompt: "Second prompt.",
+          },
+        ],
+        edges: [
+          { id: "trigger-agent1", from: "trigger", to: "agent1" },
+          { id: "trigger-agent2", from: "trigger", to: "agent2" },
+        ],
+      },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(result.content[0].text).toContain("FAN_OUT_UNSUPPORTED");
+    expect(scheduler.addTask).not.toHaveBeenCalled();
   });
 });
 
@@ -811,6 +910,116 @@ describe("handleManageScheduledTasks — update", () => {
     );
   });
 
+  it("preserves existing edges and step content when updating step metadata only", async () => {
+    const existingSteps = [
+      {
+        id: "trigger",
+        type: "trigger" as const,
+        label: "Every weekday",
+        icon: "clock",
+        position: { x: 0, y: 0 },
+        triggerConfig: {
+          type: "schedule" as const,
+          scheduleType: "cron" as const,
+          scheduleValue: "0 9 * * 1-5",
+          timezone: "UTC",
+        },
+      },
+      {
+        id: "agent1",
+        type: "agent" as const,
+        label: "Check inbox",
+        icon: "sketch-ai",
+        position: { x: 260, y: 0 },
+      },
+    ];
+    const existingEdges = [{ id: "trigger-agent1", from: "trigger", to: "agent1" }];
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(
+        makeTask({
+          steps: JSON.stringify(existingSteps),
+          edges: JSON.stringify(existingEdges),
+          outputPlatform: "slack",
+          outputTarget: "D123",
+        }),
+      ),
+    });
+    const localRepo = makeMockStepContentRepo();
+    vi.mocked(localRepo.getByTask).mockResolvedValue([
+      {
+        task_id: "task-1",
+        step_id: "agent1",
+        content_type: "prompt",
+        content: "Summarize the inbox",
+        apps: null,
+        updated_at: "2026-06-01T00:00:00.000Z",
+      },
+    ]);
+
+    await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        steps: [
+          existingSteps[0],
+          {
+            ...existingSteps[1],
+            label: "Check priority inbox",
+            position: { x: 300, y: 20 },
+          },
+        ],
+      },
+      { scheduler, stepContentRepo: localRepo, taskContext: dmContext },
+    );
+
+    expect(localRepo.deleteOrphanedSteps).toHaveBeenCalledWith("task-1", ["trigger", "agent1"]);
+    expect(localRepo.upsert).not.toHaveBeenCalled();
+    expect(scheduler.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.not.objectContaining({
+        edges: expect.any(String),
+      }),
+    );
+    const updateFields = (scheduler.updateTask as ReturnType<typeof vi.fn>).mock.calls[0][1] as { steps: string };
+    expect(JSON.parse(updateFields.steps)[1]).toMatchObject({
+      id: "agent1",
+      label: "Check priority inbox",
+      position: { x: 300, y: 20 },
+    });
+  });
+
+  it("rejects step updates whose trigger metadata does not match the schedule", async () => {
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Webhook",
+            icon: "webhook",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "webhook" },
+          },
+          {
+            id: "agent1",
+            type: "agent",
+            label: "Check inbox",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentPrompt: "Check inbox.",
+          },
+        ],
+      },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(result.content[0].text).toContain("TRIGGER_CONFIG_MISMATCH");
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+  });
+
   it("returns updated task in response", async () => {
     const task = makeTask({ prompt: "Updated" });
     const scheduler = makeMockScheduler({ updateTask: vi.fn().mockResolvedValue(task) });
@@ -895,6 +1104,36 @@ describe("handleManageScheduledTasks — resume", () => {
     );
     expect(scheduler.resumeTask).toHaveBeenCalledWith("task-1");
     expect(result.content[0].text).toContain("resumed");
+  });
+});
+
+describe("handleManageScheduledTasks — updateStepContent", () => {
+  it("updates step content and bumps the task revision", async () => {
+    const scheduler = makeMockScheduler();
+    const localRepo = makeMockStepContentRepo();
+    vi.mocked(localRepo.getByStep).mockResolvedValue({
+      task_id: "task-1",
+      step_id: "step1",
+      content_type: "prompt",
+      content: "old prompt",
+      apps: null,
+      updated_at: "2026-06-01T00:00:00.000Z",
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "updateStepContent", task_id: "task-1", step_id: "step1", step_content: "new prompt" },
+      { scheduler, stepContentRepo: localRepo, taskContext: dmContext },
+    );
+
+    expect(localRepo.upsert).toHaveBeenCalledWith({
+      taskId: "task-1",
+      stepId: "step1",
+      contentType: "prompt",
+      content: "new prompt",
+      apps: null,
+    });
+    expect(scheduler.touchTaskRevision).toHaveBeenCalledWith("task-1");
+    expect(result.content[0].text).toContain("content updated");
   });
 });
 
@@ -1073,6 +1312,21 @@ describe("handleManageScheduledTasks — ownership", () => {
       expect(result.content[0].text).toBe("Error: task not found.");
     });
   }
+
+  it("allows guarded actions when the context can manage any task", async () => {
+    const otherUsersTask = makeTask({ createdBy: "U_OTHER" });
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(otherUsersTask),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "task-1", prompt: "Admin update" },
+      { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
+    );
+
+    expect(scheduler.updateTask).toHaveBeenCalledWith("task-1", expect.objectContaining({ prompt: "Admin update" }));
+    expect(result.content[0].text).toContain("Automation updated:");
+  });
 
   it("falls back when the task owner cannot be resolved", async () => {
     const otherUsersTask = makeTask({ createdBy: "U_OTHER", title: "AWS Daily Cost Chart" });

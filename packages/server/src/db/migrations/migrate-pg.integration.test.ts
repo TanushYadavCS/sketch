@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 102;
+const EXPECTED_MIGRATION_COUNT = 105;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -135,6 +135,9 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[99]).toBe("104-daily-brief-item-metadata");
     expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
     expect(names[101]).toBe("106-agents");
+    expect(names[102]).toBe("107-scheduled-task-builder-revisions");
+    expect(names[103]).toBe("108-scheduled-task-origin-chat");
+    expect(names[104]).toBe("109-scheduled-task-origin-message-id");
   });
 
   it("running migrations twice is idempotent", async () => {

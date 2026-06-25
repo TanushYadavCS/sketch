@@ -84,7 +84,8 @@ interface AppDeps {
   onSlackDisconnect?: () => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
-  scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
+  scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById"> &
+    Partial<Pick<TaskScheduler, "refreshTaskSchedule" | "executeStepById" | "getTaskById">>;
   runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -354,7 +355,13 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
-    app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));
+    app.route(
+      "/api/scheduled-tasks",
+      scheduledTaskRoutes(db, deps.scheduler, {
+        logger,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
+      }),
+    );
   }
   app.route(
     "/api/channels",
