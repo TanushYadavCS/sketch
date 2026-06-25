@@ -103,6 +103,17 @@ const plainMcpBody = {
   credentials: { bearerToken: "tok-abc" },
 };
 
+async function createCanvasProviderServer(db: Kysely<DB>) {
+  const repo = createMcpServerRepository(db);
+  return repo.create({
+    type: "canvas",
+    displayName: "Canvas",
+    url: "https://canvas.example.com/mcp",
+    apiUrl: "https://canvas.example.com",
+    credentials: JSON.stringify({ apiKey: "sk-test" }),
+  });
+}
+
 describe("MCP Servers API", () => {
   let db: Kysely<DB>;
 
@@ -580,6 +591,388 @@ describe("MCP Servers API", () => {
     });
   });
 
+  // --- POST /api/mcp-servers/:id/connections/intents ---
+
+  describe("POST /api/mcp-servers/:id/connections/intents", () => {
+    it("uses the requested safe app slug directly before catalog lookup", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [
+            { id: "github", name: "GitHub Enterprise", description: "" },
+            { id: "github-oauth", name: "GitHub", description: "" },
+          ],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/github" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          appId: "GitHub",
+          appName: "GitHub",
+          callbackUrl: "https://sketch.example.com/integrations/callback",
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body).toEqual({
+        app: { id: "github", name: "GitHub", description: "" },
+        redirectUrl: "https://auth.example.com/github",
+      });
+      expect(mockProvider.listApps).not.toHaveBeenCalled();
+      expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
+        "member@test.com",
+        "github",
+        "https://sketch.example.com/integrations/callback?app=github",
+        "Test Member",
+        "member",
+      );
+    });
+
+    it("resolves a unique exact app name hit", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [
+            { id: "github-oauth", name: "GitHub", description: "" },
+            { id: "slack", name: "Slack", description: "" },
+          ],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValueOnce(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found"))
+          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/github" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ appId: "github" }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.app).toEqual({ id: "github-oauth", name: "GitHub", description: "" });
+      expect(body.redirectUrl).toBe("https://auth.example.com/github");
+      expect(mockProvider.initiateConnection).toHaveBeenNthCalledWith(
+        1,
+        "member@test.com",
+        "github",
+        "",
+        "Test Member",
+        "member",
+      );
+      expect(mockProvider.initiateConnection).toHaveBeenNthCalledWith(
+        2,
+        "member@test.com",
+        "github-oauth",
+        "",
+        "Test Member",
+        "member",
+      );
+    });
+
+    it("returns 404 only after the requested app slug and catalog fallback both miss", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValue(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found")),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ appId: "github" }),
+      });
+      expect(res.status).toBe(404);
+
+      const body = await res.json();
+      expect(body.error).toEqual({ code: "NOT_FOUND", message: "App not found" });
+      expect(mockProvider.initiateConnection).toHaveBeenCalledOnce();
+    });
+
+    it("returns 409 for an ambiguous exact app name hit", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [
+            { id: "github-oauth", name: "GitHub", description: "" },
+            { id: "github-enterprise", name: "Git Hub", description: "" },
+          ],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValue(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found")),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ appId: "github" }),
+      });
+      expect(res.status).toBe(409);
+
+      const body = await res.json();
+      expect(body.error).toEqual({ code: "CONFLICT", message: "App name is ambiguous" });
+      expect(mockProvider.initiateConnection).toHaveBeenCalledOnce();
+    });
+
+    it("initiates the connection with the canonical app id", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [{ id: "google-calendar-oauth", name: "Google Calendar", description: "" }],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValueOnce(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found"))
+          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/google-calendar" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          appId: "google-calendar",
+          callbackUrl: "https://sketch.example.com/integrations/callback?app=google-calendar",
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
+        "member@test.com",
+        "google-calendar-oauth",
+        "https://sketch.example.com/integrations/callback?app=google-calendar-oauth",
+        "Test Member",
+        "member",
+      );
+    });
+
+    it("uses returned card app slugs directly when catalog search misses", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/gmail" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          appId: "google-gmail-oauth",
+          appName: "Gmail",
+          description: "Email",
+          icon: "https://img.example.com/gmail.svg",
+          callbackUrl: "https://sketch.example.com/integrations/callback?app=google-gmail-oauth",
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.app).toEqual({
+        id: "google-gmail-oauth",
+        name: "Gmail",
+        description: "Email",
+        icon: "https://img.example.com/gmail.svg",
+      });
+      expect(mockProvider.listApps).not.toHaveBeenCalled();
+      expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
+        "member@test.com",
+        "google-gmail-oauth",
+        "https://sketch.example.com/integrations/callback?app=google-gmail-oauth",
+        "Test Member",
+        "member",
+      );
+    });
+
+    it("falls back to provider search when a shorthand app slug is rejected", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [{ id: "google-gmail-oauth", name: "Gmail", description: "Email" }],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValueOnce(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found"))
+          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/gmail" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          appId: "gmail",
+          callbackUrl: "https://sketch.example.com/integrations/callback?app=gmail",
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.app).toEqual({ id: "google-gmail-oauth", name: "Gmail", description: "Email" });
+      expect(mockProvider.initiateConnection).toHaveBeenNthCalledWith(
+        2,
+        "member@test.com",
+        "google-gmail-oauth",
+        "https://sketch.example.com/integrations/callback?app=google-gmail-oauth",
+        "Test Member",
+        "member",
+      );
+    });
+
+    it("prefers the most specific canonical app id from provider search results", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [
+            { id: "whatsapp", name: "WhatsApp", description: "Messaging" },
+            { id: "whatsapp-business", name: "WhatsApp Business", description: "Business messaging" },
+          ],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValueOnce(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found"))
+          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/whatsapp-business" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections/intents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          appId: "whatsapp-business-oauth",
+          callbackUrl: "https://sketch.example.com/integrations/callback?app=whatsapp-business-oauth",
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.app).toEqual({
+        id: "whatsapp-business",
+        name: "WhatsApp Business",
+        description: "Business messaging",
+      });
+      expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
+        "member@test.com",
+        "whatsapp-business",
+        "https://sketch.example.com/integrations/callback?app=whatsapp-business",
+        "Test Member",
+        "member",
+      );
+    });
+  });
+
   // --- POST /api/mcp-servers/:id/connections ---
 
   describe("POST /api/mcp-servers/:id/connections", () => {
@@ -621,7 +1014,10 @@ describe("MCP Servers API", () => {
 
       const mockProvider = {
         type: "canvas",
-        listApps: vi.fn(),
+        listApps: vi.fn().mockResolvedValue({
+          apps: [{ id: "slack", name: "Slack", description: "" }],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
         initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/connect" }),
         listConnections: vi.fn(),
         removeConnection: vi.fn(),
@@ -647,7 +1043,7 @@ describe("MCP Servers API", () => {
       expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
         "member@test.com",
         "slack",
-        "https://sketch.example.com/callback",
+        "https://sketch.example.com/callback?app=slack",
         "Test Member",
         "member",
       );
@@ -666,7 +1062,10 @@ describe("MCP Servers API", () => {
 
       const mockProvider = {
         type: "canvas",
-        listApps: vi.fn(),
+        listApps: vi.fn().mockResolvedValue({
+          apps: [{ id: "google-calendar-oauth", name: "Google Calendar", description: "" }],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
         initiateConnection: vi.fn().mockResolvedValue({ redirectUrl: "https://auth.example.com/connect" }),
         listConnections: vi.fn(),
         removeConnection: vi.fn(),
@@ -693,6 +1092,50 @@ describe("MCP Servers API", () => {
         "",
         "admin",
         "admin",
+      );
+    });
+
+    it("canonicalizes shorthand app IDs before initiating direct connections", async () => {
+      await seedAdmin(db);
+      const server = await createCanvasProviderServer(db);
+      const mockProvider = {
+        type: "canvas",
+        listApps: vi.fn().mockResolvedValue({
+          apps: [{ id: "google-gmail-oauth", name: "Gmail", description: "Email" }],
+          pageInfo: { endCursor: null, hasMore: false },
+        }),
+        initiateConnection: vi
+          .fn()
+          .mockRejectedValueOnce(new CanvasProviderRequestError(404, "NOT_FOUND", "App not found"))
+          .mockResolvedValueOnce({ redirectUrl: "https://auth.example.com/gmail" }),
+        listConnections: vi.fn(),
+        removeConnection: vi.fn(),
+        isBrokerCapable: () => false,
+        getBrokerSpec: () => null,
+      };
+
+      const { createProvider } = await import("../integrations/factory");
+      vi.mocked(createProvider).mockReturnValue(mockProvider);
+
+      const app = createApp(db, config);
+      const memberCookie = await getMemberCookie(db);
+
+      const res = await app.request(`/api/mcp-servers/${server.id}/connections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          appId: "gmail",
+          callbackUrl: "https://sketch.example.com/integrations/callback",
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      expect(mockProvider.initiateConnection).toHaveBeenCalledWith(
+        "member@test.com",
+        "google-gmail-oauth",
+        "https://sketch.example.com/integrations/callback?app=google-gmail-oauth",
+        "Test Member",
+        "member",
       );
     });
 

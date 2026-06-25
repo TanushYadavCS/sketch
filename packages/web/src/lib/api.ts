@@ -1321,10 +1321,10 @@ export const api = {
       return request<SessionResponse>("/api/auth/session");
     },
     magicLink: {
-      request(email: string) {
+      request(email: string, returnTo?: string | null) {
         return request<{ success: boolean; channels: string[] }>("/api/auth/magic-link", {
           method: "POST",
-          body: JSON.stringify({ email }),
+          body: JSON.stringify({ email, ...(returnTo ? { returnTo } : {}) }),
         });
       },
     },
@@ -2034,6 +2034,26 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ appId, callbackUrl }),
       });
+    },
+    createConnectionIntent(
+      providerId: string,
+      appId: string,
+      callbackUrl?: string,
+      app?: Pick<IntegrationApp, "name" | "description" | "icon">,
+    ) {
+      return request<{ app: IntegrationApp; redirectUrl: string }>(
+        `/api/mcp-servers/${providerId}/connections/intents`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            appId,
+            callbackUrl,
+            appName: app?.name,
+            description: app?.description,
+            icon: app?.icon,
+          }),
+        },
+      );
     },
     async listConnections(providerId: string) {
       const res = await request<{ connections: IntegrationConnection[] }>(`/api/mcp-servers/${providerId}/connections`);

@@ -271,7 +271,11 @@ describe("web chat API", () => {
       reason: "Connect GitHub so Sketch can inspect repository issues.",
     };
     const runAgent = vi.fn().mockResolvedValue({
-      ...makeAgentResult("Connect GitHub first."),
+      ...makeAgentResult(
+        "GitHub is not connected.\n\n" +
+          "You'll need to connect it in Settings → Integrations using the GitHub OAuth flow.\n\n" +
+          "Once it's connected, ask again and I'll inspect the issues.",
+      ),
       pendingIntegrationConnections: [card],
     });
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
@@ -293,12 +297,67 @@ describe("web chat API", () => {
       type: "data-integration-connection",
       data: card,
     });
+    expect(text).toContain("GitHub is not connected.");
+    expect(text).not.toContain("Settings");
+    expect(text).not.toContain("OAuth flow");
     const transcript = JSON.parse(
       await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-integrations"), "utf-8"),
     );
     expect(transcript.messages.at(-1).parts).toContainEqual({
+      type: "text",
+      text: "GitHub is not connected.",
+    });
+    expect(transcript.messages.at(-1).parts).toContainEqual({
       type: "data-integration-connection",
       id: "integration-connection-0",
+      data: card,
+    });
+  });
+
+  it("buffers integration-related streamed text until setup instructions can be sanitized", async () => {
+    await seedAdmin(db);
+    const card = {
+      requestId: "integration-req-1",
+      appId: "github",
+      appName: "GitHub",
+      reason: "Connect GitHub so Sketch can inspect repository issues.",
+    };
+    const rawText =
+      "GitHub is not connected.\n\n" +
+      "You'll need to connect it in Settings -> Integrations using the GitHub OAuth flow.";
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__direct_execute_action",
+        input: { componentKey: "github-create-issue" },
+      });
+      await params.onTextDelta?.(rawText);
+      return {
+        ...makeAgentResult(rawText),
+        pendingIntegrationConnections: [card],
+      };
+    });
+
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-buffered-integrations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Create a GitHub issue" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("GitHub is not connected.");
+    expect(text).not.toContain("Settings");
+    expect(text).not.toContain("OAuth flow");
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
+      type: "data-integration-connection",
       data: card,
     });
   });
@@ -1058,6 +1117,60 @@ describe("web chat API", () => {
       ],
       updatedAt: expect.any(String),
     });
+  });
+
+  it("sanitizes legacy manual setup text when returning persisted integration cards", async () => {
+    const admin = await seedAdmin(db);
+    const transcriptDir = join(dataDir, "web-chat", admin.id);
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, "chat-setup-text.json"),
+      JSON.stringify({
+        version: 1,
+        messages: [
+          { id: "u-history", role: "user", parts: [{ type: "text", text: "Check Gmail" }] },
+          {
+            id: "a-history",
+            role: "assistant",
+            parts: [
+              {
+                type: "text",
+                text:
+                  "Gmail is not connected.\n\n" +
+                  "You'll need to connect Gmail in Settings → Integrations with a Gmail API key.\n\n" +
+                  "Once it's connected, ask again.",
+              },
+              {
+                type: "data-integration-connection",
+                id: "integration-connection-0",
+                data: {
+                  requestId: "req-gmail",
+                  appId: "google-gmail-oauth",
+                  appName: "Gmail",
+                  state: "connect",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat/messages?conversationId=chat-setup-text", {
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { messages: Array<{ parts: unknown[] }> };
+    expect(JSON.stringify(json)).not.toContain("Settings");
+    expect(JSON.stringify(json)).not.toContain("API key");
+    expect(json.messages.at(-1)?.parts).toContainEqual({ type: "text", text: "Gmail is not connected." });
   });
 
   it("accepts legacy line-only web chat progress transcripts", async () => {

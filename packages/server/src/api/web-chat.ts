@@ -15,7 +15,7 @@ import {
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
-import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
+import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
@@ -34,6 +34,7 @@ import {
   dedupeIntegrationCards,
   isConnectedAccountsInquiry,
 } from "../integrations/cards";
+import { sanitizeIntegrationConnectionText } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -832,12 +833,24 @@ function sanitizeTranscriptMessage(message: unknown): WebChatTranscriptMessage |
   if (!Array.isArray(message.parts)) return null;
   const createdAt = typeof message.createdAt === "string" && message.createdAt.trim() ? message.createdAt : undefined;
 
-  const parts = message.parts.flatMap((part) => {
+  const parts: WebChatStoredPart[] = message.parts.flatMap((part) => {
     const sanitized = sanitizeTranscriptPart(part);
     return sanitized ? [sanitized] : [];
   });
   if (parts.length === 0) return null;
-  return { id: message.id, role: message.role, ...(createdAt ? { createdAt } : {}), parts };
+  const integrationConnections = parts
+    .filter((part) => part.type === "data-integration-connection")
+    .map((part) => part.data);
+  const sanitizedParts: WebChatStoredPart[] =
+    message.role === "assistant" && integrationConnections.length > 0
+      ? parts.flatMap((part): WebChatStoredPart[] => {
+          if (part.type !== "text") return [part];
+          const text = sanitizeIntegrationConnectionText(part.text, integrationConnections);
+          return text ? [{ type: "text" as const, text }] : [];
+        })
+      : parts;
+  if (sanitizedParts.length === 0) return null;
+  return { id: message.id, role: message.role, ...(createdAt ? { createdAt } : {}), parts: sanitizedParts };
 }
 
 async function readWebChatTranscript(
@@ -981,6 +994,23 @@ async function deterministicIntegrationCardsForWebChat(params: {
     params.logger.warn({ err }, "Failed to resolve connected account cards for web chat");
     return [];
   }
+}
+
+function shouldBufferWebChatTextAfterProgress(event: ProgressEvent): boolean {
+  if (event.kind !== "tool_use") return false;
+  const toolName = event.toolName.toLowerCase().replace(/_/g, "-");
+  if (toolName === "bash") {
+    const command = typeof event.input.command === "string" ? event.input.command : "";
+    return /\$\{?CANVAS_CLI\}?/.test(command);
+  }
+  return (
+    toolName.includes("canvas") ||
+    toolName.includes("pipedream") ||
+    toolName.includes("search-app") ||
+    toolName.includes("direct-execute-action") ||
+    toolName.includes("fetch-remote-options") ||
+    toolName.includes("create-sketch-trigger-workflow")
+  );
 }
 
 async function appendWebChatPendingTurn(
@@ -1555,6 +1585,8 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       let progressPartIndex = 0;
       let wroteOffProgress = false;
       let currentTextPart = "";
+      let bufferTextDeltas = false;
+      let bufferedTextDeltas = "";
       let sawAutomationTool = false;
       let bufferedTextAfterAutomationTool = "";
 
@@ -1578,6 +1610,22 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         if (!textPartId) return;
         currentTextPart += delta;
         write({ type: "text-delta", id: textPartId, delta });
+      };
+
+      const writeBufferedTextDeltas = () => {
+        if (!bufferedTextDeltas) return;
+        const text = bufferedTextDeltas;
+        bufferedTextDeltas = "";
+        writeTextDelta(text);
+      };
+
+      const writeOrBufferTextDelta = (delta: string) => {
+        if (!delta) return;
+        if (bufferTextDeltas) {
+          bufferedTextDeltas += delta;
+          return;
+        }
+        writeTextDelta(delta);
       };
 
       const writeFinalText = (finalText: string) => {
@@ -1624,6 +1672,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               responseSurface: "web",
               contextType: "dm",
               onProgressEvent: async (event) => {
+                if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
                 if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
                   sawAutomationTool = true;
                   closeTextPart();
@@ -1654,7 +1703,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
                   bufferedTextAfterAutomationTool += delta;
                   return;
                 }
-                writeTextDelta(delta);
+                writeOrBufferTextDelta(delta);
               },
               onSessionId: async () => {},
               abortController,
@@ -1679,11 +1728,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ),
         );
 
-        const automationArtifacts = result.trace.automationArtifacts ?? [];
-        const rawFinalText = result.trace.finalText?.trim() ? result.trace.finalText : bufferedTextAfterAutomationTool;
-        const finalText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
-        writeFinalText(finalText);
-
         const fileParts: Array<{ id: string; data: WebChatFile }> = [];
         for (const [index, filePath] of result.pendingUploads.entries()) {
           const file = await webChatFileForUpload(workspaceDir, filePath);
@@ -1693,7 +1737,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           }
           const id = `file-${index}`;
           fileParts.push({ id, data: file });
-          write({ type: "data-file", id, data: file });
         }
         const deterministicIntegrationCards = await deterministicIntegrationCardsForWebChat({
           deps,
@@ -1706,6 +1749,24 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...(result.pendingIntegrationConnections ?? []),
           ...deterministicIntegrationCards,
         ]);
+        const automationArtifacts = result.trace.automationArtifacts ?? [];
+        const rawFinalText = result.trace.finalText?.trim()
+          ? result.trace.finalText
+          : sawAutomationTool
+            ? bufferedTextAfterAutomationTool
+            : bufferedTextDeltas;
+        const automationText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
+        const finalText = sanitizeIntegrationConnectionText(automationText, integrationCards) ?? "";
+        if (integrationCards.length === 0 && automationArtifacts.length === 0) {
+          writeBufferedTextDeltas();
+        } else {
+          bufferedTextDeltas = "";
+        }
+        writeFinalText(finalText);
+
+        for (const file of fileParts) {
+          write({ type: "data-file", id: file.id, data: file.data });
+        }
         const integrationConnectionParts = integrationCards.map((connection, index) => {
           const id = `integration-connection-${index}`;
           write({ type: "data-integration-connection", id, data: connection });
@@ -1727,6 +1788,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         );
       } catch (err) {
         if (abortController.signal.aborted) {
+          writeBufferedTextDeltas();
           const interruptedText = currentTextPart.trim();
           closeTextPart();
           write({ type: "data-interruption", id: "interruption", data: WEB_CHAT_INTERRUPTION_DATA });
@@ -1742,6 +1804,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           return;
         }
         const message = errorMessage(err);
+        writeBufferedTextDeltas();
         closeTextPart();
         deps.logger.warn({ err }, "Web chat run failed");
         await completeWebChatProgressMessage(

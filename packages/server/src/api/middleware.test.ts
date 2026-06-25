@@ -240,6 +240,20 @@ describe("auth middleware - managed SSO", () => {
     expect(res.headers.get("location")).toBe(`${MANAGED_URL}/login`);
   });
 
+  it("preserves managed URL path prefixes when redirecting to platform login", async () => {
+    const app = createTestApp(mockSettings, {
+      managedAuthSecret: MANAGED_AUTH_SECRET,
+      managedUrl: `${MANAGED_URL}/platform/`,
+      findUserByEmail,
+    });
+    const badToken = await makePlatformToken("admin@test.com", "admin", "wrong-secret-that-is-at-least-32chars");
+    const res = await app.request("/api/test", {
+      headers: { Cookie: `sketch_platform_session=${badToken}` },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`${MANAGED_URL}/platform/login`);
+  });
+
   it("redirects to MANAGED_URL/login when platform cookie JWT is expired", async () => {
     const app = createTestApp(mockSettings, {
       managedAuthSecret: MANAGED_AUTH_SECRET,

@@ -47,6 +47,7 @@ import { type createSettingsRepository, parseOrgContext } from "../db/repositori
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -693,7 +694,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
         });
 
-        const finalText = appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []);
+        const finalText = appendIntegrationConnectionLinks(
+          appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+          result.pendingIntegrationConnections,
+          "slack",
+          toolConfig,
+        );
         if (finalText) {
           const sent = await onFinalMessage(finalText);
           await captureSlackBotReplies({
@@ -1029,7 +1035,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           },
         });
 
-        const finalText = appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []);
+        const finalText = appendIntegrationConnectionLinks(
+          appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+          result.pendingIntegrationConnections,
+          "slack",
+          toolConfig,
+        );
         if (finalText) {
           const sent = await onFinalMessage(finalText);
           await captureSlackBotReplies({

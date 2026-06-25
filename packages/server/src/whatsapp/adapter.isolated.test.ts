@@ -81,6 +81,7 @@ function makeAgentResult(overrides: Record<string, unknown> = {}) {
     fileSizes: [],
     promptMode: "text",
     toolCalls: [],
+    pendingIntegrationConnections: [],
     trace: { progressEvents: [], finalText: "hello back" },
     ...overrides,
   };
@@ -487,6 +488,94 @@ describe("whatsapp/adapter", () => {
 
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "final reply");
       expect(mock.sendText).not.toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
+    });
+
+    it("appends an integration connection link to DM replies", async () => {
+      const deps = makeDeps({
+        config: createTestConfig({
+          DATA_DIR: "/tmp/test-data",
+          PORT: 0,
+          LOG_LEVEL: "error",
+          BASE_URL: "https://sketch.test",
+        }),
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: { progressEvents: [], finalText: "GitHub needs connection" },
+            pendingIntegrationConnections: [
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
+            ],
+          }),
+        ),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "create issue",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "1234567890@s.whatsapp.net",
+        "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
+      );
+    });
+
+    it("sends a DM connection link when the agent has no final text", async () => {
+      const deps = makeDeps({
+        config: createTestConfig({
+          DATA_DIR: "/tmp/test-data",
+          PORT: 0,
+          LOG_LEVEL: "error",
+          BASE_URL: "https://sketch.test",
+        }),
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: { progressEvents: [], finalText: null },
+            pendingIntegrationConnections: [
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
+            ],
+          }),
+        ),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "create issue",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "1234567890@s.whatsapp.net",
+        "To continue, connect GitHub: https://sketch.test/integrations?connect=github",
+      );
     });
 
     it("removes 👀 and does not add ✅ when the DM run fails", async () => {
@@ -1472,6 +1561,54 @@ describe("whatsapp/adapter", () => {
         { quoted: rawMessage },
       ]);
       expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "hello back", { quoted: rawMessage });
+    });
+
+    it("appends an integration connection link to group mention replies", async () => {
+      const deps = makeDeps({
+        config: createTestConfig({
+          DATA_DIR: "/tmp/test-data",
+          PORT: 0,
+          LOG_LEVEL: "error",
+          BASE_URL: "https://sketch.test",
+        }),
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: { progressEvents: [], finalText: "GitHub needs connection" },
+            pendingIntegrationConnections: [
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
+            ],
+          }),
+        ),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "group@g.us", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "group",
+        text: "@bot create issue",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "group@g.us",
+        "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
+        { quoted: rawMessage },
+      );
     });
 
     it("group handler uses senderPhone for user lookup instead of senderJid", async () => {

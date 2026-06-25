@@ -72,6 +72,10 @@ type WebChatMetadata = {
 
 type WebChatMessage = UIMessage<WebChatMetadata, WebChatDataParts> & { createdAt?: string | Date };
 type WebChatPart = WebChatMessage["parts"][number];
+type ActiveIntegrationConnection = {
+  connection: ChatThreadIntegrationConnection;
+  popupWindow: Window | null;
+};
 
 export interface ChatSearch {
   message?: string;
@@ -836,8 +840,9 @@ export function ChatPage() {
   const [toolProgress, setToolProgress] = useState<WebChatToolProgress>("friendly");
   const [pendingToolProgress, setPendingToolProgress] = useState<WebChatToolProgress | null>(null);
   const [stoppingRun, setStoppingRun] = useState(false);
-  const [activeIntegrationConnection, setActiveIntegrationConnection] =
-    useState<ChatThreadIntegrationConnection | null>(null);
+  const [activeIntegrationConnection, setActiveIntegrationConnection] = useState<ActiveIntegrationConnection | null>(
+    null,
+  );
   const [localIntegrationConnectionStatuses, setLocalIntegrationConnectionStatuses] = useState<
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
@@ -999,8 +1004,14 @@ export function ChatPage() {
         toast.error("No integration provider is configured");
         return;
       }
+      const popupWindow = window.open("about:blank", "_blank", "width=600,height=700");
+      if (!popupWindow || popupWindow.closed) {
+        setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "error" }));
+        toast.error("Sketch could not open the connection window. Allow popups and try again.");
+        return;
+      }
       setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "connecting" }));
-      setActiveIntegrationConnection(connection);
+      setActiveIntegrationConnection({ connection, popupWindow });
     },
     [provider, providerLoading],
   );
@@ -1135,7 +1146,8 @@ export function ChatPage() {
       <ChatIntegrationConnectionFrame
         open={activeIntegrationConnection !== null}
         providerId={provider?.id ?? null}
-        connection={activeIntegrationConnection}
+        connection={activeIntegrationConnection?.connection ?? null}
+        popupWindow={activeIntegrationConnection?.popupWindow ?? null}
         onOpenChange={handleIntegrationConnectionOpenChange}
         onStatusChange={handleIntegrationConnectionStatusChange}
         onConnected={handleIntegrationConnected}

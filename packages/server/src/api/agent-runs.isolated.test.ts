@@ -37,12 +37,13 @@ function sseData(text: string, event: string) {
   return data ? JSON.parse(data) : undefined;
 }
 
-function makeAgentResult() {
+function makeAgentResult(overrides: Record<string, unknown> = {}) {
   return {
     messageSent: true,
     sessionId: "sess-1",
     costUsd: 0.01,
     pendingUploads: [],
+    pendingIntegrationConnections: [],
     trace: { progressEvents: [], finalText: "agent response" },
     rawUsage: {
       model: null,
@@ -67,6 +68,7 @@ function makeAgentResult() {
       toolCalls: [],
       sdkCostUsd: 0.01,
     },
+    ...overrides,
   };
 }
 
@@ -241,6 +243,8 @@ describe("agent invoke API", () => {
     expect(sseData(text, "progress")).toEqual({ kind: "tool_use", toolName: "Read", input: { file_path: "x" } });
     const completed = sseData(text, "completed");
     expect(completed.finalText).toBe("agent response");
+    expect(completed.displayText).toBe("agent response");
+    expect(completed.pendingIntegrationConnections).toEqual([]);
     expect(completed.delivery).toEqual({ mode: "silent", platform: "slack" });
 
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
@@ -332,6 +336,99 @@ describe("agent invoke API", () => {
     });
   });
 
+  it("appends an integration connection link to delivered target user runs", async () => {
+    const { requester, target } = await seedTenant(db);
+    const runAgent = vi.fn().mockResolvedValue(
+      makeAgentResult({
+        trace: { progressEvents: [], finalText: "GitHub needs connection" },
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+            connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+          },
+        ],
+      }),
+    );
+    const sendDm = vi
+      .fn()
+      .mockResolvedValueOnce({ channelId: "D123", messageRef: "request-ts" })
+      .mockResolvedValueOnce({ channelId: "D123", messageRef: "response-ts" });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, BASE_URL: "https://sketch.test" }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      sendDm,
+    });
+
+    const res = await app.request("/api/agent-runs", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        requesterUserId: requester.id,
+        message: "run in target workspace",
+        target: { type: "user", userId: target.id, platform: "slack" },
+        deliveryMode: "target",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const completed = sseData(await readSse(res), "completed");
+    expect(completed.finalText).toBe("GitHub needs connection");
+    expect(completed.displayText).toBe(
+      "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+    );
+    expect(completed.pendingIntegrationConnections).toMatchObject([{ appId: "github", state: "connect" }]);
+
+    expect(sendDm).toHaveBeenNthCalledWith(2, {
+      userId: target.id,
+      platform: "slack",
+      message:
+        "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+    });
+  });
+
+  it("exposes display text and connection cards for silent runs", async () => {
+    const { requester, target } = await seedTenant(db);
+    const runAgent = vi.fn().mockResolvedValue(
+      makeAgentResult({
+        trace: { progressEvents: [], finalText: "GitHub needs connection" },
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+          },
+        ],
+      }),
+    );
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, BASE_URL: "https://sketch.test" }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+
+    const res = await app.request("/api/agent-runs", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        requesterUserId: requester.id,
+        message: "run in target workspace",
+        target: { type: "user", userId: target.id, platform: "slack" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const completed = sseData(await readSse(res), "completed");
+
+    expect(completed.finalText).toBe("GitHub needs connection");
+    expect(completed.displayText).toBe(
+      "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+    );
+    expect(completed.pendingIntegrationConnections).toMatchObject([{ appId: "github", state: "connect" }]);
+  });
+
   it("creates a Slack thread when no threadId is provided", async () => {
     const { requester } = await seedTenant(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
@@ -369,6 +466,57 @@ describe("agent invoke API", () => {
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
     expect(call.workspaceKey).toBe("channel-C123");
     expect(call.threadTs).toBe("1712345678.000000");
+  });
+
+  it("appends an integration connection link to delivered Slack channel runs", async () => {
+    const { requester } = await seedTenant(db);
+    const runAgent = vi.fn().mockResolvedValue(
+      makeAgentResult({
+        trace: { progressEvents: [], finalText: "GitHub needs connection" },
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+            connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+          },
+        ],
+      }),
+    );
+    const slack = {
+      getChannelInfo: vi.fn().mockResolvedValue({ name: "general", type: "public_channel" }),
+      getChannelHistory: vi.fn().mockResolvedValue([]),
+      getThreadReplies: vi.fn().mockResolvedValue([]),
+      postMessage: vi.fn().mockResolvedValue("1712345678.000000"),
+      postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
+      uploadFile: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SlackBot;
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, BASE_URL: "https://sketch.test" }), {
+      logger: createTestLogger(),
+      getSlack: () => slack,
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+
+    const res = await app.request("/api/agent-runs", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        requesterUserId: requester.id,
+        message: "start channel run",
+        target: { type: "slack_channel", channelId: "C123" },
+        deliveryMode: "target",
+      }),
+    });
+    expect(res.status).toBe(200);
+    await readSse(res);
+
+    expect(slack.postThreadReply).toHaveBeenCalledWith(
+      "C123",
+      "1712345678.000000",
+      "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+    );
   });
 
   it("reuses a provided Slack threadId", async () => {
@@ -444,6 +592,58 @@ describe("agent invoke API", () => {
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
     expect(call.workspaceKey).toBe("wa-group-123@g.us");
     expect(call.platform).toBe("whatsapp");
+  });
+
+  it("appends an integration connection link to delivered WhatsApp group runs", async () => {
+    const { requester } = await seedTenant(db);
+    await db
+      .insertInto("whatsapp_groups")
+      .values({ jid: "123@g.us", name: "Ops", description: null, updated_at: new Date().toISOString() })
+      .execute();
+    const runAgent = vi.fn().mockResolvedValue(
+      makeAgentResult({
+        trace: { progressEvents: [], finalText: "GitHub needs connection" },
+        pendingIntegrationConnections: [
+          {
+            requestId: "req-1",
+            appId: "github",
+            appName: "GitHub",
+            state: "connect",
+            connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+          },
+        ],
+      }),
+    );
+    const whatsapp = {
+      isConnected: true,
+      sendText: vi.fn().mockResolvedValue(null),
+      sendFile: vi.fn().mockResolvedValue(undefined),
+      getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Ops" }),
+    } as unknown as WhatsAppBot;
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, BASE_URL: "https://sketch.test" }), {
+      logger: createTestLogger(),
+      whatsapp,
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+
+    const res = await app.request("/api/agent-runs", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({
+        requesterUserId: requester.id,
+        message: "group run",
+        target: { type: "whatsapp_group", groupJid: "123@g.us" },
+        deliveryMode: "target",
+      }),
+    });
+    expect(res.status).toBe(200);
+    await readSse(res);
+
+    expect(whatsapp.sendText).toHaveBeenCalledWith(
+      "123@g.us",
+      "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
+    );
   });
 
   it("rejects WhatsApp group runs for groups that were not discovered", async () => {

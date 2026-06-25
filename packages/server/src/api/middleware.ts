@@ -14,6 +14,7 @@ import type { Context, Next } from "hono";
 import { getCookie } from "hono/cookie";
 import { verifyJwt } from "../auth/jwt";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import { managedLoginHref } from "../managed-url";
 import { SESSION_COOKIE } from "./auth";
 
 declare module "hono" {
@@ -161,8 +162,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       if (platformToken) {
         const payload = await verifyJwt(platformToken, opts.managedAuthSecret);
         if (!payload || !payload.email) {
-          const loginUrl = opts.managedUrl ? `${opts.managedUrl}/login` : "/login";
-          return c.redirect(loginUrl);
+          return c.redirect(managedLoginHref(opts.managedUrl));
         }
 
         const user = await opts.findUserByEmail?.(payload.email);

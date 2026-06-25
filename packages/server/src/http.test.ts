@@ -154,6 +154,22 @@ describe("managed login redirect", () => {
     expect(res.headers.get("location")).toBe("https://app.getsketch.ai/login");
   });
 
+  it("preserves integration setup links when redirecting to managed login", async () => {
+    const app = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://app.getsketch.ai/platform/",
+        MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
+      }),
+    );
+
+    const res = await app.request("/integrations?connect=github");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      `https://app.getsketch.ai/platform/login?return_to=${encodeURIComponent("/integrations?connect=github")}`,
+    );
+  });
+
   it("does not affect API routes", async () => {
     const app = createApp(
       db,
@@ -191,6 +207,52 @@ describe("managed login redirect", () => {
 
     expect([200, 404]).toContain(res.status);
     expect(res.status).not.toBe(302);
+  });
+});
+
+describe("magic link return_to", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedAdmin(db);
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {}
+  });
+
+  it("preserves a safe integrations return path through verification", async () => {
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const app = createApp(db, createTestConfig({ BASE_URL: "https://sketch.test" }), {
+      logger: logger as never,
+    });
+    const returnTo = "/integrations?connect=github";
+
+    const requestRes = await app.request("/api/auth/magic-link", {
+      method: "POST",
+      body: JSON.stringify({ email: "admin@test.com", returnTo }),
+    });
+    expect(requestRes.status).toBe(200);
+
+    const magicLinkUrl = logger.info.mock.calls
+      .map(([data]) => (data as { magicLinkUrl?: string }).magicLinkUrl)
+      .find(Boolean);
+    expect(magicLinkUrl).toBeDefined();
+
+    const url = new URL(magicLinkUrl as string);
+    expect(url.searchParams.get("return_to")).toBe(returnTo);
+
+    const verifyRes = await app.request(`${url.pathname}${url.search}`);
+    expect(verifyRes.status).toBe(302);
+    expect(verifyRes.headers.get("location")).toBe(returnTo);
   });
 });
 

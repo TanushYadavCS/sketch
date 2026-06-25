@@ -16,6 +16,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
@@ -85,14 +86,16 @@ function badRequest(code: string, message: string) {
   return { error: { code, message } };
 }
 
-function runResultBody(result: RunAgentResult, extra: Record<string, unknown>) {
+function runResultBody(result: RunAgentResult, extra: Record<string, unknown>, displayText?: string | null) {
   return {
     ok: true,
     status: "completed",
     messageSent: result.messageSent,
     sessionId: result.sessionId,
     finalText: result.trace.finalText,
+    displayText: displayText ?? result.trace.finalText,
     pendingUploads: result.pendingUploads,
+    pendingIntegrationConnections: result.pendingIntegrationConnections ?? [],
     usage: {
       costUsd: result.costUsd,
       auxCostUsd: result.auxCostUsd,
@@ -252,20 +255,30 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             },
           } as RunAgentParams);
 
-          if (parsed.data.deliveryMode === "target" && result.trace.finalText && deps.sendDm) {
+          const finalText = appendIntegrationConnectionLinks(
+            result.trace.finalText,
+            result.pendingIntegrationConnections,
+            parsed.data.target.platform,
+            toolConfig,
+          );
+          if (parsed.data.deliveryMode === "target" && finalText && deps.sendDm) {
             delivery.response = await deps.sendDm({
               userId: target.id,
               platform: parsed.data.target.platform,
-              message: result.trace.finalText,
+              message: finalText,
             });
           }
 
           await writeEvent(
             "completed",
-            runResultBody(result, {
-              target: { type: "user", userId: target.id, platform: parsed.data.target.platform },
-              delivery,
-            }),
+            runResultBody(
+              result,
+              {
+                target: { type: "user", userId: target.id, platform: parsed.data.target.platform },
+                delivery,
+              },
+              finalText,
+            ),
           );
           return;
         }
@@ -351,9 +364,15 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             },
           } as RunAgentParams);
 
-          if (parsed.data.deliveryMode === "target" && threadId && result.trace.finalText) {
+          const finalText = appendIntegrationConnectionLinks(
+            result.trace.finalText,
+            result.pendingIntegrationConnections,
+            "slack",
+            toolConfig,
+          );
+          if (parsed.data.deliveryMode === "target" && threadId && finalText) {
             const onFinalMessage = createSlackMessageHandler(slack, parsed.data.target.channelId, threadId);
-            await onFinalMessage(result.trace.finalText);
+            await onFinalMessage(finalText);
           }
           if (parsed.data.deliveryMode === "target" && threadId) {
             for (const filePath of result.pendingUploads) {
@@ -363,10 +382,14 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
           await writeEvent(
             "completed",
-            runResultBody(result, {
-              target: { type: "slack_channel", channelId: parsed.data.target.channelId },
-              delivery,
-            }),
+            runResultBody(
+              result,
+              {
+                target: { type: "slack_channel", channelId: parsed.data.target.channelId },
+                delivery,
+              },
+              finalText,
+            ),
           );
           return;
         }
@@ -418,9 +441,15 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           },
         } as RunAgentParams);
 
-        if (parsed.data.deliveryMode === "target" && result.trace.finalText) {
+        const finalText = appendIntegrationConnectionLinks(
+          result.trace.finalText,
+          result.pendingIntegrationConnections,
+          "whatsapp",
+          toolConfig,
+        );
+        if (parsed.data.deliveryMode === "target" && finalText) {
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid);
-          await onFinalMessage(result.trace.finalText);
+          await onFinalMessage(finalText);
         }
         if (parsed.data.deliveryMode === "target") {
           for (const filePath of result.pendingUploads) {
@@ -431,10 +460,14 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
 
         await writeEvent(
           "completed",
-          runResultBody(result, {
-            target: { type: "whatsapp_group", groupJid },
-            delivery,
-          }),
+          runResultBody(
+            result,
+            {
+              target: { type: "whatsapp_group", groupJid },
+              delivery,
+            },
+            finalText,
+          ),
         );
       } catch (err) {
         if (abortController.signal.aborted || stream.aborted) return;

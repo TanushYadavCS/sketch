@@ -11,6 +11,7 @@ import { type createSettingsRepository, parseOrgContext } from "../db/repositori
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
@@ -92,6 +93,13 @@ function pendingUploadsFromAgentResult(result: unknown): string[] {
   return (result as { pendingUploads?: string[] }).pendingUploads ?? [];
 }
 
+function pendingIntegrationConnectionsFromAgentResult(result: unknown) {
+  if (!result || typeof result !== "object") return [];
+  if (!("pendingIntegrationConnections" in result)) return [];
+  return (result as { pendingIntegrationConnections?: Parameters<typeof appendIntegrationConnectionLinks>[1] })
+    .pendingIntegrationConnections;
+}
+
 function providerTimestampFromWhatsApp(message: { messageTimestamp?: unknown } | null | undefined): string | null {
   const seconds = Number(message?.messageTimestamp);
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
@@ -144,12 +152,17 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
   }
 
   async function deliverResult(delivery: LocalClaudeEventDelivery, result: unknown, botName?: string | null) {
-    const finalText = finalTextFromAgentResult(result);
     const pendingUploads = pendingUploadsFromAgentResult(result);
     const target = delivery.session.origin_delivery_target;
     const originPlatform = platform(delivery.session.origin_platform);
     const conversationId = delivery.session.origin_conversation_id;
     if (!originPlatform || !target) return;
+    const finalText = appendIntegrationConnectionLinks(
+      finalTextFromAgentResult(result),
+      pendingIntegrationConnectionsFromAgentResult(result),
+      originPlatform,
+      { BASE_URL: deps.config.BASE_URL, PORT: deps.config.PORT },
+    );
 
     if (originPlatform === "slack") {
       const slack = deps.getSlack?.();

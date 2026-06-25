@@ -160,6 +160,7 @@ function makeAgentResult(overrides: Record<string, unknown> = {}) {
     fileSizes: [],
     promptMode: "text",
     toolCalls: [],
+    pendingIntegrationConnections: [],
     trace: { progressEvents: [], finalText: "hello back" },
     ...overrides,
   };
@@ -353,6 +354,75 @@ describe("slack/adapter", () => {
           text: "hello back",
         }),
       );
+    });
+
+    it("appends an integration connection link to DM replies", async () => {
+      const deps = makeDeps({
+        config: createTestConfig({
+          DATA_DIR: "/tmp/test-data",
+          PORT: 0,
+          LOG_LEVEL: "error",
+          BASE_URL: "https://sketch.test",
+        }),
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: { progressEvents: [], finalText: "GitHub needs connection" },
+            pendingIntegrationConnections: [
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
+            ],
+          }),
+        ),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "create issue", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      const expected =
+        "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>";
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", expected);
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expected }));
+    });
+
+    it("sends a DM connection link even when the agent has no final text", async () => {
+      const deps = makeDeps({
+        config: createTestConfig({
+          DATA_DIR: "/tmp/test-data",
+          PORT: 0,
+          LOG_LEVEL: "error",
+          BASE_URL: "https://sketch.test",
+        }),
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: { progressEvents: [], finalText: null },
+            pendingIntegrationConnections: [
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
+            ],
+          }),
+        ),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "create issue", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      const expected = "To continue: <https://sketch.test/integrations?connect=github|Connect GitHub>";
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", expected);
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalledWith("D1", "_No response_");
     });
 
     it("replies with an identity-mapping error when Slack resolution conflicts", async () => {
@@ -849,6 +919,42 @@ describe("slack/adapter", () => {
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("<channel>");
       expect(agentCall.userMessage).toContain("name: #general");
+    });
+
+    it("appends an integration connection link to channel mention replies", async () => {
+      const deps = makeDeps({
+        config: createTestConfig({
+          DATA_DIR: "/tmp/test-data",
+          PORT: 0,
+          LOG_LEVEL: "error",
+          BASE_URL: "https://sketch.test",
+        }),
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            trace: { progressEvents: [], finalText: "GitHub needs connection" },
+            pendingIntegrationConnections: [
+              {
+                requestId: "req-1",
+                appId: "github",
+                appName: "GitHub",
+                state: "connect",
+                connectUrl: "https://canvas.example.com/connect/secrets?token=github",
+              },
+            ],
+          }),
+        ),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "create issue", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith(
+        "C1",
+        "1",
+        "GitHub needs connection\n\nTo continue: <https://sketch.test/integrations?connect=github|Connect GitHub>",
+      );
     });
 
     it("reuses existing channel", async () => {

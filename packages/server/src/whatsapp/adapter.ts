@@ -40,6 +40,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -528,9 +529,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
-          const finalText = appendAutomationBuilderLinks(
-            result.trace.finalText,
-            result.trace.automationArtifacts ?? [],
+          const finalText = appendIntegrationConnectionLinks(
+            appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+            result.pendingIntegrationConnections,
+            "whatsapp",
+            toolConfig,
           );
           if (finalText) {
             const sent = await onFinalMessage(finalText);
@@ -830,9 +833,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
-        const finalText = user
+        const textWithAutomationLinks = user
           ? appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? [])
           : result.trace.finalText;
+        const finalText = appendIntegrationConnectionLinks(
+          textWithAutomationLinks,
+          result.pendingIntegrationConnections,
+          "whatsapp",
+          toolConfig,
+        );
         if (finalText) {
           const sent = await onFinalMessage(finalText);
           await captureBotReply({
