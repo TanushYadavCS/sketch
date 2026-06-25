@@ -17,7 +17,11 @@ import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 import { extractEntities, handleCandidates, smartEnrichFile } from "./smart-enrichment";
 
-async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
+async function seedFile(
+  db: Kysely<DB>,
+  fileId: string,
+  opts: { content?: string; contentHash?: string | null } = {},
+): Promise<void> {
   await db
     .insertInto("connector_configs")
     .values({
@@ -42,7 +46,8 @@ async function seedFile(db: Kysely<DB>, fileId: string): Promise<void> {
       source: "google_drive",
       source_path: "/",
       provider_url: null,
-      content: "hello",
+      content: opts.content ?? "hello",
+      content_hash: opts.contentHash ?? null,
       summary: null,
       context_note: null,
       access_scope_id: null,
@@ -195,8 +200,8 @@ describe("smartEnrichFile — LLM extraction facts", () => {
   it("persists LLM facts on first sighting, defers materialization, and promotes once threshold reached", async () => {
     const firstFileId = randomUUID();
     const secondFileId = randomUUID();
-    await seedFile(db, firstFileId);
-    await seedFile(db, secondFileId);
+    await seedFile(db, firstFileId, { content: "Jane Doe discussed the launch plan.", contentHash: "hash-1" });
+    await seedFile(db, secondFileId, { content: "Jane Doe discussed the launch plan.", contentHash: "hash-2" });
     const generator = {
       generate: async () => "Jane Doe discussed the launch plan.",
       generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
@@ -262,7 +267,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
 
   it("persists high-confidence relation facts and drops low-confidence relation outputs", async () => {
     const fileId = randomUUID();
-    await seedFile(db, fileId);
+    await seedFile(db, fileId, { content: "Sarah Chen leads Project Atlas.", contentHash: "hash-relations" });
     await createEntityRepository(db).upsertEntityFromTool({
       name: "Project Atlas",
       sourceType: "project",
@@ -424,9 +429,428 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     expect(facts.map((f) => f.subject_name).sort()).toEqual(["Acme Corp", "Apollo", "Sarah Chen"]);
   });
 
+  it("tombstones LLM facts written before a stale reconcile abort", async () => {
+    const fileId = randomUUID();
+    const content = "Sarah Chen owns the launch plan.";
+    await seedFile(db, fileId, { content });
+    const stale = new Error("file changed");
+    stale.name = "StaleEnrichmentError";
+    let freshnessChecks = 0;
+    const generator = {
+      generate: async () => {
+        throw new Error("summary should not be generated");
+      },
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await expect(
+      smartEnrichFile(
+        {
+          db,
+          logger: createTestLogger(),
+          generator,
+          embeddingProvider: null,
+          ensureFresh: async () => {
+            freshnessChecks += 1;
+            if (freshnessChecks === 3) throw stale;
+          },
+        },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content,
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: null,
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("file changed");
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "deleted_at"])
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ fact_type: "llm_extracted" });
+    expect(facts[0].deleted_at).not.toBeNull();
+  });
+
+  it("tombstones LLM facts written before a post-reconcile freshness abort", async () => {
+    const fileId = randomUUID();
+    const content = "Sarah Chen owns the launch plan.";
+    await seedFile(db, fileId, { content });
+    const stale = new Error("file changed");
+    stale.name = "StaleEnrichmentError";
+    let freshnessChecks = 0;
+    const generator = {
+      generate: async () => {
+        throw new Error("summary should not be generated");
+      },
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await expect(
+      smartEnrichFile(
+        {
+          db,
+          logger: createTestLogger(),
+          generator,
+          embeddingProvider: null,
+          ensureFresh: async () => {
+            freshnessChecks += 1;
+            if (freshnessChecks === 6) throw stale;
+          },
+        },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content,
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: null,
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("file changed");
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "deleted_at"])
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select("id")
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ fact_type: "llm_extracted" });
+    expect(facts[0].deleted_at).not.toBeNull();
+    expect(mentions).toHaveLength(0);
+  });
+
+  it("tombstones materialized LLM facts written before a late summary freshness abort", async () => {
+    const firstFileId = randomUUID();
+    const staleFileId = randomUUID();
+    const content = "Sarah Chen owns the launch plan.";
+    await seedFile(db, firstFileId, { content, contentHash: "hash-first" });
+    await seedFile(db, staleFileId, { content, contentHash: "hash-stale" });
+    const stale = new Error("file changed");
+    stale.name = "StaleEnrichmentError";
+    let freshnessChecks = 0;
+    let staleFactWasMaterialized = false;
+    let staleMentionWasCreated = false;
+    const generator = {
+      generate: async () => "Sarah Chen owns the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+    const fileBody = (id: string, hash: string) => ({
+      id,
+      fileName: `${id}.txt`,
+      content,
+      contentCategory: "document",
+      source: "google_drive",
+      sourcePath: "/",
+      contentHash: hash,
+      connectorConfigId: "conn-smart",
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      fileBody(firstFileId, "hash-first"),
+    );
+
+    await expect(
+      smartEnrichFile(
+        {
+          db,
+          logger: createTestLogger(),
+          generator,
+          embeddingProvider: null,
+          ensureFresh: async () => {
+            freshnessChecks += 1;
+            if (freshnessChecks === 7) {
+              const fact = await db
+                .selectFrom("indexed_file_facts")
+                .select("materialized_at")
+                .where("indexed_file_id", "=", staleFileId)
+                .where("source", "=", "llm_extraction")
+                .executeTakeFirst();
+              const mentions = await db
+                .selectFrom("entity_mentions")
+                .select("id")
+                .where("indexed_file_id", "=", staleFileId)
+                .where("source", "=", "llm_extraction")
+                .execute();
+              staleFactWasMaterialized = fact?.materialized_at != null;
+              staleMentionWasCreated = mentions.length > 0;
+              throw stale;
+            }
+          },
+        },
+        fileBody(staleFileId, "hash-stale"),
+      ),
+    ).rejects.toThrow("file changed");
+
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "deleted_at", "materialized_at"])
+      .where("indexed_file_id", "=", staleFileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    const mentions = await db
+      .selectFrom("entity_mentions")
+      .select("id")
+      .where("indexed_file_id", "=", staleFileId)
+      .where("source", "=", "llm_extraction")
+      .execute();
+    expect(staleFactWasMaterialized).toBe(true);
+    expect(staleMentionWasCreated).toBe(true);
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ fact_type: "llm_extracted", materialized_at: null });
+    expect(facts[0].deleted_at).not.toBeNull();
+    expect(mentions).toHaveLength(0);
+  });
+
+  it("rethrows stale freshness errors from summary embedding before writing learned facts", async () => {
+    const fileId = randomUUID();
+    const content = "Sarah Chen owns the launch plan.";
+    await seedFile(db, fileId, { content });
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "google_drive",
+      sourceId: "person:sarah-chen",
+    });
+    const stale = new Error("file changed");
+    stale.name = "StaleEnrichmentError";
+    let freshnessChecks = 0;
+    let embeddedSummary = false;
+    const generator = {
+      generate: async () => "Sarah Chen owns the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+          } as T;
+        }
+        if (opts?.label?.startsWith("extractEntityFacts")) {
+          return { [entity.id]: [{ fact: "Owns the launch plan" }] } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+    const embeddingProvider = {
+      name: "test",
+      dimensions: 3,
+      supportsImages: false,
+      embedTexts: async () => {
+        embeddedSummary = true;
+        return [[0.1, 0.2, 0.3]];
+      },
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      smartEnrichFile(
+        {
+          db,
+          logger: createTestLogger(),
+          generator,
+          embeddingProvider,
+          ensureFresh: async () => {
+            freshnessChecks += 1;
+            if (embeddedSummary) throw stale;
+          },
+        },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content,
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: null,
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("file changed");
+
+    expect(freshnessChecks).toBeGreaterThan(0);
+    const refreshed = await db
+      .selectFrom("entities")
+      .select("metadata")
+      .where("id", "=", entity.id)
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(refreshed.metadata ?? "{}")).not.toHaveProperty("learned_facts");
+  });
+
+  it("does not write summary embeddings when the file changes after embedding", async () => {
+    const fileId = randomUUID();
+    const content = "Sarah Chen owns the launch plan.";
+    await seedFile(db, fileId, { content });
+    const generator = {
+      generate: async () => "Sarah Chen owns the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return { mentions: [] } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+    let embeddedSummary = false;
+    const embeddingProvider = {
+      name: "test",
+      dimensions: 3,
+      supportsImages: false,
+      embedTexts: async () => {
+        embeddedSummary = true;
+        await db.updateTable("indexed_files").set({ content: "new source content" }).where("id", "=", fileId).execute();
+        return [[0.1, 0.2, 0.3]];
+      },
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      smartEnrichFile(
+        {
+          db,
+          logger: createTestLogger(),
+          generator,
+          embeddingProvider,
+          ensureFresh: async () => {},
+        },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content,
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: null,
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("Stale smart enrichment result");
+
+    expect(embeddedSummary).toBe(true);
+  });
+
+  it("does not append learned facts when the file changes before the metadata write", async () => {
+    const fileId = randomUUID();
+    const content = "Sarah Chen owns the launch plan.";
+    await seedFile(db, fileId, { content });
+    const entity = await createEntityRepository(db).upsertEntityFromTool({
+      name: "Sarah Chen",
+      sourceType: "person",
+      source: "google_drive",
+      sourceId: "person:sarah-chen-race",
+    });
+    let mutated = false;
+    const generator = {
+      generate: async () => "Sarah Chen owns the launch plan.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+          } as T;
+        }
+        if (opts?.label?.startsWith("extractEntityFacts")) {
+          return { [entity.id]: [{ fact: "Owns the launch plan" }] } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await expect(
+      smartEnrichFile(
+        {
+          db,
+          logger: createTestLogger(),
+          generator,
+          embeddingProvider: null,
+          ensureFresh: async () => {
+            const row = await db
+              .selectFrom("indexed_files")
+              .select("summary_status")
+              .where("id", "=", fileId)
+              .executeTakeFirstOrThrow();
+            if (row.summary_status === "done" && !mutated) {
+              mutated = true;
+              await db
+                .updateTable("indexed_files")
+                .set({ content: "new source content" })
+                .where("id", "=", fileId)
+                .execute();
+            }
+          },
+        },
+        {
+          id: fileId,
+          fileName: `${fileId}.txt`,
+          content,
+          contentCategory: "document",
+          source: "google_drive",
+          sourcePath: "/",
+          contentHash: null,
+          connectorConfigId: "conn-smart",
+          sourceCreatedAt: null,
+          sourceUpdatedAt: null,
+        },
+      ),
+    ).rejects.toThrow("Stale smart enrichment result");
+
+    expect(mutated).toBe(true);
+    const refreshed = await db
+      .selectFrom("entities")
+      .select("metadata")
+      .where("id", "=", entity.id)
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(refreshed.metadata ?? "{}")).not.toHaveProperty("learned_facts");
+  });
+
   it("persists and materializes engaged_with (person -> company) via v3 prompt", async () => {
     const fileId = randomUUID();
-    await seedFile(db, fileId);
+    await seedFile(db, fileId, {
+      content: "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
+      contentHash: "hash-engaged-with",
+    });
     const generator = {
       generate: async () => "Vedant Parikh kicked off the Oliver Wyman engagement this quarter.",
       generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
@@ -542,7 +966,10 @@ describe("extractEntities prompt — v6 entity type removal", () => {
 
   it("ignores feature mentions and feature endpoint relations emitted by the model", async () => {
     const fileId = randomUUID();
-    await seedFile(db, fileId);
+    await seedFile(db, fileId, {
+      content: "OW Tourism Dashboard is the umbrella; Aviation Edge scraper is part of it.",
+      contentHash: "hash-feature-partof",
+    });
     const generator = {
       generate: async () => "OW Tourism Dashboard is the umbrella; Aviation Edge scraper is part of it.",
       generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {

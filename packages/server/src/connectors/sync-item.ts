@@ -10,7 +10,14 @@ type ConnectorRepository = ReturnType<typeof createConnectorRepository>;
 
 export type ExistingContentHashMap = Map<
   string,
-  { id: string; contentHash: string | null; contentCategory: string; rollupGroupId: string | null }
+  {
+    id: string;
+    contentHash: string | null;
+    contentCategory: string;
+    content: string | null;
+    sourceUpdatedAt: string | null;
+    rollupGroupId: string | null;
+  }
 >;
 
 export type ProcessSyncedItemResult =
@@ -42,8 +49,10 @@ export async function loadExistingContentHashes(
       "connector_config_id",
       "provider_file_id",
       "provider_message_id",
+      "content",
       "content_hash",
       "content_category",
+      "source_updated_at",
       "rollup_group_id",
     ])
     .where("source", "=", connectorType)
@@ -61,6 +70,8 @@ export async function loadExistingContentHashes(
         id: f.id,
         contentHash: f.content_hash,
         contentCategory: f.content_category,
+        content: f.content,
+        sourceUpdatedAt: f.source_updated_at,
         rollupGroupId: f.rollup_group_id,
       });
     }
@@ -89,16 +100,29 @@ export async function processSyncedItem({
 
   const existing = existingHashes.get(syncIdentityKey(getSyncIdentityForItem(item, connectorConfigId, connectorType)));
   const rollupGroupIds = uniqueRollupGroupIds([existing?.rollupGroupId, item.rollupGroupId ?? null]);
-  if (existing && existing.contentHash === item.contentHash && existing.contentCategory === item.contentCategory) {
-    const sourceCreatedAt =
-      item.sourceCreatedAt === null || item.sourceCreatedAt === undefined
-        ? undefined
-        : normalizeSourceTimestampForStorage(item.sourceCreatedAt);
-    const sourceUpdatedAt =
-      item.sourceUpdatedAt === null || item.sourceUpdatedAt === undefined
-        ? undefined
-        : normalizeSourceTimestampForStorage(item.sourceUpdatedAt);
+  const sourceCreatedAt =
+    item.sourceCreatedAt === null || item.sourceCreatedAt === undefined
+      ? undefined
+      : normalizeSourceTimestampForStorage(item.sourceCreatedAt);
+  const sourceUpdatedAt =
+    item.sourceUpdatedAt === null || item.sourceUpdatedAt === undefined
+      ? undefined
+      : normalizeSourceTimestampForStorage(item.sourceUpdatedAt);
+  const hashlessSourceVersionChanged =
+    existing !== undefined &&
+    existing.contentHash === null &&
+    item.contentHash === null &&
+    existing.content === null &&
+    item.content === null &&
+    sourceUpdatedAt !== undefined &&
+    sourceUpdatedAt !== existing.sourceUpdatedAt;
 
+  if (
+    existing &&
+    existing.contentHash === item.contentHash &&
+    existing.contentCategory === item.contentCategory &&
+    !hashlessSourceVersionChanged
+  ) {
     await db
       .updateTable("indexed_files")
       .set({
@@ -145,7 +169,7 @@ export async function processSyncedItem({
       rollupGroupId: item.rollupGroupId ?? null,
     });
 
-    if (upsertResult.contentChanged || upsertResult.categoryChanged) {
+    if (upsertResult.contentChanged || upsertResult.categoryChanged || upsertResult.sourceVersionChanged) {
       await clearEnrichmentData(trx, upsertResult.id);
     }
 

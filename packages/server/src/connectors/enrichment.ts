@@ -31,8 +31,10 @@ import { buildParticipantBlock } from "./participant-block";
 import { smartEnrichFile } from "./smart-enrichment";
 import { extractDatesFromText } from "./tagging";
 
-/** Max files to enrich per run. Set high — enrichment is now deterministic (no LLM costs). */
+/** Max files to enrich for explicit/manual runs. */
 export const MAX_FILES_PER_RUN = 5000;
+export const SCHEDULED_ENRICHMENT_MAX_FILES_PER_RUN = 50;
+export const SCHEDULED_ENRICHMENT_TIME_BUDGET_MS = 5 * 60 * 1000;
 
 /** Minimum entity name length for substring matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
@@ -47,15 +49,39 @@ const ENRICHMENT_BACKOFF_MS = [
   24 * 60 * 60 * 1000,
 ] as const;
 
-let enrichmentActive = false;
+let activeEnrichmentRuns = 0;
 export function isEnrichmentActive(): boolean {
-  return enrichmentActive;
+  return activeEnrichmentRuns > 0;
+}
+
+class StaleEnrichmentError extends Error {
+  constructor(readonly fileId: string) {
+    super(`Stale enrichment result for file ${fileId}`);
+    this.name = "StaleEnrichmentError";
+  }
 }
 
 type DeterministicEntity = {
   id: string;
   name: string;
   aliases: string | null;
+};
+
+type FileContentVersion = {
+  contentHash: string | null;
+  contentCategory: string;
+  content: string | null;
+  sourceUpdatedAt: string | null;
+};
+
+type ContentVersionGuardable<T> = {
+  where(column: "content_category", op: "=", value: string): T;
+  where(column: "content_hash", op: "=", value: string): T;
+  where(column: "content_hash", op: "is", value: null): T;
+  where(column: "content", op: "=", value: string): T;
+  where(column: "content", op: "is", value: null): T;
+  where(column: "source_updated_at", op: "=", value: string): T;
+  where(column: "source_updated_at", op: "is", value: null): T;
 };
 
 function parseStringArray(raw: string | null): string[] {
@@ -83,30 +109,120 @@ function nextRetryAt(attempts: number): string {
   return new Date(Date.now() + ENRICHMENT_BACKOFF_MS[index]).toISOString();
 }
 
-async function markSummaryFailure(db: Kysely<DB>, fileId: string, currentAttempts: number): Promise<void> {
+function noRowsUpdated(result: { numUpdatedRows?: bigint | number }): boolean {
+  const count = result.numUpdatedRows ?? 0;
+  return typeof count === "bigint" ? count === BigInt(0) : count === 0;
+}
+
+function assertFreshUpdate(result: { numUpdatedRows?: bigint | number }, fileId: string): void {
+  if (noRowsUpdated(result)) throw new StaleEnrichmentError(fileId);
+}
+
+function contentVersionOf(file: {
+  content_hash: string | null;
+  content_category: string;
+  content: string | null;
+  source_updated_at: string | null;
+}): FileContentVersion {
+  return {
+    contentHash: file.content_hash,
+    contentCategory: file.content_category,
+    content: file.content,
+    sourceUpdatedAt: file.source_updated_at,
+  };
+}
+
+function contentVersionMatches(row: FileContentVersion | undefined, version: FileContentVersion): boolean {
+  if (!row) return false;
+  if (row.contentCategory !== version.contentCategory) return false;
+  if (row.contentHash !== version.contentHash) return false;
+  if (version.contentHash !== null) return true;
+  if (row.content !== version.content) return false;
+  return version.content !== null || row.sourceUpdatedAt === version.sourceUpdatedAt;
+}
+
+async function ensureFileFresh(db: Kysely<DB>, fileId: string, version: FileContentVersion): Promise<void> {
+  const row = await db
+    .selectFrom("indexed_files")
+    .select([
+      "content_hash as contentHash",
+      "content_category as contentCategory",
+      "content",
+      "source_updated_at as sourceUpdatedAt",
+    ])
+    .where("id", "=", fileId)
+    .executeTakeFirst();
+  if (!contentVersionMatches(row, version)) throw new StaleEnrichmentError(fileId);
+}
+
+function applyContentVersionWhere<T extends ContentVersionGuardable<T>>(query: T, version: FileContentVersion): T {
+  let guarded = query.where("content_category", "=", version.contentCategory);
+  if (version.contentHash === null) {
+    guarded = guarded.where("content_hash", "is", null);
+    if (version.content !== null) return guarded.where("content", "=", version.content);
+    guarded = guarded.where("content", "is", null);
+    return version.sourceUpdatedAt === null
+      ? guarded.where("source_updated_at", "is", null)
+      : guarded.where("source_updated_at", "=", version.sourceUpdatedAt);
+  }
+  return guarded.where("content_hash", "=", version.contentHash);
+}
+
+async function withFreshFileWriteLock<T>(
+  db: Kysely<DB>,
+  fileId: string,
+  version: FileContentVersion,
+  write: (trx: Kysely<DB>) => Promise<T>,
+): Promise<T> {
+  return db.transaction().execute(async (trx) => {
+    const lockQuery = trx
+      .updateTable("indexed_files")
+      .set({ embedding_status: sql<string>`embedding_status` })
+      .where("id", "=", fileId);
+    const lockResult = await applyContentVersionWhere(lockQuery, version).executeTakeFirst();
+    assertFreshUpdate(lockResult, fileId);
+    return write(trx);
+  });
+}
+
+async function markSummaryFailure(
+  db: Kysely<DB>,
+  fileId: string,
+  currentAttempts: number,
+  version?: FileContentVersion,
+): Promise<void> {
   const attempts = currentAttempts + 1;
-  await db
+  let query = db
     .updateTable("indexed_files")
     .set({ summary_status: "failed", summary_attempts: attempts, summary_next_retry_at: nextRetryAt(attempts) })
-    .where("id", "=", fileId)
-    .execute();
+    .where("id", "=", fileId);
+  if (version) query = applyContentVersionWhere(query, version);
+  await query.execute();
 }
 
-async function resetSummaryRetry(db: Kysely<DB>, fileId: string): Promise<void> {
-  await db
+async function resetSummaryRetry(db: Kysely<DB>, fileId: string, version?: FileContentVersion): Promise<void> {
+  let query = db
     .updateTable("indexed_files")
     .set({ summary_attempts: 0, summary_next_retry_at: null })
-    .where("id", "=", fileId)
-    .execute();
+    .where("id", "=", fileId);
+  if (version) query = applyContentVersionWhere(query, version);
+  const result = await query.executeTakeFirst();
+  if (version) assertFreshUpdate(result, fileId);
 }
 
-async function markEmbeddingFailure(db: Kysely<DB>, fileId: string, currentAttempts: number): Promise<void> {
+async function markEmbeddingFailure(
+  db: Kysely<DB>,
+  fileId: string,
+  currentAttempts: number,
+  version?: FileContentVersion,
+): Promise<void> {
   const attempts = currentAttempts + 1;
-  await db
+  let query = db
     .updateTable("indexed_files")
     .set({ embedding_status: "failed", embedding_attempts: attempts, embedding_next_retry_at: nextRetryAt(attempts) })
-    .where("id", "=", fileId)
-    .execute();
+    .where("id", "=", fileId);
+  if (version) query = applyContentVersionWhere(query, version);
+  await query.execute();
 }
 
 export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
@@ -161,6 +277,9 @@ export interface EnrichmentDeps {
    * the per-file "Enrich File" debug endpoint; never set in bulk runs.
    */
   debugDumpDir?: string;
+  maxFilesPerRun?: number;
+  timeBudgetMs?: number;
+  now?: () => number;
 }
 
 export interface EnrichmentResult {
@@ -168,22 +287,27 @@ export interface EnrichmentResult {
   filesSkipped: number;
   filesFailed: number;
   errors: Array<{ fileId: string; error: string }>;
+  stoppedReason?: "time_budget" | "file_limit" | "cancelled";
 }
 
 /**
  * Run enrichment for pending files, or specific files if fileIds is set.
  */
 export async function runEnrichment(deps: EnrichmentDeps): Promise<EnrichmentResult> {
-  enrichmentActive = true;
+  activeEnrichmentRuns++;
   try {
     return await runEnrichmentInner(deps);
   } finally {
-    enrichmentActive = false;
+    activeEnrichmentRuns--;
   }
 }
 
 async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResult> {
   const { db, logger } = deps;
+  const nowMs = deps.now ?? Date.now;
+  const startedAtMs = nowMs();
+  const maxFilesPerRun = deps.maxFilesPerRun ?? MAX_FILES_PER_RUN;
+  const timeBudgetMs = deps.timeBudgetMs;
   const result: EnrichmentResult = {
     filesProcessed: 0,
     filesSkipped: 0,
@@ -253,6 +377,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "embedding_next_retry_at",
       "summary_attempts",
       "summary_next_retry_at",
+      "synced_at",
     ])
     .where("is_archived", "=", 0);
 
@@ -280,7 +405,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   const pendingFiles = await query
     .orderBy("source_created_at", "asc")
     .orderBy("id", "asc")
-    .limit(MAX_FILES_PER_RUN)
+    .limit(maxFilesPerRun)
     .execute();
 
   if (pendingFiles.length === 0) {
@@ -292,8 +417,25 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   deps.onProgress?.({ phase: "enrich", completed: 0, total: pendingFiles.length });
 
   for (let idx = 0; idx < pendingFiles.length; idx++) {
-    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    if (deps.shouldCancel?.()) {
+      result.stoppedReason = "cancelled";
+      throw new Error("Re-enrich stopped");
+    }
+    if (timeBudgetMs !== undefined && nowMs() - startedAtMs >= timeBudgetMs) {
+      result.stoppedReason = "time_budget";
+      logger.info(
+        {
+          processed: result.filesProcessed,
+          skipped: result.filesSkipped,
+          failed: result.filesFailed,
+          budgetMs: timeBudgetMs,
+        },
+        "Enrichment run stopped at time budget",
+      );
+      break;
+    }
     const file = pendingFiles[idx];
+    const fileVersion = contentVersionOf(file);
     const fileStart = Date.now();
     try {
       const isImage = file.mime_type?.startsWith("image/") || file.file_type === "image";
@@ -341,6 +483,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   knownEntities,
                   participantBlock,
                   debugDumpDir: deps.debugDumpDir,
+                  ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
                 },
                 {
                   id: file.id,
@@ -356,6 +499,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   sourceUpdatedAt: file.source_updated_at,
                 },
               );
+              await ensureFileFresh(db, file.id, fileVersion);
               const floor = await applyEngagementFloor(
                 { db, logger },
                 {
@@ -365,11 +509,13 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   contentHash: file.content_hash,
                 },
               );
+              await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger);
               }
-              await resetSummaryRetry(db, file.id);
+              await resetSummaryRetry(db, file.id, fileVersion);
             } catch (err) {
+              if (err instanceof StaleEnrichmentError) throw err;
               logger.warn(
                 {
                   err,
@@ -383,23 +529,25 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                 },
                 "Summary-only enrichment failed",
               );
-              await markSummaryFailure(db, file.id, Number(file.summary_attempts ?? 0));
+              await markSummaryFailure(db, file.id, Number(file.summary_attempts ?? 0), fileVersion);
               result.filesFailed++;
               continue;
             }
           } else {
-            await db
+            const skippedQuery = db
               .updateTable("indexed_files")
               .set({ summary_status: "skipped", summary_attempts: 0, summary_next_retry_at: null })
-              .where("id", "=", file.id)
-              .execute();
+              .where("id", "=", file.id);
+            const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
+            assertFreshUpdate(skippedResult, file.id);
           }
         } else {
-          await db
+          const skippedQuery = db
             .updateTable("indexed_files")
             .set({ summary_status: "skipped", summary_attempts: 0, summary_next_retry_at: null })
-            .where("id", "=", file.id)
-            .execute();
+            .where("id", "=", file.id);
+          const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
+          assertFreshUpdate(skippedResult, file.id);
         }
         result.filesProcessed++;
         if (isEmailMessage && file.thread_id) {
@@ -428,6 +576,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
         .set({ embedding_status: "processing" })
         .where("id", "=", file.id)
         .where("embedding_status", "in", claimableStatuses)
+        .where("synced_at", "=", file.synced_at)
         .executeTakeFirst();
       if (claimResult.numUpdatedRows === BigInt(0)) {
         result.filesSkipped++;
@@ -439,18 +588,22 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       } else if (file.content) {
         await enrichTextDocument(file as typeof file & { content: string }, isStructured, deps, threadContext);
       } else {
-        // No content and not an image — skip
-        await db.updateTable("indexed_files").set({ embedding_status: "skipped" }).where("id", "=", file.id).execute();
+        const skippedQuery = db
+          .updateTable("indexed_files")
+          .set({ embedding_status: "skipped" })
+          .where("id", "=", file.id);
+        const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
+        assertFreshUpdate(skippedResult, file.id);
         result.filesSkipped++;
         continue;
       }
 
-      // Mark as done
-      await db
+      const doneQuery = db
         .updateTable("indexed_files")
         .set({ embedding_status: "done", embedding_attempts: 0, embedding_next_retry_at: null })
-        .where("id", "=", file.id)
-        .execute();
+        .where("id", "=", file.id);
+      const doneResult = await applyContentVersionWhere(doneQuery, fileVersion).executeTakeFirst();
+      assertFreshUpdate(doneResult, file.id);
 
       result.filesProcessed++;
       if (isEmailMessage && file.thread_id) {
@@ -470,16 +623,25 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
         "Enriched file",
       );
     } catch (err) {
+      if (err instanceof StaleEnrichmentError) {
+        logger.info({ fileId: file.id, fileName: file.file_name }, "Skipped stale enrichment result");
+        result.filesSkipped++;
+        continue;
+      }
       const message = err instanceof Error ? err.message : String(err);
       logger.warn({ err, fileId: file.id, fileName: file.file_name }, "Enrichment failed for file");
       result.errors.push({ fileId: file.id, error: message });
       result.filesFailed++;
 
-      await markEmbeddingFailure(db, file.id, Number(file.embedding_attempts ?? 0));
+      await markEmbeddingFailure(db, file.id, Number(file.embedding_attempts ?? 0), fileVersion);
     } finally {
       deps.onProgress?.({ phase: "enrich", completed: idx + 1, total: pendingFiles.length });
       await yieldToEventLoop();
     }
+  }
+
+  if (!result.stoppedReason && pendingFiles.length >= maxFilesPerRun) {
+    result.stoppedReason = "file_limit";
   }
 
   logger.info(
@@ -487,6 +649,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       processed: result.filesProcessed,
       skipped: result.filesSkipped,
       failed: result.filesFailed,
+      stoppedReason: result.stoppedReason,
     },
     "Enrichment run complete",
   );
@@ -522,6 +685,7 @@ async function enrichTextDocument(
     source_path: string | null;
     source_created_at: string | null;
     source_updated_at: string | null;
+    synced_at: string;
     file_type: string | null;
     summary_status: string;
     summary_attempts: number;
@@ -531,44 +695,46 @@ async function enrichTextDocument(
   threadContext: string | null = null,
 ): Promise<void> {
   const { db, logger, embeddingProvider } = deps;
+  const fileVersion = contentVersionOf(file);
 
   // For structured data (CSV/sheets), only extract timeframes + link entities — no chunking, no embedding
   if (isStructured) {
     const timeframes = extractDatesFromText(file.content);
-    await clearFileTimeframes(db, file.id);
-    await storeTimeframes(db, file.id, timeframes);
+    await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+      await clearFileTimeframes(trx, file.id);
+      await storeTimeframes(trx, file.id, timeframes);
+    });
 
-    // Deterministic entity linking on structured content
-    await linkEntitiesDeterministic(db, file.id, file.content, []);
+    await linkEntitiesDeterministic(db, file.id, file.content, [], undefined, () =>
+      ensureFileFresh(db, file.id, fileVersion),
+    );
 
     logger.debug({ fileId: file.id, fileName: file.file_name }, "Structured file enriched (no chunking/embedding)");
     return;
   }
 
-  // 1. Chunk the content
   const chunks = chunkText(file.content);
-
-  // 2. Store chunks (batch insert)
-  await clearFileChunks(db, file.id);
-  if (chunks.length > 0) {
-    await db
-      .insertInto("document_chunks")
-      .values(
-        chunks.map((chunk) => ({
-          id: randomUUID(),
-          indexed_file_id: file.id,
-          chunk_index: chunk.index,
-          content: chunk.content,
-          token_count: chunk.tokenCount,
-        })),
-      )
-      .execute();
-  }
-
-  // 3. Deterministic timeframes
   const timeframes = extractDatesFromText(file.content);
-  await clearFileTimeframes(db, file.id);
-  await storeTimeframes(db, file.id, timeframes);
+
+  await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+    await clearFileChunks(trx, file.id);
+    if (chunks.length > 0) {
+      await trx
+        .insertInto("document_chunks")
+        .values(
+          chunks.map((chunk) => ({
+            id: randomUUID(),
+            indexed_file_id: file.id,
+            chunk_index: chunk.index,
+            content: chunk.content,
+            token_count: chunk.tokenCount,
+          })),
+        )
+        .execute();
+    }
+    await clearFileTimeframes(trx, file.id);
+    await storeTimeframes(trx, file.id, timeframes);
+  });
 
   // 4. Entity linking — AI-powered when Gemini available, deterministic fallback
   // Skip LLM calls for tiny documents (<100 words) — not enough content to extract meaningful entities/summaries
@@ -606,6 +772,7 @@ async function enrichTextDocument(
           knownEntities,
           participantBlock,
           debugDumpDir: deps.debugDumpDir,
+          ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
         },
         {
           id: file.id,
@@ -621,6 +788,7 @@ async function enrichTextDocument(
           sourceUpdatedAt: file.source_updated_at,
         },
       );
+      await ensureFileFresh(db, file.id, fileVersion);
       const floor = await applyEngagementFloor(
         { db, logger },
         {
@@ -630,21 +798,24 @@ async function enrichTextDocument(
           contentHash: file.content_hash,
         },
       );
+      await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger);
       }
-      await resetSummaryRetry(db, file.id);
+      await resetSummaryRetry(db, file.id, fileVersion);
       usedSmartEnrichment = true;
     } catch (err) {
+      if (err instanceof StaleEnrichmentError) throw err;
       smartEnrichmentFailed = true;
       logger.warn({ err, fileId: file.id }, "Smart enrichment failed, falling back to deterministic");
     }
   }
 
   if (!summaryAlreadyResolved && !usedSmartEnrichment) {
-    await linkEntitiesDeterministic(db, file.id, file.content, chunks);
-    // 'failed' = retryable (Gemini error), 'skipped' = intentional (no key or content too short)
-    await db
+    await linkEntitiesDeterministic(db, file.id, file.content, chunks, undefined, () =>
+      ensureFileFresh(db, file.id, fileVersion),
+    );
+    const summaryQuery = db
       .updateTable("indexed_files")
       .set(
         smartEnrichmentFailed
@@ -655,11 +826,11 @@ async function enrichTextDocument(
             }
           : { summary_status: "skipped", summary_attempts: 0, summary_next_retry_at: null },
       )
-      .where("id", "=", file.id)
-      .execute();
+      .where("id", "=", file.id);
+    const summaryResult = await applyContentVersionWhere(summaryQuery, fileVersion).executeTakeFirst();
+    assertFreshUpdate(summaryResult, file.id);
   }
 
-  // 5. Embed chunks (best-effort — entity linking still succeeds if embedding fails)
   if (embeddingProvider && chunks.length > 0) {
     const texts = chunks.map((c) => c.content);
     let embeddings: number[][];
@@ -671,30 +842,33 @@ async function enrichTextDocument(
     }
 
     try {
-      const storedChunks = await db
-        .selectFrom("document_chunks")
-        .select(["id", "chunk_index"])
-        .where("indexed_file_id", "=", file.id)
-        .orderBy("chunk_index", "asc")
-        .execute();
+      const embedded = await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+        const storedChunks = await trx
+          .selectFrom("document_chunks")
+          .select(["id", "chunk_index"])
+          .where("indexed_file_id", "=", file.id)
+          .orderBy("chunk_index", "asc")
+          .execute();
 
-      const isPostgres = isPg(db);
+        const isPostgres = isPg(trx);
 
-      const pairs = storedChunks
-        .map((chunk, i) => ({ chunk, embedding: embeddings[i] }))
-        .filter((p): p is { chunk: (typeof storedChunks)[number]; embedding: number[] } => !!p.embedding);
+        const pairs = storedChunks
+          .map((chunk, i) => ({ chunk, embedding: embeddings[i] }))
+          .filter((p): p is { chunk: (typeof storedChunks)[number]; embedding: number[] } => !!p.embedding);
 
-      await Promise.all(
-        pairs.map(({ chunk, embedding }) =>
-          isPostgres
-            ? sql`INSERT INTO chunk_embeddings (chunk_id, embedding)
-                  VALUES (${chunk.id}, ${JSON.stringify(embedding)}::vector)
-                  ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(db)
-            : sql`INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding)
-                  VALUES (${chunk.id}, ${JSON.stringify(embedding)})`.execute(db),
-        ),
-      );
-      logger.info({ fileId: file.id, chunks: pairs.length }, "Embeddings created");
+        await Promise.all(
+          pairs.map(({ chunk, embedding }) =>
+            isPostgres
+              ? sql`INSERT INTO chunk_embeddings (chunk_id, embedding)
+                    VALUES (${chunk.id}, ${JSON.stringify(embedding)}::vector)
+                    ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(trx)
+              : sql`INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding)
+                    VALUES (${chunk.id}, ${JSON.stringify(embedding)})`.execute(trx),
+          ),
+        );
+        return pairs.length;
+      });
+      logger.info({ fileId: file.id, chunks: embedded }, "Embeddings created");
     } catch (err) {
       logger.warn({ err, fileId: file.id }, "Embedding storage failed, entity linking still saved");
     }
@@ -708,42 +882,52 @@ async function enrichImage(
   file: {
     id: string;
     file_name: string;
+    content: string | null;
+    content_category: string;
+    content_hash: string | null;
     mime_type: string | null;
     provider_file_id: string;
     connector_config_id: string;
     source_path: string | null;
+    source_updated_at: string | null;
+    synced_at: string;
   },
   deps: EnrichmentDeps,
 ): Promise<void> {
   const { db, embeddingProvider, downloadImage } = deps;
+  const fileVersion = contentVersionOf(file);
 
   if (!embeddingProvider?.supportsImages || !embeddingProvider.embedImage) {
-    await db.updateTable("indexed_files").set({ embedding_status: "skipped" }).where("id", "=", file.id).execute();
+    const skippedQuery = db.updateTable("indexed_files").set({ embedding_status: "skipped" }).where("id", "=", file.id);
+    const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
+    assertFreshUpdate(skippedResult, file.id);
     return;
   }
 
   if (!downloadImage) {
-    await db.updateTable("indexed_files").set({ embedding_status: "skipped" }).where("id", "=", file.id).execute();
+    const skippedQuery = db.updateTable("indexed_files").set({ embedding_status: "skipped" }).where("id", "=", file.id);
+    const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
+    assertFreshUpdate(skippedResult, file.id);
     return;
   }
 
-  // Download image temporarily
+  await ensureFileFresh(db, file.id, fileVersion);
   const { buffer, mimeType } = await downloadImage(file.provider_file_id, file.connector_config_id);
 
-  // Embed
   const embedding = await embeddingProvider.embedImage(buffer, mimeType);
 
-  // Store embedding
-  const isPostgres = isPg(db);
-  if (isPostgres) {
-    await sql`INSERT INTO file_embeddings (indexed_file_id, embedding)
-      VALUES (${file.id}, ${JSON.stringify(embedding)}::vector)
-      ON CONFLICT (indexed_file_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(db);
-  } else {
-    await sql`INSERT OR REPLACE INTO file_embeddings (indexed_file_id, embedding) VALUES (${file.id}, ${JSON.stringify(embedding)})`.execute(
-      db,
-    );
-  }
+  await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+    const isPostgres = isPg(trx);
+    if (isPostgres) {
+      await sql`INSERT INTO file_embeddings (indexed_file_id, embedding)
+        VALUES (${file.id}, ${JSON.stringify(embedding)}::vector)
+        ON CONFLICT (indexed_file_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(trx);
+    } else {
+      await sql`INSERT OR REPLACE INTO file_embeddings (indexed_file_id, embedding) VALUES (${file.id}, ${JSON.stringify(embedding)})`.execute(
+        trx,
+      );
+    }
+  });
 
   // buffer is garbage collected — nothing stored on disk
 }
@@ -830,9 +1014,11 @@ async function linkEntitiesDeterministic(
   content: string,
   chunks: Chunk[],
   allEntities?: DeterministicEntity[],
+  ensureFresh?: () => Promise<void>,
 ): Promise<void> {
   const entityRepo = createEntityRepository(db);
 
+  await ensureFresh?.();
   await db
     .deleteFrom("entity_mentions")
     .where("indexed_file_id", "=", fileId)
@@ -863,10 +1049,10 @@ async function linkEntitiesDeterministic(
     });
 
     if (matchedName) {
-      // Find the best chunk for context snippet
       const nameLower = matchedName.toLowerCase();
       const chunkIndex = chunks.findIndex((c) => matchesAsWord(c.content.toLowerCase(), nameLower));
 
+      await ensureFresh?.();
       await entityRepo.createMention({
         entityId: entity.id,
         indexedFileId: fileId,

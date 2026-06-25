@@ -48,22 +48,52 @@ export function createEnrichmentGenerator(config: EnrichmentProviderConfig): Gem
   if (!primary) return fallback;
   if (!fallback) return primary;
 
+  let primaryDisabled = false;
+  let fallbackFailures = 0;
+  const maxFallbackFailures = 3;
+
+  async function runWithCircuit<T>(operation: string, primaryCall: () => Promise<T>, fallbackCall: () => Promise<T>) {
+    if (primaryDisabled) {
+      if (fallbackFailures >= maxFallbackFailures) {
+        throw new Error(`Enrichment providers circuit open for ${operation}`);
+      }
+      try {
+        return await fallbackCall();
+      } catch (err) {
+        fallbackFailures++;
+        throw err;
+      }
+    }
+
+    try {
+      return await primaryCall();
+    } catch (err) {
+      if (!isRetryableProviderError(err)) throw err;
+      primaryDisabled = true;
+      config.logger?.warn({ err, operation }, "Primary enrichment provider disabled for this run");
+      try {
+        return await fallbackCall();
+      } catch (fallbackErr) {
+        fallbackFailures++;
+        throw fallbackErr;
+      }
+    }
+  }
+
   return {
     generate(prompt, opts) {
-      return withProviderFallback({
-        operation: opts?.label ?? "generate",
-        primary: () => primary.generate(prompt, opts),
-        fallback: () => fallback.generate(prompt, opts),
-        logger: config.logger,
-      });
+      return runWithCircuit(
+        opts?.label ?? "generate",
+        () => primary.generate(prompt, opts),
+        () => fallback.generate(prompt, opts),
+      );
     },
     generateJSON(prompt, opts) {
-      return withProviderFallback({
-        operation: opts?.label ?? "generateJSON",
-        primary: () => primary.generateJSON(prompt, opts),
-        fallback: () => fallback.generateJSON(prompt, opts),
-        logger: config.logger,
-      });
+      return runWithCircuit(
+        opts?.label ?? "generateJSON",
+        () => primary.generateJSON(prompt, opts),
+        () => fallback.generateJSON(prompt, opts),
+      );
     },
   };
 }
