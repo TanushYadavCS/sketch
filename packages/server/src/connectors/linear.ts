@@ -15,6 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
+import { qualifyContainerName } from "./container-name";
 import type { Connector, ConnectorCredentials, EntitySeedCallback, OAuthCredentials, SyncedItem } from "./types";
 
 const LINEAR_API = "https://api.linear.app/graphql";
@@ -239,7 +240,13 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
       statusRaw: issue.state?.name,
       priority: issue.priorityLabel || PRIORITY_LABELS[issue.priority] || undefined,
       dueAt: issue.dueDate ?? undefined,
-      project: issue.project ? { name: issue.project.name, source: "linear", sourceId: issue.project.id } : undefined,
+      project: issue.project
+        ? {
+            name: qualifyContainerName(issue.project.name, issue.team?.name ?? null),
+            source: "linear",
+            sourceId: issue.project.id,
+          }
+        : undefined,
       assignee: issue.assignee
         ? {
             name: issue.assignee.displayName,
@@ -473,16 +480,19 @@ query TeamMembers($teamId: String!, $first: Int!, $after: String) {
  * entities inherit org-wide visibility until Linear connector hardening lands.
  */
 async function emitLinearProjectSeed(project: LinearProject, onEntitySeed: EntitySeedCallback): Promise<void> {
+  const teams = project.teams.nodes.map((team) => team.name);
+  const name = qualifyContainerName(project.name, teams.length === 1 ? teams[0] : null);
   await onEntitySeed({
-    name: project.name,
+    name,
     sourceType: "project",
     source: "linear",
     sourceId: project.id,
     sourceUrl: project.url,
+    aliases: name === project.name ? undefined : [project.name],
     metadata: {
       state: project.state,
       lead: project.lead?.displayName ?? null,
-      teams: project.teams.nodes.map((team) => team.name),
+      teams,
       startDate: project.startDate,
       targetDate: project.targetDate,
     },

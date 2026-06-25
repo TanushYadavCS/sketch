@@ -43,6 +43,7 @@ describe("entity review seed rows", () => {
 
     expect(renamed.row.id).toBe(first.row.id);
     expect(renamed.row.proposed_name).toBe("Ruler");
+    expect(renamed.row.normalized_name).toBe("ruler");
     expect(renamed.row.occurrence_count).toBe(first.row.occurrence_count + 1);
 
     const colliding = await repo.upsertSeedReviewRow({
@@ -56,7 +57,21 @@ describe("entity review seed rows", () => {
     });
 
     expect(colliding.row.id).not.toBe(first.row.id);
-    expect(colliding.row.normalized_name).toBe("sketch:linear:P2");
+    expect(colliding.row.normalized_name).toBe("sketch");
+
+    const renamedBack = await repo.upsertSeedReviewRow({
+      proposedName: "Sketch",
+      normalizedName: normalizeName("Sketch"),
+      entityType: "project",
+      seedSource: "linear",
+      seedSourceId: "P1",
+      candidateEntityId: null,
+      triggeredByUserId: USER_ID,
+    });
+
+    expect(renamedBack.row.id).toBe(first.row.id);
+    expect(renamedBack.row.proposed_name).toBe("Sketch");
+    expect(renamedBack.row.normalized_name).toBe("sketch:linear:P1");
 
     const rows = await db.selectFrom("entity_review_queue").selectAll().orderBy("id", "asc").execute();
     expect(rows).toHaveLength(2);

@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 110;
+const EXPECTED_MIGRATION_COUNT = 111;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -143,6 +143,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[107]).toBe("112-work-cycles");
     expect(names[108]).toBe("113-work-cycles-connector");
     expect(names[109]).toBe("114-work-cycles-connector-key");
+    expect(names[110]).toBe("115-container-name-qualification");
   });
 
   it("creates the task assignee_name column", async () => {

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 110;
+const EXPECTED_MIGRATION_COUNT = 111;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -166,6 +166,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[107]).toBe("112-work-cycles");
     expect(names[108]).toBe("113-work-cycles-connector");
     expect(names[109]).toBe("114-work-cycles-connector-key");
+    expect(names[110]).toBe("115-container-name-qualification");
   });
 
   it("creates the task assignee_name column", async () => {

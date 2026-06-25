@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { stripDomainSuffix, tokenizeName } from "./name-tokenize";
 
 export type CandidateValueKind = "name" | "alias";
 
@@ -52,12 +53,7 @@ export function normalizeStrict(name: string): string {
  * (`Sanaa` vs an unrelated `Sanaa`). The caller treats `""` as "no key".
  */
 export function normalizeTokenSet(name: string): string {
-  const tokens = stripDomainSuffix(name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
+  const tokens = tokenizeName(name);
   if (tokens.length < 2) return "";
   return tokens.sort().join(" ");
 }
@@ -310,8 +306,4 @@ function canCreateBlake2b64(): boolean {
   } catch {
     return false;
   }
-}
-
-function stripDomainSuffix(value: string): string {
-  return value.trim().replace(/\.(com|org|net|io|ai|co|in|dev|app)\b\.?$/i, "");
 }

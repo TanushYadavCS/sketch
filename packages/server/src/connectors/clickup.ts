@@ -14,6 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
+import { qualifyContainerName } from "./container-name";
 import {
   type HierarchyMapping,
   type HierarchyNode,
@@ -425,7 +426,7 @@ function taskToSyncedItem(
   const mappedProject = hierarchyMapping
     ? nearestMappedAncestor(rawHierarchyNodes, hierarchyMapping, ["project"])
     : undefined;
-  const taskProject = hierarchyMapping
+  const rawTaskProject = hierarchyMapping
     ? mappedProject
       ? { name: mappedProject.name, source: "clickup", sourceId: mappedProject.id }
       : undefined
@@ -434,6 +435,9 @@ function taskToSyncedItem(
       : listProjectParent
         ? { name: listProjectParent.name, source: "clickup", sourceId: listProjectParent.id }
         : undefined;
+  const taskProject = rawTaskProject
+    ? { ...rawTaskProject, name: qualifyContainerName(rawTaskProject.name, spaceName) }
+    : undefined;
   const primaryAssignee = task.assignees.find((assignee) => assignee.username);
   const syncedTask: NonNullable<SyncedItem["task"]> = {
     sourceTaskId: task.id,
@@ -485,11 +489,13 @@ function clickupProjectSeed(params: {
   spaceName: string;
   spaceId: string;
 }): EntitySeed {
+  const name = qualifyContainerName(params.node.name, params.spaceName);
   return {
-    name: params.node.name,
+    name,
     sourceType: "project",
     source: "clickup",
     sourceId: params.node.id,
+    aliases: name === params.node.name ? undefined : [params.node.name],
     metadata: {
       workspaceName: params.workspaceName,
       workspaceId: params.workspaceId,
@@ -511,11 +517,16 @@ function clickupHierarchySeed(params: {
   parentPath?: string[];
 }): EntitySeed {
   const path = [...(params.parentPath ?? []), params.node.name].join(" / ");
+  const name =
+    params.sourceType === "project"
+      ? qualifyContainerName(params.node.name, params.spaceName ?? null)
+      : params.node.name;
   return {
-    name: params.node.name,
+    name,
     sourceType: params.sourceType,
     source: "clickup",
     sourceId: params.node.id,
+    aliases: name === params.node.name ? undefined : [params.node.name],
     metadata: {
       levelKey: params.levelKey,
       workspaceName: params.workspaceName,

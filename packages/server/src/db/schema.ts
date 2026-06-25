@@ -806,6 +806,7 @@ export interface EntityReviewQueueTable {
   resolved_entity_id: string | null;
   seed_source: string | null;
   seed_source_id: string | null;
+  seed_aliases: string | null;
 }
 
 export interface EntityReviewEvidenceTable {

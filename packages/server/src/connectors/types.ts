@@ -186,6 +186,7 @@ export interface EntitySeed {
   source: string;
   sourceId: string;
   sourceUrl?: string;
+  aliases?: string[];
   metadata?: Record<string, unknown>;
 }
 
