@@ -77,6 +77,7 @@ export interface UpsertSeedReviewRowInput {
   candidateEntityId: string | null;
   triggeredByUserId: string;
   metadata?: Record<string, unknown>;
+  seedAliases?: string[];
 }
 
 export interface UpsertEvidenceInput {
@@ -175,6 +176,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         triggered_by_user_id: input.triggeredByUserId,
         seed_source: input.seedSource,
         seed_source_id: input.seedSourceId,
+        seed_aliases: input.seedAliases && input.seedAliases.length > 0 ? JSON.stringify(input.seedAliases) : null,
       })
       .execute();
 
@@ -299,16 +301,28 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
 
       const now = new Date().toISOString();
       if (existing) {
+        const normalizedNameCollision = await db
+          .selectFrom("entity_review_queue")
+          .select(["id"])
+          .where("normalized_name", "=", input.normalizedName)
+          .where("entity_type", "=", input.entityType)
+          .where("id", "!=", existing.id)
+          .executeTakeFirst();
+        const normalizedName = normalizedNameCollision
+          ? `${input.normalizedName}:${input.seedSource}:${input.seedSourceId}`
+          : input.normalizedName;
         await db
           .updateTable("entity_review_queue")
           .set({
             proposed_name: input.proposedName,
+            normalized_name: normalizedName,
             candidate_entity_id: input.candidateEntityId,
             candidate_score: null,
             candidate_reason: null,
             candidate_generated_at: now,
             last_seen_at: now,
             occurrence_count: existing.occurrence_count + 1,
+            seed_aliases: input.seedAliases && input.seedAliases.length > 0 ? JSON.stringify(input.seedAliases) : null,
           })
           .where("id", "=", existing.id)
           .execute();

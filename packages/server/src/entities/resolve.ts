@@ -424,6 +424,17 @@ async function autoResolutionShortCircuit(ctx: ResolveTxnCtx, target: Entity, pr
   return aliases.some((a) => normalizeName(a) === normalized);
 }
 
+function parseSeedAliases(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Find stale entities to merge during Confirm. Stale = same source_type,
  * canonical name matches the proposed name, no email, distinct from target.
@@ -747,6 +758,9 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         source: row.seed_source,
         sourceId: row.seed_source_id,
       });
+    }
+    for (const alias of parseSeedAliases(row.seed_aliases)) {
+      await trxCtx.entityRepo.appendAlias(target.id, alias);
     }
 
     // Evidence cap (chunking deferred).

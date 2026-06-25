@@ -130,10 +130,14 @@ describe("ClickUp hierarchy mapping", () => {
     );
 
     expect(canvas.seeds.filter((seed) => seed.sourceType === "team")).toEqual([
-      expect.objectContaining({ sourceId: "space-marketing", name: "Marketing" }),
+      expect.objectContaining({ sourceId: "space-marketing", name: "Marketing", aliases: undefined }),
     ]);
     expect(canvas.seeds.filter((seed) => seed.sourceType === "project")).toEqual([
-      expect.objectContaining({ sourceId: "folder-content", name: "Content Engine" }),
+      expect.objectContaining({
+        sourceId: "folder-content",
+        name: "Marketing Content Engine",
+        aliases: ["Content Engine"],
+      }),
     ]);
     expect(canvas.seeds.map((seed) => seed.sourceId)).not.toEqual(
       expect.arrayContaining(["list-blog", "list-video", "list-web"]),
@@ -297,7 +301,11 @@ describe("ClickUp hierarchy mapping", () => {
       expect.arrayContaining(["space-project-list", "list-sprint-project"]),
     );
     expect(items[0]?.task?.cycle).toBeUndefined();
-    expect(items[0]?.task?.project).toEqual({ name: "Sprint 9", source: "clickup", sourceId: "list-sprint-project" });
+    expect(items[0]?.task?.project).toEqual({
+      name: "Project List Space Sprint 9",
+      source: "clickup",
+      sourceId: "list-sprint-project",
+    });
   });
 
   it("keeps sprint tasks parented to the nearest mapped project and drops sprint cycles with no project ancestor", async () => {

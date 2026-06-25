@@ -57,7 +57,29 @@ export async function materializeProjectSeed(
   }
 
   const entity = result.entity as unknown as EntityRow;
-  registerEntity(deps.index, entity);
-  deps.index.bySourceRef.set(`${subjectSource}:${subjectSourceId}`, entity);
-  return { kind: result.kind === "created" ? "entity_created" : "entity_linked", entity, mentionWritten: false };
+  const refreshed = await applySeedAliases(deps, entity, extractSeedAliases(raw));
+  deps.index.bySourceRef.set(`${subjectSource}:${subjectSourceId}`, refreshed);
+  return {
+    kind: result.kind === "created" ? "entity_created" : "entity_linked",
+    entity: refreshed,
+    mentionWritten: false,
+  };
+}
+
+function extractSeedAliases(raw: Record<string, unknown>): string[] {
+  const aliases = raw.aliases;
+  if (!Array.isArray(aliases)) return [];
+  return aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
+}
+
+async function applySeedAliases(deps: MaterializeDeps, entity: EntityRow, aliases: string[]): Promise<EntityRow> {
+  let refreshed = entity;
+  for (const alias of aliases) {
+    await deps.entityRepo.appendAlias(refreshed.id, alias);
+  }
+  if (aliases.length > 0) {
+    refreshed = ((await deps.entityRepo.getEntity(refreshed.id)) ?? refreshed) as unknown as EntityRow;
+  }
+  registerEntity(deps.index, refreshed);
+  return refreshed;
 }

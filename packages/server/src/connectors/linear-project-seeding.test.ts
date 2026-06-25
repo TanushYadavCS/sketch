@@ -184,6 +184,7 @@ async function syncRecordedLinearPayload(db: Kysely<DB>, syncRunId: string): Pro
       factContext,
       item,
       indexedFileId: itemResult.indexedFileId,
+      experimentalFlag: true,
     });
   }
 
@@ -211,12 +212,13 @@ describe("Linear project entity seeding", () => {
   it("materializes one Linear project seed with a bare project source ref", async () => {
     await syncRecordedLinearPayload(db, "sync-run-1");
 
-    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
 
     expect(summary.entitiesCreated).toBe(1);
     const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();
     expect(projects).toHaveLength(1);
-    expect(projects[0].name).toBe("Atlas Launch");
+    expect(projects[0].name).toBe("Platform Atlas Launch");
+    expect(JSON.parse(projects[0].aliases ?? "[]")).toEqual(["Atlas Launch"]);
     const projectRef = await db
       .selectFrom("entity_source_refs")
       .selectAll()
@@ -236,6 +238,99 @@ describe("Linear project entity seeding", () => {
       .where("id", "=", teamRef.entity_id)
       .executeTakeFirstOrThrow();
     expect(team.source_type).toBe("team");
+    const task = await db
+      .selectFrom("tasks")
+      .select(["parent_name"])
+      .where("source_task_id", "=", "lin-issue-tagged-1")
+      .executeTakeFirstOrThrow();
+    expect(task.parent_name).toBe("Platform Atlas Launch");
+  });
+
+  it("qualifies Linear project seeds only when one team provides scope", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        graphqlResponse({ data: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } }),
+      )
+      .mockResolvedValueOnce(
+        graphqlResponse({ data: { teams: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } }),
+      )
+      .mockResolvedValueOnce(
+        graphqlResponse({
+          data: {
+            projects: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [
+                {
+                  id: "lin-proj-platform",
+                  name: "Platform",
+                  description: null,
+                  url: "https://linear.example/project/platform",
+                  state: "started",
+                  lead: null,
+                  startDate: null,
+                  targetDate: null,
+                  teams: { nodes: [{ name: "Sketch", key: "SK" }] },
+                  createdAt: "2026-06-01T00:00:00.000Z",
+                  updatedAt: "2026-06-10T00:00:00.000Z",
+                },
+                {
+                  id: "lin-proj-oss",
+                  name: "Sketch OSS",
+                  description: null,
+                  url: "https://linear.example/project/oss",
+                  state: "started",
+                  lead: null,
+                  startDate: null,
+                  targetDate: null,
+                  teams: { nodes: [{ name: "Sketch", key: "SK" }] },
+                  createdAt: "2026-06-01T00:00:00.000Z",
+                  updatedAt: "2026-06-10T00:00:00.000Z",
+                },
+                {
+                  id: "lin-proj-shared",
+                  name: "Shared",
+                  description: null,
+                  url: "https://linear.example/project/shared",
+                  state: "started",
+                  lead: null,
+                  startDate: null,
+                  targetDate: null,
+                  teams: {
+                    nodes: [
+                      { name: "Sketch", key: "SK" },
+                      { name: "Canvas", key: "CV" },
+                    ],
+                  },
+                  createdAt: "2026-06-01T00:00:00.000Z",
+                  updatedAt: "2026-06-10T00:00:00.000Z",
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+    const seeds: EntitySeed[] = [];
+    const items = [];
+    for await (const item of createLinearConnector().sync({
+      connectorConfigId: CONNECTOR_ID,
+      credentials: { type: "api_key", api_key: "linear-token" },
+      scopeConfig: {},
+      cursor: null,
+      logger: createTestLogger(),
+      onEntitySeed: async (seed) => {
+        seeds.push(seed);
+      },
+    })) {
+      items.push(item);
+    }
+
+    expect(items).toHaveLength(3);
+    expect(seeds.map((seed) => ({ name: seed.name, aliases: seed.aliases }))).toEqual([
+      { name: "Sketch Platform", aliases: ["Platform"] },
+      { name: "Sketch OSS", aliases: undefined },
+      { name: "Shared", aliases: undefined },
+    ]);
   });
 
   it("links the seeded Linear project entity to its own project document", async () => {
@@ -355,6 +450,8 @@ describe("Linear project entity seeding", () => {
     const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();
     expect(projects).toHaveLength(1);
     expect(projects[0].id).toBe(firstProject.id);
+    expect(projects[0].name).toBe("Platform Atlas Launch");
+    expect(JSON.parse(projects[0].aliases ?? "[]")).toEqual(["Atlas Launch"]);
     expect(projects[0].updated_at).toBe(firstProject.updated_at);
     const reviews = await db.selectFrom("entity_review_queue").selectAll().execute();
     expect(reviews).toHaveLength(0);
