@@ -1,3 +1,4 @@
+import { deriveQualifiedSeedName } from "../connectors/container-name";
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { createMentionFromFact } from "./materialize-mentions";
 import { buildSeedProvenanceNote, isProjectCandidateSeed } from "./materialize-structural-gate";
@@ -81,7 +82,11 @@ export async function materializeSpineCandidate(
     const owner = deps.resolveOwner(fact);
     if (!owner) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
-    const subjectName = fact.subject_name as string;
+    const { name: subjectName, aliases: seedAliases } = deriveQualifiedSeedName({
+      source: args.subjectSource,
+      subjectName: fact.subject_name as string,
+      raw: args.raw,
+    });
     const { row, skipEvidence } = await deps.reviewRepo.upsertSeedReviewRow({
       proposedName: subjectName,
       normalizedName: normalizeEntityMatchName(spineType, subjectName),
@@ -91,7 +96,7 @@ export async function materializeSpineCandidate(
       candidateEntityId: null,
       triggeredByUserId: owner,
       metadata: args.metadata,
-      seedAliases: extractSeedAliases(args.raw),
+      seedAliases,
     });
 
     if (skipEvidence) {
@@ -109,15 +114,20 @@ export async function materializeSpineCandidate(
     return { kind: "queued", reviewId: row.id };
   }
 
+  const { name: qualifiedName, aliases: qualifiedAliases } = deriveQualifiedSeedName({
+    source: args.subjectSource,
+    subjectName: fact.subject_name as string,
+    raw: args.raw,
+  });
   const entity = await upsertEntityFromSeed(deps, {
-    name: fact.subject_name as string,
+    name: qualifiedName,
     sourceType: spineType,
     source: args.subjectSource,
     sourceId: args.subjectSourceId,
     sourceUrl: args.sourceUrl,
     sourceRefId: fact.indexed_file_id ?? undefined,
     metadata: args.metadata,
-    aliases: extractSeedAliases(args.raw),
+    aliases: qualifiedAliases,
   });
   deps.index.bySourceRef.set(`${args.subjectSource}:${args.subjectSourceId}`, entity);
   return { kind: "structural", entity };

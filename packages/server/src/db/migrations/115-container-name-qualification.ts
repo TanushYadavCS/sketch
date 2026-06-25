@@ -130,11 +130,11 @@ async function addSeedAliasesColumn(db: Kysely<unknown>): Promise<void> {
   await db.schema.alterTable("entity_review_queue").addColumn("seed_aliases", "text").execute();
 }
 
-async function normalizedQueueName(
+async function isNormalizedNameTaken(
   db: Kysely<MigrationDb>,
   row: QueueCandidateRow,
   normalizedName: string,
-): Promise<string> {
+): Promise<boolean> {
   const colliding = await db
     .selectFrom("entity_review_queue")
     .select(["id"])
@@ -142,8 +142,24 @@ async function normalizedQueueName(
     .where("entity_type", "=", row.entity_type)
     .where("id", "!=", row.id)
     .executeTakeFirst();
-  if (!colliding) return normalizedName;
-  return `${normalizedName}:${row.seed_source}:${row.seed_source_id}`;
+  return Boolean(colliding);
+}
+
+/**
+ * Returns a collision-free `normalized_name` honoring the unique
+ * `(normalized_name, entity_type)` index, or null if even the seed-handle
+ * fallback is already taken (caller skips the row rather than failing the
+ * migration).
+ */
+async function normalizedQueueName(
+  db: Kysely<MigrationDb>,
+  row: QueueCandidateRow,
+  normalizedName: string,
+): Promise<string | null> {
+  if (!(await isNormalizedNameTaken(db, row, normalizedName))) return normalizedName;
+  const fallback = `${normalizedName}:${row.seed_source}:${row.seed_source_id}`;
+  if (!(await isNormalizedNameTaken(db, row, fallback))) return fallback;
+  return null;
 }
 
 async function findSeedFact(
@@ -185,6 +201,7 @@ async function backfillQueueContainerNames(db: Kysely<MigrationDb>): Promise<voi
     if (qualifiedName === bareLeaf) continue;
 
     const normalizedName = await normalizedQueueName(db, row, normalizeEntityMatchName(row.entity_type, qualifiedName));
+    if (normalizedName === null) continue;
     await db
       .updateTable("entity_review_queue")
       .set({
