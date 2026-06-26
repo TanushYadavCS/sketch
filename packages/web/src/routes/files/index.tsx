@@ -41,7 +41,29 @@ const PAGE_SIZE = 50;
 
 type FilesTab = "files" | "entities" | "graph";
 
-function FilesPage() {
+type ManagingConnectorState = {
+  definition: IntegrationDefinition;
+  connector: ConnectorConfig;
+};
+
+export function getLiveManagingConnector(
+  managingConnector: ManagingConnectorState | null,
+  connectors: ConnectorConfig[],
+): ConnectorConfig | null {
+  if (!managingConnector) return null;
+  return connectors.find((connector) => connector.id === managingConnector.connector.id) ?? managingConnector.connector;
+}
+
+export function syncingConnectorIdsWithoutProgress(
+  connectors: ConnectorConfig[],
+  activeProgressConnectorIds: Set<string>,
+): string[] {
+  return connectors
+    .filter((connector) => connector.syncStatus === "syncing" && !activeProgressConnectorIds.has(connector.id))
+    .map((connector) => connector.id);
+}
+
+export function FilesPage() {
   const queryClient = useQueryClient();
 
   const [activeTab, setActiveTab] = useState<FilesTab>("files");
@@ -55,10 +77,7 @@ function FilesPage() {
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [accessFilter, setAccessFilter] = useState<string | null>(null);
   const [viewingFile, setViewingFile] = useState<string | null>(null);
-  const [managingConnector, setManagingConnector] = useState<{
-    definition: IntegrationDefinition;
-    connector: ConnectorConfig;
-  } | null>(null);
+  const [managingConnector, setManagingConnector] = useState<ManagingConnectorState | null>(null);
   /** Set when the user triggers "Update credentials" from ManageConnectorDialog — passed to ConnectorPicker to open its connect dialog. */
   const [reconnectTarget, setReconnectTarget] = useState<IntegrationDefinition | null>(null);
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
@@ -84,6 +103,8 @@ function FilesPage() {
   const connectors = connectorsData?.connectors ?? [];
   const teamMemberCount = connectorsData?.teamMemberCount ?? 0;
   const connectorMemberCounts = connectorsData?.connectorMemberCounts ?? {};
+  const liveManagingConnector = getLiveManagingConnector(managingConnector, connectors);
+  const hasSyncingConnectors = connectors.some((connector) => connector.syncStatus === "syncing");
 
   // Viewer-aware file count per source. Connector-row counts under-count for
   // members who have file-access via meetings someone else's connector synced;
@@ -267,12 +288,39 @@ function FilesPage() {
   const { data: progressData } = useQuery({
     queryKey: ["sync-progress"],
     queryFn: () => api.integrations.progress(),
-    refetchInterval: 10000,
+    refetchInterval: hasSyncingConnectors ? 2000 : 10000,
   });
 
   const pendingEnrichment = progressData?.pendingEnrichment ?? 0;
   const enrichmentStats = progressData?.enrichmentStats;
   const enrichmentActive = progressData?.enrichmentActive ?? false;
+  const handledCompletedSyncIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!progressData) return;
+
+    const activeIds = new Set(progressData.active.map((progress) => progress.connectorId));
+    const syncingIds = connectors
+      .filter((connector) => connector.syncStatus === "syncing")
+      .map((connector) => connector.id);
+
+    if (syncingIds.length === 0) {
+      handledCompletedSyncIdsRef.current.clear();
+      return;
+    }
+
+    for (const id of syncingIds) {
+      if (activeIds.has(id)) handledCompletedSyncIdsRef.current.delete(id);
+    }
+
+    const completedIds = syncingConnectorIdsWithoutProgress(connectors, activeIds).filter(
+      (id) => !handledCompletedSyncIdsRef.current.has(id),
+    );
+    if (completedIds.length === 0) return;
+
+    for (const id of completedIds) handledCompletedSyncIdsRef.current.add(id);
+    refreshFilesData();
+  }, [connectors, progressData, refreshFilesData]);
 
   const enrichMutation = useMutation({
     mutationFn: () => api.settings.runEnrichment(),
@@ -433,12 +481,12 @@ function FilesPage() {
 
       <ManageConnectorDialog
         definition={managingConnector?.definition ?? null}
-        connector={managingConnector?.connector ?? null}
+        connector={liveManagingConnector}
         open={!!managingConnector}
         onOpenChange={(open) => !open && setManagingConnector(null)}
         onDisconnected={handleDisconnected}
         onReconnect={(def) => {
-          if (managingConnector?.connector && sourceFilter === managingConnector.connector.connectorType) {
+          if (liveManagingConnector && sourceFilter === liveManagingConnector.connectorType) {
             setSourceFilter(null);
           }
           setManagingConnector(null);

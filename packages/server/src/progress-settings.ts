@@ -9,26 +9,39 @@ import {
 
 export interface ProgressDisplaySettings extends ProgressSettingsSummary {}
 
-export function resolveToolProgress(value: string | null | undefined): ToolProgressCommand {
-  return TOOL_PROGRESS_OPTIONS.includes(value as ToolProgressCommand) ? (value as ToolProgressCommand) : "friendly";
+export interface ProgressDisplayDefaults {
+  toolProgress?: ToolProgressCommand;
+  reasoningText?: boolean;
 }
 
-export function resolveReasoningText(value: unknown): boolean {
+export function resolveToolProgress(
+  value: string | null | undefined,
+  fallback: ToolProgressCommand = "friendly",
+): ToolProgressCommand {
+  if (TOOL_PROGRESS_OPTIONS.includes(value as ToolProgressCommand)) return value as ToolProgressCommand;
+  if (value == null) return fallback;
+  return "friendly";
+}
+
+export function resolveReasoningText(value: unknown, fallback = false): boolean {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
   if (typeof value === "string") {
     return value === "1" || value.toLowerCase() === "true";
   }
-  return false;
+  return fallback;
 }
 
-export function resolveProgressDisplaySettings(input: {
-  tool_progress?: string | null;
-  reasoning_text?: unknown;
-}): ProgressDisplaySettings {
+export function resolveProgressDisplaySettings(
+  input: {
+    tool_progress?: string | null;
+    reasoning_text?: unknown;
+  },
+  defaults: ProgressDisplayDefaults = {},
+): ProgressDisplaySettings {
   return {
-    toolProgress: resolveToolProgress(input.tool_progress),
-    reasoningText: resolveReasoningText(input.reasoning_text),
+    toolProgress: resolveToolProgress(input.tool_progress, defaults.toolProgress),
+    reasoningText: resolveReasoningText(input.reasoning_text, defaults.reasoningText),
   };
 }
 

@@ -276,6 +276,7 @@ export async function runConnectorSync(
           connectorConfigId: config.id,
           connectorType,
           providerFileIds: record.providerFileId ? [record.providerFileId] : undefined,
+          providerFileIdPrefixes: record.providerFileIdPrefix ? [record.providerFileIdPrefix] : undefined,
           providerMessageIds: record.providerMessageId ? [record.providerMessageId] : undefined,
           sourceCreatedBefore: record.sourceCreatedBefore,
         });

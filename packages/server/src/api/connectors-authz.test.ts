@@ -71,13 +71,14 @@ async function userIdFor(db: Kysely<DB>, email: string): Promise<string> {
 /**
  * Insert a connector_config directly via the repo.
  * For org-wide connectors (clickup, notion, linear), `createdBy` is the admin.
- * For per-user (fireflies, google_drive), pass the actual owner.
+ * For per-user connectors, pass the actual owner.
  */
 async function insertConfig(
   db: Kysely<DB>,
   opts: {
     connectorType:
       | "google_drive"
+      | "google_calendar"
       | "gmail"
       | "outlook"
       | "teams"
@@ -95,6 +96,7 @@ async function insertConfig(
     connectorType: opts.connectorType,
     authType:
       opts.connectorType === "google_drive" ||
+      opts.connectorType === "google_calendar" ||
       opts.connectorType === "gmail" ||
       opts.connectorType === "outlook" ||
       opts.connectorType === "teams" ||

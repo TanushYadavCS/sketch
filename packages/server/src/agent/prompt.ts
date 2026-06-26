@@ -56,6 +56,17 @@ export interface ConversationBacklogContext {
   nextCursor?: number;
 }
 
+export interface QuotedMessageContext {
+  id?: number;
+  providerMessageId: string;
+  senderName?: string | null;
+  senderJid?: string | null;
+  text: string;
+  attachments: Attachment[];
+  providerTimestamp?: string | null;
+  receivedAt?: string | null;
+}
+
 export interface LocalClaudeSessionEventContext {
   sessionId: string;
   eventId?: string;
@@ -86,6 +97,7 @@ export interface SketchContextParams {
     groupDescription?: string;
   };
   conversationBacklog?: ConversationBacklogContext;
+  quotedMessage?: QuotedMessageContext;
   localClaudeSessionEvent?: LocalClaudeSessionEventContext;
   visionAnalysisEnabled?: boolean;
 }
@@ -140,8 +152,27 @@ function renderConversationBacklogLines(
   return messageLines.length > 0 ? [...lines, "", ...messageLines] : lines;
 }
 
+function renderQuotedMessageLines(
+  quotedMessage: QuotedMessageContext | undefined,
+  attachmentOptions: AttachmentPromptOptions = {},
+): string[] {
+  if (!quotedMessage) return [];
+
+  const lines = [
+    "The current message is a WhatsApp reply to this quoted message.",
+    `text: ${quotedMessage.text || (quotedMessage.attachments.length > 0 ? "See attached files." : "")}`,
+  ];
+  if (quotedMessage.senderName?.trim()) {
+    lines.splice(1, 0, `sender: ${quotedMessage.senderName}`);
+  }
+  if (quotedMessage.attachments.length > 0) {
+    lines.push(formatAttachmentsForPrompt(quotedMessage.attachments, attachmentOptions));
+  }
+  return lines;
+}
+
 export function getImageAttachmentPathsFromSketchContext(
-  params: Pick<SketchContextParams, "messages" | "conversationBacklog">,
+  params: Pick<SketchContextParams, "messages" | "conversationBacklog" | "quotedMessage">,
 ): string[] {
   const paths: string[] = [];
   for (const message of params.messages) {
@@ -153,6 +184,9 @@ export function getImageAttachmentPathsFromSketchContext(
     for (const attachment of message.attachments) {
       if (isImageAttachment(attachment)) paths.push(attachment.localPath);
     }
+  }
+  for (const attachment of params.quotedMessage?.attachments ?? []) {
+    if (isImageAttachment(attachment)) paths.push(attachment.localPath);
   }
   return paths;
 }
@@ -597,6 +631,11 @@ export function buildSketchContext(params: SketchContextParams): string {
   if (threadLines.length > 0) {
     const tag = params.threadTag ?? "thread";
     sectionParts.push(`<${tag}>\n${threadLines.join("\n")}\n</${tag}>`);
+  }
+
+  const quotedMessageLines = renderQuotedMessageLines(params.quotedMessage, attachmentOptions);
+  if (quotedMessageLines.length > 0) {
+    sectionParts.push(`<quoted_message>\n${quotedMessageLines.join("\n")}\n</quoted_message>`);
   }
 
   if (params.taskPrompt) {

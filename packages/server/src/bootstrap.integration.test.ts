@@ -13,6 +13,14 @@ vi.mock("./agent/runner", () => ({
   runAgent: vi.fn(),
 }));
 
+vi.mock("./agent/concurrency-limiter", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./agent/concurrency-limiter")>();
+  return {
+    ...actual,
+    createAgentRunLimiter: vi.fn(actual.createAgentRunLimiter),
+  };
+});
+
 // Avoid syncing skills from remote repo during tests
 vi.mock("./skills/sync", () => ({
   syncFeaturedSkills: vi.fn(),
@@ -33,6 +41,7 @@ describe("bootstrap", () => {
       await handle.shutdown();
       handle = null;
     }
+    vi.clearAllMocks();
   });
 
   async function boot(configOverrides: Record<string, unknown> = {}) {
@@ -57,6 +66,17 @@ describe("bootstrap", () => {
   it("has no Slack bot when tokens are not configured", async () => {
     const h = await boot();
     expect(h.getSlack()).toBeNull();
+  });
+
+  it("configures the process-wide agent limiter from server config", async () => {
+    const { createAgentRunLimiter } = await import("./agent/concurrency-limiter");
+    await boot({ MAX_CONCURRENT_AGENT_RUNS: 2 });
+
+    expect(createAgentRunLimiter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 2,
+      }),
+    );
   });
 
   it("health endpoint responds 200", async () => {

@@ -47,6 +47,7 @@ export interface ExecuteAutomationParams {
   sendMessage?: (text: string) => Promise<void>;
   onEvent?: (event: AutomationExecutionEvent) => Promise<void>;
   recordWorkflowStep?: RecordWorkflowStep;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export type AutomationExecutionEvent =
@@ -450,6 +451,7 @@ async function executeWorkflowStep(params: {
       sendDm: runtimeParams.sendDm,
       outputPlatform: resolveWorkflowDelivery(task).platform,
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
+      limitAgentExecution: runtimeParams.limitAgentExecution,
     });
   }
 
@@ -827,6 +829,7 @@ interface AgentStepParams {
   sendDm?: RunAgentParams["sendDm"];
   outputPlatform: "slack" | "whatsapp";
   recordWorkflowStep?: RecordWorkflowStep;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -870,49 +873,53 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
     ...buildPlatformFormattingLines(outputPlatform),
   ];
 
-  const run = query({
-    prompt: userMessage,
-    options: {
-      maxTurns: 10,
-      ...(modelOverride ? { model: modelOverride } : {}),
-      cwd: workspaceDir,
-      systemPrompt: systemPromptLines.join("\n"),
-      permissionMode: "bypassPermissions" as const,
-      settingSources: [],
-      stderr: (chunk: string) => {
-        stderrChunks.push(chunk);
-      },
-    },
-  });
+  const limitAgentExecution = params.limitAgentExecution ?? (<T>(work: () => Promise<T>) => work());
 
   let lastText = "";
   let stepUsage: WorkflowStepUsage | null = null;
   try {
-    for await (const message of run) {
-      if (!message || typeof message !== "object" || !("type" in message)) continue;
-      if (message.type === "assistant" && "message" in message) {
-        const msg = message.message as { content?: Array<{ type: string; text?: string }> };
-        if (msg.content) {
-          for (const block of msg.content) {
-            if (block.type === "text" && block.text) {
-              lastText = block.text;
+    await limitAgentExecution(async () => {
+      const run = query({
+        prompt: userMessage,
+        options: {
+          maxTurns: 10,
+          ...(modelOverride ? { model: modelOverride } : {}),
+          cwd: workspaceDir,
+          systemPrompt: systemPromptLines.join("\n"),
+          permissionMode: "bypassPermissions" as const,
+          settingSources: [],
+          stderr: (chunk: string) => {
+            stderrChunks.push(chunk);
+          },
+        },
+      });
+
+      for await (const message of run) {
+        if (!message || typeof message !== "object" || !("type" in message)) continue;
+        if (message.type === "assistant" && "message" in message) {
+          const msg = message.message as { content?: Array<{ type: string; text?: string }> };
+          if (msg.content) {
+            for (const block of msg.content) {
+              if (block.type === "text" && block.text) {
+                lastText = block.text;
+              }
             }
           }
+        } else if (message.type === "result") {
+          const resultMsg = message as Record<string, unknown>;
+          const u = resultMsg.usage as Record<string, unknown> | undefined;
+          const modelKeys = Object.keys((resultMsg.modelUsage as Record<string, unknown>) ?? {});
+          stepUsage = {
+            model: modelKeys.length > 0 ? modelKeys[0] : (modelOverride ?? null),
+            inputTokens: (u?.input_tokens as number) ?? 0,
+            outputTokens: (u?.output_tokens as number) ?? 0,
+            cacheReadTokens: (u?.cache_read_input_tokens as number) ?? 0,
+            cacheCreationTokens: (u?.cache_creation_input_tokens as number) ?? 0,
+            sdkCostUsd: (resultMsg.total_cost_usd as number) ?? 0,
+          };
         }
-      } else if (message.type === "result") {
-        const resultMsg = message as Record<string, unknown>;
-        const u = resultMsg.usage as Record<string, unknown> | undefined;
-        const modelKeys = Object.keys((resultMsg.modelUsage as Record<string, unknown>) ?? {});
-        stepUsage = {
-          model: modelKeys.length > 0 ? modelKeys[0] : (modelOverride ?? null),
-          inputTokens: (u?.input_tokens as number) ?? 0,
-          outputTokens: (u?.output_tokens as number) ?? 0,
-          cacheReadTokens: (u?.cache_read_input_tokens as number) ?? 0,
-          cacheCreationTokens: (u?.cache_creation_input_tokens as number) ?? 0,
-          sdkCostUsd: (resultMsg.total_cost_usd as number) ?? 0,
-        };
       }
-    }
+    });
   } catch (err) {
     const stderrText = stderrChunks.join("").slice(0, 2000);
     logger.error({ err, stepId: step.id, stderrText }, "Automation agent: step failed (Claude Code subprocess error)");

@@ -151,6 +151,7 @@ describe("searchFiles — FTS5 query sanitization", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     try {
       await db.destroy();
     } catch {

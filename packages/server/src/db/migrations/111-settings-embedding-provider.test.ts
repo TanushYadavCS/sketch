@@ -2,7 +2,7 @@ import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encrypt } from "../../auth/encryption";
-import { down, up } from "./110-settings-embedding-provider";
+import { down, up } from "./111-settings-embedding-provider";
 
 const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -20,7 +20,7 @@ function createDb(): Kysely<TestDb> {
   });
 }
 
-describe("110-settings-embedding-provider migration", () => {
+describe("111-settings-embedding-provider migration", () => {
   let db: Kysely<TestDb>;
 
   function migrationDb(): Kysely<unknown> {

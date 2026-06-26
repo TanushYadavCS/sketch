@@ -193,6 +193,20 @@ export function createConversationRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
+    async findMessageByProviderMessageId(
+      conversationId: number,
+      providerMessageId: string,
+    ): Promise<StoredConversationMessage | undefined> {
+      const row = await db
+        .selectFrom("conversation_messages")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .where("provider_message_id", "=", providerMessageId)
+        .orderBy("id", "desc")
+        .executeTakeFirst();
+      return row ? toStored(row) : undefined;
+    },
+
     async insertMessage(
       data: ConversationMessageInsert,
     ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
