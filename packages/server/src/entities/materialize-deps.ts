@@ -26,6 +26,7 @@ const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
+let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
 let configuredExperimentalFlag = false;
 
@@ -39,6 +40,7 @@ export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }): void {
@@ -49,6 +51,7 @@ export function configureMaterializeDefaults(opts: {
     configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
+  if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
   if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
 }
@@ -258,6 +261,7 @@ export interface BuildMaterializeDepsOptions {
   llmTaskCorroborationThreshold?: number;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }
@@ -280,6 +284,7 @@ export async function buildMaterializeDeps(
       ? Math.floor(opts.llmTaskCorroborationThreshold)
       : configuredLlmTaskCorroborationThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
+  const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
   const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
 
@@ -341,6 +346,7 @@ export async function buildMaterializeDeps(
     llmPromotionThreshold,
     llmTaskCorroborationThreshold,
     birthGateTypes,
+    birthGateLiveTypes,
     birthGateDryRun,
     experimentalFlag,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),

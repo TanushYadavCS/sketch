@@ -129,6 +129,7 @@ export interface ProposeDeps {
   lookup: EntityLookup;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   /** Read an entity's email from its metadata JSON. */
   readEmail: (entity: Entity) => string | null;
@@ -431,7 +432,8 @@ async function birthGateOrCreate(
   branch: "skipFuzzy" | "ranked_empty",
 ): Promise<ProposeResult> {
   if (deps.birthGateTypes?.has(input.entityType)) {
-    if (deps.birthGateDryRun ?? true) {
+    const effectiveDryRun = (deps.birthGateDryRun ?? true) && !deps.birthGateLiveTypes?.has(input.entityType);
+    if (effectiveDryRun) {
       deps.logger?.info(
         { event: "would_birth_gate", type: input.entityType, name: input.name, path: input.source, branch },
         "would_birth_gate",

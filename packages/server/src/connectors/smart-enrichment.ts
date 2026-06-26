@@ -563,6 +563,7 @@ export async function handleCandidates(
             lookup: materializeDeps.lookup,
             logger: materializeDeps.logger,
             birthGateTypes: materializeDeps.birthGateTypes,
+            birthGateLiveTypes: materializeDeps.birthGateLiveTypes,
             birthGateDryRun: materializeDeps.birthGateDryRun,
             readEmail: materializeDeps.readEmail,
           },
