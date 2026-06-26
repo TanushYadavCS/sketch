@@ -3,6 +3,7 @@ import { createTestLogger } from "../test-utils";
 import {
   createEnrichmentEmbeddingProvider,
   createEnrichmentQueryEmbedder,
+  resolveEmbeddingProviderName,
   resolveOpenRouterEnrichmentConfig,
 } from "./enrichment-providers";
 
@@ -15,7 +16,13 @@ describe("enrichment providers", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses direct Gemini embeddings when the primary provider succeeds", async () => {
+  it("resolves null and unset embedding providers to OpenRouter", () => {
+    expect(resolveEmbeddingProviderName(null)).toBe("openrouter");
+    expect(resolveEmbeddingProviderName(undefined)).toBe("openrouter");
+    expect(resolveEmbeddingProviderName("")).toBe("openrouter");
+  });
+
+  it("uses direct Gemini embeddings when Gemini is selected", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json({
         embedding: { values: vector() },
@@ -25,6 +32,7 @@ describe("enrichment providers", () => {
 
     const provider = createEnrichmentEmbeddingProvider({
       geminiApiKey: "gemini-key",
+      embeddingProvider: "gemini",
       openRouterApiKey: "openrouter-key",
       logger: createTestLogger(),
     });
@@ -37,66 +45,71 @@ describe("enrichment providers", () => {
     expect(String(calls[0][0])).toContain("generativelanguage.googleapis.com");
   });
 
-  it("falls back to OpenRouter embeddings when Gemini quota is exhausted", async () => {
+  it("does not fall back to OpenRouter embeddings when selected Gemini fails", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(Response.json({ error: { code: 429, message: "RESOURCE_EXHAUSTED" } }, { status: 429 }))
-      .mockResolvedValueOnce(
-        Response.json({
-          data: [{ embedding: vector() }],
-          model: "gemini-embedding-2-preview",
-          usage: { prompt_tokens: 1, total_tokens: 1 },
-        }),
-      );
+      .mockResolvedValueOnce(Response.json({ error: { code: 429, message: "RESOURCE_EXHAUSTED" } }, { status: 429 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const provider = createEnrichmentEmbeddingProvider({
       geminiApiKey: "gemini-key",
+      embeddingProvider: "gemini",
       geminiMaxRetries: 0,
       openRouterApiKey: "openrouter-key",
       logger: createTestLogger(),
     });
 
-    const embeddings = await provider?.embedTexts(["hello"]);
+    await expect(provider?.embedTexts(["hello"])).rejects.toThrow();
     const calls = fetchMock.mock.calls as unknown as Array<[unknown, RequestInit]>;
-    const openRouterBody = JSON.parse(calls[1][1]?.body as string) as {
-      model: string;
-      dimensions: number;
-    };
 
-    expect(embeddings?.[0]).toHaveLength(3072);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(String(calls[1][0])).toBe("https://openrouter.ai/api/v1/embeddings");
-    expect(openRouterBody).toMatchObject({
-      model: "google/gemini-embedding-2-preview",
-      dimensions: 3072,
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(calls[0][0])).toContain("generativelanguage.googleapis.com");
   });
 
-  it("uses OpenRouter embeddings directly when Gemini is not configured", async () => {
+  it("uses OpenRouter embeddings when OpenRouter is selected", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json({
         data: [{ embedding: vector() }],
-        model: "gemini-embedding-2-preview",
+        model: "gemini-embedding-2",
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
     const provider = createEnrichmentEmbeddingProvider({
-      geminiApiKey: null,
+      geminiApiKey: "gemini-key",
+      embeddingProvider: "openrouter",
       openRouterApiKey: "openrouter-key",
       logger: createTestLogger(),
     });
 
     const embeddings = await provider?.embedTexts(["hello"]);
     const calls = fetchMock.mock.calls as unknown as Array<[unknown, RequestInit]>;
+    const openRouterBody = JSON.parse(calls[0][1]?.body as string) as {
+      model: string;
+      dimensions: number;
+    };
 
     expect(embeddings?.[0]).toHaveLength(3072);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(calls[0][0])).toBe("https://openrouter.ai/api/v1/embeddings");
+    expect(openRouterBody).toMatchObject({
+      model: "google/gemini-embedding-2",
+      dimensions: 3072,
+    });
   });
 
-  it("uses Gemini RETRIEVAL_QUERY for query embeddings when Gemini succeeds", async () => {
+  it("returns no embedding provider when the selected provider has no usable key", () => {
+    expect(
+      createEnrichmentEmbeddingProvider({
+        geminiApiKey: "gemini-key",
+        embeddingProvider: "openrouter",
+        openRouterApiKey: " ",
+        logger: createTestLogger(),
+      }),
+    ).toBeNull();
+  });
+
+  it("uses Gemini RETRIEVAL_QUERY for query embeddings when Gemini is selected", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json({
         embedding: { values: vector() },
@@ -106,6 +119,7 @@ describe("enrichment providers", () => {
 
     const embedQuery = createEnrichmentQueryEmbedder({
       geminiApiKey: "gemini-key",
+      embeddingProvider: "gemini",
       openRouterApiKey: "openrouter-key",
       logger: createTestLogger(),
     });
@@ -123,37 +137,36 @@ describe("enrichment providers", () => {
     });
   });
 
-  it("falls back to OpenRouter query embeddings when Gemini query embedding fails", async () => {
+  it("does not fall back to OpenRouter query embeddings when selected Gemini fails", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(Response.json({ error: { code: 429, message: "RESOURCE_EXHAUSTED" } }, { status: 429 }))
-      .mockResolvedValueOnce(
-        Response.json({
-          data: [{ embedding: vector() }],
-          model: "gemini-embedding-2-preview",
-        }),
-      );
+      .mockResolvedValueOnce(Response.json({ error: { code: 429, message: "RESOURCE_EXHAUSTED" } }, { status: 429 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const embedQuery = createEnrichmentQueryEmbedder({
       geminiApiKey: "gemini-key",
+      embeddingProvider: "gemini",
       geminiMaxRetries: 0,
       openRouterApiKey: "openrouter-key",
       logger: createTestLogger(),
     });
 
-    const embedding = await embedQuery?.("hello");
+    await expect(embedQuery?.("hello")).rejects.toThrow();
     const calls = fetchMock.mock.calls as unknown as Array<[unknown, RequestInit]>;
-    const openRouterBody = JSON.parse(String(calls[1][1]?.body));
 
-    expect(embedding).toHaveLength(3072);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(String(calls[1][0])).toBe("https://openrouter.ai/api/v1/embeddings");
-    expect(openRouterBody).toMatchObject({
-      model: "google/gemini-embedding-2-preview",
-      input: ["hello"],
-      dimensions: 3072,
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(calls[0][0])).toContain("generativelanguage.googleapis.com");
+  });
+
+  it("returns no query embedder when the selected provider has no usable key", () => {
+    expect(
+      createEnrichmentQueryEmbedder({
+        geminiApiKey: null,
+        embeddingProvider: "gemini",
+        openRouterApiKey: "openrouter-key",
+        logger: createTestLogger(),
+      }),
+    ).toBeNull();
   });
 
   it("resolves OpenRouter enrichment config from DB settings before env", () => {

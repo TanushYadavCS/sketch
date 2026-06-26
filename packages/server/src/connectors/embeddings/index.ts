@@ -5,6 +5,7 @@
  * Currently supports Gemini Embedding 2 (multimodal).
  */
 import { createGeminiEmbeddingProvider, createGeminiQueryEmbedder } from "./gemini";
+import { createOpenRouterEmbeddingProvider } from "./openrouter";
 import type { EmbeddingProvider, EmbeddingProviderConfig } from "./types";
 
 export type { EmbeddingProvider, EmbeddingProviderConfig };
@@ -16,6 +17,8 @@ export function createEmbeddingProvider(config: EmbeddingProviderConfig): Embedd
         maxRpm: config.maxRpm,
         maxRetries: config.maxRetries,
       });
+    case "openrouter":
+      return createOpenRouterEmbeddingProvider(config.apiKey);
     default:
       throw new Error(`Unknown embedding provider: ${config.provider}`);
   }
@@ -28,6 +31,14 @@ export function createQueryEmbedder(config: EmbeddingProviderConfig): (query: st
         maxRpm: config.maxRpm,
         maxRetries: config.maxRetries,
       });
+    case "openrouter": {
+      const provider = createOpenRouterEmbeddingProvider(config.apiKey);
+      return async (query) => {
+        const [embedding] = await provider.embedTexts([query]);
+        if (!embedding) throw new Error("OpenRouter did not return a query embedding");
+        return embedding;
+      };
+    }
     default:
       throw new Error(`Unknown embedding provider: ${config.provider}`);
   }

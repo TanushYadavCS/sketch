@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 106;
+const EXPECTED_MIGRATION_COUNT = 107;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -162,6 +162,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[103]).toBe("108-scheduled-task-origin-chat");
     expect(names[104]).toBe("109-scheduled-task-origin-message-id");
     expect(names[105]).toBe("110-google-calendar-provider-file-scope");
+    expect(names[106]).toBe("111-settings-embedding-provider");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -525,7 +526,8 @@ describe("runMigrations — incremental upgrade", () => {
         '107-scheduled-task-builder-revisions',
         '108-scheduled-task-origin-chat',
         '109-scheduled-task-origin-message-id',
-        '110-google-calendar-provider-file-scope'
+        '110-google-calendar-provider-file-scope',
+        '111-settings-embedding-provider'
       )
     `.execute(db);
 
@@ -537,7 +539,8 @@ describe("runMigrations — incremental upgrade", () => {
         '107-scheduled-task-builder-revisions',
         '108-scheduled-task-origin-chat',
         '109-scheduled-task-origin-message-id',
-        '110-google-calendar-provider-file-scope'
+        '110-google-calendar-provider-file-scope',
+        '111-settings-embedding-provider'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -546,6 +549,7 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "108-scheduled-task-origin-chat" },
       { name: "109-scheduled-task-origin-message-id" },
       { name: "110-google-calendar-provider-file-scope" },
+      { name: "111-settings-embedding-provider" },
     ]);
   });
 });

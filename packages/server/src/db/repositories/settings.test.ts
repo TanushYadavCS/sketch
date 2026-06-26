@@ -82,6 +82,16 @@ describe("Settings repository", () => {
     expect(row?.aws_region).toBe("us-east-1");
   });
 
+  it("update() persists embedding provider selection", async () => {
+    await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+    await settings.update({ embeddingProvider: "gemini" });
+
+    expect((await settings.get())?.embedding_provider).toBe("gemini");
+
+    await settings.update({ embeddingProvider: null });
+    expect((await settings.get())?.embedding_provider).toBeNull();
+  });
+
   it("update() round-trips admin_can_read_all_files and defaults to 0", async () => {
     await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
     const initial = await settings.get();
