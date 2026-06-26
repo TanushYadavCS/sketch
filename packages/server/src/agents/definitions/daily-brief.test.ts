@@ -347,14 +347,17 @@ async function seedCalendarEvent(
     providerUrl?: string | null;
     archived?: boolean;
     restrictedTo?: string;
+    connectorConfigId?: string;
+    threadId?: string;
   },
 ): Promise<void> {
   await db
     .insertInto("indexed_files")
     .values({
       id: params.id,
-      connector_config_id: "config-1",
+      connector_config_id: params.connectorConfigId ?? "config-1",
       provider_file_id: `cal-${params.id}`,
+      thread_id: params.threadId ?? null,
       file_name: params.title ?? params.id,
       file_type: "calendar_event",
       content_category: "document",
@@ -373,6 +376,20 @@ async function seedCalendarEvent(
   if (params.restrictedTo) {
     await db.insertInto("file_access").values({ indexed_file_id: params.id, email: params.restrictedTo }).execute();
   }
+}
+
+async function seedCalendarConnector(db: Kysely<DB>, params: { id: string; createdBy: string }): Promise<void> {
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: params.id,
+      connector_type: "google_calendar",
+      auth_type: "oauth",
+      credentials: "{}",
+      created_by: params.createdBy,
+      scope_config: "{}",
+    })
+    .execute();
 }
 
 async function seedAttendeeFact(
@@ -493,6 +510,34 @@ describe("buildTodaysMeetings", () => {
     const meetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
 
     expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-today"]);
+  });
+
+  it("collapses duplicate calendar copies of one event, preferring the reader-owned copy", async () => {
+    await seedUser(db, { id: "coworker", email: "coworker@example.com" });
+    await seedCalendarConnector(db, { id: "cal-reader", createdBy: "user-1" });
+    await seedCalendarConnector(db, { id: "cal-coworker", createdBy: "coworker" });
+
+    await seedCalendarEvent(db, {
+      id: "evt-coworker-copy",
+      startTime: "2026-06-25T09:00:00.000Z",
+      title: "Shared sync",
+      threadId: "shared-invite@google.com",
+      connectorConfigId: "cal-coworker",
+      restrictedTo: "agent@example.com",
+    });
+    await seedCalendarEvent(db, {
+      id: "evt-reader-copy",
+      startTime: "2026-06-25T09:00:00.000Z",
+      title: "Shared sync",
+      threadId: "shared-invite@google.com",
+      connectorConfigId: "cal-reader",
+      restrictedTo: "agent@example.com",
+    });
+
+    const meetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
+
+    expect(meetings).toHaveLength(1);
+    expect(meetings[0].fileId).toBe("evt-reader-copy");
   });
 
   it("scopes an admin's meetings to their own calendar even with the read-all bypass", async () => {

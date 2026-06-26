@@ -292,7 +292,7 @@ export async function buildTodaysMeetings({
 
   const files = await db
     .selectFrom("indexed_files")
-    .select(["id", "file_name", "source_created_at", "provider_url", "source_path"])
+    .select(["id", "file_name", "source_created_at", "provider_url", "source_path", "thread_id", "connector_config_id"])
     .where("source", "=", CALENDAR_SOURCE)
     .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
     .where("is_archived", "=", 0)
@@ -311,7 +311,10 @@ export async function buildTodaysMeetings({
   const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
   if (visibleFiles.length === 0) return [];
 
-  const fileIds = visibleFiles.map((file) => file.id);
+  const readerConnectorIds = await readerOwnedCalendarConnectorIds(db, user.id);
+  const dedupedFiles = dedupeCalendarCopies(visibleFiles, readerConnectorIds);
+
+  const fileIds = dedupedFiles.map((file) => file.id);
   const attendeeFacts = await db
     .selectFrom("indexed_file_facts")
     .select(["indexed_file_id", "subject_name", "subject_email"])
@@ -339,7 +342,7 @@ export async function buildTodaysMeetings({
     attendeesByFile.set(fact.indexed_file_id, list);
   }
 
-  return visibleFiles
+  return dedupedFiles
     .map((file) => ({
       fileId: file.id,
       startTime: file.source_created_at as string,
@@ -349,6 +352,47 @@ export async function buildTodaysMeetings({
       attendees: attendeesByFile.get(file.id) ?? [],
     }))
     .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.title.localeCompare(b.title));
+}
+
+type CalendarCopyFile = {
+  id: string;
+  thread_id: string | null;
+  connector_config_id: string;
+};
+
+/** The google_calendar connector configs the reader owns (created). */
+async function readerOwnedCalendarConnectorIds(db: Kysely<DB>, userId: string): Promise<Set<string>> {
+  const rows = await db
+    .selectFrom("connector_configs")
+    .select("id")
+    .where("connector_type", "=", CALENDAR_SOURCE)
+    .where("created_by", "=", userId)
+    .execute();
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
+ * Collapses duplicate calendar copies of the same event. When several attendees
+ * in an org connect their calendars, one real invite is indexed once per
+ * connector (one row per attendee's copy) and the reader can see more than one.
+ * Copies are keyed by `thread_id` (the event's iCalUID); the reader-owned copy
+ * wins, then the lowest id, so the result is stable regardless of query order.
+ */
+function dedupeCalendarCopies<T extends CalendarCopyFile>(files: T[], readerConnectorIds: Set<string>): T[] {
+  const ordered = [...files].sort((a, b) => a.id.localeCompare(b.id));
+  const byIdentity = new Map<string, T>();
+  for (const file of ordered) {
+    const key = file.thread_id ?? `file:${file.id}`;
+    const existing = byIdentity.get(key);
+    if (!existing) {
+      byIdentity.set(key, file);
+      continue;
+    }
+    const existingOwned = readerConnectorIds.has(existing.connector_config_id);
+    const candidateOwned = readerConnectorIds.has(file.connector_config_id);
+    if (candidateOwned && !existingOwned) byIdentity.set(key, file);
+  }
+  return [...byIdentity.values()];
 }
 
 async function resolveAttendeeEntities(db: Kysely<DB>, emails: Array<string | null>): Promise<Map<string, string>> {
