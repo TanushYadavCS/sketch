@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Logger } from "../logger";
 
 interface AgentRunLimiterOptions {
@@ -17,6 +18,7 @@ export class AgentRunLimiter {
   private readonly limit: number;
   private readonly logger: Pick<Logger, "info">;
   private readonly now: () => number;
+  private readonly activeRunContext = new AsyncLocalStorage<boolean>();
 
   constructor(options: AgentRunLimiterOptions) {
     this.limit = options.limit;
@@ -25,6 +27,10 @@ export class AgentRunLimiter {
   }
 
   async run<T>(work: () => Promise<T>): Promise<T> {
+    if (this.activeRunContext.getStore()) {
+      return this.runReentrant(work);
+    }
+
     const waitMs = await this.acquire();
     const startedAt = this.now();
 
@@ -40,7 +46,7 @@ export class AgentRunLimiter {
     );
 
     try {
-      return await work();
+      return await this.activeRunContext.run(true, work);
     } finally {
       const durationMs = this.now() - startedAt;
       this.release();
@@ -52,6 +58,40 @@ export class AgentRunLimiter {
           waiting: this.waiting.length,
           waitMs,
           durationMs,
+        },
+        "Agent run limiter finished run",
+      );
+    }
+  }
+
+  private async runReentrant<T>(work: () => Promise<T>): Promise<T> {
+    const startedAt = this.now();
+
+    this.logger.info(
+      {
+        event: "agent_run_limiter_start",
+        limit: this.limit,
+        active: this.active,
+        waiting: this.waiting.length,
+        waitMs: 0,
+        reentrant: true,
+      },
+      "Agent run limiter started run",
+    );
+
+    try {
+      return await work();
+    } finally {
+      const durationMs = this.now() - startedAt;
+      this.logger.info(
+        {
+          event: "agent_run_limiter_finish",
+          limit: this.limit,
+          active: this.active,
+          waiting: this.waiting.length,
+          waitMs: 0,
+          durationMs,
+          reentrant: true,
         },
         "Agent run limiter finished run",
       );

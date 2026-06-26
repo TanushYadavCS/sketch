@@ -98,6 +98,42 @@ describe("AgentRunLimiter", () => {
     expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
   });
 
+  it("lets nested agent work reuse the active slot without bypassing queued independent work", async () => {
+    const { logger, entries } = captureLogger();
+    const limiter = createAgentRunLimiter({ limit: 1, logger });
+    const releaseOuter = deferred<void>();
+    const started: string[] = [];
+
+    const outer = limiter.run(async () => {
+      started.push("outer");
+      const nested = await limiter.run(async () => {
+        started.push("nested");
+        return "nested complete";
+      });
+      expect(nested).toBe("nested complete");
+      await releaseOuter.promise;
+      return "outer complete";
+    });
+
+    const independent = limiter.run(async () => {
+      started.push("independent");
+      return "independent complete";
+    });
+
+    await vi.waitFor(() => expect(started).toEqual(["outer", "nested"]));
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 1, waiting: 1 });
+    expect(entries.some((entry) => entry.fields.event === "agent_run_limiter_start" && entry.fields.reentrant)).toBe(
+      true,
+    );
+
+    releaseOuter.resolve();
+
+    await expect(outer).resolves.toBe("outer complete");
+    await vi.waitFor(() => expect(started).toEqual(["outer", "nested", "independent"]));
+    await expect(independent).resolves.toBe("independent complete");
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
+  });
+
   it("logs limiter wait, start, and finish fields", async () => {
     const { logger, entries } = captureLogger();
     const limiter = createAgentRunLimiter({ limit: 1, logger });
