@@ -464,6 +464,24 @@ describe("buildTodaysMeetings", () => {
     expect(meetings[1].attendees).toEqual([]);
   });
 
+  it("keeps all-day events on their calendar date in a negative-UTC timezone", async () => {
+    await seedCalendarEvent(db, { id: "evt-all-day", startTime: "2026-06-25T00:00:00.000Z", title: "Team offsite" });
+    await seedCalendarEvent(db, {
+      id: "evt-prev-evening",
+      startTime: "2026-06-25T02:00:00.000Z",
+      title: "Late call (prev local day)",
+    });
+
+    const meetings = await buildTodaysMeetings({
+      db,
+      user,
+      ...MEETINGS_RUNTIME_PARAMS,
+      timezone: "America/Los_Angeles",
+    });
+
+    expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-all-day"]);
+  });
+
   it("excludes archived events, events outside the day, and files the reader cannot see", async () => {
     await seedCalendarEvent(db, { id: "evt-today", startTime: "2026-06-25T10:00:00.000Z" });
     await seedCalendarEvent(db, { id: "evt-archived", startTime: "2026-06-25T11:00:00.000Z", archived: true });

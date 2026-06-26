@@ -606,13 +606,18 @@ function ownerResponseStatus(event: GoogleCalendarEvent): string | null {
   return event.attendees?.find((attendee) => attendee.self)?.responseStatus ?? null;
 }
 
+/** True when the calendar owner declined the event (their own RSVP is "declined"). */
+export function ownerDeclinedEvent(event: GoogleCalendarEvent): boolean {
+  return ownerResponseStatus(event) === "declined";
+}
+
 export function eventToSyncedItem(
   event: GoogleCalendarEvent,
   calendar: GoogleCalendarListEntry,
   ownerEmail: string | null | undefined,
 ): SyncedItem | null {
   if (!event.id || event.status === "cancelled") return null;
-  if (ownerResponseStatus(event) === "declined") return null;
+  if (ownerDeclinedEvent(event)) return null;
 
   const content = eventContent(event, calendar);
   const calendlyPeople = calendlyDescriptionPeople(event);
@@ -749,10 +754,10 @@ async function collectEventsForCalendar(params: {
 
     for (const event of result.items ?? []) {
       if (!event.id) continue;
-      if (event.status === "cancelled") {
+      if (event.status === "cancelled" || ownerDeclinedEvent(event)) {
         removals.push({
           providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
-          reason: "google_calendar_event_cancelled",
+          reason: event.status === "cancelled" ? "google_calendar_event_cancelled" : "google_calendar_event_declined",
         });
         continue;
       }

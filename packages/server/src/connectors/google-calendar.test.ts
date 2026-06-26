@@ -529,6 +529,54 @@ describe("Google Calendar connector", () => {
     expect(cursor.calendars).toEqual({ primary: "sync-primary-new" });
   });
 
+  it("removes a previously synced event the owner has now declined", async () => {
+    const connector = createGoogleCalendarConnector();
+    const removals: SourceItemRemovalRecord[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        return jsonResponse({
+          items: [
+            calendarEvent("declined", {
+              attendees: [{ email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus: "declined" }],
+            }),
+            calendarEvent("kept"),
+          ],
+          nextSyncToken: "sync-primary-new",
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: currentCursor({ primary: "sync-primary-old" }),
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["primary:kept"]);
+    expect(removals).toEqual([
+      {
+        providerFileId: providerFileIdForEvent("primary", "declined"),
+        reason: "google_calendar_event_declined",
+      },
+    ]);
+  });
+
   it("prunes unreadable calendars and drops their stale sync token", async () => {
     const connector = createGoogleCalendarConnector();
     const removals: SourceItemRemovalRecord[] = [];

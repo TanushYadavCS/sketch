@@ -243,6 +243,11 @@ function meetingViaFromSourcePath(sourcePath: string | null): string | null {
  * resolved to person entities. This is the canonical list the model enriches;
  * declined and cancelled events are already excluded at sync time so they never
  * reach the graph. RBAC mirrors {@link buildDailyBriefCandidateContext}.
+ *
+ * Timed events match the tz day window. All-day events are stored at UTC
+ * midnight with no timezone, so the window would drop them in negative-UTC
+ * zones; they are matched separately by their calendar date so they always land
+ * on the day they are labeled.
  */
 export async function buildTodaysMeetings({
   db,
@@ -254,6 +259,7 @@ export async function buildTodaysMeetings({
 }: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
   const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
   const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
+  const allDayInstant = `${outputDate}T00:00:00.000Z`;
   const candidateUserEmails = user.auth_role === "admin" && adminCanReadAllFiles ? undefined : contentUserEmails;
 
   const files = await db
@@ -262,8 +268,12 @@ export async function buildTodaysMeetings({
     .where("source", "=", CALENDAR_SOURCE)
     .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
     .where("is_archived", "=", 0)
-    .where("source_created_at", ">=", dayStart)
-    .where("source_created_at", "<=", dayEnd)
+    .where((eb) =>
+      eb.or([
+        eb.and([eb("source_created_at", ">=", dayStart), eb("source_created_at", "<=", dayEnd)]),
+        eb("source_created_at", "=", allDayInstant),
+      ]),
+    )
     .execute();
   if (files.length === 0) return [];
 
