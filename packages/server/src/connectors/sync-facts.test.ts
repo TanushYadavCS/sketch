@@ -139,7 +139,7 @@ describe("emitFactsForSyncedItem", () => {
     ]);
   });
 
-  it("keeps default attendee semantics for existing connectors", async () => {
+  it("derives attendee names from email-only participants", async () => {
     const factRepo = createIndexedFileFactRepository(db);
 
     await emitFactsForSyncedItem({
@@ -161,9 +161,16 @@ describe("emitFactsForSyncedItem", () => {
     const rows = await db
       .selectFrom("indexed_file_facts")
       .select(["fact_type", "relation", "subject_name", "subject_email"])
+      .orderBy("subject_email")
       .execute();
 
     expect(rows).toEqual([
+      {
+        fact_type: "attendee",
+        relation: "attended",
+        subject_name: "Email Only",
+        subject_email: "email.only@example.com",
+      },
       {
         fact_type: "attendee",
         relation: "attended",

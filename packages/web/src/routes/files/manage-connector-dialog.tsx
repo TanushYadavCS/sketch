@@ -87,6 +87,7 @@ export function ManageConnectorDialog({
     onSuccess: () => {
       toast.success("Sync started.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });
@@ -218,6 +219,7 @@ export function ManageConnectorDialog({
               connectorId={connector.id}
               connectorType={connector.connectorType}
               scopeConfig={connector.scopeConfig}
+              scopeConfigKey={definition.scopeConfigKey}
               scopeLabel={definition.scopeLabel}
               scopeEntries={scopeEntries}
               onBrowsingChange={setIsBrowsingScope}
@@ -413,6 +415,7 @@ function ScopeEditorDispatch({
   connectorId,
   connectorType,
   scopeConfig,
+  scopeConfigKey,
   scopeLabel,
   scopeEntries,
   onBrowsingChange,
@@ -421,6 +424,7 @@ function ScopeEditorDispatch({
   connectorId: string;
   connectorType: string;
   scopeConfig: Record<string, unknown>;
+  scopeConfigKey?: string;
   scopeLabel: string;
   scopeEntries: [string, unknown][];
   onBrowsingChange?: (browsing: boolean) => void;
@@ -456,6 +460,7 @@ function ScopeEditorDispatch({
     <GenericScopeEditor
       connectorId={connectorId}
       scopeConfig={scopeConfig}
+      scopeConfigKey={scopeConfigKey}
       noun={scopeLabel}
       onBrowsingChange={onBrowsingChange}
     />
@@ -501,6 +506,10 @@ function EmailScopeEditor({
     onSuccess: () => {
       toast.success("Sync scope updated — re-syncing.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
+      queryClient.invalidateQueries({ queryKey: ["all-files"] });
+      queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });

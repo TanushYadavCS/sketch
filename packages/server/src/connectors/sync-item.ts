@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { DB } from "../db/schema";
 import { normalizeSourceTimestampForStorage } from "../timestamps";
@@ -10,7 +11,14 @@ type ConnectorRepository = ReturnType<typeof createConnectorRepository>;
 
 export type ExistingContentHashMap = Map<
   string,
-  { id: string; contentHash: string | null; contentCategory: string; rollupGroupId: string | null }
+  {
+    id: string;
+    contentHash: string | null;
+    contentCategory: string;
+    contentIsNull: boolean;
+    sourceUpdatedAt: string | null;
+    rollupGroupId: string | null;
+  }
 >;
 
 export type ProcessSyncedItemResult =
@@ -44,7 +52,9 @@ export async function loadExistingContentHashes(
       "provider_message_id",
       "content_hash",
       "content_category",
+      "source_updated_at",
       "rollup_group_id",
+      sql<number>`CASE WHEN content IS NULL THEN 1 ELSE 0 END`.as("content_is_null"),
     ])
     .where("source", "=", connectorType)
     .where("is_archived", "=", 0)
@@ -61,6 +71,8 @@ export async function loadExistingContentHashes(
         id: f.id,
         contentHash: f.content_hash,
         contentCategory: f.content_category,
+        contentIsNull: Number(f.content_is_null) === 1,
+        sourceUpdatedAt: f.source_updated_at,
         rollupGroupId: f.rollup_group_id,
       });
     }
@@ -89,16 +101,29 @@ export async function processSyncedItem({
 
   const existing = existingHashes.get(syncIdentityKey(getSyncIdentityForItem(item, connectorConfigId, connectorType)));
   const rollupGroupIds = uniqueRollupGroupIds([existing?.rollupGroupId, item.rollupGroupId ?? null]);
-  if (existing && existing.contentHash === item.contentHash && existing.contentCategory === item.contentCategory) {
-    const sourceCreatedAt =
-      item.sourceCreatedAt === null || item.sourceCreatedAt === undefined
-        ? undefined
-        : normalizeSourceTimestampForStorage(item.sourceCreatedAt);
-    const sourceUpdatedAt =
-      item.sourceUpdatedAt === null || item.sourceUpdatedAt === undefined
-        ? undefined
-        : normalizeSourceTimestampForStorage(item.sourceUpdatedAt);
+  const sourceCreatedAt =
+    item.sourceCreatedAt === null || item.sourceCreatedAt === undefined
+      ? undefined
+      : normalizeSourceTimestampForStorage(item.sourceCreatedAt);
+  const sourceUpdatedAt =
+    item.sourceUpdatedAt === null || item.sourceUpdatedAt === undefined
+      ? undefined
+      : normalizeSourceTimestampForStorage(item.sourceUpdatedAt);
+  const hashlessSourceVersionChanged =
+    existing !== undefined &&
+    existing.contentHash === null &&
+    item.contentHash === null &&
+    existing.contentIsNull &&
+    item.content === null &&
+    sourceUpdatedAt !== undefined &&
+    sourceUpdatedAt !== existing.sourceUpdatedAt;
 
+  if (
+    existing &&
+    existing.contentHash === item.contentHash &&
+    existing.contentCategory === item.contentCategory &&
+    !hashlessSourceVersionChanged
+  ) {
     await db
       .updateTable("indexed_files")
       .set({
@@ -145,7 +170,7 @@ export async function processSyncedItem({
       rollupGroupId: item.rollupGroupId ?? null,
     });
 
-    if (upsertResult.contentChanged || upsertResult.categoryChanged) {
+    if (upsertResult.contentChanged || upsertResult.categoryChanged || upsertResult.sourceVersionChanged) {
       await clearEnrichmentData(trx, upsertResult.id);
     }
 

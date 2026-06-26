@@ -214,8 +214,7 @@ export class CanvasProvider implements IntegrationProvider {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Canvas initiateConnection failed: ${res.status} ${body}`);
+      throw await this.parseError(res, `Canvas initiateConnection failed: ${res.status} ${res.statusText}`);
     }
 
     const raw = (await res.json()) as {

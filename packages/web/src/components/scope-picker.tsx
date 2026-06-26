@@ -348,11 +348,13 @@ function getAllItemIds(data: BrowseResult): string[] {
 export function GenericScopeEditor({
   connectorId,
   scopeConfig,
+  scopeConfigKey,
   noun = "items",
   onBrowsingChange,
 }: {
   connectorId: string;
   scopeConfig: Record<string, unknown>;
+  scopeConfigKey?: string;
   noun?: string;
   onBrowsingChange?: (browsing: boolean) => void;
 }) {
@@ -386,8 +388,8 @@ export function GenericScopeEditor({
   const initialSelectedIds = useCallback((): Set<string> => {
     if (!browseData || browseData.type === "async") return new Set();
     const stored = browseData.scopeConfig ?? scopeConfig;
-    return computeSelectedFromScope(browseData, stored);
-  }, [browseData, scopeConfig]);
+    return computeSelectedFromScope(browseData, stored, scopeConfigKey);
+  }, [browseData, scopeConfig, scopeConfigKey]);
 
   const [selectedIds, setSelectedIds] = useState<Set<string> | null>(null);
   const effectiveIds = selectedIds ?? initialSelectedIds();
@@ -409,13 +411,17 @@ export function GenericScopeEditor({
   const saveMutation = useMutation({
     mutationFn: () => {
       if (!browseData || browseData.type === "async") throw new Error("No browse data");
-      const newScope = buildScopeFromSelection(browseData, effectiveIds);
+      const newScope = buildScopeFromSelection(browseData, effectiveIds, scopeConfigKey);
       return api.integrations.updateScope(connectorId, newScope);
     },
     onSuccess: () => {
       toast.success("Scope updated. Re-sync started.");
       setSelectedIds(null);
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
+      queryClient.invalidateQueries({ queryKey: ["all-files"] });
+      queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
       queryClient.invalidateQueries({ queryKey: ["generic-browse", connectorId] });
     },
     onError: (error: Error) => toast.error(error.message),
@@ -496,8 +502,20 @@ export function GenericScopeEditor({
  * - nested: scopeConfig.spaces / group item IDs
  * - tree: scopeConfig.sharedDrives + scopeConfig.folders / scopeConfig.items
  */
-function computeSelectedFromScope(data: BrowseResult, scope: Record<string, unknown>): Set<string> {
+function computeSelectedFromScope(
+  data: BrowseResult,
+  scope: Record<string, unknown>,
+  flatScopeKey?: string,
+): Set<string> {
   const ids = new Set<string>();
+
+  if (data.type === "flat" && flatScopeKey && Object.prototype.hasOwnProperty.call(scope, flatScopeKey)) {
+    const scopedIds = new Set((Array.isArray(scope[flatScopeKey]) ? scope[flatScopeKey] : []).filter(isString));
+    for (const id of getAllItemIds(data)) {
+      if (scopedIds.has(id)) ids.add(id);
+    }
+    return ids;
+  }
 
   // Collect all string[] values from scope config as potential selected IDs
   const allScopeIds = new Set<string>();
@@ -523,14 +541,22 @@ function computeSelectedFromScope(data: BrowseResult, scope: Record<string, unkn
   return ids;
 }
 
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
 /**
  * Build scope config from selected IDs + browse result shape.
  * Preserves the key names expected by each connector's sync().
  */
-function buildScopeFromSelection(data: BrowseResult, selectedIds: Set<string>): Record<string, unknown> {
+function buildScopeFromSelection(
+  data: BrowseResult,
+  selectedIds: Set<string>,
+  flatScopeKey = "rootPages",
+): Record<string, unknown> {
   switch (data.type) {
     case "flat":
-      return { rootPages: [...selectedIds] };
+      return { [flatScopeKey]: [...selectedIds] };
     case "nested": {
       const groupIds = new Set<string>();
       const itemIds = new Set<string>();

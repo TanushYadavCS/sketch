@@ -26,13 +26,13 @@ type LoginStep = "choose" | "password" | "magic-link" | "magic-link-sent";
 export const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     const status = await api.setup.status();
     if (!status.completed) {
       throw redirect({ to: "/onboarding" });
     }
     if (status.managedUrl) {
-      redirectToManagedLogin(status.managedUrl);
+      redirectToManagedLogin(status.managedUrl, returnToFromHref(location.href));
     }
   },
   component: LoginPage,
@@ -84,6 +84,7 @@ function LoginPage() {
         <MagicLinkStep
           email={magicLinkEmail}
           onEmailChange={setMagicLinkEmail}
+          returnTo={returnTo}
           onBack={() => setStep("choose")}
           onSent={(channels) => {
             setSentChannels(channels);
@@ -92,17 +93,31 @@ function LoginPage() {
         />
       )}
       {step === "magic-link-sent" && (
-        <MagicLinkSentStep email={magicLinkEmail} channels={sentChannels} onBack={() => setStep("magic-link")} />
+        <MagicLinkSentStep
+          email={magicLinkEmail}
+          channels={sentChannels}
+          returnTo={returnTo}
+          onBack={() => setStep("magic-link")}
+        />
       )}
     </div>
   );
 }
 
-function safeReturnTo(): string | null {
-  const value = new URLSearchParams(window.location.search).get("return_to");
+function safeReturnToValue(value: string | null | undefined): string | null {
   if (!value?.startsWith("/")) return null;
   if (value.startsWith("//")) return null;
+  if (value.startsWith("/login")) return null;
   return value;
+}
+
+function returnToFromHref(href: string): string | null {
+  const url = new URL(href, "http://sketch.local");
+  return safeReturnToValue(url.searchParams.get("return_to"));
+}
+
+function safeReturnTo(): string | null {
+  return safeReturnToValue(new URLSearchParams(window.location.search).get("return_to"));
 }
 
 function ChooseStep({ onPassword, onMagicLink }: { onPassword: () => void; onMagicLink: () => void }) {
@@ -211,11 +226,18 @@ function PasswordStep({ onBack, onSuccess }: { onBack: () => void; onSuccess: ()
 function MagicLinkStep({
   email,
   onEmailChange,
+  returnTo,
   onBack,
   onSent,
-}: { email: string; onEmailChange: (v: string) => void; onBack: () => void; onSent: (channels: string[]) => void }) {
+}: {
+  email: string;
+  onEmailChange: (v: string) => void;
+  returnTo: string | null;
+  onBack: () => void;
+  onSent: (channels: string[]) => void;
+}) {
   const magicLinkMutation = useMutation({
-    mutationFn: () => api.auth.magicLink.request(email),
+    mutationFn: () => api.auth.magicLink.request(email, returnTo),
     onSuccess: (data) => onSent(data.channels),
     onError: (error: Error) => {
       toast.error(error.message);
@@ -284,9 +306,19 @@ function ChannelIcon({ channels }: { channels: string[] }) {
   return <ChatCircleIcon size={24} className="text-primary" />;
 }
 
-function MagicLinkSentStep({ email, channels, onBack }: { email: string; channels: string[]; onBack: () => void }) {
+function MagicLinkSentStep({
+  email,
+  channels,
+  returnTo,
+  onBack,
+}: {
+  email: string;
+  channels: string[];
+  returnTo: string | null;
+  onBack: () => void;
+}) {
   const resendMutation = useMutation({
-    mutationFn: () => api.auth.magicLink.request(email),
+    mutationFn: () => api.auth.magicLink.request(email, returnTo),
     onSuccess: () => toast.success("Magic link resent!"),
     onError: (error: Error) => toast.error(error.message),
   });

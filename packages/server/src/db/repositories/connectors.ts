@@ -95,6 +95,8 @@ const CRM_ACTIVITY_FILE_TYPES_SQL = sql.join(
   ["crm_task", "crm_call", "crm_event", "crm_meeting", "crm_note"].map((t) => sql`${t}`),
 );
 
+const CONNECTOR_SCOPED_PROVIDER_FILE_ID_SOURCES = new Set<string>(["google_calendar", "teams"]);
+
 /**
  * The Files-list (browse) visibility rule, Gmail-style:
  *  - drop rollup *members* (activities shown under their parent object instead), and
@@ -398,7 +400,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .where("connector_config_id", "=", data.connectorConfigId)
             .where("provider_message_id", "=", data.providerMessageId)
             .executeTakeFirst()
-        : data.source === "teams"
+        : CONNECTOR_SCOPED_PROVIDER_FILE_ID_SOURCES.has(data.source)
           ? await db
               .selectFrom("indexed_files")
               .selectAll()
@@ -418,6 +420,12 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       if (existing) {
         const contentChanged = data.contentHash !== existing.content_hash;
         const categoryChanged = data.contentCategory !== existing.content_category;
+        const sourceVersionChanged =
+          data.contentHash === null &&
+          existing.content_hash === null &&
+          data.content === null &&
+          existing.content === null &&
+          sourceUpdatedAt !== existing.source_updated_at;
         const updates: Record<string, unknown> = {
           provider_file_id: data.providerFileId,
           provider_message_id: data.providerMessageId ?? null,
@@ -436,7 +444,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
-        if (contentChanged || categoryChanged) {
+        if (contentChanged || categoryChanged || sourceVersionChanged) {
           updates.embedding_status = "pending";
           updates.summary_status = "pending";
           updates.embedding_attempts = 0;
@@ -447,7 +455,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
         await db.updateTable("indexed_files").set(updates).where("id", "=", existing.id).execute();
 
-        return { id: existing.id, created: false, contentChanged, categoryChanged };
+        return { id: existing.id, created: false, contentChanged, categoryChanged, sourceVersionChanged };
       }
 
       const id = randomUUID();
@@ -477,7 +485,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         })
         .execute();
 
-      return { id, created: true, contentChanged: false, categoryChanged: false };
+      return { id, created: true, contentChanged: false, categoryChanged: false, sourceVersionChanged: false };
     },
 
     /** Link a connector to a file (many-to-many). Idempotent. */

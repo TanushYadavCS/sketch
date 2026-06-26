@@ -22,7 +22,12 @@ import { isRecreateActive } from "../entities/recreate-state";
 import { resolveConnectorCredentials } from "./credential-source";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
-import { runEnrichment } from "./enrichment";
+import {
+  SCHEDULED_ENRICHMENT_MAX_FILES_PER_RUN,
+  SCHEDULED_ENRICHMENT_TIME_BUDGET_MS,
+  isEnrichmentActive,
+  runEnrichment,
+} from "./enrichment";
 import {
   createEnrichmentEmbeddingProvider,
   createEnrichmentGenerator,
@@ -278,6 +283,7 @@ export async function runConnectorSync(
           connectorConfigId: config.id,
           connectorType,
           providerFileIds: record.providerFileId ? [record.providerFileId] : undefined,
+          providerFileIdPrefixes: record.providerFileIdPrefix ? [record.providerFileIdPrefix] : undefined,
           providerMessageIds: record.providerMessageId ? [record.providerMessageId] : undefined,
           sourceCreatedBefore: record.sourceCreatedBefore,
         });
@@ -550,7 +556,7 @@ async function getIntervalMsFromSettings(db: Kysely<DB>, fallbackMs: number): Pr
 }
 
 /**
- * Run sync for all connectors that are due, then run enrichment.
+ * Run sync for all connectors that are due.
  * Called on a schedule (e.g., every 30 minutes).
  */
 export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSchedulerDeps): Promise<void> {
@@ -561,15 +567,7 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   const repo = createConnectorRepository(db, deps?.appConfig?.ENCRYPTION_KEY);
 
-  // Auto-recover any connector stuck in `syncing` past the staleness threshold —
-  // a row stuck mid-process is otherwise excluded from `findSyncableConfigs` and
-  // would never retry until the server restarts.
   await recoverStaleSyncs(db, logger, STALE_SYNCING_THRESHOLD_MS, deps?.appConfig?.ENCRYPTION_KEY);
-
-  // Same idea for enrichment: scheduled runs only claim `pending`/`failed` (so
-  // an in-flight run can't be re-claimed mid-flight and race on chunk inserts),
-  // which means a crashed run's `processing` row would otherwise be stranded
-  // until startup. Reset stale `processing` rows before each tick.
   await recoverStaleEnrichments(db, logger);
 
   const intervalMs = await getIntervalMsFromSettings(db, DEFAULT_SYNC_INTERVAL_MS);
@@ -587,12 +585,42 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
     }
   });
 
-  // Run enrichment after all syncs complete
+  try {
+    const entityRepo = createEntityRepository(db);
+    const count = await entityRepo.recomputeAllHotness();
+    if (count > 0) {
+      logger.debug({ entities: count }, "Entity hotness recomputed");
+    }
+  } catch (err) {
+    logger.error({ err }, "Entity hotness recomputation failed");
+  }
+
+  const now = Date.now();
+  if (now - lastFeatureArchiveSweepAt >= FEATURE_ARCHIVE_SWEEP_INTERVAL_MS) {
+    lastFeatureArchiveSweepAt = now;
+    try {
+      await runFeatureArchiveSweep(db, logger.child({ component: "feature-archive-sweep" }), {
+        minMentions: deps?.appConfig?.FEATURE_ARCHIVE_MIN_MENTIONS,
+        ageDays: deps?.appConfig?.FEATURE_ARCHIVE_AGE_DAYS,
+        maxPerRun: deps?.appConfig?.FEATURE_ARCHIVE_MAX_PER_RUN,
+      });
+    } catch (err) {
+      logger.error({ err }, "Feature archive sweep failed");
+    }
+  }
+}
+
+export async function runScheduledEnrichment(db: Kysely<DB>, logger: Logger, deps?: SyncSchedulerDeps): Promise<void> {
+  if (isRecreateActive()) {
+    logger.info("Skipping scheduled enrichment during entity recreate");
+    return;
+  }
+
   try {
     const settings = await createSettingsRepository(db, deps?.appConfig?.ENCRYPTION_KEY).get();
 
     if (settings?.enrichment_enabled === 0) {
-      logger.info("Enrichment disabled, skipping post-sync enrichment");
+      logger.info("Enrichment disabled, skipping scheduled enrichment");
       return;
     }
 
@@ -616,45 +644,23 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
       geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
       downloadImage: deps?.downloadImage,
+      maxFilesPerRun: SCHEDULED_ENRICHMENT_MAX_FILES_PER_RUN,
+      timeBudgetMs: SCHEDULED_ENRICHMENT_TIME_BUDGET_MS,
     });
 
-    if (enrichResult.filesProcessed > 0 || enrichResult.filesFailed > 0) {
+    if (enrichResult.filesProcessed > 0 || enrichResult.filesFailed > 0 || enrichResult.filesSkipped > 0) {
       logger.info(
         {
           enriched: enrichResult.filesProcessed,
           failed: enrichResult.filesFailed,
           skipped: enrichResult.filesSkipped,
+          stoppedReason: enrichResult.stoppedReason,
         },
-        "Post-sync enrichment complete",
+        "Scheduled enrichment slice complete",
       );
     }
   } catch (err) {
-    logger.error({ err }, "Post-sync enrichment failed");
-  }
-
-  // Recompute entity hotness (decay for entities not recently mentioned)
-  try {
-    const entityRepo = createEntityRepository(db);
-    const count = await entityRepo.recomputeAllHotness();
-    if (count > 0) {
-      logger.debug({ entities: count }, "Entity hotness recomputed");
-    }
-  } catch (err) {
-    logger.error({ err }, "Entity hotness recomputation failed");
-  }
-
-  const now = Date.now();
-  if (now - lastFeatureArchiveSweepAt >= FEATURE_ARCHIVE_SWEEP_INTERVAL_MS) {
-    lastFeatureArchiveSweepAt = now;
-    try {
-      await runFeatureArchiveSweep(db, logger.child({ component: "feature-archive-sweep" }), {
-        minMentions: deps?.appConfig?.FEATURE_ARCHIVE_MIN_MENTIONS,
-        ageDays: deps?.appConfig?.FEATURE_ARCHIVE_AGE_DAYS,
-        maxPerRun: deps?.appConfig?.FEATURE_ARCHIVE_MAX_PER_RUN,
-      });
-    } catch (err) {
-      logger.error({ err }, "Feature archive sweep failed");
-    }
+    logger.error({ err }, "Scheduled enrichment failed");
   }
 }
 
@@ -693,6 +699,11 @@ async function recoverStaleSyncs(
  * Threshold: 1 hour — enrichment runs should complete well within that.
  */
 export async function recoverStaleEnrichments(db: Kysely<DB>, logger: Logger): Promise<void> {
+  if (isEnrichmentActive()) {
+    logger.debug("Skipping stale enrichment recovery while enrichment is active");
+    return;
+  }
+
   const staleThreshold = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
   const stale = await db
@@ -729,6 +740,7 @@ export function startSyncScheduler(
 ): SyncSchedulerHandle {
   let aborted = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let scheduledEnrichmentInFlight = false;
 
   // Recover any connectors stuck in "syncing" from a previous crash
   recoverStaleSyncs(db, logger, 0, deps?.appConfig?.ENCRYPTION_KEY).catch((err) => {
@@ -741,21 +753,37 @@ export function startSyncScheduler(
   });
 
   // Startup enrichment disabled — enrichment now runs only when explicitly
-  // triggered from the UI or during the scheduled sync cycle. This prevents
-  // DB contention between enrichment and manual syncs.
+  // triggered from the UI or after the scheduled sync cycle. This prevents
+  // DB contention between enrichment and sync writes.
   logger.info("Startup enrichment skipped (trigger manually from UI)");
 
-  async function scheduleNext(): Promise<void> {
+  async function scheduleNext(delayMs?: number): Promise<void> {
     if (aborted) return;
-    const nextMs = await getIntervalMsFromSettings(db, intervalMs);
+    const nextMs = delayMs ?? (await getIntervalMsFromSettings(db, intervalMs));
     timer = setTimeout(async () => {
       if (aborted) return;
+      let shouldRunEnrichment = false;
       try {
         await runAllSyncs(db, logger, deps);
+        shouldRunEnrichment = true;
       } catch (err) {
         logger.error({ err }, "Sync scheduler tick failed");
       }
       scheduleNext();
+      if (shouldRunEnrichment && !aborted) {
+        if (scheduledEnrichmentInFlight || isEnrichmentActive()) {
+          logger.warn("Skipping scheduled enrichment because enrichment is active");
+          return;
+        }
+        scheduledEnrichmentInFlight = true;
+        try {
+          await runScheduledEnrichment(db, logger, deps);
+        } catch (err) {
+          logger.error({ err }, "Enrichment scheduler tick failed");
+        } finally {
+          scheduledEnrichmentInFlight = false;
+        }
+      }
     }, nextMs);
     logger.debug({ intervalMs: nextMs }, "Next sync scheduled");
   }

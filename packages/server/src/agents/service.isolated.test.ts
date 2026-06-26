@@ -93,7 +93,10 @@ function createWritingService(
   });
 }
 
-async function seedIndexedFile(db: Kysely<DB>, params: { id: string; providerUrl: string | null }): Promise<void> {
+async function seedIndexedFile(
+  db: Kysely<DB>,
+  params: { id: string; providerUrl: string | null; sourceUpdatedAt?: string | null; restrictedTo?: string },
+): Promise<void> {
   await db
     .insertInto("users")
     .values({ id: "agent-owner", name: "Agent Owner" })
@@ -127,10 +130,55 @@ async function seedIndexedFile(db: Kysely<DB>, params: { id: string; providerUrl
       context_note: null,
       access_scope_id: null,
       content_hash: null,
-      source_updated_at: null,
+      source_updated_at: params.sourceUpdatedAt ?? null,
       source_created_at: null,
       synced_at: new Date().toISOString(),
       embedding_status: "pending",
+    })
+    .execute();
+
+  if (params.restrictedTo) {
+    await db.insertInto("file_access").values({ indexed_file_id: params.id, email: params.restrictedTo }).execute();
+  }
+}
+
+async function seedEntity(db: Kysely<DB>, params: { id: string; name: string; hotness?: number }): Promise<void> {
+  const now = NOW.toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id: params.id,
+      name: params.name,
+      source_type: "project",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: params.hotness ?? 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+    })
+    .execute();
+}
+
+async function seedMention(
+  db: Kysely<DB>,
+  params: { id: string; entityId: string; fileId: string; mentionedAt?: string },
+): Promise<void> {
+  await db
+    .insertInto("entity_mentions")
+    .values({
+      id: params.id,
+      entity_id: params.entityId,
+      indexed_file_id: params.fileId,
+      chunk_index: null,
+      context_snippet: null,
+      confidence: "EXTRACTED",
+      source: "test",
+      relation: "mentioned",
+      mentioned_at: params.mentionedAt ?? NOW.toISOString(),
     })
     .execute();
 }
@@ -389,6 +437,107 @@ describe("AgentRunService", () => {
     const output = await service.getByIdForUser(DAILY_BRIEF_AGENT_KEY, row.id, user.id);
 
     expect(output?.sections.todos[0].sourceUrl).toBeNull();
+  });
+
+  it("passes Daily Brief candidate context into the agent runtime message", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "provider-identity",
+        user_id: user.id,
+        provider: "google",
+        provider_user_id: "google-user",
+        provider_email: "provider@example.com",
+      })
+      .execute();
+    await seedEntity(db, { id: "entity-provider-email", name: "Provider Email Project", hotness: 1 });
+    await seedIndexedFile(db, {
+      id: "file-provider-email",
+      providerUrl: null,
+      sourceUpdatedAt: NOW.toISOString(),
+      restrictedTo: "provider@example.com",
+    });
+    await seedMention(db, {
+      id: "mention-provider-email",
+      entityId: "entity-provider-email",
+      fileId: "file-provider-email",
+    });
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Daily Brief", summary: "Summary" },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          items: [],
+        },
+        items: [],
+      });
+      return {
+        messageSent: true,
+        sessionId: "agent-session",
+        costUsd: 0,
+        auxCostUsd: 0,
+        pendingUploads: [],
+        durationMs: 0,
+        durationApiMs: 0,
+        numTurns: 0,
+        stopReason: null,
+        errorSubtype: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+        model: null,
+        isResumedSession: false,
+        totalAttachments: 0,
+        imageCount: 0,
+        nonImageCount: 0,
+        mimeTypes: [],
+        fileSizes: [],
+        promptMode: "text" as const,
+        toolCalls: [],
+        auxLlmCalls: [],
+        sdkCostUsd: 0,
+        rawUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        trace: { progressEvents: [], finalText: "Done" },
+      };
+    });
+    const service = new AgentRunService({
+      db,
+      config: createTestConfig(),
+      logger: createTestLogger(),
+      users,
+      settings: createSettingsRepository(db),
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      queueManager: createPausedQueueManager(tasks),
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    const userMessage = runAgent.mock.calls[0][0].userMessage;
+    expect(userMessage).toContain('"dailyBriefCandidateContext"');
+    expect(userMessage).toContain('"entityWindowDays": 7');
+    expect(userMessage).toContain('"evidenceWindowDays": 30');
+    expect(userMessage).toContain('"Provider Email Project"');
+    expect(userMessage).toContain('"sampleFileIds": [');
+    expect(userMessage).toContain('"file-provider-email"');
+    expect(userMessage).toContain('"hotFallbackEntities": []');
   });
 
   it("suppresses recent failed scheduled attempts during the schedule window", async () => {

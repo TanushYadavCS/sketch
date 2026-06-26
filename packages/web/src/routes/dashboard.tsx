@@ -19,7 +19,19 @@ export interface AuthContext {
  * If setup not complete → /onboarding.
  * If not authenticated → /login.
  */
-async function checkAuth(): Promise<{ auth: AuthContext }> {
+function safeReturnTo(value: string | undefined): string | null {
+  if (!value?.startsWith("/")) return null;
+  if (value.startsWith("//")) return null;
+  if (value.startsWith("/login")) return null;
+  return value;
+}
+
+function loginRedirect(returnTo: string | null): never {
+  const loginUrl = returnTo ? `/login?return_to=${encodeURIComponent(returnTo)}` : "/login";
+  throw redirect({ href: loginUrl });
+}
+
+async function checkAuth(returnTo?: string): Promise<{ auth: AuthContext }> {
   const status = await api.setup.status();
   if (!status.completed) {
     throw redirect({ to: "/onboarding" });
@@ -27,10 +39,11 @@ async function checkAuth(): Promise<{ auth: AuthContext }> {
 
   const session = await api.auth.session();
   if (!session.authenticated) {
+    const safeTarget = safeReturnTo(returnTo);
     if (status.managedUrl) {
-      redirectToManagedLogin(status.managedUrl);
+      redirectToManagedLogin(status.managedUrl, safeTarget);
     }
-    throw redirect({ to: "/login" });
+    loginRedirect(safeTarget);
   }
 
   return {
@@ -53,8 +66,8 @@ export function useDashboardAuth(): AuthContext {
 export const dashboardRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "dashboard",
-  beforeLoad: async () => {
-    return await checkAuth();
+  beforeLoad: async ({ location }) => {
+    return await checkAuth(location.href);
   },
   component: DashboardLayout,
 });

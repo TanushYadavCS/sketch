@@ -59,6 +59,11 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
         return { content: [{ type: "text" as const, text: "Chat history is not available in this run." }] };
       }
       const providerThreadId = deps.conversationContext?.providerThreadId;
+      const currentMessageId = deps.conversationContext?.currentMessageId;
+      const effectiveBeforeMessageId =
+        beforeMessageId && currentMessageId
+          ? Math.min(beforeMessageId, currentMessageId)
+          : (beforeMessageId ?? currentMessageId);
       const effectiveScope = scope ?? (providerThreadId ? "current_thread" : "conversation");
       if (effectiveScope === "current_thread" && !providerThreadId) {
         return {
@@ -68,7 +73,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
 
       const result = await deps.conversationRepo.listMessages(conversationId, {
         afterMessageId,
-        beforeMessageId,
+        beforeMessageId: effectiveBeforeMessageId,
         limit,
         order,
         includeBotMessages,
@@ -123,7 +128,11 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps) {
         return { content: [{ type: "text" as const, text: "Chat history search is not available in this run." }] };
       }
       const providerThreadId = deps.conversationContext?.providerThreadId;
-      const effectiveBeforeMessageId = beforeMessageId ?? deps.conversationContext?.currentMessageId;
+      const currentMessageId = deps.conversationContext?.currentMessageId;
+      const effectiveBeforeMessageId =
+        beforeMessageId && currentMessageId
+          ? Math.min(beforeMessageId, currentMessageId)
+          : (beforeMessageId ?? currentMessageId);
       const effectiveScope = scope ?? (providerThreadId ? "current_thread" : "conversation");
       if (effectiveScope === "current_thread" && !providerThreadId) {
         return {

@@ -5,7 +5,9 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunAgentParams } from "../agent/runner";
 import { getSessionId, saveSessionId } from "../agent/sessions";
+import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -38,7 +40,7 @@ function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string
     fileSizes: [],
     promptMode: "text" as const,
     toolCalls: [],
-    trace: { progressEvents: [], finalText },
+    trace: { progressEvents: [], finalText, automationArtifacts: [] },
   };
 }
 
@@ -75,6 +77,14 @@ async function login(app: ReturnType<typeof createApp>) {
     body: JSON.stringify({ email: "karan@example.com", password: "testpassword123" }),
   });
   return res.headers.get("set-cookie") ?? "";
+}
+
+async function getMemberCookie(db: Kysely<DB>, userId: string): Promise<string> {
+  const settings = createSettingsRepository(db);
+  const row = await settings.get();
+  if (!row?.jwt_secret) throw new Error("JWT secret not found in test DB");
+  const token = await signJwt(userId, "member", row.jwt_secret);
+  return `sketch_session=${token}`;
 }
 
 function webChatTranscriptPath(dataDir: string, userId: string, conversationId = "default") {
@@ -261,7 +271,11 @@ describe("web chat API", () => {
       reason: "Connect GitHub so Sketch can inspect repository issues.",
     };
     const runAgent = vi.fn().mockResolvedValue({
-      ...makeAgentResult("Connect GitHub first."),
+      ...makeAgentResult(
+        "GitHub is not connected.\n\n" +
+          "You'll need to connect it in Settings → Integrations using the GitHub OAuth flow.\n\n" +
+          "Once it's connected, ask again and I'll inspect the issues.",
+      ),
       pendingIntegrationConnections: [card],
     });
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
@@ -283,14 +297,372 @@ describe("web chat API", () => {
       type: "data-integration-connection",
       data: card,
     });
+    expect(text).toContain("GitHub is not connected.");
+    expect(text).not.toContain("Settings");
+    expect(text).not.toContain("OAuth flow");
     const transcript = JSON.parse(
       await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-integrations"), "utf-8"),
     );
+    expect(transcript.messages.at(-1).parts).toContainEqual({
+      type: "text",
+      text: "GitHub is not connected.",
+    });
     expect(transcript.messages.at(-1).parts).toContainEqual({
       type: "data-integration-connection",
       id: "integration-connection-0",
       data: card,
     });
+  });
+
+  it("buffers integration-related streamed text until setup instructions can be sanitized", async () => {
+    await seedAdmin(db);
+    const card = {
+      requestId: "integration-req-1",
+      appId: "github",
+      appName: "GitHub",
+      reason: "Connect GitHub so Sketch can inspect repository issues.",
+    };
+    const rawText =
+      "GitHub is not connected.\n\n" +
+      "You'll need to connect it in Settings -> Integrations using the GitHub OAuth flow.";
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__direct_execute_action",
+        input: { componentKey: "github-create-issue" },
+      });
+      await params.onTextDelta?.(rawText);
+      return {
+        ...makeAgentResult(rawText),
+        pendingIntegrationConnections: [card],
+      };
+    });
+
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-buffered-integrations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Create a GitHub issue" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("GitHub is not connected.");
+    expect(text).not.toContain("Settings");
+    expect(text).not.toContain("OAuth flow");
+    expect(webChatStreamChunks(text).find((chunk) => chunk.type === "data-integration-connection")).toMatchObject({
+      type: "data-integration-connection",
+      data: card,
+    });
+  });
+
+  it("streams automation cards and includes builder context when a builder reply updates an automation", async () => {
+    const admin = await seedAdmin(db);
+    const artifact = {
+      taskId: "task-123",
+      kind: "New automation",
+      title: "Send weekly customer brief",
+      description: "Summarizes customer updates every Monday.",
+      tags: ["Scheduled", "Slack"],
+      scheduleLabel: "Cron: 0 9 * * 1 (Asia/Kolkata)",
+      deliveryLabel: "Slack DM",
+      builderUrl: "/scheduled-tasks/task-123/edit",
+      status: "active" as const,
+    };
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "ManageScheduledTasks",
+        input: { action: "add" },
+      });
+      await params.onTextDelta?.("Automation created. Open builder: /scheduled-tasks/task-123/edit");
+      return {
+        ...makeAgentResult("Automation created. Open builder: /scheduled-tasks/task-123/edit"),
+        trace: {
+          progressEvents: [],
+          finalText: "Automation created. Open builder: /scheduled-tasks/task-123/edit",
+          automationArtifacts: [artifact],
+        },
+      };
+    });
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-123",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        prompt: "Send weekly customer brief",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "Asia/Kolkata",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: admin.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        title: "Send weekly customer brief",
+        description: "Summarizes customer updates every Monday.",
+        originChat: null,
+        steps: JSON.stringify([
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Weekly trigger",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: {
+              type: "schedule",
+              scheduleType: "cron",
+              scheduleValue: "0 9 * * 1",
+              timezone: "Asia/Kolkata",
+            },
+          },
+          {
+            id: "brief",
+            type: "agent",
+            label: "Create brief",
+            icon: "robot",
+            position: { x: 245, y: 0 },
+            agentMode: "sketch",
+          },
+        ]),
+        edges: JSON.stringify([{ id: "trigger-brief", from: "trigger", to: "brief" }]),
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: { platform: "slack", targetType: "dm", targetId: "D123", threadTs: null, mode: "deliver" },
+      }),
+    };
+    const stepContentRepo = {
+      getByTask: vi.fn().mockResolvedValue([
+        {
+          task_id: "task-123",
+          step_id: "brief",
+          content_type: "prompt",
+          content: "Summarize customer updates in three bullets.",
+          apps: JSON.stringify(["Slack"]),
+          updated_at: "2026-06-01T00:00:00.000Z",
+        },
+      ]),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+      stepContentRepo: stepContentRepo as never,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-automation", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Make the summary shorter", automationTaskId: "task-123" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const chunks = webChatStreamChunks(text);
+    const visibleText = chunks
+      .filter((chunk) => chunk.type === "text-delta")
+      .map((chunk) => (chunk as { delta?: string }).delta ?? "")
+      .join("");
+    expect(visibleText).toBe("All set - here's the automation.");
+    expect(visibleText).not.toContain("/scheduled-tasks/task-123/edit");
+    expect(chunks.find((chunk) => chunk.type === "data-automation")).toMatchObject({
+      type: "data-automation",
+      data: artifact,
+    });
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.userMessage).toContain("task_id: task-123");
+    expect(call.userMessage).toContain("current_automation:");
+    expect(call.userMessage).toContain("title: Send weekly customer brief");
+    expect(call.userMessage).toContain("steps:");
+    expect(call.userMessage).toContain("- brief [agent]: Create brief");
+    expect(call.userMessage).toContain("prompt: Summarize customer updates in three bullets.");
+    expect(call.userMessage).toContain("edges: trigger->brief");
+    expect(stepContentRepo.getByTask).toHaveBeenCalledWith("task-123");
+
+    const transcript = JSON.parse(await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-automation"), "utf-8"));
+    expect(transcript.messages.at(-1).parts).toContainEqual({
+      type: "data-automation",
+      id: "automation-0",
+      data: artifact,
+    });
+  });
+
+  it("starts builder replies without originating Slack conversation context", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createConversationRepository(db);
+    const conversation = await conversations.getOrCreate(
+      { platform: "slack", kind: "channel", providerConversationId: "C123" },
+      "design-wins",
+    );
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.1",
+      senderName: "Alice",
+      text: "Create a Trustpilot wins automation",
+      providerThreadId: "1700.1",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-123",
+        platform: "slack",
+        contextType: "channel",
+        deliveryTarget: "C123",
+        threadTs: "1700.1",
+        prompt: "Post design wins",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: admin.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        title: "Post design wins",
+        description: null,
+        originChat: {
+          platform: "slack",
+          conversationId: String(conversation.id),
+          providerThreadId: "1700.1",
+          currentMessageId: 1,
+        },
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: {
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C123",
+          threadTs: "1700.1",
+          mode: "deliver",
+        },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=builder-task-123", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Tighten the filter", automationTaskId: "task-123" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.userMessage).toContain("task_id: task-123");
+    expect(call.userMessage).toContain("title: Post design wins");
+    expect(call.userMessage).not.toContain("Alice");
+    expect(call.userMessage).not.toContain("The automation was created from a slack chat");
+    expect(call.platform).toBe("slack");
+    expect(call.taskContext).toMatchObject({
+      platform: "slack",
+      contextType: "channel",
+      deliveryTarget: "C123",
+      createdBy: admin.id,
+      threadTs: "1700.1",
+      canManageAnyTask: true,
+      origin: {
+        platform: "web",
+        conversationId: "builder-task-123",
+        providerThreadId: null,
+        currentMessageId: null,
+      },
+    });
+    expect(call.conversationRepo).toBeUndefined();
+    expect(call.conversationContext).toBeUndefined();
+  });
+
+  it("does not inject builder context for inaccessible automation ids", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner@test.com" });
+    const member = await users.create({ name: "Member", email: "member@test.com", slackUserId: "U_MEMBER" });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("I can help with your automations."));
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-private",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D_OWNER",
+        threadTs: null,
+        prompt: "Private task",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: owner.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        title: "Private task",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: { platform: "slack", targetType: "dm", targetId: "D_OWNER", threadTs: null, mode: "deliver" },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+      getSlack: () => ({ openDmChannel: vi.fn().mockResolvedValue("D_MEMBER") }) as never,
+    });
+    const cookie = await getMemberCookie(db, member.id);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-private", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Update it", automationTaskId: "task-private" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.userMessage).not.toContain("<automation_builder>");
+    expect(call.userMessage).not.toContain("task_id: task-private");
+    expect(call.taskContext).toMatchObject({ createdBy: member.id, deliveryTarget: "D_MEMBER" });
   });
 
   it("streams connected account cards from provider state for account enquiries", async () => {
@@ -745,6 +1117,60 @@ describe("web chat API", () => {
       ],
       updatedAt: expect.any(String),
     });
+  });
+
+  it("sanitizes legacy manual setup text when returning persisted integration cards", async () => {
+    const admin = await seedAdmin(db);
+    const transcriptDir = join(dataDir, "web-chat", admin.id);
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, "chat-setup-text.json"),
+      JSON.stringify({
+        version: 1,
+        messages: [
+          { id: "u-history", role: "user", parts: [{ type: "text", text: "Check Gmail" }] },
+          {
+            id: "a-history",
+            role: "assistant",
+            parts: [
+              {
+                type: "text",
+                text:
+                  "Gmail is not connected.\n\n" +
+                  "You'll need to connect Gmail in Settings → Integrations with a Gmail API key.\n\n" +
+                  "Once it's connected, ask again.",
+              },
+              {
+                type: "data-integration-connection",
+                id: "integration-connection-0",
+                data: {
+                  requestId: "req-gmail",
+                  appId: "google-gmail-oauth",
+                  appName: "Gmail",
+                  state: "connect",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat/messages?conversationId=chat-setup-text", {
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { messages: Array<{ parts: unknown[] }> };
+    expect(JSON.stringify(json)).not.toContain("Settings");
+    expect(JSON.stringify(json)).not.toContain("API key");
+    expect(json.messages.at(-1)?.parts).toContainEqual({ type: "text", text: "Gmail is not connected." });
   });
 
   it("accepts legacy line-only web chat progress transcripts", async () => {
@@ -1359,6 +1785,62 @@ describe("web chat API", () => {
         },
       },
     ]);
+  });
+
+  it("interrupts a stale pending web chat progress message when no run is active", async () => {
+    const admin = await seedAdmin(db);
+    const transcriptDir = join(dataDir, "web-chat", admin.id);
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, "chat-stale-progress.json"),
+      JSON.stringify({
+        version: 1,
+        messages: [
+          {
+            id: "user-msg-stale",
+            role: "user",
+            createdAt: "2026-06-01T00:00:00.000Z",
+            parts: [{ type: "text", text: "Run the automation" }],
+          },
+          {
+            id: "assistant-progress-user-msg-stale",
+            role: "assistant",
+            createdAt: "2026-06-01T00:00:01.000Z",
+            parts: [{ type: "data-progress", id: "progress", data: { lines: ['ManageScheduledTasks: "run"'] } }],
+          },
+        ],
+      }),
+    );
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const stopResponse = await app.request("/api/web-chat/conversations/chat-stale-progress/interruptions", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+
+    expect(stopResponse.status).toBe(200);
+    await expect(stopResponse.json()).resolves.toEqual({ success: true, interrupted: true });
+    const transcript = JSON.parse(await readFile(join(transcriptDir, "chat-stale-progress.json"), "utf-8")) as {
+      messages: Array<{ role: string; parts: Array<{ type: string; id?: string; data?: unknown }> }>;
+    };
+    expect(transcript.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      parts: [
+        {
+          type: "data-interruption",
+          id: "interruption",
+          data: {
+            detail: "Sketch paused.",
+            label: "Tell Sketch what to do differently.",
+          },
+        },
+      ],
+    });
   });
 
   it("reports no interruption when a web chat conversation is not running", async () => {

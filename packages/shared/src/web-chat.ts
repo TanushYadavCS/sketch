@@ -52,6 +52,7 @@ export interface WebChatIntegrationConnectionData {
   state?: "connect" | "connected";
   icon?: string;
   reason?: string;
+  connectUrl?: string;
   accountName?: string;
   connectionId?: string | null;
 }

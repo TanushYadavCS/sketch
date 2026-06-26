@@ -106,7 +106,11 @@ import * as m103 from "./migrations/103-daily-briefs";
 import * as m104 from "./migrations/104-daily-brief-item-metadata";
 import * as m105 from "./migrations/105-normalize-indexed-file-source-timestamps";
 import * as m106 from "./migrations/106-agents";
-import * as m107 from "./migrations/107-connector-credential-source";
+import * as m107 from "./migrations/107-scheduled-task-builder-revisions";
+import * as m108 from "./migrations/108-scheduled-task-origin-chat";
+import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
+import * as m110 from "./migrations/110-google-calendar-provider-file-scope";
+import * as m111 from "./migrations/111-connector-credential-source";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -217,7 +221,11 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "104-daily-brief-item-metadata": m104,
           "105-normalize-indexed-file-source-timestamps": m105,
           "106-agents": m106,
-          "107-connector-credential-source": m107,
+          "107-scheduled-task-builder-revisions": m107,
+          "108-scheduled-task-origin-chat": m108,
+          "109-scheduled-task-origin-message-id": m109,
+          "110-google-calendar-provider-file-scope": m110,
+          "111-connector-credential-source": m111,
         };
       },
     },

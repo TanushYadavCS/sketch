@@ -8,7 +8,7 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
-import type { InboxMessageContext, SketchContextParams } from "../agent/prompt";
+import type { InboxMessageContext, QuotedMessageContext, SketchContextParams } from "../agent/prompt";
 import { buildSketchContext, getImageAttachmentPathsFromSketchContext } from "../agent/prompt";
 import {
   type McpServerConfig,
@@ -19,6 +19,7 @@ import {
 import { deleteSessionId } from "../agent/sessions";
 import { createProgressRenderer, getProgressTransportStrategy } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
+import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   type ReasoningTextCommand,
   type ToolProgressCommand,
@@ -39,6 +40,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadWhatsAppMedia, extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import {
@@ -65,6 +67,7 @@ type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
 const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
+const WHATSAPP_PROGRESS_DEFAULTS = { toolProgress: "off", reasoningText: false } as const;
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -136,6 +139,30 @@ function isConversationControlMessage(text: string): boolean {
   return isToolProgressCommand(text) || isReasoningTextCommand(text);
 }
 
+function referencesQuotedMessage(text: string): boolean {
+  return /\b(this|that|it|above|same|ye|yeh|yea|isse|isko|iska|iski|iske|iss)\b/i.test(text);
+}
+
+function isAmbiguousQuotedAction(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/u, "")
+    .replace(/\s+/gu, " ");
+  if (!normalized) return true;
+  if (/^(please\s+)?(summari[sz]e|explain|translate|reply|respond)$/u.test(normalized)) return true;
+  return /^(please\s+)?(create|make|file|open|log)(\s+(a|an))?\s+(ticket|task|issue|bug)$/u.test(normalized);
+}
+
+function needsQuotedMessageContext(text: string, currentAttachments: Attachment[]): boolean {
+  if (referencesQuotedMessage(text)) return true;
+  return currentAttachments.length === 0 && isAmbiguousQuotedAction(text);
+}
+
+function hasQuotedMessageContent(quotedMessage: QuotedMessageContext | undefined): boolean {
+  return Boolean(quotedMessage && (quotedMessage.text.trim().length > 0 || quotedMessage.attachments.length > 0));
+}
+
 function conversationRefForMessage(message: WhatsAppMessage): {
   platform: string;
   kind: string;
@@ -149,6 +176,13 @@ function conversationRefForMessage(message: WhatsAppMessage): {
 
 function senderJidForMessage(message: WhatsAppMessage): string {
   return message.type === "dm" ? toPhoneJid(message.phoneNumber) : message.senderJid;
+}
+
+function resolveWhatsAppProgressDisplaySettings(input: {
+  tool_progress?: string | null;
+  reasoning_text?: unknown;
+}) {
+  return resolveProgressDisplaySettings(input, WHATSAPP_PROGRESS_DEFAULTS);
 }
 
 export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapterDeps): void {
@@ -260,6 +294,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       addressedToSketch: params.addressedToSketch,
       text: params.message.text || (attachments.length > 0 ? "See attached files." : ""),
       attachments,
+      providerParentMessageId: params.message.quotedMessage?.providerMessageId ?? null,
+      isThreadReply: Boolean(params.message.quotedMessage?.providerMessageId),
       providerTimestamp: providerTimestamp(params.message.rawMessage as WAMessage),
     });
 
@@ -286,6 +322,42 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
       providerTimestamp: providerTimestamp(params.sent ?? undefined),
     });
   };
+
+  const resolveQuotedMessageContext = async (
+    message: WhatsAppMessage,
+    conversationId: number,
+  ): Promise<QuotedMessageContext | undefined> => {
+    const quoted = message.quotedMessage;
+    if (!quoted) return undefined;
+
+    const stored = await repos.conversations.findMessageByProviderMessageId(conversationId, quoted.providerMessageId);
+    if (stored) {
+      return {
+        id: stored.id,
+        providerMessageId: stored.providerMessageId,
+        senderName: stored.senderName,
+        senderJid: stored.senderJid || null,
+        text: stored.text,
+        attachments: stored.attachments,
+        providerTimestamp: stored.providerTimestamp,
+        receivedAt: stored.receivedAt,
+      };
+    }
+
+    if (!quoted.text.trim()) return undefined;
+
+    return {
+      providerMessageId: quoted.providerMessageId,
+      senderJid: quoted.participantJid,
+      text: quoted.text,
+      attachments: [],
+      providerTimestamp: null,
+      receivedAt: null,
+    };
+  };
+
+  const buildMissingQuotedContextMessage = () =>
+    "I can see you're replying to a message, but I couldn't read the replied-to content. Please resend the issue text or quote a text message and I'll act on that.";
 
   whatsapp.onMessage(async (message) => {
     if (message.type === "dm") {
@@ -358,7 +430,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           return;
         }
 
-        const currentProgressSettings = resolveProgressDisplaySettings(user);
+        const currentProgressSettings = resolveWhatsAppProgressDisplaySettings(user);
         if (command === "tool_progress_query") {
           await whatsapp.sendText(replyJid, getToolProgressCurrent(currentProgressSettings));
           return;
@@ -403,6 +475,23 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           addressedToSketch: true,
         });
         if (!capture.inserted || !capture.captured) return;
+        const quotedMessage = await resolveQuotedMessageContext(message, capture.conversation.id);
+        if (
+          message.quotedMessage &&
+          !hasQuotedMessageContent(quotedMessage) &&
+          needsQuotedMessageContext(message.text, capture.captured.attachments)
+        ) {
+          const finalText = buildMissingQuotedContextMessage();
+          const sent = await whatsapp.sendText(deliveryJid, finalText);
+          await captureBotReply({
+            conversationId: capture.conversation.id,
+            sent,
+            text: finalText,
+            botName: settingsRow?.bot_name,
+          });
+          await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+          return;
+        }
 
         const backlog = await repos.conversations.listBacklog({
           conversationId: capture.conversation.id,
@@ -435,7 +524,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           });
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
-          const progressSettings = resolveProgressDisplaySettings(user);
+          const progressSettings = resolveWhatsAppProgressDisplaySettings(user);
           const progressRenderer = createProgressRenderer(progressSettings);
           const progressStrategy = getProgressTransportStrategy(progressSettings);
           progressTransport =
@@ -467,9 +556,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             isSharedContext: false,
             inboxMessages: pendingInbox.messages,
             conversationBacklog,
+            quotedMessage,
             visionAnalysisEnabled: visualAnalysisAllowed,
           };
           const userMessage = buildSketchContext(sketchContext);
+          const agentAttachments = [...attachments, ...(quotedMessage?.attachments ?? [])];
 
           const waTaskContext = {
             platform: "whatsapp" as const,
@@ -477,6 +568,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             deliveryTarget: deliveryJid,
             createdBy: user.id,
             creatorTimezone: user.timezone,
+            origin: {
+              platform: "whatsapp" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           };
 
           const result = await runAgent({
@@ -499,7 +596,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             botName: settingsRow?.bot_name,
             visionConfig,
             blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
-            attachments: attachments.length > 0 ? attachments : undefined,
+            attachments: agentAttachments.length > 0 ? agentAttachments : undefined,
             integrationMcpServers: waIntegrationMcpServers,
             loadIntegrationProvider,
             contextType: "dm",
@@ -521,12 +618,18 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           });
 
           await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user.id, jid: deliveryJid });
-          if (result.trace.finalText) {
-            const sent = await onFinalMessage(result.trace.finalText);
+          const finalText = appendIntegrationConnectionLinks(
+            appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+            result.pendingIntegrationConnections,
+            "whatsapp",
+            toolConfig,
+          );
+          if (finalText) {
+            const sent = await onFinalMessage(finalText);
             await captureBotReply({
               conversationId: capture.conversation.id,
               sent,
-              text: result.trace.finalText,
+              text: finalText,
               botName: settingsRow?.bot_name,
             });
           }
@@ -639,7 +742,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         return;
       }
 
-      const currentProgressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
+      const currentProgressSettings = resolveWhatsAppProgressDisplaySettings(existingGroup ?? {});
       if (command === "tool_progress_query") {
         await whatsapp.sendText(groupJid, getToolProgressCurrent(currentProgressSettings), {
           quoted: message.rawMessage as WAMessage,
@@ -699,6 +802,24 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         addressedToSketch: true,
       });
       if (!capture.inserted || !capture.captured) return;
+      const quotedMessage = await resolveQuotedMessageContext(message, capture.conversation.id);
+      if (
+        message.quotedMessage &&
+        !hasQuotedMessageContent(quotedMessage) &&
+        needsQuotedMessageContext(message.text, capture.captured.attachments)
+      ) {
+        const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
+        const finalText = buildMissingQuotedContextMessage();
+        const sent = await onFinalMessage(finalText);
+        await captureBotReply({
+          conversationId: capture.conversation.id,
+          sent,
+          text: finalText,
+          botName: settingsRow?.bot_name,
+        });
+        await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+        return;
+      }
 
       const backlog = await repos.conversations.listBacklog({
         conversationId: capture.conversation.id,
@@ -747,12 +868,14 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           threadTag: "thread",
           groupContext: { groupName, groupDescription },
           conversationBacklog,
+          quotedMessage,
           visionAnalysisEnabled: visualAnalysisAllowed,
         };
         const userMessage = buildSketchContext(sketchContext);
+        const agentAttachments = [...attachments, ...(quotedMessage?.attachments ?? [])];
 
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
-        const progressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
+        const progressSettings = resolveWhatsAppProgressDisplaySettings(existingGroup ?? {});
         const progressRenderer = createProgressRenderer(progressSettings);
         const progressStrategy = getProgressTransportStrategy(progressSettings);
         progressTransport =
@@ -785,7 +908,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           botName: settingsRow?.bot_name,
           visionConfig,
           blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
-          attachments: attachments.length > 0 ? attachments : undefined,
+          attachments: agentAttachments.length > 0 ? agentAttachments : undefined,
           integrationMcpServers,
           loadIntegrationProvider,
           contextType: "channel_mention",
@@ -796,6 +919,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
             creatorTimezone: user?.timezone ?? null,
+            origin: {
+              platform: "whatsapp" as const,
+              conversationId: String(capture.conversation.id),
+              providerThreadId: null,
+              currentMessageId: capture.captured.id,
+            },
           },
           scheduler,
           stepContentRepo,
@@ -813,12 +942,21 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         });
 
         await flushWhatsAppProgressTransport(progressTransport, logger, { userId: user?.id, groupJid });
-        if (result.trace.finalText) {
-          const sent = await onFinalMessage(result.trace.finalText);
+        const textWithAutomationLinks = user
+          ? appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? [])
+          : result.trace.finalText;
+        const finalText = appendIntegrationConnectionLinks(
+          textWithAutomationLinks,
+          result.pendingIntegrationConnections,
+          "whatsapp",
+          toolConfig,
+        );
+        if (finalText) {
+          const sent = await onFinalMessage(finalText);
           await captureBotReply({
             conversationId: capture.conversation.id,
             sent,
-            text: result.trace.finalText,
+            text: finalText,
             botName: settingsRow?.bot_name,
           });
         }

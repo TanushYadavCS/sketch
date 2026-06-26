@@ -239,16 +239,32 @@ describe("addTask()", () => {
       timezone: "UTC",
       sessionMode: "fresh",
       createdBy: "U_USER1",
+      originPlatform: "slack",
+      originConversationId: "42",
+      originProviderThreadId: "111.222",
+      originMessageId: 12,
     });
 
     expect(task.id).toBeDefined();
     expect(task.prompt).toBe("Send weekly update");
     expect(task.status).toBe("active");
+    expect(task.originChat).toEqual({
+      platform: "slack",
+      conversationId: "42",
+      providerThreadId: "111.222",
+      currentMessageId: 12,
+    });
     expect(cronCallCount).toBe(1);
 
     const dbRow = await repo.getById(task.id);
     expect(dbRow).toBeDefined();
     expect(dbRow?.prompt).toBe("Send weekly update");
+    expect(dbRow).toMatchObject({
+      origin_platform: "slack",
+      origin_conversation_id: "42",
+      origin_provider_thread_id: "111.222",
+      origin_message_id: 12,
+    });
   });
 
   it("creates an interval-type cron with the correct schedule value", async () => {

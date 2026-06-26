@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 
 export type ConnectorType =
   | "google_drive"
+  | "google_calendar"
   | "gmail"
   | "outlook"
   | "teams"
@@ -112,8 +113,8 @@ export interface SyncedItem {
   assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
-   * Sync seeds person entities from entries where `name` is present; entries
-   * with only `email` are ignored — `accessEmails` already covers ACL.
+   * Sync seeds person entities from entries where `name` is present or can be
+   * derived from `email`; `accessEmails` separately covers ACL.
    */
   attendees?: Array<{ name?: string; email?: string }>;
   authorEmail?: string;
@@ -273,6 +274,7 @@ export interface SuppressedEmailRecord {
 
 export interface SourceItemRemovalRecord {
   providerFileId?: string;
+  providerFileIdPrefix?: string;
   providerMessageId?: string | null;
   sourceCreatedBefore?: string;
   reason: string;

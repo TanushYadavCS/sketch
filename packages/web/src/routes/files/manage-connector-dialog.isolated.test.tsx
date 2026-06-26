@@ -11,6 +11,7 @@ import { ManageConnectorDialog } from "./manage-connector-dialog";
 
 const fireflies = getIntegration("fireflies") ?? null;
 const gmail = getIntegration("gmail") ?? null;
+const googleCalendar = getIntegration("google_calendar") ?? null;
 
 function connector(overrides: Partial<ConnectorConfig> = {}): ConnectorConfig {
   return {
@@ -175,5 +176,57 @@ describe("ManageConnectorDialog connector capabilities", () => {
     expect(conversations).not.toBeNull();
     const list = await within(conversations as HTMLElement).findByRole("list");
     expect(list).toHaveClass("max-h-72", "overflow-y-auto");
+  });
+
+  it("saves Google Calendar scope as selected calendarIds", async () => {
+    const user = userEvent.setup();
+    let patchedBody: unknown;
+    server.use(
+      http.get("/api/connectors/:id/browse", () =>
+        HttpResponse.json({
+          type: "flat",
+          scopeConfig: { calendarIds: [] },
+          items: [
+            { id: "primary", name: "Work" },
+            { id: "team", name: "Team" },
+          ],
+        }),
+      ),
+      http.patch("/api/connectors/:id/scope", async ({ request }) => {
+        patchedBody = await request.json();
+        return HttpResponse.json({
+          connector: {
+            id: "calendar-conn",
+            connectorType: "google_calendar",
+            scopeConfig: { calendarIds: ["team"] },
+            syncStatus: "syncing",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ManageConnectorDialog
+        definition={googleCalendar}
+        connector={connector({
+          id: "calendar-conn",
+          connectorType: "google_calendar",
+          authType: "oauth",
+          scopeConfig: { calendarIds: [] },
+          fileCount: 0,
+        })}
+        open
+        onOpenChange={() => {}}
+        onDisconnected={() => {}}
+        onReconnect={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Team" }));
+    await user.click(screen.getByRole("button", { name: /Save & re-sync/i }));
+
+    await waitFor(() => {
+      expect(patchedBody).toEqual({ scopeConfig: { calendarIds: ["team"] } });
+    });
   });
 });

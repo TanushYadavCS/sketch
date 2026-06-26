@@ -12,15 +12,65 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { clearEnrichmentData, matchesAsWord, runEnrichment } from "./enrichment";
+import type { EmbeddingProvider } from "./embeddings/types";
+import { clearEnrichmentData, isEnrichmentActive, matchesAsWord, runEnrichment } from "./enrichment";
+import type { GeminiGenerator } from "./gemini-generate";
 
 /** Insert the minimum rows needed to have an indexed file ready for enrichment. */
-async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promise<void> {
+async function seedFile(
+  db: Kysely<DB>,
+  fileId: string,
+  content: string,
+  opts: {
+    connectorType?: string;
+    fileName?: string;
+    fileType?: string;
+    contentCategory?: string;
+    source?: string;
+    sourcePath?: string;
+  } = {},
+): Promise<void> {
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: "conn-1",
+      connector_type: opts.connectorType ?? "google_drive",
+      auth_type: "oauth",
+      credentials: "{}",
+      created_by: "admin",
+    })
+    .onConflict((oc) => oc.doNothing())
+    .execute();
+
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: fileId,
+      connector_config_id: "conn-1",
+      provider_file_id: fileId,
+      file_name: opts.fileName ?? "test.txt",
+      file_type: opts.fileType ?? "text",
+      content_category: opts.contentCategory ?? "document",
+      source: opts.source ?? "google_drive",
+      source_path: opts.sourcePath ?? "My Drive",
+      provider_url: null,
+      content,
+      summary: null,
+      context_note: null,
+      access_scope_id: null,
+      source_updated_at: new Date().toISOString(),
+      synced_at: new Date().toISOString(),
+    })
+    .onConflict((oc) => oc.doNothing())
+    .execute();
+}
+
+async function seedImageFile(db: Kysely<DB>, fileId: string, sourceUpdatedAt: string): Promise<void> {
   await db
     .insertInto("connector_configs")
     .values({
@@ -39,20 +89,21 @@ async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promis
       id: fileId,
       connector_config_id: "conn-1",
       provider_file_id: fileId,
-      file_name: "test.txt",
-      file_type: "text",
+      file_name: "image.png",
+      file_type: "image",
       content_category: "document",
       source: "google_drive",
       source_path: "My Drive",
       provider_url: null,
-      content,
+      content: null,
+      content_hash: null,
+      mime_type: "image/png",
       summary: null,
       context_note: null,
       access_scope_id: null,
-      source_updated_at: new Date().toISOString(),
+      source_updated_at: sourceUpdatedAt,
       synced_at: new Date().toISOString(),
     })
-    .onConflict((oc) => oc.doNothing())
     .execute();
 }
 
@@ -209,6 +260,52 @@ describe("runEnrichment — batch chunk insert", () => {
       expect(chunks[i].chunk_index).toBe(i);
     }
   });
+
+  it("runs smart enrichment for short calendar event documents", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "Planning review with Jane Doe from Acme about pricing next steps tomorrow morning.", {
+      connectorType: "google_calendar",
+      fileName: "Planning review",
+      fileType: "calendar_event",
+      source: "google_calendar",
+      sourcePath: "Google Calendar / Work",
+    });
+    await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "=", fileId).execute();
+
+    let extractCalls = 0;
+    const generator = {
+      generate: async () => "Planning review summary.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          extractCalls += 1;
+          return { mentions: [], relations: [] } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      fileIds: [fileId],
+      generator,
+    });
+
+    const file = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary", "summary_status"])
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+
+    expect(result.filesProcessed).toBe(1);
+    expect(extractCalls).toBe(1);
+    expect(file).toEqual({
+      embedding_status: "done",
+      summary: "Planning review summary.",
+      summary_status: "done",
+    });
+  });
 });
 
 /**
@@ -295,6 +392,296 @@ describe("runEnrichment — claim semantics", () => {
 
     expect(result.filesProcessed).toBe(1);
     expect(await getStatus(fileId)).toBe("done");
+  });
+
+  it("respects maxFilesPerRun and leaves the rest pending", async () => {
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    for (const id of ids) {
+      await seedFile(db, id, "some content here");
+      await setStatus(id, "pending");
+    }
+
+    const result = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, maxFilesPerRun: 2 });
+
+    const statuses = await db
+      .selectFrom("indexed_files")
+      .select(["id", "embedding_status"])
+      .where("id", "in", ids)
+      .execute();
+    const doneCount = statuses.filter((row) => row.embedding_status === "done").length;
+    const pendingCount = statuses.filter((row) => row.embedding_status === "pending").length;
+    expect(result.filesProcessed).toBe(2);
+    expect(result.stoppedReason).toBe("file_limit");
+    expect(doneCount).toBe(2);
+    expect(pendingCount).toBe(1);
+  });
+
+  it("stops before claiming another file when the time budget is exhausted", async () => {
+    const ids = [randomUUID(), randomUUID()];
+    for (const id of ids) {
+      await seedFile(db, id, "some content here");
+      await setStatus(id, "pending");
+    }
+    let now = 0;
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      maxFilesPerRun: 2,
+      timeBudgetMs: 2,
+      now: () => now++,
+    });
+
+    const statuses = await db
+      .selectFrom("indexed_files")
+      .select(["id", "embedding_status"])
+      .where("id", "in", ids)
+      .execute();
+    expect(result.filesProcessed).toBe(1);
+    expect(result.stoppedReason).toBe("time_budget");
+    expect(statuses.filter((row) => row.embedding_status === "done")).toHaveLength(1);
+    expect(statuses.filter((row) => row.embedding_status === "pending")).toHaveLength(1);
+  });
+
+  it("tracks overlapping enrichment runs until all have finished", async () => {
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    await seedFile(db, firstId, "some content here");
+    await seedFile(db, secondId, "some other content here");
+    await setStatus(firstId, "pending");
+    await setStatus(secondId, "pending");
+
+    const embedResolves: Array<() => void> = [];
+    const embeddingProvider: EmbeddingProvider = {
+      name: "blocking-test",
+      dimensions: 1,
+      supportsImages: false,
+      embedTexts: async (texts) =>
+        new Promise((resolve) => {
+          embedResolves.push(() => resolve(texts.map(() => [1])));
+        }),
+    };
+    let firstDone = false;
+    let secondDone = false;
+
+    const firstRun = runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider,
+      fileIds: [firstId],
+    }).finally(() => {
+      firstDone = true;
+    });
+    const secondRun = runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider,
+      fileIds: [secondId],
+    }).finally(() => {
+      secondDone = true;
+    });
+
+    await vi.waitFor(() => expect(embedResolves).toHaveLength(2));
+    expect(isEnrichmentActive()).toBe(true);
+
+    embedResolves[0]();
+    await vi.waitFor(() => expect(firstDone).toBe(true));
+    expect(secondDone).toBe(false);
+    expect(isEnrichmentActive()).toBe(true);
+
+    embedResolves[1]();
+    await Promise.all([firstRun, secondRun]);
+    expect(isEnrichmentActive()).toBe(false);
+  });
+
+  it("skips stale completion when the file is synced during enrichment", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "old body mentioning Acme before the sync update");
+    await setStatus(fileId, "pending");
+
+    let releaseEmbedding!: () => void;
+    let resolveEmbeddingStarted!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => {
+      resolveEmbeddingStarted = resolve;
+    });
+    const embeddingProvider: EmbeddingProvider = {
+      name: "blocking-test",
+      dimensions: 1,
+      supportsImages: false,
+      embedTexts: async (texts) => {
+        resolveEmbeddingStarted();
+        await new Promise<void>((resolve) => {
+          releaseEmbedding = resolve;
+        });
+        return texts.map(() => [1]);
+      },
+    };
+
+    const run = runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider,
+      fileIds: [fileId],
+    });
+
+    await embeddingStarted;
+    const newerSyncedAt = new Date(Date.now() + 1000).toISOString();
+    await db
+      .updateTable("indexed_files")
+      .set({
+        content: "new body from the later sync",
+        content_hash: "new-hash",
+        synced_at: newerSyncedAt,
+        embedding_status: "pending",
+        summary_status: "pending",
+        summary: null,
+      })
+      .where("id", "=", fileId)
+      .execute();
+    await clearEnrichmentData(db, fileId);
+
+    releaseEmbedding();
+    const result = await run;
+
+    const file = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary_status", "synced_at", "content"])
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+    const chunkCount = await db
+      .selectFrom("document_chunks")
+      .select(sql<number>`count(*)`.as("n"))
+      .where("indexed_file_id", "=", fileId)
+      .executeTakeFirstOrThrow();
+
+    expect(result.filesProcessed).toBe(0);
+    expect(result.filesSkipped).toBe(1);
+    expect(file).toEqual({
+      embedding_status: "pending",
+      summary_status: "pending",
+      synced_at: newerSyncedAt,
+      content: "new body from the later sync",
+    });
+    expect(Number(chunkCount.n)).toBe(0);
+  });
+
+  it("completes when an unchanged sync only bumps synced_at during enrichment", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "unchanged body mentioning Acme during a later sync");
+    await setStatus(fileId, "pending");
+
+    let releaseEmbedding!: () => void;
+    let resolveEmbeddingStarted!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => {
+      resolveEmbeddingStarted = resolve;
+    });
+    const embeddingProvider: EmbeddingProvider = {
+      name: "blocking-test",
+      dimensions: 1,
+      supportsImages: false,
+      embedTexts: async (texts) => {
+        resolveEmbeddingStarted();
+        await new Promise<void>((resolve) => {
+          releaseEmbedding = resolve;
+        });
+        return texts.map(() => [1]);
+      },
+    };
+
+    const run = runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider,
+      fileIds: [fileId],
+    });
+
+    await embeddingStarted;
+    const newerSyncedAt = new Date(Date.now() + 1000).toISOString();
+    await db
+      .updateTable("indexed_files")
+      .set({
+        synced_at: newerSyncedAt,
+      })
+      .where("id", "=", fileId)
+      .execute();
+
+    releaseEmbedding();
+    const result = await run;
+
+    const file = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary_status", "synced_at"])
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+
+    expect(result.filesProcessed).toBe(1);
+    expect(result.filesSkipped).toBe(0);
+    expect(file).toEqual({
+      embedding_status: "done",
+      summary_status: "skipped",
+      synced_at: newerSyncedAt,
+    });
+  });
+
+  it("skips stale completion when a hashless image source timestamp changes during enrichment", async () => {
+    const fileId = randomUUID();
+    const originalSourceUpdatedAt = "2026-01-01T00:00:00.000Z";
+    const newerSourceUpdatedAt = "2026-01-02T00:00:00.000Z";
+    await seedImageFile(db, fileId, originalSourceUpdatedAt);
+    await setStatus(fileId, "pending");
+
+    let releaseEmbedding!: () => void;
+    let resolveEmbeddingStarted!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => {
+      resolveEmbeddingStarted = resolve;
+    });
+    const embeddingProvider: EmbeddingProvider = {
+      name: "blocking-image-test",
+      dimensions: 1,
+      supportsImages: true,
+      embedTexts: async () => {
+        throw new Error("text embedding should not be called for image test");
+      },
+      embedImage: async () => {
+        resolveEmbeddingStarted();
+        await new Promise<void>((resolve) => {
+          releaseEmbedding = resolve;
+        });
+        return [1];
+      },
+    };
+
+    const run = runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider,
+      fileIds: [fileId],
+      downloadImage: async () => ({ buffer: Buffer.from("image"), mimeType: "image/png" }),
+    });
+
+    await embeddingStarted;
+    await db
+      .updateTable("indexed_files")
+      .set({
+        source_updated_at: newerSourceUpdatedAt,
+        synced_at: new Date(Date.now() + 1000).toISOString(),
+        embedding_status: "pending",
+      })
+      .where("id", "=", fileId)
+      .execute();
+
+    releaseEmbedding();
+    const result = await run;
+
+    const file = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "source_updated_at"])
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+
+    expect(result.filesProcessed).toBe(0);
+    expect(result.filesSkipped).toBe(1);
+    expect(file).toEqual({ embedding_status: "pending", source_updated_at: newerSourceUpdatedAt });
   });
 
   it("explicit fileIds rerun DOES claim a file in `done` (manual override)", async () => {

@@ -1,4 +1,5 @@
-import type { Kysely } from "kysely";
+import type { Kysely, SqlBool } from "kysely";
+import { sql } from "kysely";
 import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository } from "../db/repositories/entities";
@@ -27,6 +28,7 @@ export interface RemoveConnectorSourceItemsParams {
   connectorConfigId: string;
   connectorType: ConnectorType;
   providerFileIds?: string[];
+  providerFileIdPrefixes?: string[];
   providerMessageIds?: string[];
   sourceCreatedBefore?: string;
 }
@@ -96,6 +98,7 @@ export async function removeConnectorSourceItems({
   connectorConfigId,
   connectorType,
   providerFileIds = [],
+  providerFileIdPrefixes = [],
   providerMessageIds = [],
   sourceCreatedBefore,
 }: RemoveConnectorSourceItemsParams): Promise<{ itemsDeleted: number; affectedIndexedFileIds: string[] }> {
@@ -107,6 +110,17 @@ export async function removeConnectorSourceItems({
       .select("id")
       .where("connector_config_id", "=", connectorConfigId)
       .where("provider_file_id", "in", providerFileIds)
+      .execute();
+    for (const row of rows) fileIdSet.add(row.id);
+  }
+
+  for (const prefix of [...new Set(providerFileIdPrefixes)].filter((value) => value.length > 0)) {
+    const pattern = `${escapeLike(prefix)}%`;
+    const rows = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where("connector_config_id", "=", connectorConfigId)
+      .where(sql<SqlBool>`${sql.ref("provider_file_id")} LIKE ${pattern} ESCAPE '\\'`)
       .execute();
     for (const row of rows) fileIdSet.add(row.id);
   }
@@ -160,6 +174,10 @@ export async function removeConnectorSourceItems({
   });
 
   return { itemsDeleted: indexedFileIds.length, affectedIndexedFileIds: indexedFileIds };
+}
+
+function escapeLike(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
 
 async function deleteMaterializedFactMentions(

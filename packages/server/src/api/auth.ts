@@ -54,6 +54,15 @@ function setSessionCookie(c: Context, token: string, secure: boolean) {
   });
 }
 
+function safeReturnTo(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("/")) return null;
+  if (trimmed.startsWith("//")) return null;
+  if (trimmed.startsWith("/login")) return null;
+  return trimmed;
+}
+
 export async function createSession(c: Context, sub: string, role: AuthRole, jwtSecret: string): Promise<void> {
   const token = await signJwt(sub, role, jwtSecret);
   setSessionCookie(c, token, isSecure(c));
@@ -196,12 +205,13 @@ export function authRoutes(
   // --- Magic link login ---
 
   routes.post("/magic-link", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { email?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string; returnTo?: unknown };
     if (!body.email) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Email required" } }, 400);
     }
 
     const email = body.email.toLowerCase().trim();
+    const returnTo = safeReturnTo(body.returnTo);
 
     const noChannelsResponse = { success: true, channels: [] as string[] };
 
@@ -212,7 +222,10 @@ export function authRoutes(
     if (!token) return c.json(noChannelsResponse);
 
     const baseUrl = resolveBaseUrl(c, deps.config);
-    const magicLinkUrl = `${baseUrl}/api/auth/magic-link/verify?token=${token}`;
+    const magicLink = new URL("/api/auth/magic-link/verify", `${baseUrl}/`);
+    magicLink.searchParams.set("token", token);
+    if (returnTo) magicLink.searchParams.set("return_to", returnTo);
+    const magicLinkUrl = magicLink.toString();
 
     const settingsRow = await settings.get();
     const botName = settingsRow?.bot_name ?? "Sketch";
@@ -228,6 +241,7 @@ export function authRoutes(
 
   routes.get("/magic-link/verify", async (c) => {
     const token = c.req.query("token");
+    const returnTo = safeReturnTo(c.req.query("return_to"));
     if (!token) {
       return c.redirect("/login?error=invalid_link");
     }
@@ -251,7 +265,7 @@ export function authRoutes(
     }
 
     await createSession(c, user.id, toAuthRole(user.auth_role), settingsRow.jwt_secret);
-    return c.redirect("/");
+    return c.redirect(returnTo ?? "/");
   });
 
   return routes;

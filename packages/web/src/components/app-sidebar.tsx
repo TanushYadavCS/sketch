@@ -93,6 +93,7 @@ function formatRole(role?: "admin" | "member"): string | null {
 function isNavItemActive(pathname: string, href: string): boolean {
   if (href === "/home") return pathname === "/home";
   if (href === "/chat") return pathname === "/chat" || pathname.startsWith("/chat/");
+  if (href === "/scheduled-tasks") return pathname === "/scheduled-tasks" || pathname.startsWith("/scheduled-tasks/");
   return pathname === href;
 }
 

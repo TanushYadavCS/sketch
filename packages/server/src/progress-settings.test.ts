@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   progressDisplaySettingsForWebChatMode,
+  resolveProgressDisplaySettings,
   resolveToolProgress,
   resolveWebChatProgressRendererMode,
 } from "./progress-settings";
@@ -16,6 +17,31 @@ describe("resolveToolProgress", () => {
     expect(resolveToolProgress("concise")).toBe("friendly");
     expect(resolveToolProgress("verbose")).toBe("friendly");
     expect(resolveToolProgress(null)).toBe("friendly");
+  });
+
+  it("supports caller-specific fallback values", () => {
+    expect(resolveToolProgress(null, "off")).toBe("off");
+    expect(resolveToolProgress(undefined, "off")).toBe("off");
+    expect(resolveToolProgress("technical", "off")).toBe("technical");
+    expect(resolveToolProgress("verbose", "off")).toBe("friendly");
+  });
+});
+
+describe("resolveProgressDisplaySettings", () => {
+  it("uses shared defaults unless caller-specific defaults are provided", () => {
+    expect(resolveProgressDisplaySettings({ tool_progress: null, reasoning_text: null })).toEqual({
+      toolProgress: "friendly",
+      reasoningText: false,
+    });
+    expect(
+      resolveProgressDisplaySettings(
+        { tool_progress: null, reasoning_text: null },
+        { toolProgress: "off", reasoningText: false },
+      ),
+    ).toEqual({
+      toolProgress: "off",
+      reasoningText: false,
+    });
   });
 });
 

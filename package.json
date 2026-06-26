@@ -3,6 +3,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "dev": "bash scripts/with-node-version.sh pnpm exec concurrently -n server,web -c blue,magenta \"DOTENV_CONFIG_PATH=$PWD/.env pnpm --filter @sketch/server dev\" \"pnpm --filter @sketch/web dev\"",
+    "dev:branch": "bash scripts/dev-branch-db.sh",
     "build": "pnpm -r build && cp -r packages/web/dist packages/server/dist/public",
     "lint": "biome check .",
     "format": "biome format . --write",

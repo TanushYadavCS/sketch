@@ -320,12 +320,28 @@ describe("buildSystemContext", () => {
       expect(result).toContain("Should I pull up the connection card?");
       expect(result).toContain("I can pull up the right card");
       expect(result).toContain("Which Zoho product should I use?");
-      expect(result).toContain("use the Connect button on that card");
-      expect(result).toContain("Do not send them to Settings -> Integrations unless no card is available");
-      expect(result).toContain("Do not describe card rendering mechanics");
-      expect(result).toContain("continue only with task-relevant guidance if needed");
+      expect(result).toContain("do not give manual navigation, API-key, or 'look for this app' setup instructions");
+      expect(result).toContain("Do not include a separate 'connect these apps' section");
+      expect(result).toContain("Do not send users to Settings -> Integrations unless no setup card/link");
+      expect(result).toContain("Do not tell the user how to use the setup card/link");
+      expect(result).toContain("Do not describe card or link rendering mechanics");
+      expect(result).toContain("it will add an app-specific setup option automatically");
+      expect(result).toContain("do not mention that rendering step");
       expect(result).not.toContain("SearchIntegrationApps");
       expect(result).not.toContain("RequestIntegrationConnection");
+    });
+
+    it("includes connection-link guidance for Slack and WhatsApp", () => {
+      const slack = buildSystemContext({ platform: "slack" });
+      const whatsapp = buildSystemContext({ platform: "whatsapp" });
+
+      expect(slack).toContain("use the integration search-apps capability");
+      expect(slack).toContain("Sketch will resolve the returned app identity into the right connection target");
+      expect(slack).toContain("Do not send users to Settings -> Integrations unless no setup card/link");
+      expect(slack).toContain("Do not tell the user how to use the setup card/link");
+      expect(whatsapp).toContain("Do not tell the user how to use the setup card/link");
+      expect(whatsapp).toContain("Do not include a separate 'connect these apps' section");
+      expect(whatsapp).not.toContain("RequestIntegrationConnection");
     });
 
     it("does not include Slack or WhatsApp link formatting", () => {
@@ -851,6 +867,63 @@ describe("buildSketchContext", () => {
 
       expect(result).toContain('hint="Use mcp__sketch__VisualAnalysis with this path to understand the image."');
       expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/photo.jpg"]);
+    });
+
+    it("renders quoted WhatsApp message context separately from missed backlog", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "please create this ticket",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        quotedMessage: {
+          id: 42,
+          providerMessageId: "wa-parent-1",
+          senderName: "Bob",
+          senderJid: "111@s.whatsapp.net",
+          text: "Checkout keeps failing for paid members",
+          attachments: [],
+          providerTimestamp: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      });
+
+      expect(result).toContain("<quoted_message>");
+      expect(result).toContain("The current message is a WhatsApp reply to this quoted message.");
+      expect(result).toContain("sender: Bob");
+      expect(result).not.toContain("111@s.whatsapp.net");
+      expect(result).not.toContain("messageId=42");
+      expect(result).not.toContain("providerMessageId: wa-parent-1");
+      expect(result).toContain("text: Checkout keeps failing for paid members");
+    });
+
+    it("collects image paths from quoted WhatsApp message attachments", () => {
+      const sketchContext = {
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "please create a ticket for this",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        quotedMessage: {
+          providerMessageId: "wa-parent-1",
+          senderName: "Bob",
+          text: "",
+          attachments: [
+            {
+              originalName: "screenshot.jpg",
+              mimeType: "image/jpeg",
+              localPath: "/ws/attachments/screenshot.jpg",
+              sizeBytes: 120,
+            },
+          ],
+        },
+      };
+
+      const result = buildSketchContext(sketchContext);
+
+      expect(result).toContain("text: See attached files.");
+      expect(result).toContain('path="/ws/attachments/screenshot.jpg"');
+      expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/screenshot.jpg"]);
     });
 
     it("tells the agent how to continue when backlog is truncated", () => {

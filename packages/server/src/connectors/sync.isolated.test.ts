@@ -19,13 +19,14 @@ import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData } from "./enrichment";
 import { recoverStaleEnrichments, runAllSyncs, runConnectorSync, startSyncScheduler } from "./sync";
-import type { NameResolver, SyncedItem } from "./types";
+import type { NameResolver, SourceItemRemovalRecord, SyncedItem } from "./types";
 
 const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 // Stub the heavy enrichment/sync work to keep tests fast
 vi.mock("./enrichment", () => ({
   runEnrichment: vi.fn().mockResolvedValue({ filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] }),
+  isEnrichmentActive: vi.fn(() => false),
   clearEnrichmentData: vi.fn(),
 }));
 
@@ -77,6 +78,7 @@ describe("startSyncScheduler", () => {
   const logger = createTestLogger();
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (db) {
       try {
         await db.destroy();
@@ -199,6 +201,34 @@ describe("recoverStaleEnrichments", () => {
       .selectFrom("indexed_files")
       .select("embedding_status")
       .where("id", "=", "file-fresh")
+      .executeTakeFirst();
+    expect(row?.embedding_status).toBe("processing");
+  });
+
+  it("does not recover processing files while enrichment is active", async () => {
+    db = await createTestDb();
+    const { isEnrichmentActive } = await import("./enrichment");
+    vi.mocked(isEnrichmentActive).mockReturnValueOnce(true);
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-recover",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        created_by: "admin",
+      })
+      .execute();
+
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await insertFile(db, "file-active", { embeddingStatus: "processing", syncedAt: twoHoursAgo });
+
+    await recoverStaleEnrichments(db, logger);
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select("embedding_status")
+      .where("id", "=", "file-active")
       .executeTakeFirst();
     expect(row?.embedding_status).toBe("processing");
   });
@@ -463,7 +493,13 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
       connectorConfigId: "gmail-a",
     });
 
-    expect(second).toEqual({ id: first.id, created: false, contentChanged: true, categoryChanged: false });
+    expect(second).toEqual({
+      id: first.id,
+      created: false,
+      contentChanged: true,
+      categoryChanged: false,
+      sourceVersionChanged: false,
+    });
 
     const rows = await db
       .selectFrom("indexed_files")
@@ -594,6 +630,15 @@ describe("runAllSyncs (Fix A + Fix C)", () => {
       .executeTakeFirstOrThrow();
     expect(row.sync_status).toBe("error");
     expect(row.error_message).toMatch(/auto-recovered/);
+  });
+
+  it("does not run enrichment inline, so ingestion can return without waiting on backlog processing", async () => {
+    db = await createTestDb();
+    const { runEnrichment } = await import("./enrichment");
+
+    await runAllSyncs(db, logger);
+
+    expect(runEnrichment).not.toHaveBeenCalled();
   });
 });
 
@@ -806,6 +851,118 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     });
   });
 
+  it("removes source items by provider file id prefix", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values([
+        {
+          id: "connector-prefix-removal",
+          connector_type: "google_calendar",
+          auth_type: "oauth",
+          credentials: JSON.stringify({
+            type: "oauth",
+            accessToken: "test",
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          created_by: "admin",
+          scope_config: JSON.stringify({}),
+        },
+        {
+          id: "connector-prefix-other",
+          connector_type: "google_calendar",
+          auth_type: "oauth",
+          credentials: JSON.stringify({
+            type: "oauth",
+            accessToken: "test",
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          created_by: "other-admin",
+          scope_config: JSON.stringify({}),
+        },
+      ])
+      .execute();
+
+    const baseFile = {
+      file_type: "calendar_event",
+      content_category: "structured" as const,
+      source: "google_calendar",
+      source_path: null,
+      provider_url: null,
+      content: "content",
+      summary: null,
+      context_note: null,
+      access_scope_id: null,
+      source_updated_at: new Date().toISOString(),
+      synced_at: new Date().toISOString(),
+      embedding_status: "pending",
+    };
+
+    await db
+      .insertInto("indexed_files")
+      .values([
+        {
+          ...baseFile,
+          id: "team-event-1",
+          connector_config_id: "connector-prefix-removal",
+          provider_file_id: "team:event-1",
+          file_name: "Team event 1",
+        },
+        {
+          ...baseFile,
+          id: "team-event-2",
+          connector_config_id: "connector-prefix-removal",
+          provider_file_id: "team:event-2",
+          file_name: "Team event 2",
+        },
+        {
+          ...baseFile,
+          id: "primary-event",
+          connector_config_id: "connector-prefix-removal",
+          provider_file_id: "primary:event-1",
+          file_name: "Primary event",
+        },
+        {
+          ...baseFile,
+          id: "team-event-other-config",
+          connector_config_id: "connector-prefix-other",
+          provider_file_id: "team:event-1",
+          file_name: "Other config team event",
+        },
+      ])
+      .execute();
+
+    async function* mockGen(opts: { onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void> }) {
+      await opts.onSourceItemRemoved?.({
+        providerFileIdPrefix: "team:",
+        reason: "test_prefix_removal",
+      });
+      yield* [];
+    }
+    mockConnectorSync.mockImplementationOnce(mockGen);
+
+    const result = await runConnectorSync(db, "connector-prefix-removal", logger);
+
+    expect(result.itemsArchived).toBe(2);
+    const remainingRows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "connector_config_id", "provider_file_id"])
+      .orderBy("id", "asc")
+      .execute();
+    expect(remainingRows).toEqual([
+      {
+        id: "primary-event",
+        connector_config_id: "connector-prefix-removal",
+        provider_file_id: "primary:event-1",
+      },
+      {
+        id: "team-event-other-config",
+        connector_config_id: "connector-prefix-other",
+        provider_file_id: "team:event-1",
+      },
+    ]);
+  });
+
   it("emits the same stable fact set for changed and unchanged item paths", async () => {
     db = await createTestDb();
     await db
@@ -939,6 +1096,86 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     expect(result.itemsUpdated).toBe(1);
     expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
     expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-clear-enrichment");
+  });
+
+  it("clears enrichment data when a hashless contentless file source timestamp changes", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-hashless-source-change",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-hashless-source-change",
+        connector_config_id: "connector-hashless-source-change",
+        provider_file_id: "provider-hashless-source-change",
+        file_name: "image.png",
+        file_type: "image",
+        content_category: "document",
+        source: "google_drive",
+        source_path: "/image.png",
+        provider_url: null,
+        content: null,
+        summary: "old summary",
+        context_note: null,
+        access_scope_id: null,
+        content_hash: null,
+        source_updated_at: "2026-01-01T00:00:00.000Z",
+        synced_at: new Date().toISOString(),
+        embedding_status: "processing",
+        summary_status: "done",
+        mime_type: "image/png",
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "provider-hashless-source-change",
+        providerUrl: null,
+        fileName: "image.png",
+        fileType: "image",
+        contentCategory: "document" as const,
+        content: null,
+        sourcePath: "/image.png",
+        contentHash: null,
+        sourceCreatedAt: null,
+        sourceUpdatedAt: "2026-01-02T00:00:00.000Z",
+        mimeType: "image/png",
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+    vi.mocked(clearEnrichmentData).mockClear();
+
+    const result = await runConnectorSync(db, "connector-hashless-source-change", logger);
+
+    expect(result.itemsProcessed).toBe(1);
+    expect(result.itemsUpdated).toBe(1);
+    expect(clearEnrichmentData).toHaveBeenCalledTimes(1);
+    expect(clearEnrichmentData).toHaveBeenCalledWith(expect.anything(), "file-hashless-source-change");
+
+    const row = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary_status", "source_updated_at"])
+      .where("id", "=", "file-hashless-source-change")
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({
+      embedding_status: "pending",
+      summary_status: "pending",
+      source_updated_at: "2026-01-02T00:00:00.000Z",
+    });
   });
 
   it("clears enrichment data when an existing file's content category changes with the same hash", async () => {
@@ -1117,6 +1354,62 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
       { confidence: "EXTRACTED", source: "google_drive_attendee", relation: "attended" },
     ]);
+  });
+
+  it("materializes Google Calendar email-only attendees into graph relationships", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-calendar-graph-test",
+        connector_type: "google_calendar",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "primary:event-graph",
+        providerUrl: null,
+        fileName: "Customer planning",
+        fileType: "calendar_event",
+        contentCategory: "document" as const,
+        content: "Customer planning with Jane Doe from Acme.",
+        sourcePath: "Google Calendar / Work",
+        contentHash: "hash-calendar-graph",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ email: "jane.doe@acme.com" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const result = await runConnectorSync(db, "connector-calendar-graph-test", logger);
+    expect(result.itemsProcessed).toBe(1);
+
+    const entities = await db.selectFrom("entities").select(["name", "source_type"]).orderBy("name").execute();
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        { name: "Acme", source_type: "company" },
+        { name: "Jane Doe", source_type: "person" },
+      ]),
+    );
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as sourceName", "target.name as targetName", "entity_relationships.relationship_type"])
+      .execute();
+
+    expect(relationships).toEqual([{ sourceName: "Jane Doe", targetName: "Acme", relationship_type: "works_at" }]);
   });
 
   it("writes author facts and materializes authored mentions", async () => {

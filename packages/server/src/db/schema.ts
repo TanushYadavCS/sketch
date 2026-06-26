@@ -486,12 +486,19 @@ export interface ScheduledTasksTable {
   created_at: Generated<string>;
   title: string | null;
   description: string | null;
+  origin_platform: string | null;
+  origin_conversation_id: string | null;
+  origin_provider_thread_id: string | null;
+  origin_message_id: number | null;
   steps: string | null;
   edges: string | null;
   output_target: string | null;
   output_platform: string | null;
   output_thread_ts: string | null;
   output_mode: Generated<string>;
+  updated_at: Generated<string>;
+  revision: Generated<number>;
+  last_edited_by: string | null;
 }
 
 export interface AutomationRunsTable {

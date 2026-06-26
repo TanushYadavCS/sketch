@@ -15,6 +15,7 @@ import type { Connector, ConnectorType } from "./types";
 import { createClickUpConnector } from "./clickup";
 import { createFirefliesConnector } from "./fireflies";
 import { createGmailConnector } from "./gmail";
+import { createGoogleCalendarConnector } from "./google-calendar";
 import { createGoogleDriveConnector } from "./google-drive";
 import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
@@ -24,6 +25,7 @@ import { createZohoCrmConnector } from "./zoho-crm";
 
 export const connectorFactories: Record<ConnectorType, () => Connector> = {
   google_drive: createGoogleDriveConnector,
+  google_calendar: createGoogleCalendarConnector,
   gmail: createGmailConnector,
   outlook: createOutlookConnector,
   teams: createTeamsConnector,

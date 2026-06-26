@@ -16,6 +16,7 @@ import type { ConversationRowProps } from "@/components/sketch/conversation-row"
 import { HomePane } from "@/components/sketch/home-pane";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
 import {
+  type AutomationArtifact,
   type WebChatConversationSummary,
   type WebChatToolProgress,
   type WebChatUploadedAttachment,
@@ -52,6 +53,7 @@ type WebChatDataParts = {
     mediaType: string;
     sizeBytes?: number;
   };
+  automation: AutomationArtifact;
   "integration-connection": {
     requestId: string;
     appId: string;
@@ -70,6 +72,10 @@ type WebChatMetadata = {
 
 type WebChatMessage = UIMessage<WebChatMetadata, WebChatDataParts> & { createdAt?: string | Date };
 type WebChatPart = WebChatMessage["parts"][number];
+type ActiveIntegrationConnection = {
+  connection: ChatThreadIntegrationConnection;
+  popupWindow: Window | null;
+};
 
 export interface ChatSearch {
   message?: string;
@@ -183,6 +189,10 @@ function latestFileIndex(parts: WebChatPart[]): number {
   );
 }
 
+function latestAutomationIndex(parts: WebChatPart[]): number {
+  return findLastPartIndex(parts, (part) => part.type === "data-automation" && part.data.taskId.trim().length > 0);
+}
+
 function latestInterruptionIndex(parts: WebChatPart[]): number {
   return findLastPartIndex(
     parts,
@@ -263,7 +273,15 @@ function latestProgressWins(message: WebChatMessage): boolean {
   const parts = visibleMessageParts(message);
   const progress = latestProgressPart(parts);
   if (!progress) return false;
-  return progress.index > Math.max(latestTextIndex(parts), latestFileIndex(parts), latestInterruptionIndex(parts));
+  return (
+    progress.index >
+    Math.max(
+      latestTextIndex(parts),
+      latestFileIndex(parts),
+      latestAutomationIndex(parts),
+      latestInterruptionIndex(parts),
+    )
+  );
 }
 
 function textFromParts(parts: WebChatPart[]): string {
@@ -287,6 +305,17 @@ function filesFromParts(parts: WebChatPart[]): ChatThreadFile[] {
 
 function filesFromMessage(message: WebChatMessage): ChatThreadFile[] {
   return filesFromParts(visibleMessageParts(message));
+}
+
+function automationsFromParts(parts: WebChatPart[]): AutomationArtifact[] {
+  return parts
+    .filter((part) => part.type === "data-automation")
+    .map((part) => part.data)
+    .filter((artifact) => artifact.taskId.trim().length > 0 && artifact.title.trim().length > 0);
+}
+
+function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
+  return automationsFromParts(visibleMessageParts(message));
 }
 
 function integrationConnectionsFromParts(parts: WebChatPart[]): ChatThreadIntegrationConnection[] {
@@ -666,6 +695,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
       const interruption = interruptionFromMessage(message);
       if (hasTimelineProgress(timeline)) {
         const files = filesFromMessage(message);
+        const automations = automationsFromMessage(message);
         const integrationConnections = integrationConnectionsFromMessage(message);
         return [
           {
@@ -674,6 +704,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
             createdAt,
             timeline,
             files: files.length > 0 ? files : undefined,
+            automations: automations.length > 0 ? automations : undefined,
             integrationConnections: integrationConnections.length > 0 ? integrationConnections : undefined,
             ...(interruption ? { interruption } : {}),
           },
@@ -682,9 +713,10 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
     }
     const text = textFromMessage(message);
     const files = filesFromMessage(message);
+    const automations = message.role === "assistant" ? automationsFromMessage(message) : [];
     const integrationConnections = message.role === "assistant" ? integrationConnectionsFromMessage(message) : [];
     const interruption = message.role === "assistant" ? interruptionFromMessage(message) : undefined;
-    if (text || files.length > 0 || integrationConnections.length > 0 || interruption) {
+    if (text || files.length > 0 || automations.length > 0 || integrationConnections.length > 0 || interruption) {
       return [
         {
           id: message.id,
@@ -692,6 +724,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
           text: text || undefined,
           createdAt,
           files: files.length > 0 ? files : undefined,
+          automations: automations.length > 0 ? automations : undefined,
           integrationConnections: integrationConnections.length > 0 ? integrationConnections : undefined,
           ...(interruption ? { interruption } : {}),
         },
@@ -807,8 +840,9 @@ export function ChatPage() {
   const [toolProgress, setToolProgress] = useState<WebChatToolProgress>("friendly");
   const [pendingToolProgress, setPendingToolProgress] = useState<WebChatToolProgress | null>(null);
   const [stoppingRun, setStoppingRun] = useState(false);
-  const [activeIntegrationConnection, setActiveIntegrationConnection] =
-    useState<ChatThreadIntegrationConnection | null>(null);
+  const [activeIntegrationConnection, setActiveIntegrationConnection] = useState<ActiveIntegrationConnection | null>(
+    null,
+  );
   const [localIntegrationConnectionStatuses, setLocalIntegrationConnectionStatuses] = useState<
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
@@ -970,8 +1004,14 @@ export function ChatPage() {
         toast.error("No integration provider is configured");
         return;
       }
+      const popupWindow = window.open("about:blank", "_blank", "width=600,height=700");
+      if (!popupWindow || popupWindow.closed) {
+        setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "error" }));
+        toast.error("Sketch could not open the connection window. Allow popups and try again.");
+        return;
+      }
       setLocalIntegrationConnectionStatuses((current) => ({ ...current, [connection.requestId]: "connecting" }));
-      setActiveIntegrationConnection(connection);
+      setActiveIntegrationConnection({ connection, popupWindow });
     },
     [provider, providerLoading],
   );
@@ -1075,6 +1115,7 @@ export function ChatPage() {
             error={chat.error?.message ?? null}
             integrationConnectionStatuses={integrationConnectionStatuses}
             onConnectIntegration={handleConnectIntegration}
+            conversationId={conversationId}
           />
         </div>
       </div>
@@ -1105,7 +1146,8 @@ export function ChatPage() {
       <ChatIntegrationConnectionFrame
         open={activeIntegrationConnection !== null}
         providerId={provider?.id ?? null}
-        connection={activeIntegrationConnection}
+        connection={activeIntegrationConnection?.connection ?? null}
+        popupWindow={activeIntegrationConnection?.popupWindow ?? null}
         onOpenChange={handleIntegrationConnectionOpenChange}
         onStatusChange={handleIntegrationConnectionStatusChange}
         onConnected={handleIntegrationConnected}

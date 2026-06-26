@@ -6,6 +6,7 @@ import type { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { EntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
+import type { MentionType } from "./graph";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 export interface ReplayFactsSummary {
@@ -48,6 +49,7 @@ export interface MaterializeDeps {
   onEntityResolved: (entity: Entity) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
   llmPromotionThreshold: number;
+  countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
 }
 
 export type MaterializeResult =

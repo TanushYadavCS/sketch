@@ -1,7 +1,14 @@
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../test-utils";
-import { oauthRoutes, resolveOrigin } from "./oauth";
+import {
+  googleConnectorFromQuery,
+  googleScopesFor,
+  initialGoogleScopeConfig,
+  oauthRoutes,
+  resolveOrigin,
+  shouldRunGoogleFirstSync,
+} from "./oauth";
 
 /**
  * Exercises the origin used to build OAuth redirect URIs. The production bug:
@@ -32,6 +39,21 @@ describe("resolveOrigin", () => {
 
   it("falls back to the request origin when no forwarded headers are present", async () => {
     expect(await originFor({ host: "capmobfinance.getsketch.ai" })).toBe("http://capmobfinance.getsketch.ai");
+  });
+});
+
+describe("Google OAuth connector routing", () => {
+  it("maps Google Calendar authorize requests to the calendar connector and scope", () => {
+    expect(googleConnectorFromQuery("google_calendar")).toBe("google_calendar");
+    expect(googleConnectorFromQuery("calendar")).toBe("google_calendar");
+    expect(googleScopesFor("google_calendar")).toContain("https://www.googleapis.com/auth/calendar.readonly");
+    expect(googleScopesFor("google_calendar")).toContain("https://www.googleapis.com/auth/userinfo.email");
+  });
+
+  it("starts Calendar OAuth with an empty selectable scope instead of auto-syncing every calendar", () => {
+    expect(initialGoogleScopeConfig("google_calendar")).toEqual({ calendarIds: [] });
+    expect(shouldRunGoogleFirstSync("google_calendar")).toBe(false);
+    expect(shouldRunGoogleFirstSync("gmail")).toBe(true);
   });
 });
 
