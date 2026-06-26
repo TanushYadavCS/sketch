@@ -1,8 +1,11 @@
+import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import * as automationRunsModule from "../db/repositories/automation-runs";
+import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -19,7 +22,7 @@ async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "t
   const hash = await hashPassword(password);
   const normalizedEmail = email.trim().toLowerCase();
   await settings.create();
-  await users.create({
+  const admin = await users.create({
     name: normalizedEmail.split("@")[0],
     email: normalizedEmail,
     emailVerified: true,
@@ -27,6 +30,7 @@ async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "t
     authRole: "admin",
   });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
+  return admin;
 }
 
 async function loginAdmin(app: ReturnType<typeof createApp>) {
@@ -44,6 +48,61 @@ async function getMemberCookie(db: Kysely<DB>, userId: string): Promise<string> 
   if (!row?.jwt_secret) throw new Error("JWT secret not found in test DB");
   const token = await signJwt(userId, "member", row.jwt_secret);
   return `sketch_session=${token}`;
+}
+
+function makeBuilderSaveRequest(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
+  const request: AutomationBuilderSaveRequest = {
+    expectedRevision: 0,
+    title: "Daily account brief",
+    description: "Summarize account activity every two minutes.",
+    prompt: "Summarize account activity.",
+    scheduleType: "interval",
+    scheduleValue: "120",
+    timezone: "UTC",
+    status: "active",
+    delivery: {
+      platform: "slack",
+      targetType: "dm",
+      targetId: "D123",
+      threadTs: null,
+      mode: "deliver",
+    },
+    steps: [
+      {
+        id: "trigger-1",
+        type: "trigger",
+        label: "Every two minutes",
+        icon: "clock",
+        position: { x: 0, y: 0 },
+        triggerConfig: {
+          type: "schedule",
+          scheduleType: "interval",
+          scheduleValue: "120",
+          timezone: "UTC",
+        },
+      },
+      {
+        id: "agent-1",
+        type: "agent",
+        label: "Summarize",
+        icon: "sketch-ai",
+        position: { x: 260, y: 0 },
+        agentMode: "sketch",
+      },
+    ],
+    edges: [{ id: "trigger-1-agent-1", from: "trigger-1", to: "agent-1" }],
+    stepContent: {
+      "agent-1": {
+        taskId: "task-builder",
+        stepId: "agent-1",
+        contentType: "prompt",
+        content: "Check account activity and summarize changes.",
+        apps: ["clickup"],
+      },
+    },
+  };
+
+  return { ...request, ...overrides };
 }
 
 describe("Scheduled Tasks API", () => {
@@ -106,6 +165,9 @@ describe("Scheduled Tasks API", () => {
       status: "active",
       next_run_at: null,
       output_target: recipient.slack_user_id,
+      origin_platform: "web",
+      origin_conversation_id: "chat-alpha",
+      origin_provider_thread_id: null,
     });
     await tasks.add({
       id: "task-group",
@@ -146,8 +208,119 @@ describe("Scheduled Tasks API", () => {
     expect(slackTask.creatorName).toBe("Alice Member");
     expect(slackTask.targetKindLabel).toBe("Slack channel");
     expect(slackTask.delivery.label).toBe("Recipient Person");
+    expect(slackTask.originChat).toEqual({
+      platform: "web",
+      conversationId: "chat-alpha",
+      providerThreadId: null,
+      currentMessageId: null,
+    });
     expect(whatsappTask.targetKindLabel).toBe("WhatsApp group");
     expect(whatsappTask.canResume).toBe(true);
+    expect(whatsappTask.originChat).toBeNull();
+
+    const detail = await app.request("/api/scheduled-tasks/task-channel", { headers: { Cookie: cookie } });
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toMatchObject({
+      automation: {
+        id: "task-channel",
+        originChat: {
+          platform: "web",
+          conversationId: "chat-alpha",
+          providerThreadId: null,
+          currentMessageId: null,
+        },
+      },
+    });
+  });
+
+  it("returns the persisted Slack origin chat transcript for accessible automations", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const conversations = createConversationRepository(db);
+    const member = await users.create({ name: "Alice Member", email: "alice@test.com" });
+    const conversation = await conversations.getOrCreate(
+      { platform: "slack", kind: "channel", providerConversationId: "C123" },
+      "design-wins",
+    );
+    const originMessage = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.1",
+      senderName: "Alice",
+      text: "Create a Trustpilot wins automation",
+      providerThreadId: "1700.1",
+      receivedAt: "2026-06-01T00:00:00.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.2",
+      senderName: "Sketch",
+      isBot: true,
+      text: "All set - here's the draft.",
+      providerThreadId: "1700.1",
+      receivedAt: "2026-06-01T00:00:02.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.3",
+      senderName: "Bob",
+      text: "Unrelated top-level note",
+      providerThreadId: "1700.3",
+    });
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "1700.4",
+      senderName: "Alice",
+      text: "Later note after creation",
+      providerThreadId: "1700.1",
+    });
+
+    await tasks.add({
+      id: "task-origin",
+      platform: "slack",
+      context_type: "channel",
+      delivery_target: "C123",
+      thread_ts: "1700.1",
+      prompt: "Post design wins",
+      schedule_type: "cron",
+      schedule_value: "0 9 * * 1",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: member.id,
+      status: "active",
+      next_run_at: null,
+      origin_platform: "slack",
+      origin_conversation_id: String(conversation.id),
+      origin_provider_thread_id: "1700.1",
+      origin_message_id: originMessage.row.id,
+    });
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-origin/origin-chat/messages", {
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      messages: [
+        {
+          id: "1",
+          role: "user",
+          senderName: "Alice",
+          text: "Alice: Create a Trustpilot wins automation",
+          createdAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    });
   });
 
   it("returns Canvas-managed trigger metadata for external workflows", async () => {
@@ -686,6 +859,260 @@ describe("Scheduled Tasks API", () => {
     } finally {
       factorySpy.mockRestore();
     }
+  });
+
+  it("saves builder definitions atomically and asks the scheduler to reschedule", async () => {
+    const admin = await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const stepContent = createAutomationStepContentRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-builder@test.com" });
+
+    await tasks.add({
+      id: "task-builder",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Old prompt",
+      schedule_type: "cron",
+      schedule_value: "0 9 * * 1",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+    await stepContent.upsert({
+      taskId: "task-builder",
+      stepId: "old-step",
+      contentType: "prompt",
+      content: "Stale prompt",
+    });
+
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest()),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.automation).toMatchObject({
+      id: "task-builder",
+      title: "Daily account brief",
+      revision: 1,
+      scheduleType: "interval",
+      scheduleValue: "120",
+    });
+    expect(refreshTaskSchedule).toHaveBeenCalledWith("task-builder");
+
+    const row = await tasks.getById("task-builder");
+    expect(row).toMatchObject({
+      prompt: "Summarize account activity.",
+      schedule_type: "interval",
+      schedule_value: "120",
+      last_edited_by: admin.id,
+      revision: 1,
+    });
+    expect(row?.steps).not.toContain("Check account activity");
+
+    const contentRows = await stepContent.getByTask("task-builder");
+    expect(contentRows).toHaveLength(1);
+    expect(contentRows[0]).toMatchObject({
+      step_id: "agent-1",
+      content_type: "prompt",
+      content: "Check account activity and summarize changes.",
+    });
+    expect(contentRows[0].apps).toBe(JSON.stringify(["clickup"]));
+  });
+
+  it("rejects stale builder saves without rescheduling", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-conflict@test.com" });
+
+    await tasks.add({
+      id: "task-builder",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Old prompt",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    await db.updateTable("scheduled_tasks").set({ revision: 3 }).where("id", "=", "task-builder").execute();
+
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(makeBuilderSaveRequest({ expectedRevision: 0 })),
+    });
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "REVISION_CONFLICT", currentRevision: 3 },
+    });
+    expect(refreshTaskSchedule).not.toHaveBeenCalled();
+    await expect(tasks.getById("task-builder")).resolves.toMatchObject({ prompt: "Old prompt", revision: 3 });
+  });
+
+  it("rejects action steps when no broker-capable integration provider is configured", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-action@test.com" });
+    const baseRequest = makeBuilderSaveRequest();
+
+    await tasks.add({
+      id: "task-builder",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Old prompt",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const actionRequest = makeBuilderSaveRequest({
+      steps: [
+        ...baseRequest.steps,
+        {
+          id: "action-1",
+          type: "action",
+          label: "Post update",
+          icon: "bolt",
+          position: { x: 520, y: 0 },
+        },
+      ],
+      edges: [
+        { id: "trigger-1-agent-1", from: "trigger-1", to: "agent-1" },
+        { id: "agent-1-action-1", from: "agent-1", to: "action-1" },
+      ],
+      stepContent: {
+        ...baseRequest.stepContent,
+        "action-1": {
+          taskId: "task-builder",
+          stepId: "action-1",
+          contentType: "script",
+          content: "return input;",
+          apps: ["slack"],
+        },
+      },
+    });
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(actionRequest),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: "BROKER_REQUIRED" })]));
+    expect(refreshTaskSchedule).not.toHaveBeenCalled();
+  });
+
+  it("runs single builder steps through the scheduler", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-step@test.com" });
+
+    await tasks.add({
+      id: "task-builder",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Run step",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const executeStepById = vi.fn(async () => ({
+      runId: "run-step",
+      status: "completed" as const,
+      stepOutputs: { "agent-1": { status: "completed" as const, output: "ok", duration_ms: 12 } },
+      finalOutput: "ok",
+    }));
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        executeStepById,
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-builder/steps/agent-1/runs", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { account: "Acme" }, useLatestUpstreamOutput: true }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ run: { runId: "run-step", status: "completed" } });
+    expect(executeStepById).toHaveBeenCalledWith("task-builder", "agent-1", {
+      input: { account: "Acme" },
+      useLatestUpstreamOutput: true,
+    });
   });
 
   it("deletes tasks successfully", async () => {

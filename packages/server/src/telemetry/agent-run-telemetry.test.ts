@@ -91,7 +91,7 @@ const result: RunAgentResult = {
   costUsd: 99,
   auxCostUsd: 0,
   pendingUploads: [],
-  trace: { progressEvents: [], finalText: "hi" },
+  trace: { progressEvents: [], finalText: "hi", automationArtifacts: [] },
   rawUsage: usage,
 };
 

@@ -6,6 +6,7 @@ import { whatsappNumberSchema } from "@sketch/shared";
  */
 import { Hono } from "hono";
 import { z } from "zod";
+import type { createEntityRepository } from "../db/repositories/entities";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
@@ -17,6 +18,7 @@ type InboxMessagesRepo = ReturnType<typeof createInboxMessagesRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type McpServersRepo = ReturnType<typeof createMcpServerRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
+type EntityRepo = ReturnType<typeof createEntityRepository>;
 
 type SlackTokensCallback = (tokens: { botToken: string; appToken?: string }) => unknown;
 
@@ -27,6 +29,7 @@ interface SystemDeps {
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   onLlmSettingsUpdated?: Function;
   userRepo?: UserRepo;
+  entityRepo?: EntityRepo;
   inboxMessagesRepo?: InboxMessagesRepo;
   mcpServers?: McpServersRepo;
   sendSlackDmToSlackUser?: (params: {
@@ -106,6 +109,11 @@ const systemBulkUsersSchema = z.object({
         message: "email is required for Slack users",
       }),
   ),
+});
+
+const hotnessRecomputationSchema = z.object({
+  cursor: z.string().trim().min(1).nullable().optional(),
+  limit: z.coerce.number().int().min(1).max(1000).default(500),
 });
 
 const canvasIntegrationSchema = z.object({
@@ -217,6 +225,21 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
   routes.put("/api-key", async (c) => {
     const apiKey = await settings.ensureSketchApiKey(generateSketchApiKey);
     return c.json({ configured: true, apiKey });
+  });
+
+  routes.post("/entities/graph/hotness-recomputations", async (c) => {
+    if (!deps.entityRepo) {
+      return c.json({ error: { code: "UNAVAILABLE", message: "Entity repository is not configured" } }, 503);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = hotnessRecomputationSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
+    }
+
+    const result = await deps.entityRepo.recomputeHotnessBatch(parsed.data);
+    return c.json(result);
   });
 
   routes.put("/slack/tokens", async (c) => {

@@ -312,6 +312,38 @@ describe("buildSystemContext", () => {
       expect(result).toContain("fenced code blocks");
     });
 
+    it("tells the agent to resolve integration status without UI-render side effects", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("use the integration search-apps capability");
+      expect(result).toContain("Call search-apps without queries when the user asks what integration accounts");
+      expect(result).toContain("Never ask whether to show, pull up, open, or display a connection card");
+      expect(result).toContain("Should I pull up the connection card?");
+      expect(result).toContain("I can pull up the right card");
+      expect(result).toContain("Which Zoho product should I use?");
+      expect(result).toContain("do not give manual navigation, API-key, or 'look for this app' setup instructions");
+      expect(result).toContain("Do not include a separate 'connect these apps' section");
+      expect(result).toContain("Do not send users to Settings -> Integrations unless no setup card/link");
+      expect(result).toContain("Do not tell the user how to use the setup card/link");
+      expect(result).toContain("Do not describe card or link rendering mechanics");
+      expect(result).toContain("it will add an app-specific setup option automatically");
+      expect(result).toContain("do not mention that rendering step");
+      expect(result).not.toContain("SearchIntegrationApps");
+      expect(result).not.toContain("RequestIntegrationConnection");
+    });
+
+    it("includes connection-link guidance for Slack and WhatsApp", () => {
+      const slack = buildSystemContext({ platform: "slack" });
+      const whatsapp = buildSystemContext({ platform: "whatsapp" });
+
+      expect(slack).toContain("use the integration search-apps capability");
+      expect(slack).toContain("Sketch will resolve the returned app identity into the right connection target");
+      expect(slack).toContain("Do not send users to Settings -> Integrations unless no setup card/link");
+      expect(slack).toContain("Do not tell the user how to use the setup card/link");
+      expect(whatsapp).toContain("Do not tell the user how to use the setup card/link");
+      expect(whatsapp).toContain("Do not include a separate 'connect these apps' section");
+      expect(whatsapp).not.toContain("RequestIntegrationConnection");
+    });
+
     it("does not include Slack or WhatsApp link formatting", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).not.toContain("<url|text>");

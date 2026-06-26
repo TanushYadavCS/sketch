@@ -7,14 +7,14 @@
  * Integration-specific sub-resources (apps, connections) delegate to the
  * provider adapter from integrations/factory.ts, scoped to the member's email.
  */
-import type { IntegrationConnection } from "@sketch/shared";
+import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createUserRepository } from "../db/repositories/users";
 import { CanvasProviderRequestError } from "../integrations/canvas";
 import { createProvider } from "../integrations/factory";
-import { canvasCredentialsSchema } from "../integrations/types";
+import { type IntegrationProvider, canvasCredentialsSchema } from "../integrations/types";
 
 type McpServerRepo = ReturnType<typeof createMcpServerRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
@@ -58,14 +58,42 @@ const connectionTestSchema = z.object({
   credentials: z.string().min(1, "Credentials are required"),
 });
 
-const createConnectionSchema = z.object({
-  appId: z.string().min(1, "App ID is required"),
+const integrationAppIdSchema = z
+  .string()
+  .trim()
+  .min(1, "App ID is required")
+  .max(128, "App ID must be at most 128 characters")
+  .regex(
+    /^[a-z0-9][a-z0-9._-]*$/i,
+    "App ID must start with a letter or number and contain only letters, numbers, dots, underscores, or hyphens",
+  )
+  .transform((value) => value.toLowerCase());
+
+const connectionIntentAppMetadataSchema = z.object({
+  appName: z.string().trim().min(1).max(160).optional(),
+  description: z.string().trim().max(1000).optional(),
+  icon: z.string().trim().url().optional(),
+});
+
+const createConnectionSchema = connectionIntentAppMetadataSchema.extend({
+  appId: integrationAppIdSchema,
   callbackUrl: z.string().url().optional(),
 });
+
+const createConnectionIntentSchema = z
+  .object({
+    appId: integrationAppIdSchema,
+    callbackUrl: z.string().url().optional(),
+  })
+  .merge(connectionIntentAppMetadataSchema);
 
 const updateConnectionAccessSchema = z.object({
   accessLevel: z.enum(["personal", "organization"]),
 });
+
+const CONNECTION_INTENT_APP_LIMIT = 50;
+const CONNECTION_INTENT_MAX_PAGES = 20;
+type JsonErrorStatus = 400 | 401 | 403 | 404 | 409 | 429 | 500 | 502 | 503;
 
 /**
  * Maps raw MCP SDK errors to user-friendly messages.
@@ -87,6 +115,23 @@ function friendlyConnectionError(err: unknown): string {
     return "Authentication failed. Check your credentials.";
   }
   return msg;
+}
+
+function jsonErrorStatus(status: number): JsonErrorStatus {
+  switch (status) {
+    case 400:
+    case 401:
+    case 403:
+    case 404:
+    case 409:
+    case 429:
+    case 500:
+    case 502:
+    case 503:
+      return status;
+    default:
+      return 500;
+  }
 }
 
 async function testMcpConnection(
@@ -202,6 +247,240 @@ function hasDisplayOwnerName(connection: IntegrationConnection): boolean {
 
 function isEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function normalizeConnectionIntentLookup(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+const CONNECTION_INTENT_IGNORED_TOKENS = new Set([
+  "api",
+  "app",
+  "apps",
+  "auth",
+  "authorize",
+  "connect",
+  "connector",
+  "integration",
+  "integrations",
+  "oauth",
+]);
+
+function connectionIntentTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .trim()
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .filter((token) => token.length > 0 && !CONNECTION_INTENT_IGNORED_TOKENS.has(token)),
+  );
+}
+
+function titleCaseToken(value: string): string {
+  return value ? `${value[0].toUpperCase()}${value.slice(1)}` : value;
+}
+
+function fallbackConnectionIntentApp(params: {
+  appId: string;
+  appName?: string;
+  description?: string;
+  icon?: string;
+}): IntegrationApp {
+  const tokens = params.appId
+    .split(/[^a-z0-9]+/gi)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token && !CONNECTION_INTENT_IGNORED_TOKENS.has(token));
+  const name = params.appName?.trim() || tokens.map(titleCaseToken).join(" ") || params.appId;
+  return {
+    id: params.appId,
+    name,
+    description: params.description?.trim() ?? "",
+    ...(params.icon?.trim() ? { icon: params.icon.trim() } : {}),
+  };
+}
+
+function hasTokenSubset(left: Set<string>, right: Set<string>): boolean {
+  if (left.size === 0 || right.size === 0) return false;
+  for (const token of left) {
+    if (!right.has(token)) return false;
+  }
+  return true;
+}
+
+function connectionIntentTokenMatchScore(
+  appTokens: Set<string>,
+  requestedTokens: Set<string>,
+): { rank: number; specificity: number; distance: number } | null {
+  const appInRequested = hasTokenSubset(appTokens, requestedTokens);
+  const requestedInApp = hasTokenSubset(requestedTokens, appTokens);
+  if (!appInRequested && !requestedInApp) return null;
+
+  if (appInRequested && requestedInApp) return { rank: 3, specificity: appTokens.size, distance: 0 };
+  if (appInRequested) {
+    return { rank: 2, specificity: appTokens.size, distance: requestedTokens.size - appTokens.size };
+  }
+  return { rank: 1, specificity: requestedTokens.size, distance: appTokens.size - requestedTokens.size };
+}
+
+function betterConnectionIntentTokenScore(
+  left: { rank: number; specificity: number; distance: number } | null,
+  right: { rank: number; specificity: number; distance: number } | null,
+): { rank: number; specificity: number; distance: number } | null {
+  if (!left) return right;
+  if (!right) return left;
+  if (left.rank !== right.rank) return left.rank > right.rank ? left : right;
+  if (left.specificity !== right.specificity) return left.specificity > right.specificity ? left : right;
+  if (left.distance !== right.distance) return left.distance < right.distance ? left : right;
+  return left;
+}
+
+function connectionIntentTokenScore(
+  app: IntegrationApp,
+  requestedAppId: string,
+): { rank: number; specificity: number; distance: number } | null {
+  const requestedTokens = connectionIntentTokens(requestedAppId);
+  let best: { rank: number; specificity: number; distance: number } | null = null;
+  for (const value of [app.id, app.name]) {
+    const score = connectionIntentTokenMatchScore(connectionIntentTokens(value), requestedTokens);
+    best = betterConnectionIntentTokenScore(best, score);
+  }
+  return best;
+}
+
+function compareConnectionIntentTokenScore(
+  left: { rank: number; specificity: number; distance: number },
+  right: { rank: number; specificity: number; distance: number },
+): number {
+  if (left.rank !== right.rank) return left.rank - right.rank;
+  if (left.specificity !== right.specificity) return left.specificity - right.specificity;
+  if (left.distance !== right.distance) return right.distance - left.distance;
+  return 0;
+}
+
+async function listConnectionIntentApps(
+  provider: Pick<IntegrationProvider, "listApps">,
+  query: string,
+): Promise<{ apps: IntegrationApp[]; exhausted: boolean }> {
+  const apps: IntegrationApp[] = [];
+  let after: string | undefined;
+
+  for (let page = 0; page < CONNECTION_INTENT_MAX_PAGES; page++) {
+    const result = await provider.listApps(query, CONNECTION_INTENT_APP_LIMIT, after);
+    apps.push(...result.apps);
+    if (!result.pageInfo.hasMore) return { apps, exhausted: true };
+    if (!result.pageInfo.endCursor || result.pageInfo.endCursor === after) return { apps, exhausted: false };
+    after = result.pageInfo.endCursor;
+  }
+
+  return { apps, exhausted: false };
+}
+
+function resolveConnectionIntentApp(
+  apps: IntegrationApp[],
+  requestedAppId: string,
+  exhausted: boolean,
+  fallbackApp: IntegrationApp,
+): { ok: true; app: IntegrationApp } | { ok: false; status: 409; code: "CONFLICT"; message: string } {
+  const requestedKey = normalizeConnectionIntentLookup(requestedAppId);
+  const idMatches = apps.filter((app) => normalizeConnectionIntentLookup(app.id) === requestedKey);
+  if (idMatches.length === 1) return { ok: true, app: idMatches[0] };
+  if (idMatches.length > 1) {
+    return { ok: false, status: 409, code: "CONFLICT", message: "App ID is ambiguous" };
+  }
+
+  const nameMatches = apps.filter((app) => normalizeConnectionIntentLookup(app.name) === requestedKey);
+  if (nameMatches.length === 1 && exhausted) return { ok: true, app: nameMatches[0] };
+  if (nameMatches.length > 1 || !exhausted) {
+    return { ok: false, status: 409, code: "CONFLICT", message: "App name is ambiguous" };
+  }
+
+  const tokenMatches = apps
+    .map((app) => ({ app, score: connectionIntentTokenScore(app, requestedAppId) }))
+    .filter((match): match is { app: IntegrationApp; score: { rank: number; specificity: number; distance: number } } =>
+      Boolean(match.score),
+    )
+    .sort((left, right) => compareConnectionIntentTokenScore(right.score, left.score));
+  const bestTokenMatch = tokenMatches[0];
+  const tiedTokenMatches = bestTokenMatch
+    ? tokenMatches.filter((match) => compareConnectionIntentTokenScore(match.score, bestTokenMatch.score) === 0)
+    : [];
+  if (tiedTokenMatches.length === 1 && exhausted) return { ok: true, app: tiedTokenMatches[0].app };
+  if (tiedTokenMatches.length > 1 || !exhausted) {
+    return { ok: false, status: 409, code: "CONFLICT", message: "App search result is ambiguous" };
+  }
+
+  if (apps.length === 1 && exhausted) return { ok: true, app: apps[0] };
+  if (apps.length > 1) {
+    return { ok: false, status: 409, code: "CONFLICT", message: "App search result is ambiguous" };
+  }
+
+  return { ok: true, app: fallbackApp };
+}
+
+function connectionIntentCallbackUrl(callbackUrl: string | undefined, appId: string): string {
+  if (!callbackUrl) return "";
+  const url = new URL(callbackUrl);
+  url.searchParams.set("app", appId);
+  return url.toString();
+}
+
+function isSameConnectionIntentApp(left: IntegrationApp, right: IntegrationApp): boolean {
+  return normalizeConnectionIntentLookup(left.id) === normalizeConnectionIntentLookup(right.id);
+}
+
+async function initiateConnectionForApp(params: {
+  provider: IntegrationProvider;
+  userEmail: string;
+  userName?: string;
+  userRole: "admin" | "member";
+  app: IntegrationApp;
+  callbackUrl?: string;
+}): Promise<{ ok: true; redirectUrl: string } | { ok: false; status: number; code: string; message: string }> {
+  try {
+    const result = await params.provider.initiateConnection(
+      params.userEmail,
+      params.app.id,
+      connectionIntentCallbackUrl(params.callbackUrl, params.app.id),
+      params.userName,
+      params.userRole,
+    );
+    return { ok: true, redirectUrl: result.redirectUrl };
+  } catch (err) {
+    if (err instanceof CanvasProviderRequestError) {
+      return { ok: false, status: err.status, code: err.code, message: err.message };
+    }
+    throw err;
+  }
+}
+
+async function resolveConnectionIntent(params: {
+  provider: IntegrationProvider;
+  userEmail: string;
+  userName?: string;
+  userRole: "admin" | "member";
+  app: IntegrationApp;
+  callbackUrl?: string;
+}): Promise<
+  { ok: true; app: IntegrationApp; redirectUrl: string } | { ok: false; status: number; code: string; message: string }
+> {
+  const directResult = await initiateConnectionForApp(params);
+  if (directResult.ok) {
+    return { ok: true, app: params.app, redirectUrl: directResult.redirectUrl };
+  }
+  if (directResult.code !== "NOT_FOUND") return directResult;
+
+  const listed = await listConnectionIntentApps(params.provider, params.app.id).catch(() => null);
+  if (!listed) return directResult;
+  const appResult = resolveConnectionIntentApp(listed.apps, params.app.id, listed.exhausted, params.app);
+  if (!appResult.ok) return appResult;
+  if (isSameConnectionIntentApp(appResult.app, params.app)) return directResult;
+
+  const resolvedResult = await initiateConnectionForApp({ ...params, app: appResult.app });
+  if (!resolvedResult.ok) return resolvedResult;
+  return { ok: true, app: appResult.app, redirectUrl: resolvedResult.redirectUrl };
 }
 
 function extractEmails(value?: string): string[] {
@@ -459,14 +738,50 @@ export function mcpServerRoutes(mcpServers: McpServerRepo, users: UserRepo) {
     if (!userResult.ok) return userResult.response;
 
     const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
-    const result = await provider.initiateConnection(
-      userResult.email,
-      parsed.data.appId,
-      parsed.data.callbackUrl ?? "",
-      userResult.name,
-      c.get("role"),
-    );
-    return c.json(result);
+    const fallbackApp = fallbackConnectionIntentApp(parsed.data);
+    const result = await resolveConnectionIntent({
+      provider,
+      userEmail: userResult.email,
+      userName: userResult.name,
+      userRole: c.get("role"),
+      app: fallbackApp,
+      callbackUrl: parsed.data.callbackUrl,
+    });
+    if (!result.ok) {
+      return c.json({ error: { code: result.code, message: result.message } }, jsonErrorStatus(result.status));
+    }
+    return c.json({ redirectUrl: result.redirectUrl });
+  });
+
+  routes.post("/:id/connections/intents", async (c) => {
+    const resolved = await resolveProvider(c, mcpServers);
+    if (!resolved.ok) return resolved.response;
+    const { row } = resolved;
+
+    const body = await c.req.json();
+    const parsed = createConnectionIntentSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const userResult = await resolveUserIdentity(c, users);
+    if (!userResult.ok) return userResult.response;
+
+    const provider = createProvider(row.type, row.api_url, row.credentials, row.id);
+    const fallbackApp = fallbackConnectionIntentApp(parsed.data);
+    const result = await resolveConnectionIntent({
+      provider,
+      userEmail: userResult.email,
+      userName: userResult.name,
+      userRole: c.get("role"),
+      app: fallbackApp,
+      callbackUrl: parsed.data.callbackUrl,
+    });
+    if (!result.ok) {
+      return c.json({ error: { code: result.code, message: result.message } }, jsonErrorStatus(result.status));
+    }
+    return c.json({ app: result.app, redirectUrl: result.redirectUrl });
   });
 
   routes.get("/:id/connections", async (c) => {

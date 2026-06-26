@@ -10,6 +10,7 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
+import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -19,6 +20,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
+import { type IntegrationProgressEventLike, collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
@@ -39,8 +41,13 @@ import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
-import { UploadCollector, createSketchMcpServer } from "./sketch-tools";
-import type { DailyBriefWriter } from "./tools/daily-brief";
+import {
+  AutomationArtifactCollector,
+  IntegrationConnectionCollector,
+  UploadCollector,
+  createSketchMcpServer,
+} from "./sketch-tools";
+import type { AgentOutputWriter } from "./tools/agent-output";
 
 /**
  * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
@@ -75,6 +82,7 @@ export type ProgressEvent = ToolUseProgressEvent | IntermediateTextProgressEvent
 export interface RunTrace {
   progressEvents: ProgressEvent[];
   finalText: string | null;
+  automationArtifacts: AutomationArtifact[];
 }
 
 /**
@@ -91,6 +99,7 @@ export interface AgentResult {
   costUsd: number;
   auxCostUsd: number;
   pendingUploads: string[];
+  pendingIntegrationConnections?: WebChatIntegrationConnectionData[];
   trace: RunTrace;
 }
 
@@ -155,6 +164,7 @@ export interface RunAgentParams {
   platform: "slack" | "whatsapp";
   responseSurface?: ResponseSurface;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
+  onTextDelta?: (delta: string) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
   threadTs?: string;
@@ -214,7 +224,7 @@ export interface RunAgentParams {
   seedAuxCalls?: AuxLlmCall[];
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
-  dailyBriefWriter?: DailyBriefWriter;
+  agentOutputWriter?: AgentOutputWriter;
   conversationRepo?: ReturnType<typeof createConversationRepository>;
   conversationContext?: {
     conversationId: number;
@@ -256,6 +266,19 @@ export function extractAssistantText(message: unknown): string | null {
 
   const joined = texts.join("\n");
   return joined.trim() ? joined : null;
+}
+
+export function extractAssistantTextDelta(message: unknown): string | null {
+  if (!message || typeof message !== "object") return null;
+  const msg = message as Record<string, unknown>;
+  if (msg.type !== "stream_event") return null;
+
+  const event = msg.event as Record<string, unknown> | undefined;
+  if (!event || event.type !== "content_block_delta") return null;
+
+  const delta = event.delta as Record<string, unknown> | undefined;
+  if (!delta || delta.type !== "text_delta" || typeof delta.text !== "string") return null;
+  return delta.text ? delta.text : null;
 }
 
 export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
@@ -358,9 +381,13 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   }
 
   const uploadCollector = new UploadCollector();
+  const integrationConnectionCollector = new IntegrationConnectionCollector();
+  const automationArtifactCollector = new AutomationArtifactCollector();
   const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
+    integrationConnectionCollector,
+    automationArtifactCollector,
     auxCostCollector,
     workspaceDir: absWorkspace,
     db: params.db,
@@ -379,6 +406,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     inboxMessagesRepo: params.inboxMessagesRepo,
     userRepo: params.userRepo,
     currentUserId: params.currentUserId ?? undefined,
+    currentUserEmail: params.userEmail ?? null,
+    currentUserName: params.userName,
     localDeviceInvoker: params.localDeviceInvoker,
     localClaudeSessionService: params.localClaudeSessionService,
     workspaceKey: params.workspaceKey,
@@ -394,7 +423,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     conversationContext: params.conversationContext,
     agentInstructions: params.agentInstructions,
     agentAllowedTools: params.agentAllowedTools,
-    dailyBriefWriter: params.dailyBriefWriter,
+    agentOutputWriter: params.agentOutputWriter,
     originOrgContextEnabled: params.claudeConfigDir !== undefined,
   });
 
@@ -445,6 +474,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   }
 
   let pendingToolCalls: ToolCallRecord[] = [];
+  const integrationProgressEvents: IntegrationProgressEventLike[] = [];
+  const toolUsesById = new Map<string, { toolName: string; input: Record<string, unknown> }>();
 
   const flushIntermediateText = async () => {
     if (currentTextSuffix.length === 0) return;
@@ -491,6 +522,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
         },
         systemPrompt: systemAppend,
         abortController: params.abortController,
+        includePartialMessages: Boolean(params.onTextDelta),
         tools: sdkBuiltInTools as string[],
         permissionMode: "default" as const,
         allowDangerouslySkipPermissions: false,
@@ -515,6 +547,17 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
         await notifySessionId(sessionId);
       }
 
+      if (message.type === "stream_event" && params.onTextDelta) {
+        const delta = extractAssistantTextDelta(message);
+        if (delta) {
+          try {
+            await params.onTextDelta(delta);
+          } catch (err) {
+            logger.warn({ err }, "Failed to deliver assistant text delta");
+          }
+        }
+      }
+
       if (message.type === "assistant") {
         const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
         const content = inner?.content;
@@ -537,8 +580,9 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
             }
             for (const block of content) {
               if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-                const name = (block as { name: string }).name;
-                const input = (block as { input?: Record<string, unknown> }).input ?? {};
+                const toolBlock = block as { id?: unknown; name: string; input?: Record<string, unknown> };
+                const name = toolBlock.name;
+                const input = toolBlock.input ?? {};
                 const tc: ToolCallRecord = {
                   toolName: name,
                   skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
@@ -548,6 +592,10 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
                 toolCalls.push(tc);
                 pendingToolCalls.push(tc);
                 const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
+                integrationProgressEvents.push(event);
+                if (typeof toolBlock.id === "string") {
+                  toolUsesById.set(toolBlock.id, { toolName: name, input });
+                }
                 progressEvents.push(event);
                 try {
                   await params.onProgressEvent(event);
@@ -561,6 +609,27 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
             if (text) {
               currentTextSuffix.push(text);
             }
+          }
+        }
+      }
+
+      if (message.type === "user") {
+        const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
+        const content = inner?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (!block || typeof block !== "object" || !("type" in block) || block.type !== "tool_result") continue;
+            const toolResult = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
+            const toolUse =
+              typeof toolResult.tool_use_id === "string" ? toolUsesById.get(toolResult.tool_use_id) : null;
+            if (!toolUse) continue;
+            integrationProgressEvents.push({
+              kind: "tool_result",
+              toolName: toolUse.toolName,
+              input: toolUse.input,
+              output: toolResult.content,
+              isError: toolResult.is_error === true,
+            });
           }
         }
       }
@@ -646,24 +715,55 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     }
   }
 
+  if (params.contextType !== "scheduled_task") {
+    try {
+      await collectIntegrationCardsFromProgressEvents({
+        events: integrationProgressEvents,
+        loadIntegrationProvider: params.loadIntegrationProvider,
+        collector: integrationConnectionCollector,
+        userEmail: params.userEmail ?? null,
+        userName: params.userName,
+      });
+    } catch (err) {
+      logger.warn({ err }, "Failed to resolve integration cards from agent progress");
+    }
+  }
+
   const pendingUploads = uploadCollector.drain();
+  const drainedIntegrationConnections = integrationConnectionCollector.drain();
+  const responseSurface = params.responseSurface ?? params.platform;
+  const pendingIntegrationConnections =
+    responseSurface === "web"
+      ? drainedIntegrationConnections
+      : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
+  const automationArtifacts = automationArtifactCollector.drain();
   const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
   const auxCostUsd = sumAuxCost(auxLlmCalls);
   logger.info(
-    { userId: userName, sessionId, sdkCostUsd, auxCostUsd, pendingUploads: pendingUploads.length },
+    {
+      userId: userName,
+      sessionId,
+      sdkCostUsd,
+      auxCostUsd,
+      pendingUploads: pendingUploads.length,
+      pendingIntegrationConnections: pendingIntegrationConnections.length,
+      automationArtifacts: automationArtifacts.length,
+    },
     "Agent run completed",
   );
   const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
 
   return {
-    messageSent: finalText !== null,
+    messageSent: finalText !== null || pendingIntegrationConnections.length > 0 || automationArtifacts.length > 0,
     sessionId,
     costUsd: sdkCostUsd,
     auxCostUsd,
     pendingUploads,
+    pendingIntegrationConnections,
     trace: {
       progressEvents,
       finalText,
+      automationArtifacts,
     },
     rawUsage: {
       model,

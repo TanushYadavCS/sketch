@@ -1,13 +1,22 @@
 import { type Context, Hono } from "hono";
-import type { Kysely, Selectable } from "kysely";
+import { type Kysely, type Selectable, sql } from "kysely";
 import type { Logger } from "pino";
+import {
+  AutomationValidationError,
+  buildAutomationDefinition,
+  parseAutomationBuilderSaveRequest,
+  scheduledTaskFieldsFromSaveRequest,
+  validateAutomationBuilderSaveRequest,
+} from "../automation/definition";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
+import { type StoredConversationMessage, createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
+import type { IntegrationProvider } from "../integrations/types";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
@@ -20,6 +29,17 @@ interface ScheduledTaskMutationDeps {
   resumeTask: (id: string) => Promise<void>;
   removeTask: (id: string) => Promise<boolean>;
   executeTaskById: (id: string) => Promise<unknown>;
+  refreshTaskSchedule?: (id: string) => Promise<unknown>;
+  executeStepById?: (
+    id: string,
+    stepId: string,
+    options?: { input?: unknown; useLatestUpstreamOutput?: boolean },
+  ) => Promise<unknown>;
+}
+
+interface ScheduledTaskRouteOptions {
+  logger?: Logger;
+  loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
 }
 
 interface ScheduledTaskListItem {
@@ -47,6 +67,12 @@ interface ScheduledTaskListItem {
   canDelete: boolean;
   title: string | null;
   description: string | null;
+  originChat: {
+    platform: "web" | "slack" | "whatsapp";
+    conversationId: string;
+    providerThreadId: string | null;
+    currentMessageId: number | null;
+  } | null;
   steps: string | null;
   stepCount: number;
   triggerConfig: WorkflowTriggerConfig | null;
@@ -57,6 +83,14 @@ interface ScheduledTaskListItem {
   delivery: WorkflowDelivery & { label: string };
   lastRunStatus: string | null;
   runCount: number;
+}
+
+interface ScheduledTaskOriginChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  senderName: string;
+  text: string;
+  createdAt: string;
 }
 
 function compareNewestFirst(a: ScheduledTaskRow, b: ScheduledTaskRow): number {
@@ -126,6 +160,17 @@ function getTargetKindLabel(row: ScheduledTaskRow): ScheduledTaskListItem["targe
   if (row.platform === "slack") return "Slack DM";
   if (row.context_type === "group") return "WhatsApp group";
   return "WhatsApp DM";
+}
+
+function toOriginChatMessage(message: StoredConversationMessage): ScheduledTaskOriginChatMessage {
+  const text = message.text.trim() || (message.attachments.length > 0 ? "See attached files." : "");
+  return {
+    id: String(message.id),
+    role: message.isBot ? "assistant" : "user",
+    senderName: message.senderName,
+    text: message.isBot ? text : `${message.senderName}: ${text}`,
+    createdAt: message.receivedAt,
+  };
 }
 
 async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Promise<ScheduledTaskListItem[]> {
@@ -276,6 +321,16 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
       canDelete: true,
       title: row.title,
       description: row.description,
+      originChat:
+        row.origin_conversation_id &&
+        (row.origin_platform === "web" || row.origin_platform === "slack" || row.origin_platform === "whatsapp")
+          ? {
+              platform: row.origin_platform,
+              conversationId: row.origin_conversation_id,
+              providerThreadId: row.origin_provider_thread_id,
+              currentMessageId: row.origin_message_id,
+            }
+          : null,
       steps: normalizedSteps ?? null,
       stepCount,
       triggerConfig,
@@ -290,10 +345,15 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
   });
 }
 
-export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMutationDeps, logger?: Logger) {
+export function scheduledTaskRoutes(
+  db: Kysely<DB>,
+  scheduler: ScheduledTaskMutationDeps,
+  options: ScheduledTaskRouteOptions = {},
+) {
   const routes = new Hono();
   const repo = createScheduledTaskRepository(db);
   const users = createUserRepository(db);
+  const logger = options.logger;
 
   // sub can be a user UUID (managed SSO, local JWT) or an email (legacy local JWT).
   // Follows the precedent in api/users.ts:223-233.
@@ -335,6 +395,19 @@ export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMuta
     return { row };
   }
 
+  async function loadFullDefinition(row: ScheduledTaskRow) {
+    const stepContentRepo = createAutomationStepContentRepository(db);
+    const runsRepo = createAutomationRunsRepository(db);
+    const [stepContentRows, runRows] = await Promise.all([stepContentRepo.getByTask(row.id), runsRepo.list(row.id)]);
+    return buildAutomationDefinition({ row, stepContentRows, runRows });
+  }
+
+  async function hasBrokerCapableProvider(): Promise<boolean> {
+    if (!options.loadIntegrationProvider) return false;
+    const provider = await options.loadIntegrationProvider();
+    return Boolean(provider?.isBrokerCapable());
+  }
+
   routes.get("/", async (c) => {
     const role = c.get("role");
     const userId = await resolveUserId(c.get("sub"));
@@ -351,6 +424,191 @@ export function scheduledTaskRoutes(db: Kysely<DB>, scheduler: ScheduledTaskMuta
     rows.sort(compareNewestFirst);
 
     return c.json({ tasks: await buildTaskListItems(db, rows) });
+  });
+
+  routes.get("/:id/origin-chat/messages", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    const originPlatform = result.row.origin_platform;
+    const originConversationId = result.row.origin_conversation_id;
+    if (!originConversationId || (originPlatform !== "slack" && originPlatform !== "whatsapp")) {
+      return c.json({ messages: [] as ScheduledTaskOriginChatMessage[] });
+    }
+
+    const conversationId = Number(originConversationId);
+    if (!Number.isSafeInteger(conversationId) || conversationId <= 0) {
+      return c.json({ messages: [] as ScheduledTaskOriginChatMessage[] });
+    }
+
+    const conversations = createConversationRepository(db);
+    const resultMessages = await conversations.listMessages(conversationId, {
+      order: "desc",
+      limit: 50,
+      includeBotMessages: true,
+      beforeMessageId: result.row.origin_message_id ? result.row.origin_message_id + 1 : undefined,
+      providerThreadId: result.row.origin_provider_thread_id ?? undefined,
+    });
+    return c.json({ messages: resultMessages.messages.reverse().map(toOriginChatMessage) });
+  });
+
+  routes.get("/:id", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    return c.json({ automation: await loadFullDefinition(result.row) });
+  });
+
+  routes.put("/:id", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!scheduler.refreshTaskSchedule) {
+      return c.json({ error: { code: "SCHEDULER_UNAVAILABLE", message: "Scheduler refresh is unavailable" } }, 503);
+    }
+
+    let request: ReturnType<typeof parseAutomationBuilderSaveRequest>;
+    try {
+      request = parseAutomationBuilderSaveRequest(await c.req.json());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid automation definition";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const brokerCapable = request.steps.some((step) => step.type === "action")
+      ? await hasBrokerCapableProvider()
+      : true;
+    try {
+      validateAutomationBuilderSaveRequest({ request, brokerCapable });
+    } catch (err) {
+      if (err instanceof AutomationValidationError) {
+        logger?.warn(
+          { taskId: id, issueCodes: err.issues.map((issue) => issue.code) },
+          "scheduled-tasks: builder save validation failed",
+        );
+        return c.json(
+          { error: { code: "VALIDATION_ERROR", message: "Automation definition is invalid", issues: err.issues } },
+          400,
+        );
+      }
+      throw err;
+    }
+
+    const userId = await resolveUserId(c.get("sub"));
+    let updatedRow: ScheduledTaskRow | undefined;
+    const contentEntries = Object.values(request.stepContent).filter((content) =>
+      request.steps.some((step) => step.id === content.stepId && step.type !== "trigger"),
+    );
+
+    const saveResult = await db.transaction().execute(async (trx) => {
+      const current = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
+      if (!current) return { kind: "not_found" as const };
+      if (!canAccess(current, userId, c.get("role"))) return { kind: "not_found" as const };
+      if (request.expectedRevision !== undefined && current.revision !== request.expectedRevision) {
+        return { kind: "revision_conflict" as const, currentRevision: current.revision };
+      }
+
+      const fields = scheduledTaskFieldsFromSaveRequest(request);
+      let update = trx
+        .updateTable("scheduled_tasks")
+        .set({
+          ...fields,
+          revision: sql<number>`revision + 1`,
+          updated_at: sql`CURRENT_TIMESTAMP`,
+          last_edited_by: userId,
+        })
+        .where("id", "=", id);
+      if (request.expectedRevision !== undefined) {
+        update = update.where("revision", "=", request.expectedRevision);
+      }
+      const updateResult = await update.executeTakeFirst();
+      if (Number(updateResult.numUpdatedRows ?? 0) === 0) {
+        const latest = await trx
+          .selectFrom("scheduled_tasks")
+          .select("revision")
+          .where("id", "=", id)
+          .executeTakeFirst();
+        return { kind: "revision_conflict" as const, currentRevision: latest?.revision ?? current.revision };
+      }
+
+      const txStepContentRepo = createAutomationStepContentRepository(trx);
+      await txStepContentRepo.deleteOrphanedSteps(
+        id,
+        contentEntries.map((content) => content.stepId),
+      );
+      for (const content of contentEntries) {
+        await txStepContentRepo.upsert({
+          taskId: id,
+          stepId: content.stepId,
+          contentType: content.contentType,
+          content: content.content,
+          apps: content.apps,
+        });
+      }
+
+      updatedRow = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
+      return { kind: "saved" as const };
+    });
+
+    if (saveResult.kind === "not_found") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (saveResult.kind === "revision_conflict") {
+      return c.json(
+        {
+          error: {
+            code: "REVISION_CONFLICT",
+            message: "Automation was changed by another editor",
+            currentRevision: saveResult.currentRevision,
+          },
+        },
+        409,
+      );
+    }
+
+    await scheduler.refreshTaskSchedule(id);
+    const refreshed = (await repo.getById(id)) ?? updatedRow ?? result.row;
+    return c.json({ automation: await loadFullDefinition(refreshed) });
+  });
+
+  routes.post("/:id/runs", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+
+    if (result.row.status !== "active") {
+      return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
+    }
+
+    scheduler.executeTaskById(id).catch(() => {});
+    return c.json({ status: "triggered" });
+  });
+
+  routes.post("/:id/steps/:stepId/runs", async (c) => {
+    const id = c.req.param("id");
+    const stepId = c.req.param("stepId");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    if (!scheduler.executeStepById) {
+      return c.json({ error: { code: "SCHEDULER_UNAVAILABLE", message: "Step testing is unavailable" } }, 503);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    const input =
+      typeof body === "object" && body !== null && "input" in body ? (body as { input: unknown }).input : undefined;
+    const useLatestUpstreamOutput =
+      typeof body === "object" &&
+      body !== null &&
+      "useLatestUpstreamOutput" in body &&
+      (body as { useLatestUpstreamOutput: unknown }).useLatestUpstreamOutput === true;
+    try {
+      const run = await scheduler.executeStepById(id, stepId, { input, useLatestUpstreamOutput });
+      return c.json({ run });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Step test failed";
+      return c.json({ error: { code: "STEP_TEST_FAILED", message } }, 400);
+    }
   });
 
   routes.post("/:id/pause", async (c) => {

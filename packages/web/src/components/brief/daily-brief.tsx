@@ -19,16 +19,22 @@ function formatBriefDate(value: string): string {
 export function DailyBrief({
   brief,
   running,
+  enabledSections,
   onOpenChat,
 }: {
   brief: DailyBriefData;
   running: boolean;
+  /** Section keys enabled in the user's config; when omitted, all sections show. */
+  enabledSections?: string[];
   onOpenChat: (prompt: string) => void;
 }) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const subtitle =
     brief.masthead?.summary ?? brief.masthead?.title ?? "Today across your to-dos, customers, and projects.";
-  const allItems = BRIEF_SECTIONS.flatMap((section) => brief.sections[section.key]);
+  const visibleSections = enabledSections
+    ? BRIEF_SECTIONS.filter((section) => enabledSections.includes(section.key))
+    : BRIEF_SECTIONS;
+  const allItems = visibleSections.flatMap((section) => brief.sections[section.key]);
   const selectedItem = allItems.find((item) => item.id === selectedItemId) ?? null;
 
   return (
@@ -50,7 +56,7 @@ export function DailyBrief({
       </header>
 
       <div className="mt-8 flex flex-col gap-8">
-        {BRIEF_SECTIONS.map((section) => {
+        {visibleSections.map((section) => {
           const items = brief.sections[section.key];
           return (
             <BriefSection key={section.key} label={section.label}>

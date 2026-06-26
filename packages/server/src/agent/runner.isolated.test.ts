@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { extractAssistantText, runAgent } from "./runner";
+import { extractAssistantText, extractAssistantTextDelta, runAgent } from "./runner";
 
 // Mock the SDK so runAgent can be tested without spawning subprocesses
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
@@ -26,7 +26,27 @@ vi.mock("./sketch-tools", () => {
       return [];
     }
   }
+  class MockIntegrationConnectionCollector {
+    private pending: unknown[] = [];
+
+    collect(card: unknown) {
+      this.pending.push(card);
+    }
+
+    drain() {
+      const cards = [...this.pending];
+      this.pending = [];
+      return cards;
+    }
+  }
+  class MockAutomationArtifactCollector {
+    drain() {
+      return [];
+    }
+  }
   return {
+    AutomationArtifactCollector: MockAutomationArtifactCollector,
+    IntegrationConnectionCollector: MockIntegrationConnectionCollector,
     UploadCollector: MockUploadCollector,
     createSketchMcpServer: vi.fn().mockReturnValue({}),
   };
@@ -120,6 +140,27 @@ describe("extractAssistantText", () => {
       message: { content: "not an array" },
     };
     expect(extractAssistantText(message)).toBeNull();
+  });
+});
+
+describe("extractAssistantTextDelta", () => {
+  it("extracts text deltas from SDK partial assistant stream events", () => {
+    expect(
+      extractAssistantTextDelta({
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hel" } },
+      }),
+    ).toBe("Hel");
+  });
+
+  it("returns null for non-text partial events", () => {
+    expect(
+      extractAssistantTextDelta({
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: "{}" } },
+      }),
+    ).toBeNull();
+    expect(extractAssistantTextDelta({ type: "assistant" })).toBeNull();
   });
 });
 
@@ -339,6 +380,39 @@ describe("runAgent", () => {
     };
     expect(callArgs.options.model).toBe("claude-test-model");
     expect(callArgs.options.maxTurns).toBe(50);
+  });
+
+  it("enables SDK partial messages and forwards assistant text deltas", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const onTextDelta = vi.fn().mockResolvedValue(undefined);
+    let includePartialMessages: boolean | undefined;
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      const callArgs = args as { options: { includePartialMessages?: boolean } };
+      includePartialMessages = callArgs.options.includePartialMessages;
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-stream" };
+        yield {
+          type: "stream_event",
+          event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hel" } },
+        };
+        yield {
+          type: "stream_event",
+          event: { type: "content_block_delta", delta: { type: "text_delta", text: "lo" } },
+        };
+        yield {
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Hello" }] },
+        };
+        yield makeRichResultMessage({ session_id: "sess-stream" });
+      })();
+    }) as unknown as typeof query);
+
+    const result = await runAgent(makeBaseParams({ onTextDelta }));
+
+    expect(includePartialMessages).toBe(true);
+    expect(onTextDelta).toHaveBeenNthCalledWith(1, "Hel");
+    expect(onTextDelta).toHaveBeenNthCalledWith(2, "lo");
+    expect(result.trace.finalText).toBe("Hello");
   });
 
   it("uses text attachment references for image prompts when the vision tool is configured", async () => {
@@ -585,6 +659,231 @@ describe("runAgent", () => {
       expect(tc.startedAt).toBeGreaterThan(0);
       expect(tc.endedAt).toBeGreaterThanOrEqual(tc.startedAt);
     }
+  });
+
+  it("skips progress-derived integration cards for scheduled tasks", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-canvas-cli" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "t1",
+                name: "Bash",
+                input: {
+                  command: "$CANVAS_CLI direct-execute-action --component-key github-create-issue --output json",
+                },
+              },
+            ],
+          },
+        };
+        yield makeRichResultMessage({ session_id: "sess-canvas-cli" });
+      })();
+    }) as unknown as typeof query);
+    const provider = {
+      getBrokerSpec: vi.fn().mockReturnValue(null),
+      listConnections: vi.fn().mockRejectedValue(new Error("should not list connections")),
+      listApps: vi.fn().mockRejectedValue(new Error("should not list apps")),
+    };
+
+    const result = await runAgent(
+      makeBaseParams({
+        responseSurface: "web",
+        contextType: "scheduled_task",
+        userEmail: "alice@example.com",
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+      }),
+    );
+
+    expect(provider.listConnections).not.toHaveBeenCalled();
+    expect(provider.listApps).not.toHaveBeenCalled();
+    expect(result.pendingIntegrationConnections).toEqual([]);
+  });
+
+  it("collects progress-derived missing integration cards for interactive runs", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-web-canvas-cli" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "t1",
+                name: "Bash",
+                input: {
+                  command: "$CANVAS_CLI direct-execute-action --component-key github-create-issue --output json",
+                },
+              },
+            ],
+          },
+        };
+        yield makeRichResultMessage({ session_id: "sess-web-canvas-cli" });
+      })();
+    }) as unknown as typeof query);
+    const provider = {
+      getBrokerSpec: vi.fn().mockReturnValue(null),
+      listConnections: vi.fn().mockResolvedValue([]),
+      listApps: vi.fn().mockResolvedValue({
+        apps: [{ id: "github", name: "GitHub", description: "Code hosting", icon: "https://cdn.example/github.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    };
+
+    const result = await runAgent(
+      makeBaseParams({
+        responseSurface: "web",
+        contextType: "dm",
+        userEmail: "alice@example.com",
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+      }),
+    );
+
+    expect(provider.listConnections).toHaveBeenCalledWith("alice@example.com", "TestUser");
+    expect(result.pendingIntegrationConnections).toMatchObject([
+      { appId: "github", appName: "GitHub", state: "connect" },
+    ]);
+  });
+
+  it("collects result-derived missing integration cards without minting direct URLs", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-result-card" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-1",
+                name: "mcp__plugin_pipedream__slack_send_message",
+                input: { app: "slack" },
+              },
+            ],
+          },
+        };
+        yield {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-1",
+                is_error: true,
+                content: [{ type: "text", text: "CONNECTION_NOT_CONNECTED" }],
+              },
+            ],
+          },
+        };
+        yield makeRichResultMessage({ session_id: "sess-result-card" });
+      })();
+    }) as unknown as typeof query);
+    const provider = {
+      getBrokerSpec: vi.fn().mockReturnValue(null),
+      listConnections: vi.fn().mockResolvedValue([]),
+      listApps: vi.fn().mockResolvedValue({
+        apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+      initiateConnection: vi.fn().mockResolvedValue({
+        redirectUrl: "https://canvas.example.com/connect/secrets?token=slack",
+      }),
+    };
+
+    const result = await runAgent(
+      makeBaseParams({
+        contextType: "dm",
+        userEmail: "alice@example.com",
+        toolConfig: { BASE_URL: "https://sketch.example.com", PORT: 3000 },
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+      }),
+    );
+
+    expect(result.trace.progressEvents).toEqual([
+      { kind: "tool_use", toolName: "mcp__plugin_pipedream__slack_send_message", input: { app: "slack" } },
+    ]);
+    expect(provider.initiateConnection).not.toHaveBeenCalled();
+    expect(result.pendingIntegrationConnections).toMatchObject([
+      {
+        appId: "slack",
+        appName: "Slack",
+        state: "connect",
+      },
+    ]);
+    expect(result.pendingIntegrationConnections?.[0]).not.toHaveProperty("connectUrl");
+  });
+
+  it("does not mint result-derived direct integration URLs for channel mentions", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockImplementation((() => {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-shared-card" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-1",
+                name: "mcp__plugin_pipedream__slack_send_message",
+                input: { app: "slack" },
+              },
+            ],
+          },
+        };
+        yield {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-1",
+                is_error: true,
+                content: [{ type: "text", text: "CONNECTION_NOT_CONNECTED" }],
+              },
+            ],
+          },
+        };
+        yield makeRichResultMessage({ session_id: "sess-shared-card" });
+      })();
+    }) as unknown as typeof query);
+    const provider = {
+      getBrokerSpec: vi.fn().mockReturnValue(null),
+      listConnections: vi.fn().mockResolvedValue([]),
+      listApps: vi.fn().mockResolvedValue({
+        apps: [{ id: "slack", name: "Slack", description: "Team chat", icon: "https://cdn.example/slack.png" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+      initiateConnection: vi.fn().mockResolvedValue({
+        redirectUrl: "https://canvas.example.com/connect/secrets?token=slack",
+      }),
+    };
+
+    const result = await runAgent(
+      makeBaseParams({
+        contextType: "channel_mention",
+        userEmail: "alice@example.com",
+        toolConfig: { BASE_URL: "https://sketch.example.com", PORT: 3000 },
+        loadIntegrationProvider: vi.fn().mockResolvedValue(provider),
+      }),
+    );
+
+    expect(provider.initiateConnection).not.toHaveBeenCalled();
+    expect(result.pendingIntegrationConnections).toMatchObject([
+      {
+        appId: "slack",
+        appName: "Slack",
+        state: "connect",
+      },
+    ]);
+    expect(result.pendingIntegrationConnections?.[0]).not.toHaveProperty("connectUrl");
   });
 
   it("sets skillName to null when Skill tool has no input.skill", async () => {

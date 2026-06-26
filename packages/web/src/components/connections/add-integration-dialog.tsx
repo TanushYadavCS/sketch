@@ -15,29 +15,45 @@ import {
   DialogTitle,
 } from "@sketch/ui/components/dialog";
 import { Input } from "@sketch/ui/components/input";
-import { getAbbreviation } from "@sketch/ui/lib/utils";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { AppIcon } from "./app-icon";
 import { isOwnedOrPersonalAppConnection } from "./connection-status";
 
 type AddIntegrationStep =
   | { kind: "search" }
+  | { kind: "direct_loading"; appId: string }
+  | { kind: "direct_ready"; app: IntegrationApp; redirectUrl: string }
+  | { kind: "direct_not_found"; appId: string }
   | { kind: "oauth"; app: IntegrationApp }
   | { kind: "oauth_cancelled"; app: IntegrationApp }
   | { kind: "popup_blocked"; app: IntegrationApp }
   | { kind: "connected"; app: IntegrationApp };
+
+const OAUTH_POPUP_CLOSED_GRACE_MS = 30_000;
+
+function appNameFromId(appId: string): string {
+  return appId
+    .replaceAll(/[_-]+/g, " ")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
+    .trim();
+}
 
 export function AddIntegrationDialog({
   open,
   onOpenChange,
   providerId,
   connectedAppIds,
+  initialAppId,
+  initialSearch,
   onSuccess,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   providerId: string;
   connectedAppIds: Set<string>;
+  initialAppId?: string | null;
+  initialSearch?: string | null;
   onSuccess: () => void;
 }) {
   const [step, setStep] = useState<AddIntegrationStep>({ kind: "search" });
@@ -51,7 +67,9 @@ export function AddIntegrationDialog({
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const oauthWindowRef = useRef<Window | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const oauthAttemptRef = useRef(0);
   const cancelledRef = useRef(false);
+  const directRequestRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -84,23 +102,62 @@ export function AddIntegrationDialog({
   );
 
   useEffect(() => {
-    if (open && step.kind === "search") {
+    if (!open) {
+      directRequestRef.current = null;
+      return;
+    }
+
+    const requestedAppId = initialAppId?.trim();
+    if (!requestedAppId || directRequestRef.current === requestedAppId) return;
+    const appId = requestedAppId;
+
+    let cancelled = false;
+    directRequestRef.current = appId;
+    setStep({ kind: "direct_loading", appId });
+    setSearch("");
+    setApps([]);
+    setHasMore(false);
+    setEndCursor(null);
+
+    async function loadDirectApp() {
+      try {
+        const callbackUrl = `${window.location.origin}/integrations/callback`;
+        const result = await api.mcpServers.createConnectionIntent(providerId, appId, callbackUrl);
+        if (!cancelled) setStep({ kind: "direct_ready", app: result.app, redirectUrl: result.redirectUrl });
+      } catch {
+        if (!cancelled) {
+          toast.error("Failed to load integration");
+          setStep({ kind: "direct_not_found", appId });
+        }
+      }
+    }
+
+    void loadDirectApp();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, initialAppId, providerId]);
+
+  useEffect(() => {
+    if (open && !initialAppId?.trim() && step.kind === "search") {
+      const query = initialSearch?.trim() ?? "";
+      setSearch(query);
       setApps([]);
       setHasMore(false);
       setEndCursor(null);
-      loadApps("", null, false);
+      loadApps(query, null, false);
     }
-  }, [open, step.kind, loadApps]);
+  }, [open, step.kind, initialAppId, initialSearch, loadApps]);
 
   useEffect(() => {
-    if (!open || step.kind !== "search") return;
+    if (!open || initialAppId?.trim() || step.kind !== "search") return;
     clearTimeout(searchTimeoutRef.current);
     searchTimeoutRef.current = setTimeout(() => {
       setEndCursor(null);
       loadApps(search, null, false);
     }, 300);
     return () => clearTimeout(searchTimeoutRef.current);
-  }, [search, open, step.kind, loadApps]);
+  }, [search, open, step.kind, initialAppId, loadApps]);
 
   useEffect(() => {
     if (!hasMore || isLoadingApps || step.kind !== "search") return;
@@ -121,6 +178,7 @@ export function AddIntegrationDialog({
 
   const resetAndClose = () => {
     cancelledRef.current = true;
+    oauthAttemptRef.current += 1;
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = undefined;
@@ -130,6 +188,7 @@ export function AddIntegrationDialog({
     setApps([]);
     setHasMore(false);
     setEndCursor(null);
+    directRequestRef.current = null;
     if (oauthWindowRef.current && !oauthWindowRef.current.closed) {
       oauthWindowRef.current.close();
     }
@@ -137,52 +196,121 @@ export function AddIntegrationDialog({
     onOpenChange(false);
   };
 
+  const startOAuthWindow = (
+    app: IntegrationApp,
+    redirectUrl: string,
+    preopenedPopup?: Window | null,
+    attemptId = oauthAttemptRef.current + 1,
+  ) => {
+    if (attemptId > oauthAttemptRef.current) oauthAttemptRef.current = attemptId;
+    if (oauthAttemptRef.current !== attemptId) {
+      if (preopenedPopup && !preopenedPopup.closed) preopenedPopup.close();
+      return;
+    }
+    if (connectedAppIds.has(app.id)) {
+      if (preopenedPopup && !preopenedPopup.closed) preopenedPopup.close();
+      return;
+    }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = undefined;
+    }
+    setStep({ kind: "oauth", app });
+
+    const popup = preopenedPopup ?? window.open(redirectUrl, "_blank", "width=600,height=700");
+
+    if (!popup || popup.closed) {
+      setStep({ kind: "popup_blocked", app });
+      return;
+    }
+    if (preopenedPopup) popup.location.href = redirectUrl;
+
+    oauthWindowRef.current = popup;
+    cancelledRef.current = false;
+    let popupClosedAt: number | null = null;
+    let isVerifying = false;
+    let finalizeAfterVerify = false;
+
+    const stopPolling = () => {
+      clearInterval(intervalId);
+      if (pollIntervalRef.current === intervalId) pollIntervalRef.current = undefined;
+      oauthWindowRef.current = null;
+    };
+
+    const verifyConnection = async (finalIfMissing: boolean) => {
+      if (oauthAttemptRef.current !== attemptId) return;
+      if (isVerifying) {
+        if (finalIfMissing) finalizeAfterVerify = true;
+        return;
+      }
+      isVerifying = true;
+      const shouldFinalizeIfMissing = finalIfMissing || finalizeAfterVerify;
+      finalizeAfterVerify = false;
+      try {
+        const connections = await api.mcpServers.listConnections(providerId);
+        const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
+        if (cancelledRef.current || oauthAttemptRef.current !== attemptId) return;
+        if (connected) {
+          toast.success("App connected successfully!");
+          onSuccess();
+          resetAndClose();
+        } else if (shouldFinalizeIfMissing) {
+          stopPolling();
+          toast.error("App connection cancelled");
+          setStep({ kind: "oauth_cancelled", app });
+        }
+      } catch {
+        if (cancelledRef.current || oauthAttemptRef.current !== attemptId) return;
+        stopPolling();
+        toast.error("Could not verify connection status");
+        setStep({ kind: "oauth_cancelled", app });
+      } finally {
+        isVerifying = false;
+        if (finalizeAfterVerify && !cancelledRef.current && oauthAttemptRef.current === attemptId) {
+          void verifyConnection(true);
+        }
+      }
+    };
+
+    const intervalId = setInterval(() => {
+      if (oauthAttemptRef.current !== attemptId) {
+        clearInterval(intervalId);
+        return;
+      }
+      if (popup.closed) {
+        popupClosedAt ??= Date.now();
+        const finalIfMissing = Date.now() - popupClosedAt >= OAUTH_POPUP_CLOSED_GRACE_MS;
+        void verifyConnection(finalIfMissing);
+      } else {
+        popupClosedAt = null;
+      }
+    }, 500);
+    pollIntervalRef.current = intervalId;
+  };
+
   const handleStartOAuth = async (app: IntegrationApp) => {
     if (connectedAppIds.has(app.id)) return;
+    const attemptId = oauthAttemptRef.current + 1;
+    oauthAttemptRef.current = attemptId;
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = undefined;
+    }
     setStep({ kind: "oauth", app });
+    const popup = window.open("about:blank", "_blank", "width=600,height=700");
+
+    if (!popup || popup.closed) {
+      setStep({ kind: "popup_blocked", app });
+      return;
+    }
 
     try {
       const callbackUrl = `${window.location.origin}/integrations/callback`;
-      const result = await api.mcpServers.createConnection(providerId, app.id, callbackUrl);
-      const popup = window.open(result.redirectUrl, "_blank", "width=600,height=700");
-
-      if (!popup || popup.closed) {
-        setStep({ kind: "popup_blocked", app });
-        return;
-      }
-
-      oauthWindowRef.current = popup;
-      cancelledRef.current = false;
-
-      const verifyConnection = async () => {
-        try {
-          const connections = await api.mcpServers.listConnections(providerId);
-          const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
-          if (cancelledRef.current) return;
-          if (connected) {
-            toast.success("App connected successfully!");
-            onSuccess();
-            resetAndClose();
-          } else {
-            toast.error("App connection cancelled");
-            setStep({ kind: "oauth_cancelled", app });
-          }
-        } catch {
-          if (cancelledRef.current) return;
-          toast.error("Could not verify connection status");
-          setStep({ kind: "oauth_cancelled", app });
-        }
-      };
-
-      pollIntervalRef.current = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = undefined;
-          oauthWindowRef.current = null;
-          verifyConnection();
-        }
-      }, 500);
+      const result = await api.mcpServers.createConnectionIntent(providerId, app.id, callbackUrl, app);
+      startOAuthWindow(result.app, result.redirectUrl, popup, attemptId);
     } catch (err) {
+      if (!popup.closed) popup.close();
+      if (oauthAttemptRef.current !== attemptId) return;
       toast.error(err instanceof Error ? err.message : "Failed to start connection");
       setStep({ kind: "search" });
     }
@@ -259,13 +387,83 @@ export function AddIntegrationDialog({
           </>
         )}
 
+        {step.kind === "direct_loading" && (
+          <>
+            <DialogHeader>
+              <DialogTitle>Connect {appNameFromId(step.appId)}</DialogTitle>
+              <DialogDescription>Loading the integration setup.</DialogDescription>
+            </DialogHeader>
+
+            <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/30 p-4">
+              <AppIcon name={appNameFromId(step.appId)} className="size-10 rounded-lg text-xs" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-foreground">Preparing connection</p>
+                <p className="text-xs text-muted-foreground">Fetching the exact app from your provider.</p>
+              </div>
+              <SpinnerGapIcon size={18} className="animate-spin text-muted-foreground" aria-hidden />
+            </div>
+          </>
+        )}
+
+        {step.kind === "direct_ready" && (
+          <>
+            <DialogHeader>
+              <DialogTitle>Connect {step.app.name}</DialogTitle>
+              <DialogDescription>Authorize this app through your integration provider.</DialogDescription>
+            </DialogHeader>
+
+            <div className="rounded-lg border border-border bg-muted/30 p-4">
+              <div className="flex items-start gap-3">
+                <AppIcon name={step.app.name} icon={step.app.icon} className="size-10 rounded-lg text-xs" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-foreground">{step.app.name}</p>
+                  {step.app.description ? (
+                    <p className="mt-1 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                      {step.app.description}
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-xs text-muted-foreground">Ready to connect to Sketch.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={resetAndClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => startOAuthWindow(step.app, step.redirectUrl)}
+                disabled={connectedAppIds.has(step.app.id)}
+              >
+                {connectedAppIds.has(step.app.id) ? "Already added" : `Connect ${step.app.name}`}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+
+        {step.kind === "direct_not_found" && (
+          <>
+            <DialogHeader>
+              <DialogTitle>Integration unavailable</DialogTitle>
+              <DialogDescription>
+                {appNameFromId(step.appId)} could not be found in your integration provider catalog.
+              </DialogDescription>
+            </DialogHeader>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={resetAndClose}>
+                Close
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+
         {step.kind === "oauth" && (
           <>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-3">
-                <div className="flex size-8 items-center justify-center rounded-lg bg-muted text-[10px] font-bold">
-                  {step.app.name.slice(0, 2).toUpperCase()}
-                </div>
+                <AppIcon name={step.app.name} icon={step.app.icon} className="size-8 rounded-lg text-[10px]" />
                 Connecting {step.app.name}
               </DialogTitle>
               <DialogDescription>Authorizing via OAuth, this opens in a new window.</DialogDescription>
@@ -274,9 +472,7 @@ export function AddIntegrationDialog({
             <div className="py-6">
               <div className="rounded-lg border border-border bg-muted/30 p-6">
                 <div className="flex flex-col items-center text-center">
-                  <div className="flex size-14 items-center justify-center rounded-xl bg-muted text-lg font-bold">
-                    {step.app.name.slice(0, 2).toUpperCase()}
-                  </div>
+                  <AppIcon name={step.app.name} icon={step.app.icon} className="size-14 rounded-xl text-lg" />
                   <p className="mt-4 text-sm font-medium">Authorize Sketch to access {step.app.name}</p>
                   <div className="mt-5 flex items-center gap-2">
                     <SpinnerGapIcon size={16} className="animate-spin text-primary" />
@@ -387,8 +583,6 @@ function AppRow({
   isConnected: boolean;
   onConnect: () => void;
 }) {
-  const abbrev = getAbbreviation(app.name);
-
   return (
     <button
       type="button"
@@ -398,9 +592,7 @@ function AppRow({
         isConnected ? "cursor-default opacity-50" : "hover:bg-muted/50"
       }`}
     >
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-[11px] font-bold">
-        {app.icon ? <img src={app.icon} alt="" className="size-6 rounded" /> : abbrev}
-      </div>
+      <AppIcon name={app.name} icon={app.icon} className="size-9 rounded-lg text-[11px]" imageClassName="size-6" />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium">{app.name}</p>
         {app.description && <p className="text-xs text-muted-foreground">{app.description}</p>}

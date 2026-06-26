@@ -44,6 +44,7 @@ export function HomePage() {
         <DailyBrief
           brief={brief}
           running={running}
+          enabledSections={briefQuery.data?.enabledSections}
           onOpenChat={(prompt) => {
             void navigate(chatPrefillTargetFromPrompt(prompt));
           }}

@@ -143,6 +143,7 @@ interface SmartEnrichmentDeps {
    * "Enrich File" debug path; never set in bulk sync/reset/reenrich runs.
    */
   debugDumpDir?: string;
+  ensureFresh?: () => Promise<void>;
 }
 
 interface FileContext {
@@ -157,6 +158,75 @@ interface FileContext {
   connectorConfigId: string;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
+}
+
+type FileContentVersion = {
+  contentHash: string | null;
+  contentCategory: string;
+  content: string;
+  sourceUpdatedAt: string | null;
+};
+
+type ContentVersionGuardable<T> = {
+  where(column: "content_category", op: "=", value: string): T;
+  where(column: "content_hash", op: "=", value: string): T;
+  where(column: "content_hash", op: "is", value: null): T;
+  where(column: "content", op: "=", value: string): T;
+  where(column: "source_updated_at", op: "=", value: string): T;
+  where(column: "source_updated_at", op: "is", value: null): T;
+};
+
+function noRowsUpdated(result: { numUpdatedRows?: bigint | number }): boolean {
+  const count = result.numUpdatedRows ?? 0;
+  return typeof count === "bigint" ? count === BigInt(0) : count === 0;
+}
+
+function staleEnrichmentError(fileId: string): Error {
+  const err = new Error(`Stale smart enrichment result for file ${fileId}`);
+  err.name = "StaleEnrichmentError";
+  return err;
+}
+
+function assertFreshUpdate(result: { numUpdatedRows?: bigint | number }, fileId: string): void {
+  if (noRowsUpdated(result)) throw staleEnrichmentError(fileId);
+}
+
+function isStaleEnrichmentError(err: unknown): boolean {
+  return err instanceof Error && err.name === "StaleEnrichmentError";
+}
+
+function contentVersionOf(file: FileContext): FileContentVersion {
+  return {
+    contentHash: file.contentHash,
+    contentCategory: file.contentCategory,
+    content: file.content,
+    sourceUpdatedAt: file.sourceUpdatedAt,
+  };
+}
+
+function applyContentVersionWhere<T extends ContentVersionGuardable<T>>(query: T, version: FileContentVersion): T {
+  const guarded = query.where("content_category", "=", version.contentCategory);
+  if (version.contentHash === null) {
+    return guarded.where("content_hash", "is", null).where("content", "=", version.content);
+  }
+  return guarded.where("content_hash", "=", version.contentHash);
+}
+
+async function withFreshFileWriteLock<T>(
+  db: Kysely<DB>,
+  fileId: string,
+  version: FileContentVersion,
+  write: (trx: Kysely<DB>) => Promise<T>,
+): Promise<T> {
+  return db.transaction().execute(async (trx) => {
+    const lockQuery = trx
+      .updateTable("indexed_files")
+      .set({ embedding_status: sql<string>`embedding_status` })
+      .where("id", "=", fileId);
+    const lockResult = await applyContentVersionWhere(lockQuery, version).executeTakeFirst();
+    assertFreshUpdate(lockResult, fileId);
+    return write(trx);
+  });
 }
 
 // ── Entity Extraction ────────────────────────────────────────────────────
@@ -661,6 +731,7 @@ ${truncatedContent}
 export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileContext): Promise<void> {
   const { db, logger, generator, embeddingProvider } = deps;
   const entityRepo = createEntityRepository(db);
+  const fileVersion = contentVersionOf(file);
 
   const fileMeta = {
     fileId: file.id,
@@ -699,7 +770,16 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     "smartEnrichFile: stage done",
   );
 
-  await reconcileLlmExtractionFacts(deps, file, extraction);
+  await deps.ensureFresh?.();
+  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction);
+  try {
+    await deps.ensureFresh?.();
+  } catch (err) {
+    if (isStaleEnrichmentError(err)) {
+      await tombstoneWrittenLlmFacts(deps, writtenLlmFactKeys);
+    }
+    throw err;
+  }
 
   const { matched, unmatched } = await matchEntities(db, extraction.mentions);
   const allMatched = matched.map((m) => m.entity);
@@ -756,60 +836,80 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     "smartEnrichFile: stage done",
   );
 
-  await db.updateTable("indexed_files").set({ summary, summary_status: "done" }).where("id", "=", file.id).execute();
+  try {
+    await deps.ensureFresh?.();
+    const summaryUpdate = applyContentVersionWhere(
+      db.updateTable("indexed_files").set({ summary, summary_status: "done" }).where("id", "=", file.id),
+      fileVersion,
+    );
+    const summaryUpdateResult = await summaryUpdate.executeTakeFirst();
+    assertFreshUpdate(summaryUpdateResult, file.id);
 
-  // Embed summary into file_embeddings
-  if (embeddingProvider && summary) {
-    try {
-      const [embedding] = await embeddingProvider.embedTexts([summary]);
-      if (embedding) {
-        const isPostgres = isPg(db);
-        if (isPostgres) {
-          await sql`INSERT INTO file_embeddings (indexed_file_id, embedding)
-            VALUES (${file.id}, ${JSON.stringify(embedding)}::vector)
-            ON CONFLICT (indexed_file_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(db);
-        } else {
-          await sql`INSERT OR REPLACE INTO file_embeddings (indexed_file_id, embedding)
-            VALUES (${file.id}, ${JSON.stringify(embedding)})`.execute(db);
+    if (embeddingProvider && summary) {
+      try {
+        const [embedding] = await embeddingProvider.embedTexts([summary]);
+        if (embedding) {
+          await deps.ensureFresh?.();
+          await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+            const isPostgres = isPg(trx);
+            if (isPostgres) {
+              await sql`INSERT INTO file_embeddings (indexed_file_id, embedding)
+                VALUES (${file.id}, ${JSON.stringify(embedding)}::vector)
+                ON CONFLICT (indexed_file_id) DO UPDATE SET embedding = EXCLUDED.embedding`.execute(trx);
+            } else {
+              await sql`INSERT OR REPLACE INTO file_embeddings (indexed_file_id, embedding)
+                VALUES (${file.id}, ${JSON.stringify(embedding)})`.execute(trx);
+            }
+          });
         }
+      } catch (err) {
+        if (isStaleEnrichmentError(err)) throw err;
+        logger.warn({ err, fileId: file.id }, "Failed to embed summary");
       }
-    } catch (err) {
-      logger.warn({ err, fileId: file.id }, "Failed to embed summary");
     }
-  }
 
-  // Update entity definitions with new facts
-  for (const [entityId, facts] of factsMap) {
-    if (facts.length === 0) continue;
+    // Update entity definitions with new facts
+    for (const [entityId, facts] of factsMap) {
+      if (facts.length === 0) continue;
 
-    const entity = await entityRepo.getEntity(entityId);
-    if (!entity) continue;
+      const entity = await entityRepo.getEntity(entityId);
+      if (!entity) continue;
 
-    const metadata = parseEntityMetadata(entity.metadata);
-    const existingFacts = metadata.learned_facts ?? [];
+      const newFacts = facts
+        .filter((f) => {
+          const validation = validateLearnedFact(f.fact);
+          if (!validation.ok) {
+            logger.info({ fileId: file.id, entityId, reason: validation.reason }, "Dropped invalid learned fact");
+            return false;
+          }
+          return true;
+        })
+        .map((f) => ({
+          fact: f.fact,
+          source_file_id: file.id,
+          learned_at: new Date().toISOString().split("T")[0],
+        }));
+      if (newFacts.length === 0) continue;
 
-    const newFacts = facts
-      .filter((f) => {
-        const validation = validateLearnedFact(f.fact);
-        if (!validation.ok) {
-          logger.info({ fileId: file.id, entityId, reason: validation.reason }, "Dropped invalid learned fact");
-          return false;
-        }
+      await deps.ensureFresh?.();
+      const updated = await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
+        const txEntityRepo = createEntityRepository(trx);
+        const currentEntity = await txEntityRepo.getEntity(entityId);
+        if (!currentEntity) return false;
+        const currentMetadata = parseEntityMetadata(currentEntity.metadata);
+        currentMetadata.learned_facts = [...(currentMetadata.learned_facts ?? []), ...newFacts];
+        await txEntityRepo.updateEntity(entityId, { metadata: JSON.stringify(currentMetadata) });
         return true;
-      })
-      .map((f) => ({
-        fact: f.fact,
-        source_file_id: file.id,
-        learned_at: new Date().toISOString().split("T")[0],
-      }));
-    if (newFacts.length === 0) continue;
+      });
 
-    metadata.learned_facts = [...existingFacts, ...newFacts];
-
-    await entityRepo.updateEntity(entityId, { metadata: JSON.stringify(metadata) });
-
-    logger.debug({ entityId, newFactCount: facts.length }, "Updated entity definition");
-    await yieldToEventLoop();
+      if (updated) logger.debug({ entityId, newFactCount: facts.length }, "Updated entity definition");
+      await yieldToEventLoop();
+    }
+  } catch (err) {
+    if (isStaleEnrichmentError(err)) {
+      await tombstoneWrittenLlmFacts(deps, writtenLlmFactKeys);
+    }
+    throw err;
   }
 }
 
@@ -817,7 +917,7 @@ async function reconcileLlmExtractionFacts(
   deps: SmartEnrichmentDeps,
   file: FileContext,
   extraction: EntityExtractionResult,
-): Promise<void> {
+): Promise<string[]> {
   const { db } = deps;
   const factRepo = createIndexedFileFactRepository(db);
   const owner = await db
@@ -828,94 +928,146 @@ async function reconcileLlmExtractionFacts(
   const contentHash = file.contentHash ?? `missing-content-hash:${file.id}`;
   const emittedMentionKeys: string[] = [];
   const emittedRelationKeys: string[] = [];
+  const writtenFactKeys: string[] = [];
 
-  for (const mention of extraction.mentions) {
-    if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) {
-      deps.logger.info(
-        { fileId: file.id, displayName: mention.mention, entityType: mention.type },
-        "Dropped LLM mention with unsupported type",
-      );
-      continue;
-    }
-    if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
-    const validation = validateLlmMention({
-      displayName: mention.mention,
-      entityType: mention.type,
-      aliases: mention.variations,
-      fileContent: file.content,
-      resolutionContext: file.threadContext,
-      source: "llm_extraction",
-    });
-    if (!validation.ok) {
-      deps.logger.info(
-        { fileId: file.id, displayName: mention.mention, reason: validation.reason },
-        "Dropped invalid LLM mention",
-      );
-      continue;
-    }
-    const input: UpsertIndexedFileFactInput = {
-      indexedFileId: file.id,
-      connectorConfigId: file.connectorConfigId,
-      createdByUserId: owner?.created_by ?? null,
-      contentHash,
-      source: "llm_extraction",
-      factType: "llm_extracted",
-      relation: "mentioned",
-      subjectName: mention.mention,
-      subjectSource: "llm_extraction",
-      subjectSourceId: `${file.id}:${contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`,
-      contextSnippet: null,
-      raw: {
+  try {
+    for (const mention of extraction.mentions) {
+      if (!PROPOSABLE_ENTITY_TYPES.has(mention.type as ProposeEntityType)) {
+        deps.logger.info(
+          { fileId: file.id, displayName: mention.mention, entityType: mention.type },
+          "Dropped LLM mention with unsupported type",
+        );
+        continue;
+      }
+      if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+      const validation = validateLlmMention({
+        displayName: mention.mention,
+        entityType: mention.type,
+        aliases: mention.variations,
+        fileContent: file.content,
+        resolutionContext: file.threadContext,
+        source: "llm_extraction",
+      });
+      if (!validation.ok) {
+        deps.logger.info(
+          { fileId: file.id, displayName: mention.mention, reason: validation.reason },
+          "Dropped invalid LLM mention",
+        );
+        continue;
+      }
+      const input: UpsertIndexedFileFactInput = {
+        indexedFileId: file.id,
+        connectorConfigId: file.connectorConfigId,
+        createdByUserId: owner?.created_by ?? null,
         contentHash,
-        promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
-        model: "gemini",
-        mention: mention.mention,
-        type: mention.type,
-        variations: mention.variations,
-        confidence: typeof mention.confidence === "number" ? mention.confidence : 0.7,
-      },
-    };
-    emittedMentionKeys.push(buildIndexedFileFactKey(input));
-    await factRepo.upsertFact(input);
-    await yieldToEventLoop();
+        source: "llm_extraction",
+        factType: "llm_extracted",
+        relation: "mentioned",
+        subjectName: mention.mention,
+        subjectSource: "llm_extraction",
+        subjectSourceId: `${file.id}:${contentHash}:${LLM_EXTRACTION_PROMPT_VERSION}:${mention.mention}`,
+        contextSnippet: null,
+        raw: {
+          contentHash,
+          promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+          model: "gemini",
+          mention: mention.mention,
+          type: mention.type,
+          variations: mention.variations,
+          confidence: typeof mention.confidence === "number" ? mention.confidence : 0.7,
+        },
+      };
+      const factKey = buildIndexedFileFactKey(input);
+      emittedMentionKeys.push(factKey);
+      await deps.ensureFresh?.();
+      await factRepo.upsertFact(input);
+      writtenFactKeys.push(factKey);
+      await yieldToEventLoop();
+    }
+
+    for (const relation of extraction.relations) {
+      const input = buildRelationFactInput({
+        file,
+        ownerUserId: owner?.created_by ?? null,
+        contentHash,
+        relation,
+        mentions: extraction.mentions,
+      });
+      if (!input) continue;
+      const factKey = buildIndexedFileFactKey(input);
+      emittedRelationKeys.push(factKey);
+      await deps.ensureFresh?.();
+      await factRepo.upsertFact(input);
+      writtenFactKeys.push(factKey);
+      await yieldToEventLoop();
+    }
+
+    await deps.ensureFresh?.();
+    const mentionReconcile = await factRepo.reconcileStaleFacts(
+      { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
+      new Set(emittedMentionKeys),
+    );
+    const relationReconcile = await factRepo.reconcileStaleFacts(
+      { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
+      new Set(emittedRelationKeys),
+    );
+    await cleanupRelationshipEvidenceForFacts(db, [
+      ...mentionReconcile.tombstonedFactIds,
+      ...relationReconcile.tombstonedFactIds,
+    ]);
+    await cleanupEmptyRelationships(db);
+
+    await deps.ensureFresh?.();
+    await db
+      .deleteFrom("entity_mentions")
+      .where("indexed_file_id", "=", file.id)
+      .where("source", "=", "llm_extraction")
+      .where("confidence", "!=", "EXTRACTED")
+      .execute();
+
+    await deps.ensureFresh?.();
+    await materializeUnmaterializedFacts(db, deps.logger);
+    return writtenFactKeys;
+  } catch (err) {
+    if (isStaleEnrichmentError(err)) {
+      await tombstoneWrittenLlmFacts(deps, writtenFactKeys);
+    }
+    throw err;
   }
+}
 
-  for (const relation of extraction.relations) {
-    const input = buildRelationFactInput({
-      file,
-      ownerUserId: owner?.created_by ?? null,
-      contentHash,
-      relation,
-      mentions: extraction.mentions,
-    });
-    if (!input) continue;
-    emittedRelationKeys.push(buildIndexedFileFactKey(input));
-    await factRepo.upsertFact(input);
-    await yieldToEventLoop();
-  }
-
-  const mentionReconcile = await factRepo.reconcileStaleFacts(
-    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
-    new Set(emittedMentionKeys),
+async function tombstoneWrittenLlmFacts(deps: SmartEnrichmentDeps, factKeys: string[]): Promise<void> {
+  const keys = [...new Set(factKeys)];
+  if (keys.length === 0) return;
+  const now = new Date().toISOString();
+  const facts = await deps.db
+    .selectFrom("indexed_file_facts")
+    .select(["id", "indexed_file_id"])
+    .where("fact_key", "in", keys)
+    .where("deleted_at", "is", null)
+    .execute();
+  if (facts.length === 0) return;
+  await deps.db
+    .updateTable("indexed_file_facts")
+    .set({ deleted_at: now, materialized_at: null, updated_at: now })
+    .where(
+      "id",
+      "in",
+      facts.map((fact) => fact.id),
+    )
+    .execute();
+  await cleanupRelationshipEvidenceForFacts(
+    deps.db,
+    facts.map((fact) => fact.id),
   );
-  const relationReconcile = await factRepo.reconcileStaleFacts(
-    { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
-    new Set(emittedRelationKeys),
-  );
-  await cleanupRelationshipEvidenceForFacts(db, [
-    ...mentionReconcile.tombstonedFactIds,
-    ...relationReconcile.tombstonedFactIds,
-  ]);
-  await cleanupEmptyRelationships(db);
-
-  await db
+  await cleanupEmptyRelationships(deps.db);
+  const fileIds = [...new Set(facts.map((fact) => fact.indexed_file_id))];
+  await deps.db
     .deleteFrom("entity_mentions")
-    .where("indexed_file_id", "=", file.id)
+    .where("indexed_file_id", "in", fileIds)
     .where("source", "=", "llm_extraction")
     .where("confidence", "!=", "EXTRACTED")
     .execute();
-
-  await materializeUnmaterializedFacts(db, deps.logger);
 }
 
 function buildRelationFactInput(input: {

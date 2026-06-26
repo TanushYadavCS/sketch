@@ -1,9 +1,11 @@
+import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { createConversationRepository } from "../../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../../db/repositories/inbox-messages";
 import type { DB, UsersTable } from "../../db/schema";
+import { normalizeIntegrationLookup } from "../../integrations/cards";
 import type { IntegrationProvider } from "../../integrations/types";
 import type { LocalClaudeSessionService } from "../../local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "../../local-devices/gateway";
@@ -14,7 +16,7 @@ import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
 import type { AuxCostCollector } from "../aux-cost";
-import type { DailyBriefWriter } from "./daily-brief";
+import type { AgentOutputWriter } from "./agent-output";
 
 export type SelectableUser = Selectable<UsersTable>;
 
@@ -45,8 +47,46 @@ export class UploadCollector {
   }
 }
 
+export class IntegrationConnectionCollector {
+  private pending: WebChatIntegrationConnectionData[] = [];
+
+  collect(card: WebChatIntegrationConnectionData): void {
+    const key = `${card.state ?? "connect"}:${normalizeIntegrationLookup(card.appId)}`;
+    const existingIndex = this.pending.findIndex(
+      (item) => `${item.state ?? "connect"}:${normalizeIntegrationLookup(item.appId)}` === key,
+    );
+    if (existingIndex !== -1) {
+      this.pending[existingIndex] = card;
+      return;
+    }
+    this.pending.push(card);
+  }
+
+  drain(): WebChatIntegrationConnectionData[] {
+    const cards = [...this.pending];
+    this.pending = [];
+    return cards;
+  }
+}
+
+export class AutomationArtifactCollector {
+  private pending: AutomationArtifact[] = [];
+
+  collect(artifact: AutomationArtifact): void {
+    this.pending.push(artifact);
+  }
+
+  drain(): AutomationArtifact[] {
+    const artifacts = [...this.pending];
+    this.pending = [];
+    return artifacts;
+  }
+}
+
 export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
+  integrationConnectionCollector?: IntegrationConnectionCollector;
+  automationArtifactCollector?: AutomationArtifactCollector;
   workspaceDir: string;
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -63,6 +103,8 @@ export interface SketchMcpDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   userRepo?: SearchableUserRepo;
   currentUserId?: string;
+  currentUserEmail?: string | null;
+  currentUserName?: string | null;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
   workspaceKey?: string;
@@ -87,7 +129,7 @@ export interface SketchMcpDeps {
   };
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
-  dailyBriefWriter?: DailyBriefWriter;
+  agentOutputWriter?: AgentOutputWriter;
   originOrgContextEnabled?: boolean;
   publicMcp?: {
     userEmails?: string[];

@@ -1,6 +1,7 @@
 import { type Kysely, sql } from "kysely";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP INDEX IF EXISTS uq_indexed_files_scoped_provider`.execute(db);
   await sql`DROP INDEX IF EXISTS uq_indexed_files_teams_provider`.execute(db);
   await sql`DROP INDEX IF EXISTS idx_indexed_files_source_provider`.execute(db);
   await sql`

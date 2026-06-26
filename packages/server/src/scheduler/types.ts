@@ -27,6 +27,7 @@ export interface ScheduledTask {
   createdAt: string;
   title: string | null;
   description: string | null;
+  originChat: TaskOriginChat | null;
   steps: string | null;
   edges: string | null;
   outputTarget: string | null;
@@ -34,6 +35,13 @@ export interface ScheduledTask {
   outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
   delivery: WorkflowDelivery;
+}
+
+export interface TaskOriginChat {
+  platform: "web" | "slack" | "whatsapp";
+  conversationId: string;
+  providerThreadId: string | null;
+  currentMessageId: number | null;
 }
 
 export interface TaskContext {
@@ -47,4 +55,6 @@ export interface TaskContext {
    */
   creatorTimezone?: string | null;
   threadTs?: string;
+  origin?: TaskOriginChat;
+  canManageAnyTask?: boolean;
 }
