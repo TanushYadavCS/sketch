@@ -17,6 +17,7 @@ export const configSchema = z.object({
   // Slack context
   SLACK_CHANNEL_HISTORY_LIMIT: z.coerce.number().default(5),
   SLACK_THREAD_HISTORY_LIMIT: z.coerce.number().default(50),
+  MAX_CONCURRENT_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
 
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),

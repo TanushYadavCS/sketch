@@ -63,6 +63,7 @@ interface WorkflowRouteDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 class WorkflowApiError extends Error {
@@ -255,6 +256,7 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     sendDm: deps.sendDm,
     sendMessage: delivery.sendMessage,
     onEvent,
+    limitAgentExecution: deps.limitAgentExecution,
   });
 
   return {

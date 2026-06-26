@@ -101,6 +101,7 @@ interface AppDeps {
   localDeviceGateway?: LocalDeviceGateway;
   localClaudeSessionService?: LocalClaudeSessionService;
   agentRunService?: AgentRunService;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -301,6 +302,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
       queueManager: deps?.queueManager,
+      limitAgentExecution: deps?.limitAgentExecution,
     }),
   );
   if (deps?.runAgent) {
