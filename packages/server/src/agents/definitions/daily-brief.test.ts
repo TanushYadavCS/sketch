@@ -464,22 +464,20 @@ describe("buildTodaysMeetings", () => {
     expect(meetings[1].attendees).toEqual([]);
   });
 
-  it("keeps all-day events on their calendar date in a negative-UTC timezone", async () => {
+  it("excludes all-day events (UTC-midnight sentinel) regardless of timezone", async () => {
     await seedCalendarEvent(db, { id: "evt-all-day", startTime: "2026-06-25T00:00:00.000Z", title: "Team offsite" });
-    await seedCalendarEvent(db, {
-      id: "evt-prev-evening",
-      startTime: "2026-06-25T02:00:00.000Z",
-      title: "Late call (prev local day)",
-    });
+    await seedCalendarEvent(db, { id: "evt-timed", startTime: "2026-06-25T09:00:00.000Z", title: "Standup" });
 
-    const meetings = await buildTodaysMeetings({
+    const utcMeetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
+    expect(utcMeetings.map((meeting) => meeting.fileId)).toEqual(["evt-timed"]);
+
+    const istMeetings = await buildTodaysMeetings({
       db,
       user,
       ...MEETINGS_RUNTIME_PARAMS,
-      timezone: "America/Los_Angeles",
+      timezone: "Asia/Kolkata",
     });
-
-    expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-all-day"]);
+    expect(istMeetings.map((meeting) => meeting.fileId)).toEqual(["evt-timed"]);
   });
 
   it("excludes archived events, events outside the day, and files the reader cannot see", async () => {
@@ -495,6 +493,28 @@ describe("buildTodaysMeetings", () => {
     const meetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
 
     expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-today"]);
+  });
+
+  it("scopes an admin's meetings to their own calendar even with the read-all bypass", async () => {
+    const admin = await seedUser(db, { id: "admin-1", email: "admin@example.com", authRole: "admin" });
+    await seedCalendarEvent(db, { id: "evt-mine", startTime: "2026-06-25T09:00:00.000Z" });
+    await seedCalendarEvent(db, {
+      id: "evt-someone-else",
+      startTime: "2026-06-25T10:00:00.000Z",
+      restrictedTo: "other-person@example.com",
+    });
+
+    const meetings = await buildTodaysMeetings({
+      db,
+      user: admin,
+      outputDate: "2026-06-25",
+      timezone: "UTC",
+      now: NOW,
+      adminCanReadAllFiles: true,
+      contentUserEmails: ["admin@example.com"],
+    });
+
+    expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-mine"]);
   });
 });
 

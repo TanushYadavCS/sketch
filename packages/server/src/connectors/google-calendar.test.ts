@@ -577,6 +577,53 @@ describe("Google Calendar connector", () => {
     ]);
   });
 
+  it("removes a declined recurring instance by its stored series id", async () => {
+    const connector = createGoogleCalendarConnector();
+    const removals: SourceItemRemovalRecord[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        return jsonResponse({
+          items: [
+            calendarEvent("recur-declined", {
+              recurringEventId: "recur-declined-series",
+              attendees: [{ email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus: "declined" }],
+            }),
+          ],
+          nextSyncToken: "sync-primary-new",
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: currentCursor({ primary: "sync-primary-old" }),
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(removals).toEqual([
+      {
+        providerFileId: "primary:recurring:recur-declined@google.com",
+        reason: "google_calendar_event_declined",
+      },
+    ]);
+  });
+
   it("prunes unreadable calendars and drops their stale sync token", async () => {
     const connector = createGoogleCalendarConnector();
     const removals: SourceItemRemovalRecord[] = [];

@@ -108,6 +108,13 @@ export const DAILY_BRIEF_MEETING_ATTENDEE_LIMIT = 12;
 const CALENDAR_SOURCE = "google_calendar";
 const CALENDAR_EVENT_FILE_TYPE = "calendar_event";
 
+/**
+ * All-day Google Calendar events are stored with a UTC-midnight `source_created_at`
+ * sentinel ("YYYY-MM-DDT00:00:00.000Z"). The meetings section is for timed meetings,
+ * so they are excluded with this LIKE suffix (portable across SQLite and Postgres).
+ */
+const ALL_DAY_INSTANT_SUFFIX = "%T00:00:00.000Z";
+
 export type TodaysMeetingAttendee = {
   name: string;
   email: string | null;
@@ -242,25 +249,22 @@ function meetingViaFromSourcePath(sourcePath: string | null): string | null {
  * event whose start lands on `outputDate` in the user's timezone, with attendees
  * resolved to person entities. This is the canonical list the model enriches;
  * declined and cancelled events are already excluded at sync time so they never
- * reach the graph. RBAC mirrors {@link buildDailyBriefCandidateContext}.
+ * reach the graph. Always scoped to the reader's own calendar access: unlike the
+ * knowledge candidate query it does not honor the admin "read all files" bypass,
+ * so an admin's meetings section never pulls in other people's meetings.
  *
- * Timed events match the tz day window. All-day events are stored at UTC
- * midnight with no timezone, so the window would drop them in negative-UTC
- * zones; they are matched separately by their calendar date so they always land
- * on the day they are labeled.
+ * Only timed events inside the timezone day window are included; all-day events
+ * (stored at UTC midnight) are excluded since this section is about meetings to
+ * prep for, not OOO/holiday/offsite entries. See {@link ALL_DAY_INSTANT_SUFFIX}.
  */
 export async function buildTodaysMeetings({
   db,
   outputDate,
   timezone,
-  adminCanReadAllFiles,
   contentUserEmails,
-  user,
 }: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
   const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
   const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
-  const allDayInstant = `${outputDate}T00:00:00.000Z`;
-  const candidateUserEmails = user.auth_role === "admin" && adminCanReadAllFiles ? undefined : contentUserEmails;
 
   const files = await db
     .selectFrom("indexed_files")
@@ -268,19 +272,16 @@ export async function buildTodaysMeetings({
     .where("source", "=", CALENDAR_SOURCE)
     .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
     .where("is_archived", "=", 0)
-    .where((eb) =>
-      eb.or([
-        eb.and([eb("source_created_at", ">=", dayStart), eb("source_created_at", "<=", dayEnd)]),
-        eb("source_created_at", "=", allDayInstant),
-      ]),
-    )
+    .where("source_created_at", ">=", dayStart)
+    .where("source_created_at", "<=", dayEnd)
+    .where("source_created_at", "not like", ALL_DAY_INSTANT_SUFFIX)
     .execute();
   if (files.length === 0) return [];
 
   const visibleFileIds = await filterVisibleCandidateFileIds(
     db,
     files.map((file) => file.id),
-    candidateUserEmails,
+    contentUserEmails,
   );
   const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
   if (visibleFiles.length === 0) return [];

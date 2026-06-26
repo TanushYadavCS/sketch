@@ -754,10 +754,17 @@ async function collectEventsForCalendar(params: {
 
     for (const event of result.items ?? []) {
       if (!event.id) continue;
-      if (event.status === "cancelled" || ownerDeclinedEvent(event)) {
+      if (event.status === "cancelled") {
         removals.push({
           providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
-          reason: event.status === "cancelled" ? "google_calendar_event_cancelled" : "google_calendar_event_declined",
+          reason: "google_calendar_event_cancelled",
+        });
+        continue;
+      }
+      if (ownerDeclinedEvent(event)) {
+        removals.push({
+          providerFileId: providerFileIdForSyncedEvent(params.calendar.id, event),
+          reason: "google_calendar_event_declined",
         });
         continue;
       }
