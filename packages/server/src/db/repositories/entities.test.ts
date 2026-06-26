@@ -66,6 +66,32 @@ describe("createEntityRepository createMention", () => {
     await db.destroy();
   });
 
+  it("persists caller-supplied declared and structural provenance tiers on creation", async () => {
+    const declared = await repo.upsertEntity({
+      name: "Manual Product",
+      sourceType: "product",
+      provenanceTier: "declared",
+    });
+    const structural = await repo.upsertEntityFromTool({
+      name: "Seeded Project",
+      sourceType: "project",
+      source: "linear",
+      sourceId: "linear-seeded-project",
+      provenanceTier: "structural",
+    });
+
+    const rows = await db
+      .selectFrom("entities")
+      .select(["id", "provenance_tier"])
+      .where("id", "in", [declared.id, structural.id])
+      .orderBy("provenance_tier", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { id: declared.id, provenance_tier: "declared" },
+      { id: structural.id, provenance_tier: "structural" },
+    ]);
+  });
+
   it("is idempotent for the same entity, file, and relation", async () => {
     const entity = await repo.upsertPersonEntity({
       name: "Beetu",

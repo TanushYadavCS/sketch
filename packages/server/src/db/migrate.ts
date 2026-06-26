@@ -129,6 +129,7 @@ import * as m126 from "./migrations/126-work-cycles";
 import * as m127 from "./migrations/127-work-cycles-connector";
 import * as m128 from "./migrations/128-work-cycles-connector-key";
 import * as m129 from "./migrations/129-container-name-qualification";
+import * as m130 from "./migrations/130-entity-provenance-tier";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -262,6 +263,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "127-work-cycles-connector": m127,
           "128-work-cycles-connector-key": m128,
           "129-container-name-qualification": m129,
+          "130-entity-provenance-tier": m130,
         };
       },
     },

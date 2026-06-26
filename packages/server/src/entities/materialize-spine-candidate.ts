@@ -160,6 +160,7 @@ async function upsertEntityFromSeed(
     sourceUrl: input.sourceUrl,
     sourceRefId: input.sourceRefId,
     metadata: input.metadata,
+    provenanceTier: "structural",
   })) as unknown as EntityRow;
   return applySeedAliases(deps, entity, input.aliases);
 }

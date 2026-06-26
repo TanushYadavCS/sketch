@@ -576,6 +576,7 @@ export async function handleCandidates(
             triggeredByUserId: owner?.created_by ?? "system",
             aliases: mention.variations,
             metadata: { origin: "ai" },
+            provenanceTier: "inferred",
           },
         );
 

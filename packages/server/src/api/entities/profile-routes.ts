@@ -289,6 +289,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       subtype: body.subtype,
       aliases: body.aliases,
       status: "confirmed",
+      provenanceTier: "declared",
     });
 
     return c.json({

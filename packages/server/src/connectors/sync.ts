@@ -74,6 +74,7 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
         subtype: "internal",
         source: "team",
         sourceId: user.id,
+        provenanceTier: "structural",
       });
       // Direct seed path: no file evidence available, so the helper can
       // only write a works_at edge when a corporate domain is already

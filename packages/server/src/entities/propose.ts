@@ -26,6 +26,7 @@ import type { EntityDomainsRepository } from "../db/repositories/entity-domains"
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
+import type { ProvenanceTier } from "./provenance";
 
 export type Entity = Selectable<EntitiesTable>;
 
@@ -60,6 +61,7 @@ export interface ProposeInput {
   triggeredByUserId: string;
   aliases?: string[];
   metadata?: Record<string, unknown>;
+  provenanceTier?: ProvenanceTier;
   evidenceDomain?: string | null;
   precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
   skipFuzzy?: boolean;
@@ -273,6 +275,7 @@ async function persistEntity(
       subtype: input.subtype,
       source: input.source,
       sourceId: input.sourceId,
+      provenanceTier: input.provenanceTier ?? "inferred",
     };
     const entity = await deps.entityRepo.createPersonEntity(personData);
     return { entity, created: true };
@@ -294,6 +297,7 @@ async function persistEntity(
     aliases: input.aliases,
     metadata: input.metadata,
     status: "confirmed",
+    provenanceTier: input.provenanceTier ?? "inferred",
   });
   await deps.entityRepo.upsertSourceRef({
     entityId: entity.id,

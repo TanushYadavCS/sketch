@@ -77,6 +77,7 @@ export async function materializeNonPersonLlmEntity(
       triggeredByUserId,
       aliases: variations,
       metadata: { origin: "ai" },
+      provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
     },
   );
