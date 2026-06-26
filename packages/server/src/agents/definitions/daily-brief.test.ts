@@ -497,7 +497,11 @@ describe("buildTodaysMeetings", () => {
 
   it("scopes an admin's meetings to their own calendar even with the read-all bypass", async () => {
     const admin = await seedUser(db, { id: "admin-1", email: "admin@example.com", authRole: "admin" });
-    await seedCalendarEvent(db, { id: "evt-mine", startTime: "2026-06-25T09:00:00.000Z" });
+    await seedCalendarEvent(db, {
+      id: "evt-mine",
+      startTime: "2026-06-25T09:00:00.000Z",
+      restrictedTo: "admin@example.com",
+    });
     await seedCalendarEvent(db, {
       id: "evt-someone-else",
       startTime: "2026-06-25T10:00:00.000Z",
@@ -511,7 +515,7 @@ describe("buildTodaysMeetings", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: true,
-      contentUserEmails: ["admin@example.com"],
+      contentUserEmails: undefined,
     });
 
     expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-mine"]);

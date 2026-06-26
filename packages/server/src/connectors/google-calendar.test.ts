@@ -577,7 +577,7 @@ describe("Google Calendar connector", () => {
     ]);
   });
 
-  it("removes a declined recurring instance by its stored series id", async () => {
+  it("keeps the recurring series when a single instance is declined", async () => {
     const connector = createGoogleCalendarConnector();
     const removals: SourceItemRemovalRecord[] = [];
 
@@ -616,12 +616,7 @@ describe("Google Calendar connector", () => {
       }),
     );
 
-    expect(removals).toEqual([
-      {
-        providerFileId: "primary:recurring:recur-declined@google.com",
-        reason: "google_calendar_event_declined",
-      },
-    ]);
+    expect(removals).toEqual([]);
   });
 
   it("prunes unreadable calendars and drops their stale sync token", async () => {

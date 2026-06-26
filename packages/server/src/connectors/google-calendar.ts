@@ -762,10 +762,12 @@ async function collectEventsForCalendar(params: {
         continue;
       }
       if (ownerDeclinedEvent(event)) {
-        removals.push({
-          providerFileId: providerFileIdForSyncedEvent(params.calendar.id, event),
-          reason: "google_calendar_event_declined",
-        });
+        if (!recurringSeriesKey(event)) {
+          removals.push({
+            providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
+            reason: "google_calendar_event_declined",
+          });
+        }
         continue;
       }
 

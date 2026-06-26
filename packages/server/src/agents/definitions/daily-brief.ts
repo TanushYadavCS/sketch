@@ -245,6 +245,30 @@ function meetingViaFromSourcePath(sourcePath: string | null): string | null {
 }
 
 /**
+ * The reader's own email addresses (primary + linked provider identities). The
+ * meetings section is always scoped to these, even for admins with the read-all
+ * bypass (whose `contentUserEmails` is intentionally nulled upstream), so the
+ * personal meetings view never includes other people's calendar events.
+ */
+async function readerEmailsForUser(db: Kysely<DB>, userId: string): Promise<string[]> {
+  const [user, identities] = await Promise.all([
+    db.selectFrom("users").select("email").where("id", "=", userId).executeTakeFirst(),
+    db
+      .selectFrom("user_provider_identities")
+      .select("provider_email")
+      .where("user_id", "=", userId)
+      .where("provider_email", "is not", null)
+      .execute(),
+  ]);
+  const emails: string[] = [];
+  if (user?.email) emails.push(user.email);
+  for (const row of identities) {
+    if (row.provider_email && !emails.includes(row.provider_email)) emails.push(row.provider_email);
+  }
+  return emails;
+}
+
+/**
  * Deterministic skeleton for the meetings section: every non-archived calendar
  * event whose start lands on `outputDate` in the user's timezone, with attendees
  * resolved to person entities. This is the canonical list the model enriches;
@@ -259,9 +283,9 @@ function meetingViaFromSourcePath(sourcePath: string | null): string | null {
  */
 export async function buildTodaysMeetings({
   db,
+  user,
   outputDate,
   timezone,
-  contentUserEmails,
 }: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
   const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
   const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
@@ -278,10 +302,11 @@ export async function buildTodaysMeetings({
     .execute();
   if (files.length === 0) return [];
 
+  const readerEmails = await readerEmailsForUser(db, user.id);
   const visibleFileIds = await filterVisibleCandidateFileIds(
     db,
     files.map((file) => file.id),
-    contentUserEmails,
+    readerEmails,
   );
   const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
   if (visibleFiles.length === 0) return [];
