@@ -49,6 +49,7 @@ export async function materializeProjectSeed(
       evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
       triggeredByUserId,
       metadata,
+      provenanceTier: "structural",
     },
   );
 

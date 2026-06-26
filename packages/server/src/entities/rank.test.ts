@@ -12,6 +12,7 @@ function person(id: string, name: string): Entity {
     metadata: null,
     source_ref_id: null,
     status: "confirmed",
+    provenance_tier: "inferred",
     hotness: 0,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",

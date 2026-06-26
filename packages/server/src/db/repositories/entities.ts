@@ -3,6 +3,7 @@ import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
+import type { ProvenanceTier } from "../../entities/provenance";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
 import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
@@ -130,6 +131,7 @@ export interface UpsertEntityData {
   metadata?: Record<string, unknown>;
   sourceRefId?: string | null;
   status?: string;
+  provenanceTier?: ProvenanceTier;
 }
 
 export interface UpsertEntityFromToolData {
@@ -140,6 +142,7 @@ export interface UpsertEntityFromToolData {
   sourceUrl?: string;
   sourceRefId?: string;
   metadata?: Record<string, unknown>;
+  provenanceTier?: ProvenanceTier;
 }
 
 export interface UpsertPersonEntityData {
@@ -148,6 +151,7 @@ export interface UpsertPersonEntityData {
   subtype: "internal" | "external";
   source: string;
   sourceId: string;
+  provenanceTier?: ProvenanceTier;
 }
 
 export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp";
@@ -305,6 +309,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: data.sourceRefId ?? null,
           status: data.status ?? "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -1044,6 +1049,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: data.sourceRefId ?? null,
           status: "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -1076,6 +1082,10 @@ export function createEntityRepository(db: Kysely<DB>) {
      * done client-side so the same path works on SQLite and Postgres.
      * Returns whether the row was newly created so materialization summaries
      * don't count updates as new entities.
+     *
+     * Dormant legacy helper retained for compatibility; new materializers
+     * should route through the reviewed/propose paths and pass an explicit
+     * provenance tier.
      */
     async upsertLlmExtractedEntity(
       data: UpsertEntityData,
@@ -1123,6 +1133,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: null,
           status: data.status ?? "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -1337,6 +1348,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: JSON.stringify(metadata),
           source_ref_id: null,
           status: "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -1380,6 +1392,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: JSON.stringify(metadata),
           source_ref_id: null,
           status: "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,

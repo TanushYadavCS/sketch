@@ -587,6 +587,7 @@ export interface EntitiesTable {
   metadata: string | null;
   source_ref_id: string | null;
   status: string;
+  provenance_tier: Generated<string>;
   hotness: number;
   created_at: string;
   updated_at: string;

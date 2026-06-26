@@ -50,7 +50,13 @@ async function seedFile(db: Kysely<DB>, id: string): Promise<void> {
     .execute();
 }
 
-async function seedEntity(db: Kysely<DB>, id: string, name: string, sourceType = "person"): Promise<void> {
+async function seedEntity(
+  db: Kysely<DB>,
+  id: string,
+  name: string,
+  sourceType = "person",
+  provenanceTier = "inferred",
+): Promise<void> {
   await db
     .insertInto("entities")
     .values({
@@ -62,6 +68,7 @@ async function seedEntity(db: Kysely<DB>, id: string, name: string, sourceType =
       metadata: null,
       source_ref_id: null,
       status: "confirmed",
+      provenance_tier: provenanceTier,
       hotness: 0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -153,6 +160,17 @@ describe("entity merge core", () => {
       merged_into_entity_id: "survivor",
     });
     await expect(db.selectFrom("entities").selectAll().where(whereLiveEntity()).execute()).resolves.toHaveLength(2);
+  });
+
+  it("keeps the strongest provenance tier when merging declared and inferred entities", async () => {
+    await seedEntity(db, "survivor", "Alex", "person", "inferred");
+    await seedEntity(db, "loser", "Alex Product Owner", "person", "declared");
+
+    await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entities").select(["provenance_tier"]).where("id", "=", "survivor").executeTakeFirst(),
+    ).resolves.toEqual({ provenance_tier: "declared" });
   });
 
   it("unmerges re-pointed rows, collisions, self-loops, and relationship evidence", async () => {

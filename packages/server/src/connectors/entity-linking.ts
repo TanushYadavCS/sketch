@@ -67,6 +67,9 @@ export function formatEntitiesForPrompt(entities: Entity[]): string {
  * 1. Exact name match in entities
  * 2. Fuzzy match (Jaro-Winkler >= 0.85) — auto-merge with alias
  * 3. No match — create tentative person entity
+ *
+ * Dormant legacy path retained for compatibility; new extraction flows should
+ * use propose/materialize helpers and pass provenance explicitly.
  */
 export async function resolveNewPerson(db: Kysely<DB>, name: string): Promise<Entity> {
   const entityRepo = createEntityRepository(db);
@@ -96,5 +99,6 @@ export async function resolveNewPerson(db: Kysely<DB>, name: string): Promise<En
     sourceType: "person",
     subtype: "external",
     status: "tentative",
+    provenanceTier: "inferred",
   });
 }

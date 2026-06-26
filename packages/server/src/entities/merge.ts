@@ -16,6 +16,7 @@ import type {
 } from "../db/schema";
 import { parseAliasesString } from "./materialize-json";
 import { normalizeStrict } from "./name-dedup";
+import { strongestProvenanceTier } from "./provenance";
 
 type Entity = Selectable<EntitiesTable>;
 type Mention = Selectable<EntityMentionsTable>;
@@ -112,6 +113,10 @@ function isAliasAddedMove(move: EntityMergeMove): move is Extract<EntityMergeMov
 
 function updatedCount(result: { numUpdatedRows?: bigint | number | string } | undefined): number {
   return Number(result?.numUpdatedRows ?? 0);
+}
+
+function mergedProvenanceTier(survivor: Entity, loser: Entity): string {
+  return strongestProvenanceTier(survivor.provenance_tier, loser.provenance_tier);
 }
 
 async function fetchRawEntity(db: Kysely<DB>, entityId: string): Promise<Entity | undefined> {
@@ -1016,6 +1021,13 @@ export async function mergeEntitiesInTransaction(
   if (survivor && loser) await carryLoserAliasesToSurvivor(db, loser, survivor, moves);
 
   const now = new Date().toISOString();
+  if (survivor && loser) {
+    await db
+      .updateTable("entities")
+      .set({ provenance_tier: mergedProvenanceTier(survivor, loser), updated_at: now })
+      .where("id", "=", input.survivorId)
+      .execute();
+  }
   const tombstone = await db
     .updateTable("entities")
     .set({ deleted_at: now, merged_into_entity_id: input.survivorId, updated_at: now })

@@ -268,6 +268,7 @@ async function materializeRelationEndpoint(
       triggeredByUserId,
       aliases: endpoint.variations,
       metadata: { origin: "ai", relationEndpoint: true },
+      provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
       queueInsteadOfCreate: endpoint.type === "project",
     },

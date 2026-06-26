@@ -44,6 +44,7 @@ export async function materializePersonSeed(
       sourceId: fact.subject_source_id,
       evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
       triggeredByUserId,
+      provenanceTier: "structural",
       strictPersonScopeGate: true,
     },
   );
@@ -214,6 +215,7 @@ export async function materializePersonFact(
           evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
           triggeredByUserId,
           aliases: variations,
+          provenanceTier: "inferred",
           precomputedCandidates,
           skipFuzzy,
         },

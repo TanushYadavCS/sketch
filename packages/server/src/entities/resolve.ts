@@ -719,6 +719,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
             sourceType: row.entity_type,
             source: row.source,
             sourceId: row.source_id,
+            provenanceTier: "human_confirmed",
           });
         } else {
           throw new ResolveError(
@@ -735,6 +736,7 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
           sourceType: row.entity_type,
           source: row.seed_source,
           sourceId: row.seed_source_id,
+          provenanceTier: "human_confirmed",
         });
       }
     } else {
@@ -969,6 +971,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
           subtype: "internal" | "external";
           source: string;
           sourceId: string;
+          provenanceTier: "human_confirmed";
         } = {
           // Reject-created entities default to 'external'. The user has
           // told us this is a separate identity from the suggested
@@ -977,6 +980,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
           subtype: "external",
           source: sourceFromEvidence,
           sourceId,
+          provenanceTier: "human_confirmed",
         };
         if (row.proposed_email) personData.email = row.proposed_email;
         const created = await trxCtx.entityRepo.upsertPersonEntity(personData);
@@ -990,6 +994,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
           sourceType: row.entity_type,
           source: sourceFromEvidence,
           sourceId,
+          provenanceTier: "human_confirmed",
         });
         target = created;
       }
