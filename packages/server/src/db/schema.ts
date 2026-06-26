@@ -80,6 +80,7 @@ export interface SettingsTable {
   microsoft_oauth_client_secret: string | null;
   microsoft_oauth_tenant: string | null;
   gemini_api_key: string | null;
+  embedding_provider: string | null;
   enrichment_enabled: Generated<number>;
   admin_can_read_all_files: Generated<number>;
   sync_interval_minutes: Generated<number>;

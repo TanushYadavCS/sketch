@@ -17,6 +17,7 @@
  */
 import type { Kysely, SqlBool } from "kysely";
 import { sql } from "kysely";
+import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
@@ -1472,6 +1473,7 @@ export async function search(
     geminiMaxRetries?: number;
     openRouterApiKey?: string;
     settingsEncryptionKey?: string;
+    logger?: Logger;
   },
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
@@ -1517,8 +1519,10 @@ export async function search(
       const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, opts?.openRouterApiKey);
       const embedQuery = createEnrichmentQueryEmbedder({
         geminiApiKey: settings?.gemini_api_key,
+        embeddingProvider: settings?.embedding_provider,
         geminiMaxRpm: opts?.geminiMaxRpm,
         geminiMaxRetries: opts?.geminiMaxRetries,
+        logger: opts?.logger,
         ...openRouterConfig,
       });
       if (embedQuery) queryEmbedding = await embedQuery(trimmedQuery);

@@ -616,6 +616,7 @@ export async function runScheduledEnrichment(db: Kysely<DB>, logger: Logger, dep
     const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, deps?.appConfig?.OPENROUTER_API_KEY);
     const providerConfig = {
       geminiApiKey: settings?.gemini_api_key,
+      embeddingProvider: settings?.embedding_provider,
       geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
       logger,
