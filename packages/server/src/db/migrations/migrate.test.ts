@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 105;
+const EXPECTED_MIGRATION_COUNT = 106;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -161,6 +161,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[102]).toBe("107-scheduled-task-builder-revisions");
     expect(names[103]).toBe("108-scheduled-task-origin-chat");
     expect(names[104]).toBe("109-scheduled-task-origin-message-id");
+    expect(names[105]).toBe("110-settings-embedding-provider");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {

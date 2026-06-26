@@ -236,6 +236,7 @@ export async function handleSearch(
     geminiMaxRetries: deps.geminiConfig?.maxRetries,
     openRouterApiKey: deps.openRouterApiKey,
     settingsEncryptionKey: deps.settingsEncryptionKey,
+    logger: deps.logger,
   });
 
   const effectiveSortBy = sortBy ?? "relevance";

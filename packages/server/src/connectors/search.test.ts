@@ -5,7 +5,8 @@
  * searchFiles / hybridSearch: FTS5 query sanitization (Phase 7)
  */
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
@@ -62,6 +63,7 @@ describe("browseFiles — LIKE wildcard escaping", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     try {
       await db.destroy();
     } catch {
@@ -195,6 +197,20 @@ describe("searchFiles — FTS5 query sanitization", () => {
   it("an empty or all-special-chars query returns empty array without throwing", async () => {
     await expect(searchFiles(db, "   ")).resolves.toEqual([]);
     await expect(searchFiles(db, "***")).resolves.toBeInstanceOf(Array);
+  });
+
+  it("falls back to FTS when query embedding fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ error: { code: 429, message: "RESOURCE_EXHAUSTED" } }, { status: 429 })),
+    );
+    const settings = createSettingsRepository(db);
+    await settings.ensure();
+    await settings.update({ geminiApiKey: "AIza-key", embeddingProvider: "gemini" });
+
+    const results = await search(db, "planning", { geminiMaxRetries: 0 });
+
+    expect(results.map((result) => result.id)).toContain("file-fts");
   });
 });
 

@@ -127,6 +127,27 @@ describe("Settings API — security", () => {
       const stored = await createSettingsRepository(db).get();
       expect(stored?.gemini_api_key).toBe("AIza-super-secret-key-12345");
     });
+
+    it("round-trips embedding provider selection", async () => {
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const putRes = await app.request("/api/settings/search", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ embeddingProvider: "gemini" }),
+      });
+      expect(putRes.status).toBe(200);
+      expect((await putRes.json()).embeddingProvider).toBe("gemini");
+
+      const getRes = await app.request("/api/settings/search", {
+        headers: { Cookie: adminCookie },
+      });
+      expect((await getRes.json()).embeddingProvider).toBe("gemini");
+
+      const stored = await createSettingsRepository(db).get();
+      expect(stored?.embedding_provider).toBe("gemini");
+    });
   });
 
   describe("/api/settings/access", () => {

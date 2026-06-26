@@ -109,6 +109,7 @@ import * as m106 from "./migrations/106-agents";
 import * as m107 from "./migrations/107-scheduled-task-builder-revisions";
 import * as m108 from "./migrations/108-scheduled-task-origin-chat";
 import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
+import * as m110 from "./migrations/110-settings-embedding-provider";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -222,6 +223,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "107-scheduled-task-builder-revisions": m107,
           "108-scheduled-task-origin-chat": m108,
           "109-scheduled-task-origin-message-id": m109,
+          "110-settings-embedding-provider": m110,
         };
       },
     },
