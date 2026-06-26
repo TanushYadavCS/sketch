@@ -1,12 +1,12 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
-import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
+import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
 import {
@@ -20,6 +20,8 @@ import {
 } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 import { canUseEntityAsMatchTarget } from "./provenance";
+
+export { normalizeEntityMatchName } from "./match-normalize";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
@@ -54,16 +56,6 @@ export function configureMaterializeDefaults(opts: {
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
   if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
-}
-
-export function normalizeEntityMatchName(entityType: string, name: string): string {
-  if (entityType !== "product") return normalizeName(name);
-  return normalizeName(
-    name
-      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-      .replace(/[-_]+/g, " "),
-  );
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {

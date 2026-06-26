@@ -35,6 +35,7 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { finalizeLinkedDomainCandidates } from "./domain-promotion";
+import { normalizeEntityMatchName } from "./match-normalize";
 import {
   type MaterializeResult,
   buildMaterializeDeps,
@@ -179,16 +180,6 @@ function parseAliases(raw: string | null): string[] {
   } catch {
     return [];
   }
-}
-
-function normalizeEntityMatchName(entityType: string, name: string): string {
-  if (entityType !== "product") return normalizeName(name);
-  return normalizeName(
-    name
-      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-      .replace(/[-_]+/g, " "),
-  );
 }
 
 function shouldMarkHeldFactMaterialized(result: MaterializeResult): boolean {

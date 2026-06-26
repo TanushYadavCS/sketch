@@ -26,6 +26,7 @@ import type { EntityDomainsRepository } from "../db/repositories/entity-domains"
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
+import { normalizeMatchName } from "./match-normalize";
 import { type ProvenanceTier, canUseEntityAsMatchTarget } from "./provenance";
 
 export type Entity = Selectable<EntitiesTable>;
@@ -152,16 +153,6 @@ function tokenize(name: string): string[] {
     .split(" ")
     .map((t) => t.replace(/\.$/, ""))
     .filter((t) => t.length > 0);
-}
-
-function normalizeMatchName(entityType: ProposeEntityType, name: string): string {
-  if (entityType !== "product") return normalizeName(name);
-  return normalizeName(
-    name
-      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-      .replace(/[-_]+/g, " "),
-  );
 }
 
 function parseAliases(aliases: string | null): string[] {
