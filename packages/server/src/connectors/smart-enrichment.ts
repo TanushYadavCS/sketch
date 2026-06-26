@@ -138,12 +138,19 @@ interface MatchedEntity {
   learnedFacts: LearnedFactStored[];
 }
 
+interface ExtractionOrgContext {
+  orgName?: string;
+  description?: string;
+  industry?: string;
+  disambiguationGuidance?: string;
+}
+
 interface SmartEnrichmentDeps {
   db: Kysely<DB>;
   logger: Logger;
   generator: GeminiGenerator;
   embeddingProvider: EmbeddingProvider | null;
-  orgContext?: { orgName?: string; description?: string; industry?: string } | null;
+  orgContext?: ExtractionOrgContext | null;
   /** Known product/team entities to include in extraction prompt for better matching. */
   knownEntities?: Array<{
     name: string;
@@ -261,7 +268,7 @@ async function withFreshFileWriteLock<T>(
 export async function extractEntities(
   generator: GeminiGenerator,
   file: FileContext,
-  orgContext?: { orgName?: string; description?: string; industry?: string } | null,
+  orgContext?: ExtractionOrgContext | null,
   knownEntities?: Array<{
     name: string;
     type: string;
@@ -278,6 +285,9 @@ export async function extractEntities(
 
   const orgSection = orgContext?.description
     ? `\nOrganization: ${orgContext.orgName ?? "Unknown"}. ${orgContext.description}${orgContext.industry ? ` (Industry: ${orgContext.industry})` : ""}\n`
+    : "";
+  const disambiguationSection = orgContext?.disambiguationGuidance
+    ? `\nProduct/disambiguation guidance:\n${orgContext.disambiguationGuidance}\n`
     : "";
 
   const renderKnown = (e: {
@@ -300,7 +310,7 @@ export async function extractEntities(
 
   const knownSection =
     knownEntities && knownEntities.length > 0
-      ? `\nKnown entities likely to appear in this file — match these to mentions instead of creating duplicates, and prefer them as relationship endpoints:\n${knownEntities.map(renderKnown).join("\n")}\n`
+      ? `\nKnown entities likely to appear in this file — match these to mentions instead of creating duplicates, and prefer them as relationship endpoints. Product entries here are the injected known-products list; map product mentions to those entries instead of inventing new product names:\n${knownEntities.map(renderKnown).join("\n")}\n`
       : "";
 
   const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
@@ -325,7 +335,7 @@ export async function extractEntities(
     'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON working with a company.';
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
-${orgSection}${knownSection}${participantSection}${threadSection}
+${orgSection}${disambiguationSection}${knownSection}${participantSection}${threadSection}
 File: ${file.fileName}
 Source: ${file.source}${file.sourcePath ? ` / ${file.sourcePath}` : ""}
 Type: ${file.contentCategory}
@@ -333,7 +343,7 @@ Type: ${file.contentCategory}
 Extract entities that a business team would want to track and reference across documents. Focus on:
 - **People**: named individuals (employees, clients, contacts)
 - **Companies**: external businesses, clients, partners, vendors
-- **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
+- **Products**: named products or services your org builds or uses. When product entries appear in the Known entities section, treat that injected known-products list as the source of truth instead of inventing product names.
 - **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
 ${toolFocusLine}
 
@@ -351,7 +361,7 @@ DO NOT extract:
 - Meeting titles or calendar event names — anything containing "<>", "Standup", "Sync", "Weekly", "Daily", or "1:1". These are calendar event names, not projects. Extract the companies and people referenced by the meeting instead.
 - Document, note, or artifact titles as projects (e.g. names ending in "note", "chart", "doc", "spec", "deck"). These are filenames, not engagements.
 - Issue or ticket identifiers and keys — "SKE-123", "ECR-01", "ABC-1234", or a bare "#192". These are individual work items, not projects; extract the project or product they belong to instead, never the ticket key (even when the key is followed by a title, e.g. "SKE-120: Provenance columns").
-- Pull requests, commits, or branches — "PR #192", "Sketch PR #45", commit SHAs, branch names. These are code artifacts, not engagements.
+- Pull requests, commits, or branches — "PR #192", commit SHAs, branch names. These are code artifacts, not engagements.
 - A single feature, tab, screen, or module of a product as a project — "Files", "Workflows", "Analytics", "Push Notifications", "Outlook Integration". These are parts of a product, not umbrella engagements with their own scope.
 - Generic feature descriptions or internal component names as products (e.g. "responder functionality", "conversational model", "X service", "X module", "X pipeline"). Products must be a branded, proper-noun name your org or a client publicly markets — not the internal name of a component you are building.
 - Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns

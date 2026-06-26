@@ -1206,7 +1206,10 @@ describe("extractEntities prompt — v6 entity type removal", () => {
 });
 
 describe("extractEntities prompt — v7 quality rules", () => {
-  async function capturePrompt(): Promise<string> {
+  async function capturePrompt(
+    orgContext?: Parameters<typeof extractEntities>[2],
+    knownEntities?: Parameters<typeof extractEntities>[3],
+  ): Promise<string> {
     let captured = "";
     const generator = {
       generate: async () => "",
@@ -1216,18 +1219,23 @@ describe("extractEntities prompt — v7 quality rules", () => {
       },
     } as GeminiGenerator;
 
-    await extractEntities(generator, {
-      id: "f-v7",
-      fileName: "transcript.txt",
-      content: "body",
-      contentCategory: "document",
-      source: "fireflies",
-      sourcePath: "/",
-      contentHash: null,
-      connectorConfigId: "conn-v7",
-      sourceCreatedAt: null,
-      sourceUpdatedAt: null,
-    });
+    await extractEntities(
+      generator,
+      {
+        id: "f-v7",
+        fileName: "transcript.txt",
+        content: "body",
+        contentCategory: "document",
+        source: "fireflies",
+        sourcePath: "/",
+        contentHash: null,
+        connectorConfigId: "conn-v7",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+      orgContext,
+      knownEntities,
+    );
     return captured;
   }
 
@@ -1259,33 +1267,39 @@ describe("extractEntities prompt — v7 quality rules", () => {
   });
 
   it("renders the org description into the extraction prompt when provided", async () => {
-    let captured = "";
-    const generator = {
-      generate: async () => "",
-      generateJSON: async <T>(prompt: string) => {
-        captured = prompt;
-        return { mentions: [], relations: [] } as T;
-      },
-    } as GeminiGenerator;
-
-    await extractEntities(
-      generator,
-      {
-        id: "f-orgctx",
-        fileName: "transcript.txt",
-        content: "body",
-        contentCategory: "document",
-        source: "fireflies",
-        sourcePath: "/",
-        contentHash: null,
-        connectorConfigId: "conn-orgctx",
-        sourceCreatedAt: null,
-        sourceUpdatedAt: null,
-      },
-      { orgName: "Canvas Labs", description: "AI services company. Sketch is one of our products." },
-    );
+    const captured = await capturePrompt({
+      orgName: "Canvas Labs",
+      description: "AI services company. Sketch is one of our products.",
+    });
 
     expect(captured).toContain("Organization: Canvas Labs");
     expect(captured).toContain("AI services company. Sketch is one of our products.");
+  });
+
+  it("includes product disambiguation guidance when org context provides it", async () => {
+    const captured = await capturePrompt({
+      orgName: "Canvas Labs",
+      description: "AI services company.",
+      disambiguationGuidance: "A dataset or UI tab is not a product.",
+    });
+
+    expect(captured).toContain("Product/disambiguation guidance");
+    expect(captured).toContain("A dataset or UI tab is not a product.");
+  });
+
+  it("does not hardcode Sketch as a product example and points products at injected known products", async () => {
+    const captured = await capturePrompt(undefined, [
+      { name: "Known Product", type: "product", description: "Declared product" },
+    ]);
+    const productLine = captured.split("\n").find((line) => line.startsWith("- **Products**"));
+
+    expect(productLine).toBeDefined();
+    expect(captured).not.toContain("Sketch");
+    expect(productLine).not.toContain("Sketch");
+    expect(productLine).not.toContain("Canvas AI");
+    expect(productLine).not.toContain("Meetup by Habuild");
+    expect(productLine).toContain("injected known-products list");
+    expect(captured).toContain("Known entities likely to appear in this file");
+    expect(captured).toContain("Known Product (product)");
   });
 });
