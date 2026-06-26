@@ -255,13 +255,22 @@ function eventDateLabel(value: GoogleCalendarEventDate | undefined): string | nu
 
 function personLabel(person: GoogleCalendarEventPerson | undefined): string | null {
   if (!person) return null;
+  if (isGoogleCalendarManagedEmail(person.email)) return null;
   const email = normalizeEmailValue(person.email);
   const name = person.displayName?.trim();
   if (name && email) return `${name} <${email}>`;
   return name || email;
 }
 
+function isGoogleCalendarManagedEmail(email: string | null | undefined): boolean {
+  const normalized = normalizeEmailValue(email);
+  if (!normalized) return false;
+  const domain = normalized.slice(normalized.lastIndexOf("@") + 1);
+  return domain === "calendar.google.com" || domain.endsWith(".calendar.google.com");
+}
+
 function displayNameFromEmail(email: string | undefined): string | null {
+  if (isGoogleCalendarManagedEmail(email)) return null;
   const localPart = email?.split("@")[0]?.trim();
   if (!localPart) return null;
   const words = localPart
@@ -281,6 +290,7 @@ function eventPeople(event: GoogleCalendarEvent): EventPerson[] {
   const seen = new Set<string>();
   for (const person of [event.organizer, event.creator, ...(event.attendees ?? [])]) {
     if (!person) continue;
+    if (isGoogleCalendarManagedEmail(person.email)) continue;
     const key = personKey(person);
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -302,11 +312,11 @@ function eventAccessEmails(
 
   for (const person of [event.organizer, event.creator, ...(event.attendees ?? [])]) {
     const email = normalizeEmailValue(person?.email);
-    if (email) emails.add(email);
+    if (email && !isGoogleCalendarManagedEmail(email)) emails.add(email);
   }
   for (const person of extraPeople) {
     const email = normalizeEmailValue(person.email);
-    if (email) emails.add(email);
+    if (email && !isGoogleCalendarManagedEmail(email)) emails.add(email);
   }
 
   return emails.size > 0 ? [...emails] : null;
@@ -425,6 +435,7 @@ function mergePeople(people: EventPerson[]): EventPerson[] {
 
   for (const person of people) {
     const email = normalizeEmailValue(person.email) ?? undefined;
+    if (isGoogleCalendarManagedEmail(email)) continue;
     const name = cleanPersonName(person.name) ?? displayNameFromEmail(email) ?? undefined;
     if (!email && !name) continue;
 
@@ -597,7 +608,10 @@ export function eventToSyncedItem(
   const content = eventContent(event, calendar);
   const calendlyPeople = calendlyDescriptionPeople(event);
   const people = mergePeople([...eventPeople(event), ...calendlyPeople]);
-  const author = event.creator ?? event.organizer;
+  const author = [event.creator, event.organizer].find(
+    (person): person is GoogleCalendarEventPerson =>
+      person !== undefined && !isGoogleCalendarManagedEmail(person.email),
+  );
   const authorEmail = normalizeEmailValue(author?.email) ?? undefined;
   const authorName = cleanPersonName(author?.displayName) ?? displayNameFromEmail(authorEmail) ?? undefined;
   const sourceCreatedAt = eventDateToIso(event.start) ?? normalizeTimestamp(event.created);

@@ -197,6 +197,46 @@ describe("Google Calendar connector", () => {
     ]);
   });
 
+  it("filters Google Calendar managed participants before extracting entities or access emails", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("managed-participant", {
+        attendees: [
+          { email: "owner@canvasx.ai", displayName: "Owner", self: true },
+          { email: "c_room@group.calendar.google.com" },
+          { email: "c_room@group.v.calendar.google.com" },
+          { email: "jane@example.com", displayName: "Jane Doe", responseStatus: "accepted" },
+        ],
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.content).not.toContain("calendar.google.com");
+    expect(item?.content).not.toContain("c_room");
+    expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.attendees).toEqual([
+      { name: "Owner", email: "owner@canvasx.ai" },
+      { name: "Jane Doe", email: "jane@example.com" },
+    ]);
+  });
+
+  it("does not use Google Calendar managed identities as event authors", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("managed-author", {
+        creator: { email: "c_room@group.calendar.google.com" },
+        organizer: { email: "c_room@group.v.calendar.google.com" },
+        attendees: [{ email: "jane@example.com", displayName: "Jane Doe" }],
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item?.content).not.toContain("Organizer:");
+    expect(item?.authorEmail).toBeUndefined();
+    expect(item?.authorName).toBeUndefined();
+    expect(item?.attendees).toEqual([{ name: "Jane Doe", email: "jane@example.com" }]);
+  });
+
   it("ignores labeled emails in non-Calendly descriptions", () => {
     const item = eventToSyncedItem(
       calendarEvent("not-calendly", {
