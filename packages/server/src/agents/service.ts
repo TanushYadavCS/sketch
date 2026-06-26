@@ -6,6 +6,7 @@ import type { AgentOutputWriter, WriteAgentOutputPayload } from "../agent/tools/
 import { ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import {
+  type AgentDeliveryConfig,
   type AgentMasthead,
   type AgentOutputItemInput,
   type AgentOutputRow,
@@ -19,6 +20,7 @@ import type { DB, UsersTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
+import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
 import type { AgentApiItem, AgentDefinition } from "./types";
 
@@ -37,6 +39,7 @@ export interface AgentRunServiceDeps {
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: QueueManager;
+  outputDelivery?: AgentOutputDeliveryPublisher;
 }
 
 export interface RequestAgentGenerationParams {
@@ -55,6 +58,7 @@ export interface ResolvedAgentConfig {
   maxItemsPerSection: number;
   enabledSections: Record<string, boolean>;
   focus: string | null;
+  delivery: AgentDeliveryConfig | null;
 }
 
 export interface AgentSectionView {
@@ -75,6 +79,7 @@ export interface AgentConfigView {
   maxItemsPerSection: number;
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
+  delivery: AgentDeliveryConfig | null;
   sections: AgentSectionView[];
 }
 
@@ -191,6 +196,7 @@ export class AgentRunService {
       maxItemsPerSection: raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection,
       enabledSections,
       focus: prefs.focus ?? null,
+      delivery: prefs.delivery ?? null,
     };
   }
 
@@ -233,6 +239,7 @@ export class AgentRunService {
       maxItemsPerSection: config.maxItemsPerSection,
       itemsPerSectionRange: def.itemsPerSectionRange,
       focus: config.focus,
+      delivery: config.delivery,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -251,6 +258,7 @@ export class AgentRunService {
       maxItemsPerSection?: number;
       sections?: Record<string, boolean>;
       focus?: string | null;
+      delivery?: AgentDeliveryConfig | null;
     },
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
@@ -264,7 +272,7 @@ export class AgentRunService {
         : undefined;
 
     let prefs: AgentUserPrefs | undefined;
-    if (patch.sections !== undefined || patch.focus !== undefined) {
+    if (patch.sections !== undefined || patch.focus !== undefined || patch.delivery !== undefined) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
       if (patch.sections) {
         for (const section of def.sections) {
@@ -272,7 +280,8 @@ export class AgentRunService {
         }
       }
       const focus = patch.focus !== undefined ? (patch.focus?.trim() ? patch.focus.trim() : null) : current.focus;
-      prefs = { sections, focus };
+      const delivery = patch.delivery !== undefined ? patch.delivery : current.delivery;
+      prefs = { sections, focus, delivery };
     }
 
     await this.repo.upsertConfig(
@@ -575,11 +584,29 @@ export class AgentRunService {
           .set({ agent_run_id: result.sessionId || null })
           .where("id", "=", outputId)
           .execute();
+        await this.deliverCompletedOutput(def, outputId, user.id, output.trigger_type, config.delivery);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.repo.markFailed(outputId, message);
       this.deps.logger.error({ err, agentKey, outputId, userId }, "Agent: generation failed");
+    }
+  }
+
+  private async deliverCompletedOutput(
+    def: AgentDefinition,
+    outputId: string,
+    userId: string,
+    triggerType: string,
+    delivery: AgentDeliveryConfig | null,
+  ): Promise<void> {
+    if (triggerType !== "scheduled" || !delivery || !this.deps.outputDelivery) return;
+    try {
+      const completed = await this.getByIdForUser(def.key, outputId, userId);
+      if (!completed) return;
+      await this.deps.outputDelivery.deliver({ definition: def, output: completed, delivery });
+    } catch (err) {
+      this.deps.logger.warn({ err, agentKey: def.key, outputId, userId }, "Agent: output delivery failed");
     }
   }
 

@@ -1023,6 +1023,14 @@ export interface AgentSectionConfig {
   enabled: boolean;
 }
 
+export interface AgentDeliveryConfig {
+  enabled: true;
+  platform: "slack" | "whatsapp";
+  targetType: "channel" | "dm" | "group";
+  targetId: string;
+  label: string | null;
+}
+
 export interface AgentConfig {
   agentKey: string;
   title: string;
@@ -1035,6 +1043,7 @@ export interface AgentConfig {
   maxItemsPerSection: number;
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
+  delivery: AgentDeliveryConfig | null;
   sections: AgentSectionConfig[];
 }
 
@@ -1086,6 +1095,7 @@ export interface AgentConfigPatch {
   maxItemsPerSection?: number;
   sections?: Record<string, boolean>;
   focus?: string | null;
+  delivery?: AgentDeliveryConfig | null;
 }
 
 export type WebChatMessagePart =

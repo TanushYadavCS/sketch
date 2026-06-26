@@ -10,6 +10,7 @@ import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/env
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
+import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
@@ -335,6 +336,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const agentOutputDelivery = createAgentOutputDeliveryService({
+    db,
+    logger,
+    getSlack: () => slack,
+    whatsapp,
+    settingsRepo,
+  });
   const agentRunService = new AgentRunService({
     db,
     config,
@@ -345,6 +353,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     buildMcpServers,
     loadIntegrationProvider,
     queueManager,
+    outputDelivery: agentOutputDelivery,
   });
   const agentScheduler = new AgentScheduler({ service: agentRunService, logger });
   agentScheduler.start();

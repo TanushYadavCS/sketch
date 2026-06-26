@@ -556,6 +556,20 @@ export interface AgentOutputItemsTable {
   created_at: Generated<string>;
 }
 
+export interface AgentOutputDeliveriesTable {
+  id: string;
+  agent_output_id: string;
+  platform: string;
+  target_type: string;
+  target_id: string;
+  status: string;
+  message_refs_json: string | null;
+  error_message: string | null;
+  sent_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface AgentUserConfigsTable {
   agent_key: string;
   user_id: string;
@@ -907,6 +921,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
+  agent_output_deliveries: AgentOutputDeliveriesTable;
   agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;

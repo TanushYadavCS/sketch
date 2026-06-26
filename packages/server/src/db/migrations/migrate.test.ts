@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 106;
+const EXPECTED_MIGRATION_COUNT = 107;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -162,6 +162,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[103]).toBe("108-scheduled-task-origin-chat");
     expect(names[104]).toBe("109-scheduled-task-origin-message-id");
     expect(names[105]).toBe("110-google-calendar-provider-file-scope");
+    expect(names[106]).toBe("111-agent-output-deliveries");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -461,6 +462,15 @@ describe("runMigrations — full sequence", () => {
       schedule_minute: 0,
       max_items_per_section: 4,
     });
+  });
+
+  it("creates agent output delivery audit storage", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const result = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='agent_output_deliveries'
+    `.execute(db);
+    expect(result.rows).toHaveLength(1);
   });
 
   it("running migrations twice is idempotent (only applies each migration once)", async () => {

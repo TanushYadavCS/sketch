@@ -7,6 +7,7 @@ import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
+import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { AgentRunService, type AgentRunServiceDeps } from "./service";
 
 const NOW = new Date("2026-06-15T08:05:00.000Z");
@@ -41,6 +42,7 @@ function createWritingService(
   db: Kysely<DB>,
   tasks: Array<() => Promise<void>>,
   item: AgentOutputItemInput,
+  outputDelivery?: AgentOutputDeliveryPublisher,
 ): AgentRunService {
   const runAgent = vi.fn(async (params) => {
     if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
@@ -90,6 +92,7 @@ function createWritingService(
     settings: createSettingsRepository(db),
     runAgent,
     queueManager: createPausedQueueManager(tasks),
+    outputDelivery,
   });
 }
 
@@ -613,5 +616,154 @@ describe("AgentRunService", () => {
     const latest = await service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, user.id);
     expect(latest.enabledSections).toContain("todos");
     expect(latest.enabledSections).not.toContain("customer_updates");
+  });
+
+  it("persists delivery config with the other agent preferences", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const service = createService(db, []);
+
+    const updated = await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    expect(updated?.delivery).toEqual({
+      enabled: true,
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C_DAILY",
+      label: "#daily",
+    });
+
+    const reread = await service.getConfigView(DAILY_BRIEF_AGENT_KEY, user.id);
+    expect(reread?.delivery?.targetId).toBe("C_DAILY");
+  });
+
+  it("delivers scheduled outputs after saving the brief", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    await seedEntity(db, { id: "entity-delivery", name: "Delivery Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-delivery"], fileIds: [] } }),
+      outputDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ targetId: "C_DAILY" }),
+        output: expect.objectContaining({ id: row.id, outputDate: OUTPUT_DATE }),
+      }),
+    );
+  });
+
+  it("does not deliver manual outputs even when delivery is configured", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    await seedEntity(db, { id: "entity-manual", name: "Manual Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-manual"], fileIds: [] } }),
+      outputDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(outputDelivery.deliver).not.toHaveBeenCalled();
+  });
+
+  it("keeps the brief completed when scheduled delivery fails", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    await seedEntity(db, { id: "entity-delivery-failure", name: "Delivery Failure Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {
+        throw new Error("Slack unavailable");
+      }),
+    } satisfies AgentOutputDeliveryPublisher;
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-delivery-failure"], fileIds: [] } }),
+      outputDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    const output = await db
+      .selectFrom("agent_outputs")
+      .select(["status", "error_message"])
+      .where("id", "=", row.id)
+      .executeTakeFirstOrThrow();
+    expect(output.status).toBe("completed");
+    expect(output.error_message).toBeNull();
   });
 });
