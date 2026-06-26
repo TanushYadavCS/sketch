@@ -490,12 +490,28 @@ export class AgentRunService {
     });
 
     try {
-      const [settings, sameDayPrevious, previousDay] = await Promise.all([
-        this.deps.settings.get(),
+      const now = new Date();
+      const settings = await this.deps.settings.get();
+      const adminCanReadAllFiles = settings?.admin_can_read_all_files === 1;
+      const contentUserEmails =
+        user.auth_role === "admin" && adminCanReadAllFiles
+          ? undefined
+          : await this.deps.users.getAllEmailsForUser(user.id);
+      const [sameDayPrevious, previousDay, definitionContext] = await Promise.all([
         this.getLatestForUser(def.key, user.id, output.output_date),
         this.getLatestForUser(def.key, user.id, addDays(output.output_date, -1)),
+        def.buildRuntimeContext
+          ? def.buildRuntimeContext({
+              db: this.deps.db,
+              user,
+              outputDate: output.output_date,
+              timezone: output.timezone,
+              now,
+              adminCanReadAllFiles,
+              contentUserEmails,
+            })
+          : Promise.resolve({}),
       ]);
-      void settings;
       const runtimeContext = {
         agentKey: def.key,
         agentVersion: def.version,
@@ -508,6 +524,7 @@ export class AgentRunService {
         focus: config.focus,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
         previousDayOutput: this.formatOutputForContext(previousDay.output),
+        ...definitionContext,
       };
       const userMessage = buildSketchContext({
         messages: [],

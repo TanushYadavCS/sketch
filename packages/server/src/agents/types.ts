@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
+import type { Selectable } from "kysely";
 import type { AgentKnowledgeRefs, AgentOutputItemInput, AgentOutputItemRow } from "../db/repositories/agent-outputs";
-import type { DB } from "../db/schema";
+import type { DB, UsersTable } from "../db/schema";
 
 export type AgentStoredItem = AgentOutputItemRow & { knowledgeRefs: AgentKnowledgeRefs };
 
@@ -35,6 +36,16 @@ export interface AgentApiItem {
   sortOrder: number;
 }
 
+export interface AgentRuntimeContextParams {
+  db: Kysely<DB>;
+  user: Selectable<UsersTable>;
+  outputDate: string;
+  timezone: string;
+  now: Date;
+  adminCanReadAllFiles: boolean;
+  contentUserEmails: string[] | undefined;
+}
+
 /**
  * Code-owned, versioned contract for a prebuilt agent. Behavior (instructions,
  * sections, labels, output shaping) lives here; per-user preferences and outputs
@@ -63,6 +74,8 @@ export interface AgentDefinition {
   buildInstructions(): string;
   /** Derive display refs, source URLs, and canonical action labels from indexed data. */
   enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]>;
+  /** Optional per-definition runtime context appended to the agent run JSON. */
+  buildRuntimeContext?(params: AgentRuntimeContextParams): Promise<Record<string, unknown>>;
   /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
   toApiItem(item: AgentStoredItem): AgentApiItem;
 }

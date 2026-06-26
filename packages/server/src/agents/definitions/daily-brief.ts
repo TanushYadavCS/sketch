@@ -1,10 +1,20 @@
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
+import { filterAccessibleFileIds } from "../../connectors/search";
 import type { AgentKnowledgeRefs, AgentOutputItemInput } from "../../db/repositories/agent-outputs";
+import { whereLiveEntity } from "../../db/repositories/entities";
 import type { DB } from "../../db/schema";
-import type { AgentApiItem, AgentDefinition, AgentStoredItem } from "../types";
+import { parseOnceSchedule } from "../../scheduler/parse-once";
+import { parseTimestampMs } from "../../timestamps";
+import type { AgentApiItem, AgentDefinition, AgentRuntimeContextParams, AgentStoredItem } from "../types";
 
 export const DAILY_BRIEF_AGENT_KEY = "daily_brief";
 export const DAILY_BRIEF_AGENT_VERSION = "2026-06-daily-brief-v1";
+export const DAILY_BRIEF_ENTITY_WINDOW_DAYS = 7;
+export const DAILY_BRIEF_EVIDENCE_WINDOW_DAYS = 30;
+export const DAILY_BRIEF_RECENT_ENTITY_LIMIT = 30;
+export const DAILY_BRIEF_HOT_FALLBACK_LIMIT = 10;
+const FILE_ACCESS_FILTER_CHUNK_SIZE = 500;
 
 export const DAILY_BRIEF_SECTION_LABELS = {
   todos: ["todo", "in_progress", "blocked", "waiting", "done"],
@@ -39,6 +49,219 @@ const DAILY_BRIEF_ALLOWED_TOOLS = [
   "mcp__sketch__GetFileContent",
   "mcp__sketch__WriteAgentOutput",
 ];
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+type CandidateMentionRow = {
+  entity_id: string;
+  entity_name: string;
+  source_type: string;
+  subtype: string | null;
+  status: string;
+  hotness: number;
+  mention_id: string;
+  indexed_file_id: string;
+  mentioned_at: string;
+  source_updated_at: string | null;
+  source_created_at: string | null;
+};
+
+export type DailyBriefCandidateReason = "recent_activity" | "hotness_fallback";
+
+export type DailyBriefCandidateEntity = {
+  id: string;
+  name: string;
+  sourceType: string;
+  subtype: string | null;
+  status: string;
+  hotness: number;
+  lastActivityAt: string;
+  evidenceCountLast30Days: number;
+  evidenceCountLast7Days: number;
+  sampleFileIds: string[];
+  sampleMentionIds: string[];
+  reason: DailyBriefCandidateReason;
+};
+
+export type DailyBriefCandidateContext = {
+  entityWindowDays: number;
+  evidenceWindowDays: number;
+  windowEnd: string;
+  entitySince: string;
+  evidenceSince: string;
+  recentEntityLimit: number;
+  hotFallbackLimit: number;
+  recentEntities: DailyBriefCandidateEntity[];
+  hotFallbackEntities: DailyBriefCandidateEntity[];
+};
+
+type CandidateAccumulator = {
+  id: string;
+  name: string;
+  sourceType: string;
+  subtype: string | null;
+  status: string;
+  hotness: number;
+  latestActivityMs: number;
+  evidenceCountLast30Days: number;
+  evidenceCountLast7Days: number;
+  sampleFileIds: string[];
+  sampleMentionIds: string[];
+};
+
+function activityMs(row: Pick<CandidateMentionRow, "source_updated_at" | "source_created_at" | "mentioned_at">) {
+  return (
+    parseTimestampMs(row.source_updated_at) ??
+    parseTimestampMs(row.source_created_at) ??
+    parseTimestampMs(row.mentioned_at)
+  );
+}
+
+function addSample(values: string[], value: string) {
+  if (values.length < 3 && !values.includes(value)) values.push(value);
+}
+
+function toCandidate(group: CandidateAccumulator, reason: DailyBriefCandidateReason): DailyBriefCandidateEntity {
+  return {
+    id: group.id,
+    name: group.name,
+    sourceType: group.sourceType,
+    subtype: group.subtype,
+    status: group.status,
+    hotness: group.hotness,
+    lastActivityAt: new Date(group.latestActivityMs).toISOString(),
+    evidenceCountLast30Days: group.evidenceCountLast30Days,
+    evidenceCountLast7Days: group.evidenceCountLast7Days,
+    sampleFileIds: group.sampleFileIds,
+    sampleMentionIds: group.sampleMentionIds,
+    reason,
+  };
+}
+
+async function filterVisibleCandidateFileIds(
+  db: Kysely<DB>,
+  fileIds: string[],
+  contentUserEmails: string[] | undefined,
+): Promise<Set<string>> {
+  const uniqueFileIds = [...new Set(fileIds)];
+  const visibleFileIds = new Set<string>();
+  for (let i = 0; i < uniqueFileIds.length; i += FILE_ACCESS_FILTER_CHUNK_SIZE) {
+    const chunk = uniqueFileIds.slice(i, i + FILE_ACCESS_FILTER_CHUNK_SIZE);
+    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserEmails);
+    for (const fileId of visibleChunk) visibleFileIds.add(fileId);
+  }
+  return visibleFileIds;
+}
+
+function outputDateWindowEndMs(outputDate: string, timezone: string): number {
+  const parsed = parseOnceSchedule(`${outputDate}T23:59:59.999`, timezone);
+  const ms = parsed.getTime();
+  if (!Number.isFinite(ms)) throw new Error(`Invalid Daily Brief output date: ${outputDate}`);
+  return ms;
+}
+
+export async function buildDailyBriefCandidateContext({
+  db,
+  outputDate,
+  timezone,
+  adminCanReadAllFiles,
+  contentUserEmails,
+  user,
+}: AgentRuntimeContextParams): Promise<DailyBriefCandidateContext> {
+  const windowEndMs = outputDateWindowEndMs(outputDate, timezone);
+  const evidenceSinceMs = windowEndMs - DAILY_BRIEF_EVIDENCE_WINDOW_DAYS * DAY_MS;
+  const entitySinceMs = windowEndMs - DAILY_BRIEF_ENTITY_WINDOW_DAYS * DAY_MS;
+  const windowEnd = new Date(windowEndMs).toISOString();
+  const evidenceSince = new Date(evidenceSinceMs).toISOString();
+  const entitySince = new Date(entitySinceMs).toISOString();
+  const candidateUserEmails = user.auth_role === "admin" && adminCanReadAllFiles ? undefined : contentUserEmails;
+
+  const query = db
+    .selectFrom("entity_mentions")
+    .innerJoin("indexed_files", "indexed_files.id", "entity_mentions.indexed_file_id")
+    .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+    .select([
+      "entity_mentions.entity_id",
+      "entities.name as entity_name",
+      "entities.source_type",
+      "entities.subtype",
+      "entities.status",
+      "entities.hotness",
+      "entity_mentions.id as mention_id",
+      "entity_mentions.indexed_file_id",
+      "entity_mentions.mentioned_at",
+      "indexed_files.source_updated_at",
+      "indexed_files.source_created_at",
+    ])
+    .where(whereLiveEntity())
+    .where("entities.status", "!=", "archived")
+    .where("indexed_files.is_archived", "=", 0)
+    .where(
+      sql<boolean>`(
+        indexed_files.source_updated_at >= ${evidenceSince}
+        OR indexed_files.source_created_at >= ${evidenceSince}
+        OR entity_mentions.mentioned_at >= ${evidenceSince}
+      )`,
+    );
+
+  const rows = await query.execute();
+  const visibleFileIds = await filterVisibleCandidateFileIds(
+    db,
+    rows.map((row) => row.indexed_file_id),
+    candidateUserEmails,
+  );
+  const byEntity = new Map<string, CandidateAccumulator>();
+  for (const row of rows as CandidateMentionRow[]) {
+    if (!visibleFileIds.has(row.indexed_file_id)) continue;
+    const rowActivityMs = activityMs(row);
+    if (rowActivityMs === null || rowActivityMs < evidenceSinceMs || rowActivityMs > windowEndMs) continue;
+    const existing = byEntity.get(row.entity_id);
+    const group = existing ?? {
+      id: row.entity_id,
+      name: row.entity_name,
+      sourceType: row.source_type,
+      subtype: row.subtype,
+      status: row.status,
+      hotness: Number(row.hotness ?? 0),
+      latestActivityMs: rowActivityMs,
+      evidenceCountLast30Days: 0,
+      evidenceCountLast7Days: 0,
+      sampleFileIds: [],
+      sampleMentionIds: [],
+    };
+    group.evidenceCountLast30Days += 1;
+    if (rowActivityMs >= entitySinceMs) group.evidenceCountLast7Days += 1;
+    if (rowActivityMs > group.latestActivityMs) group.latestActivityMs = rowActivityMs;
+    addSample(group.sampleFileIds, row.indexed_file_id);
+    addSample(group.sampleMentionIds, row.mention_id);
+    byEntity.set(row.entity_id, group);
+  }
+
+  const groups = [...byEntity.values()];
+  const recentEntities = groups
+    .filter((group) => group.latestActivityMs >= entitySinceMs)
+    .sort((a, b) => b.latestActivityMs - a.latestActivityMs || b.hotness - a.hotness || a.name.localeCompare(b.name))
+    .slice(0, DAILY_BRIEF_RECENT_ENTITY_LIMIT)
+    .map((group) => toCandidate(group, "recent_activity"));
+
+  const hotFallbackEntities = groups
+    .filter((group) => group.latestActivityMs < entitySinceMs && group.hotness > 0)
+    .sort((a, b) => b.hotness - a.hotness || b.latestActivityMs - a.latestActivityMs || a.name.localeCompare(b.name))
+    .slice(0, DAILY_BRIEF_HOT_FALLBACK_LIMIT)
+    .map((group) => toCandidate(group, "hotness_fallback"));
+
+  return {
+    entityWindowDays: DAILY_BRIEF_ENTITY_WINDOW_DAYS,
+    evidenceWindowDays: DAILY_BRIEF_EVIDENCE_WINDOW_DAYS,
+    windowEnd,
+    entitySince,
+    evidenceSince,
+    recentEntityLimit: DAILY_BRIEF_RECENT_ENTITY_LIMIT,
+    hotFallbackLimit: DAILY_BRIEF_HOT_FALLBACK_LIMIT,
+    recentEntities,
+    hotFallbackEntities,
+  };
+}
 
 function normalizeStoredLabel(sectionKey: string, value: string | null): string {
   const labels = DAILY_BRIEF_SECTION_LABELS[sectionKey as keyof typeof DAILY_BRIEF_SECTION_LABELS] as
@@ -188,6 +411,10 @@ const DAILY_BRIEF_INSTRUCTIONS = [
   "- Do not create a meetings or calendar section.",
   "- Output a complete new brief snapshot, not patches.",
   "- Return at most the per-section item cap given in the runtime context `maxItemsPerSection` field.",
+  "- The runtime context includes `dailyBriefCandidateContext`. Start from `recentEntities` there; then consider `hotFallbackEntities` as a safety net for important entities just outside the recent window.",
+  "- `dailyBriefCandidateContext.entityWindowDays` is the entity activity window and `dailyBriefCandidateContext.evidenceWindowDays` is the evidence window. Use `dailyBriefCandidateContext.evidenceSince` for GetEntityContext `since`; for Search use `after: evidenceSince` and `before: windowEnd`.",
+  "- Do not include stale historically-hot entities unless they appear in `dailyBriefCandidateContext` or fresh tool results inside the evidence window.",
+  "- For each candidate entity you use, inspect recent context with GetEntityContext before finalizing the item unless a Search result already gives enough evidence.",
   "- Every item must include at least one real entityId or fileId in knowledgeRefs.",
   "- Do not invent IDs. Use only IDs returned by tools.",
   "- Prefer entityIds and fileIds because those are exposed by the existing knowledge tools.",
@@ -282,6 +509,9 @@ export const dailyBriefDefinition: AgentDefinition = {
   itemsPerSectionRange: { min: 1, max: 10 },
   requiresKnowledgeRefs: true,
   buildInstructions,
+  buildRuntimeContext: async (params) => ({
+    dailyBriefCandidateContext: await buildDailyBriefCandidateContext(params),
+  }),
   enrichItems,
   toApiItem,
 };
