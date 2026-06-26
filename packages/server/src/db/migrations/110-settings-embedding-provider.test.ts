@@ -1,7 +1,10 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { encrypt } from "../../auth/encryption";
 import { down, up } from "./110-settings-embedding-provider";
+
+const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 interface TestDb {
   settings: {
@@ -34,6 +37,7 @@ describe("110-settings-embedding-provider migration", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await db.destroy();
   });
 
@@ -69,6 +73,28 @@ describe("110-settings-embedding-provider migration", () => {
 
     const row = await db.selectFrom("settings").select("embedding_provider").executeTakeFirstOrThrow();
     expect(row.embedding_provider).toBe("openrouter");
+  });
+
+  it("backfills encrypted Gemini keys but skips encrypted blanks", async () => {
+    vi.stubEnv("ENCRYPTION_KEY", TEST_KEY);
+    await db
+      .insertInto("settings")
+      .values([
+        { id: "encrypted-real", gemini_api_key: encrypt("AIza-key", TEST_KEY) },
+        { id: "encrypted-blank", gemini_api_key: encrypt("", TEST_KEY) },
+      ])
+      .execute();
+
+    await up(migrationDb());
+
+    const rows = await sql<{ id: string; embedding_provider: string | null }>`
+      SELECT id, embedding_provider FROM settings ORDER BY id
+    `.execute(db);
+
+    expect(rows.rows).toEqual([
+      { id: "encrypted-blank", embedding_provider: null },
+      { id: "encrypted-real", embedding_provider: "gemini" },
+    ]);
   });
 
   it("drops the column on down", async () => {
