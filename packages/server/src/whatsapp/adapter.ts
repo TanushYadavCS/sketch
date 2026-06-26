@@ -67,6 +67,7 @@ type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
 const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
+const WHATSAPP_PROGRESS_DEFAULTS = { toolProgress: "off", reasoningText: false } as const;
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -151,6 +152,13 @@ function conversationRefForMessage(message: WhatsAppMessage): {
 
 function senderJidForMessage(message: WhatsAppMessage): string {
   return message.type === "dm" ? toPhoneJid(message.phoneNumber) : message.senderJid;
+}
+
+function resolveWhatsAppProgressDisplaySettings(input: {
+  tool_progress?: string | null;
+  reasoning_text?: unknown;
+}) {
+  return resolveProgressDisplaySettings(input, WHATSAPP_PROGRESS_DEFAULTS);
 }
 
 export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapterDeps): void {
@@ -360,7 +368,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           return;
         }
 
-        const currentProgressSettings = resolveProgressDisplaySettings(user);
+        const currentProgressSettings = resolveWhatsAppProgressDisplaySettings(user);
         if (command === "tool_progress_query") {
           await whatsapp.sendText(replyJid, getToolProgressCurrent(currentProgressSettings));
           return;
@@ -437,7 +445,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
           });
 
           const onFinalMessage = createWhatsAppMessageHandler(whatsapp, deliveryJid);
-          const progressSettings = resolveProgressDisplaySettings(user);
+          const progressSettings = resolveWhatsAppProgressDisplaySettings(user);
           const progressRenderer = createProgressRenderer(progressSettings);
           const progressStrategy = getProgressTransportStrategy(progressSettings);
           progressTransport =
@@ -653,7 +661,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         return;
       }
 
-      const currentProgressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
+      const currentProgressSettings = resolveWhatsAppProgressDisplaySettings(existingGroup ?? {});
       if (command === "tool_progress_query") {
         await whatsapp.sendText(groupJid, getToolProgressCurrent(currentProgressSettings), {
           quoted: message.rawMessage as WAMessage,
@@ -766,7 +774,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppBot, deps: WhatsAppAdapte
         const userMessage = buildSketchContext(sketchContext);
 
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid, message.rawMessage as WAMessage);
-        const progressSettings = resolveProgressDisplaySettings(existingGroup ?? {});
+        const progressSettings = resolveWhatsAppProgressDisplaySettings(existingGroup ?? {});
         const progressRenderer = createProgressRenderer(progressSettings);
         const progressStrategy = getProgressTransportStrategy(progressSettings);
         progressTransport =

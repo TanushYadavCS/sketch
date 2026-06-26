@@ -437,6 +437,9 @@ describe("whatsapp/adapter", () => {
           throw new Error("boom");
         }),
       });
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(
+        makeUser({ tool_progress: "friendly", timezone: "America/New_York" }),
+      );
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
       const handler = getHandler();
@@ -833,13 +836,42 @@ describe("whatsapp/adapter", () => {
       expect(mock.stopComposing).toHaveBeenCalledWith("1234567890@s.whatsapp.net");
     });
 
-    it("wires DM tool progress as a separate unquoted message", async () => {
+    it("does not send DM tool progress by default", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockImplementation(async ({ onProgressEvent }) => {
           await onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "src/index.ts" } });
           return makeAgentResult({ trace: { progressEvents: [], finalText: "hello back" } });
         }),
       });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: { key: { remoteJid: "1234@s.whatsapp.net", id: "m1", fromMe: false } },
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledTimes(1);
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
+    });
+
+    it("wires DM tool progress when explicitly enabled", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async ({ onProgressEvent }) => {
+          await onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "src/index.ts" } });
+          return makeAgentResult({ trace: { progressEvents: [], finalText: "hello back" } });
+        }),
+      });
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(
+        makeUser({ tool_progress: "friendly", timezone: "America/New_York" }),
+      );
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
       const handler = getHandler();
@@ -1530,12 +1562,50 @@ describe("whatsapp/adapter", () => {
       });
     });
 
-    it("wires group tool progress and final reply as separate quoted messages", async () => {
+    it("does not send group tool progress by default", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockImplementation(async ({ onProgressEvent }) => {
           await onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "src/index.ts" } });
           return makeAgentResult({ trace: { progressEvents: [], finalText: "hello back" } });
         }),
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const rawMessage = { key: { remoteJid: "group@g.us", id: "m1", fromMe: false } };
+
+      await handler({
+        type: "group",
+        text: "@bot help",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage,
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(mock.sendText).toHaveBeenCalledTimes(1);
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "hello back", { quoted: rawMessage });
+    });
+
+    it("wires group tool progress when explicitly enabled", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async ({ onProgressEvent }) => {
+          await onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "src/index.ts" } });
+          return makeAgentResult({ trace: { progressEvents: [], finalText: "hello back" } });
+        }),
+      });
+      vi.mocked(deps.repos.whatsappGroups.getByJid).mockResolvedValue({
+        jid: "group@g.us",
+        name: "Test Group",
+        description: null,
+        tool_progress: "friendly",
+        reasoning_text: 0,
+        agent_user_id: null,
+        updated_at: "2025-01-01T00:00:00Z",
       });
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
