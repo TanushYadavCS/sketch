@@ -26,7 +26,7 @@ import type { EntityDomainsRepository } from "../db/repositories/entity-domains"
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
-import type { ProvenanceTier } from "./provenance";
+import { type ProvenanceTier, canUseEntityAsMatchTarget } from "./provenance";
 
 export type Entity = Selectable<EntitiesTable>;
 
@@ -193,6 +193,12 @@ function canAutoLinkNameDedupCandidate(input: ProposeInput, candidate: RankedCan
   return true;
 }
 
+function isEligibleMatchTarget(input: Pick<ProposeInput, "entityType">, entity: Entity): boolean {
+  return (
+    entity.source_type === input.entityType && canUseEntityAsMatchTarget(entity.source_type, entity.provenance_tier)
+  );
+}
+
 /**
  * Prefix match: candidate's tokens start with the same first name AND
  * either match a "first + last-initial" pattern (e.g. proposed "Bob C"
@@ -290,7 +296,8 @@ async function persistEntity(
     return { entity: matched, created: false };
   }
 
-  const entity = await deps.entityRepo.upsertEntity({
+  const createEntity = input.entityType === "product" ? deps.entityRepo.createEntity : deps.entityRepo.upsertEntity;
+  const entity = await createEntity({
     name: input.name,
     sourceType: input.entityType,
     subtype: input.subtype,
@@ -534,7 +541,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   if (input.source && input.sourceId) {
     const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
-    if (found && found.source_type === input.entityType) {
+    if (found && isEligibleMatchTarget(input, found)) {
       await deps.entityRepo.upsertSourceRef({
         entityId: found.id,
         source: input.source,
@@ -585,9 +592,9 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   const nameMatches = deps.lookup.getByNormalizedName(normalized);
   const aliasMatches = deps.lookup.getByAlias?.(normalized) ?? [];
   const exactById = new Map<string, Entity>();
-  for (const e of nameMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
-  for (const e of aliasMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
-  for (const e of deps.lookup.listByType(input.entityType)) {
+  for (const e of nameMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
+  for (const e of aliasMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
+  for (const e of deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity))) {
     if (normalizeMatchName(input.entityType, e.name) === normalized) exactById.set(e.id, e);
     for (const alias of parseAliases(e.aliases)) {
       if (normalizeMatchName(input.entityType, alias) === normalized) exactById.set(e.id, e);
@@ -637,7 +644,9 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     }
   }
 
-  const dedupCandidates = deps.lookup.findNameDedupCandidates?.(input.entityType, input.name) ?? [];
+  const dedupCandidates = (deps.lookup.findNameDedupCandidates?.(input.entityType, input.name) ?? []).filter(
+    (candidate) => isEligibleMatchTarget(input, candidate.entity),
+  );
   if (dedupCandidates.length > 0) {
     let ranked: RankedCandidate[] = dedupCandidates.map((candidate) => ({
       entity: candidate.entity,
@@ -654,11 +663,13 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
-    let ranked = input.precomputedCandidates.map((c) => ({
-      entity: c.entity,
-      score: c.score,
-      reason: c.reason ?? ("llm-ambiguous" as const),
-    }));
+    let ranked = input.precomputedCandidates
+      .filter((candidate) => isEligibleMatchTarget(input, candidate.entity))
+      .map((c) => ({
+        entity: c.entity,
+        score: c.score,
+        reason: c.reason ?? ("llm-ambiguous" as const),
+      }));
     const filtered: RankedCandidate[] = [];
     for (const r of ranked) {
       const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
@@ -675,7 +686,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   // 4) Fuzzy-rank against same-type entities.
-  const candidates = deps.lookup.listByType(input.entityType);
+  const candidates = deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity));
   let ranked = rank(input.entityType, input.name, candidates);
 
   // 5) Drop candidates that have a sticky rejection for this normalized name.

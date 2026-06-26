@@ -21,6 +21,7 @@ import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-f
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
+import { PRODUCT_MATCH_TARGET_PROVENANCE_TIERS } from "../entities/provenance";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
@@ -336,6 +337,12 @@ export async function loadBaselineKnownEntities(
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
+    .where((eb) =>
+      eb.or([
+        eb("source_type", "!=", "product"),
+        eb("provenance_tier", "in", [...PRODUCT_MATCH_TARGET_PROVENANCE_TIERS]),
+      ]),
+    )
     .where(whereLiveEntity())
     .execute();
   const projectEntities = opts.experimentalFlag

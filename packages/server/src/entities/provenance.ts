@@ -1,5 +1,7 @@
 export type ProvenanceTier = "declared" | "human_confirmed" | "structural" | "inferred";
 
+export const PRODUCT_MATCH_TARGET_PROVENANCE_TIERS = new Set<ProvenanceTier>(["declared", "human_confirmed"]);
+
 const PROVENANCE_TIER_PRECEDENCE: Record<ProvenanceTier, number> = {
   inferred: 0,
   structural: 1,
@@ -18,4 +20,12 @@ function toProvenanceTier(value: string | null | undefined): ProvenanceTier {
     return value;
   }
   return "inferred";
+}
+
+export function canUseEntityAsMatchTarget(
+  entityType: string | null | undefined,
+  provenanceTier: string | null | undefined,
+): boolean {
+  if (entityType !== "product") return true;
+  return provenanceTier === "declared" || provenanceTier === "human_confirmed";
 }

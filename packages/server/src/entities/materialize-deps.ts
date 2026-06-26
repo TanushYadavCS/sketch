@@ -20,6 +20,7 @@ import {
   removeFromCandidatePool,
 } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
+import { canUseEntityAsMatchTarget } from "./provenance";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
@@ -78,6 +79,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
   for (const t of supportedTypes) dedupEntriesByType.set(t, []);
   for (const e of entities) {
+    if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
     dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "name", value: e.name });
@@ -106,6 +108,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     .execute();
   const bySourceRef = new Map<string, EntityRow>();
   for (const row of sourceRefs) {
+    if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) continue;
     bySourceRef.set(`${row.source}:${row.source_id}`, row as unknown as EntityRow);
   }
   const domainRows = await db
@@ -171,6 +174,7 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
+  if (!canUseEntityAsMatchTarget(entityType, entity.provenance_tier)) return;
   const typeBucket = index.entitiesByType.get(entityType);
   if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
   const nameKey = normalizeEntityMatchName(entityType, entity.name);
@@ -268,6 +272,7 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
     if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
   }
   registerEntity(index, row);
+  if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) return;
   const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
   const personScopeKeys = scopeKeys.get(row.id);
   if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
