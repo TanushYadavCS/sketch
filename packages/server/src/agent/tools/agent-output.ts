@@ -22,6 +22,11 @@ const itemSchema = z.object({
   actionLabel: z.string().optional(),
   actionPrompt: z.string().optional(),
   sourceUrl: z.string().optional(),
+  /**
+   * Free-form section-specific structured data. The shape is documented per
+   * section in the agent instructions; each definition normalizes it downstream.
+   */
+  structuredPayload: z.record(z.string(), z.unknown()).optional(),
   knowledgeRefs: knowledgeRefsSchema,
 });
 
@@ -74,6 +79,7 @@ function mapItems(payload: WriteAgentOutputPayload): AgentOutputItemInput[] {
       actionLabel: item.actionLabel ?? null,
       actionPrompt: item.actionPrompt ?? null,
       sourceUrl: item.sourceUrl ?? null,
+      structuredPayload: item.structuredPayload ?? null,
       knowledgeRefs: normalizeRefs(item.knowledgeRefs),
       sortOrder: order,
     };

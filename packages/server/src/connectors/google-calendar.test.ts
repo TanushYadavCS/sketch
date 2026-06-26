@@ -251,6 +251,35 @@ describe("Google Calendar connector", () => {
     expect(item?.attendees).toEqual([{ name: "Owner", email: "owner@canvasx.ai" }]);
   });
 
+  it("drops events the owner declined", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("declined", {
+        attendees: [
+          { email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus: "declined" },
+          { email: "jane@example.com", displayName: "Jane Doe", responseStatus: "accepted" },
+        ],
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item).toBeNull();
+  });
+
+  it("keeps events the owner has not declined", () => {
+    for (const responseStatus of ["accepted", "tentative", "needsAction"]) {
+      const item = eventToSyncedItem(
+        calendarEvent(`rsvp-${responseStatus}`, {
+          attendees: [{ email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus }],
+        }),
+        primaryCalendar,
+        "owner@canvasx.ai",
+      );
+
+      expect(item).not.toBeNull();
+    }
+  });
+
   it("syncs readable calendars and stores per-calendar sync tokens", async () => {
     const connector = createGoogleCalendarConnector();
     const requests: URL[] = [];

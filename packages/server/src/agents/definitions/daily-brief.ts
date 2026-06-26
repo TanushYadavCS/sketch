@@ -1,7 +1,11 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { filterAccessibleFileIds } from "../../connectors/search";
-import type { AgentKnowledgeRefs, AgentOutputItemInput } from "../../db/repositories/agent-outputs";
+import type {
+  AgentKnowledgeRefs,
+  AgentOutputItemInput,
+  AgentStructuredPayload,
+} from "../../db/repositories/agent-outputs";
 import { whereLiveEntity } from "../../db/repositories/entities";
 import type { DB } from "../../db/schema";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
@@ -17,12 +21,16 @@ export const DAILY_BRIEF_HOT_FALLBACK_LIMIT = 10;
 const FILE_ACCESS_FILTER_CHUNK_SIZE = 500;
 
 export const DAILY_BRIEF_SECTION_LABELS = {
+  meetings: ["meeting"],
   todos: ["todo", "in_progress", "blocked", "waiting", "done"],
   customer_updates: ["owed_follow_up", "warm", "inbound", "stuck", "cold", "at_risk"],
   active_projects: ["active", "at_risk", "blocked", "needs_attention"],
 } as const satisfies Record<string, readonly string[]>;
 
+export const DAILY_BRIEF_MEETINGS_SECTION_KEY = "meetings";
+
 export const DAILY_BRIEF_ACTION_LABELS = {
+  meetings: ["Prep with Sketch"],
   todos: ["Plan with Sketch", "Unblock with Sketch", "Review with Sketch"],
   customer_updates: [
     "Prepare with Sketch",
@@ -95,6 +103,56 @@ export type DailyBriefCandidateContext = {
   hotFallbackEntities: DailyBriefCandidateEntity[];
 };
 
+export const DAILY_BRIEF_MEETING_ATTENDEE_LIMIT = 12;
+
+const CALENDAR_SOURCE = "google_calendar";
+const CALENDAR_EVENT_FILE_TYPE = "calendar_event";
+
+export type TodaysMeetingAttendee = {
+  name: string;
+  email: string | null;
+  entityId: string | null;
+};
+
+/**
+ * Server-built canonical record of one meeting on the user's calendar today.
+ * The list is the source of truth: the model enriches each meeting (roles,
+ * context, prep prompt) but never invents, drops, or reorders them.
+ */
+export type TodaysMeeting = {
+  fileId: string;
+  startTime: string;
+  title: string;
+  via: string | null;
+  sourceUrl: string | null;
+  attendees: TodaysMeetingAttendee[];
+};
+
+/** Enrichment the model attaches to a meeting; identity stays server-owned. */
+type MeetingAttendeeEnrichment = {
+  entityId?: string;
+  name?: string;
+  role?: string;
+  note?: string;
+  emphasis?: boolean;
+};
+
+/** Per-attendee shape persisted in the meeting item's structured payload. */
+export type MeetingPayloadAttendee = {
+  name: string;
+  entityId: string | null;
+  role: string | null;
+  note: string | null;
+  emphasis: boolean;
+};
+
+/** Structured payload persisted for a meetings-section item. */
+export type MeetingStructuredPayload = {
+  startTime: string;
+  via: string | null;
+  attendees: MeetingPayloadAttendee[];
+};
+
 type CandidateAccumulator = {
   id: string;
   name: string;
@@ -158,6 +216,127 @@ function outputDateWindowEndMs(outputDate: string, timezone: string): number {
   const ms = parsed.getTime();
   if (!Number.isFinite(ms)) throw new Error(`Invalid Daily Brief output date: ${outputDate}`);
   return ms;
+}
+
+function outputDateWindowStartMs(outputDate: string, timezone: string): number {
+  const parsed = parseOnceSchedule(`${outputDate}T00:00:00.000`, timezone);
+  const ms = parsed.getTime();
+  if (!Number.isFinite(ms)) throw new Error(`Invalid Daily Brief output date: ${outputDate}`);
+  return ms;
+}
+
+function normalizeEmail(value: string | null | undefined): string | null {
+  const trimmed = value?.trim().toLowerCase();
+  return trimmed ? trimmed : null;
+}
+
+function meetingViaFromSourcePath(sourcePath: string | null): string | null {
+  if (!sourcePath) return null;
+  const slash = sourcePath.indexOf(" / ");
+  const calendar = slash >= 0 ? sourcePath.slice(slash + 3).trim() : sourcePath.trim();
+  return calendar ? calendar : null;
+}
+
+/**
+ * Deterministic skeleton for the meetings section: every non-archived calendar
+ * event whose start lands on `outputDate` in the user's timezone, with attendees
+ * resolved to person entities. This is the canonical list the model enriches;
+ * declined and cancelled events are already excluded at sync time so they never
+ * reach the graph. RBAC mirrors {@link buildDailyBriefCandidateContext}.
+ */
+export async function buildTodaysMeetings({
+  db,
+  outputDate,
+  timezone,
+  adminCanReadAllFiles,
+  contentUserEmails,
+  user,
+}: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
+  const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
+  const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
+  const candidateUserEmails = user.auth_role === "admin" && adminCanReadAllFiles ? undefined : contentUserEmails;
+
+  const files = await db
+    .selectFrom("indexed_files")
+    .select(["id", "file_name", "source_created_at", "provider_url", "source_path"])
+    .where("source", "=", CALENDAR_SOURCE)
+    .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
+    .where("is_archived", "=", 0)
+    .where("source_created_at", ">=", dayStart)
+    .where("source_created_at", "<=", dayEnd)
+    .execute();
+  if (files.length === 0) return [];
+
+  const visibleFileIds = await filterVisibleCandidateFileIds(
+    db,
+    files.map((file) => file.id),
+    candidateUserEmails,
+  );
+  const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
+  if (visibleFiles.length === 0) return [];
+
+  const fileIds = visibleFiles.map((file) => file.id);
+  const attendeeFacts = await db
+    .selectFrom("indexed_file_facts")
+    .select(["indexed_file_id", "subject_name", "subject_email"])
+    .where("fact_type", "=", "attendee")
+    .where("deleted_at", "is", null)
+    .where("indexed_file_id", "in", fileIds)
+    .execute();
+
+  const emailToEntity = await resolveAttendeeEntities(
+    db,
+    attendeeFacts.map((fact) => fact.subject_email),
+  );
+
+  const attendeesByFile = new Map<string, TodaysMeetingAttendee[]>();
+  for (const fact of attendeeFacts) {
+    if (!fact.indexed_file_id) continue;
+    const email = normalizeEmail(fact.subject_email);
+    const name = fact.subject_name?.trim() || email;
+    if (!name) continue;
+    const list = attendeesByFile.get(fact.indexed_file_id) ?? [];
+    const dedupeKey = email ?? name.toLowerCase();
+    if (list.some((existing) => (existing.email ?? existing.name.toLowerCase()) === dedupeKey)) continue;
+    if (list.length >= DAILY_BRIEF_MEETING_ATTENDEE_LIMIT) continue;
+    list.push({ name, email, entityId: (email && emailToEntity.get(email)) || null });
+    attendeesByFile.set(fact.indexed_file_id, list);
+  }
+
+  return visibleFiles
+    .map((file) => ({
+      fileId: file.id,
+      startTime: file.source_created_at as string,
+      title: file.file_name?.trim() || "Untitled event",
+      via: meetingViaFromSourcePath(file.source_path),
+      sourceUrl: file.provider_url,
+      attendees: attendeesByFile.get(file.id) ?? [],
+    }))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.title.localeCompare(b.title));
+}
+
+async function resolveAttendeeEntities(db: Kysely<DB>, emails: Array<string | null>): Promise<Map<string, string>> {
+  const normalized = [...new Set(emails.map(normalizeEmail).filter((email): email is string => email !== null))];
+  const map = new Map<string, string>();
+  if (normalized.length === 0) return map;
+
+  const rows = await db
+    .selectFrom("entity_contact_points")
+    .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+    .select(["entity_contact_points.value as email", "entities.id as entity_id", "entities.name as entity_name"])
+    .where("entity_contact_points.kind", "=", "email")
+    .where(sql<boolean>`lower(entity_contact_points.value) in (${sql.join(normalized)})`)
+    .where("entities.source_type", "=", "person")
+    .where("entities.status", "!=", "archived")
+    .where(whereLiveEntity())
+    .orderBy("entities.name", "asc")
+    .execute();
+
+  for (const row of rows) {
+    const email = normalizeEmail(row.email);
+    if (email && !map.has(email)) map.set(email, row.entity_id);
+  }
+  return map;
 }
 
 export async function buildDailyBriefCandidateContext({
@@ -268,12 +447,14 @@ function normalizeStoredLabel(sectionKey: string, value: string | null): string 
     | readonly string[]
     | undefined;
   if (labels?.includes(value ?? "")) return value as string;
+  if (sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY) return "meeting";
   if (sectionKey === "customer_updates") return "warm";
   if (sectionKey === "active_projects") return "active";
   return "todo";
 }
 
 function defaultActionLabel(sectionKey: string, label: string | null): string {
+  if (sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY) return "Prep with Sketch";
   const normalizedLabel = normalizeStoredLabel(sectionKey, label);
   if (sectionKey === "active_projects") return "Catch me up";
   if (sectionKey === "customer_updates") {
@@ -366,6 +547,7 @@ function normalizeActionLabel(item: AgentOutputItemInput): string {
 }
 
 const SECTION_GUIDE: Record<string, string> = {
+  meetings: "meetings: today's calendar events. The list is provided; you only enrich it (see Meetings below).",
   todos: "todos: concrete follow-ups, blockers, unanswered asks, or decisions that appear actionable.",
   customer_updates: "customer_updates: customer/company/account changes, risks, asks, demos, or decisions.",
   active_projects: "active_projects: internal project/workstream/product movement and next steps.",
@@ -390,11 +572,21 @@ const DAILY_BRIEF_INSTRUCTIONS = [
   "- Emit items only for the section keys listed in the runtime context `sections` field. Emit no items for any other section.",
   "",
   "Sections:",
+  `- ${SECTION_GUIDE.meetings}`,
   `- ${SECTION_GUIDE.todos}`,
   `- ${SECTION_GUIDE.customer_updates}`,
   `- ${SECTION_GUIDE.active_projects}`,
   "",
+  "Meetings (deterministic — enrich only, never invent):",
+  "- The runtime context includes `todaysMeetings`: the exact list of the reader's meetings today, built from their calendar. It is the source of truth.",
+  "- If meetings is in the enabled `sections`, emit exactly one item per entry in `todaysMeetings`. Do not add, drop, merge, or reorder meetings, and do not invent any not in the list.",
+  "- For each meeting item: sectionKey 'meetings', title = the meeting's title, label 'meeting', and set knowledgeRefs.fileIds to exactly that meeting's `fileId`.",
+  "- Put your enrichment in `structuredPayload`: { context: one-line situational read of why this meeting matters today; attendees: [{ entityId (copy from the meeting's attendee when present), name, role: one-line role, note: one line on why they matter today, emphasis: true for the single key person }] }. Only enrich attendees listed on the meeting; never add attendees.",
+  "- summary = the same one-line context. actionPrompt = a Sketch chat prompt that preps the reader for this meeting (pull context on the attendees/topic, give talking points and questions).",
+  "- The per-section item cap does NOT apply to meetings; always emit one item per meeting. Identity (time, title, attendee identity) is fixed by the server, so focus your effort on the roles, notes, context, and prep prompt.",
+  "",
   "Labels (per sectionKey):",
+  "- meetings.label must be: meeting.",
   "- todos.label must be one of: todo, in_progress, blocked, waiting, done.",
   "- customer_updates.label must be one of: owed_follow_up, warm, inbound, stuck, cold, at_risk.",
   "- active_projects.label must be one of: active, at_risk, blocked, needs_attention.",
@@ -402,13 +594,13 @@ const DAILY_BRIEF_INSTRUCTIONS = [
   "",
   "Sketch chat actions:",
   "- Every action must start a Sketch chat only. Do not use external-agent language such as Ask Claude, Review PR, send email, or run automation.",
+  "- meetings.actionLabel must be Prep with Sketch.",
   "- todos.actionLabel must be Plan with Sketch for todo, in_progress, and waiting; Unblock with Sketch for blocked; Review with Sketch only for done items that are still worth showing.",
   "- customer_updates.actionLabel must be one of: Prepare with Sketch, Draft follow-up, Plan next step, Catch me up, Unblock with Sketch, Review risk, Plan re-engagement.",
   "- active_projects.actionLabel must always be Catch me up.",
   "- actionPrompt must be a complete instruction to Sketch chat with enough context to discuss, prepare, draft, plan, catch up, or unblock. It must not claim Sketch will perform an external side effect without user review.",
   "",
   "Rules:",
-  "- Do not create a meetings or calendar section.",
   "- Output a complete new brief snapshot, not patches.",
   "- Return at most the per-section item cap given in the runtime context `maxItemsPerSection` field.",
   "- The runtime context includes `dailyBriefCandidateContext`. Start from `recentEntities` there; then consider `hotFallbackEntities` as a safety net for important entities just outside the recent window.",
@@ -430,6 +622,139 @@ const DAILY_BRIEF_INSTRUCTIONS = [
 
 function buildInstructions(): string {
   return DAILY_BRIEF_INSTRUCTIONS;
+}
+
+function parseTodaysMeetings(value: unknown): TodaysMeeting[] {
+  if (!Array.isArray(value)) return [];
+  const meetings: TodaysMeeting[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const m = raw as Record<string, unknown>;
+    if (typeof m.fileId !== "string" || typeof m.startTime !== "string" || typeof m.title !== "string") continue;
+    const attendees = Array.isArray(m.attendees)
+      ? m.attendees.flatMap((entry): TodaysMeetingAttendee[] => {
+          if (!entry || typeof entry !== "object") return [];
+          const a = entry as Record<string, unknown>;
+          if (typeof a.name !== "string") return [];
+          return [
+            {
+              name: a.name,
+              email: typeof a.email === "string" ? a.email : null,
+              entityId: typeof a.entityId === "string" ? a.entityId : null,
+            },
+          ];
+        })
+      : [];
+    meetings.push({
+      fileId: m.fileId,
+      startTime: m.startTime,
+      title: m.title,
+      via: typeof m.via === "string" ? m.via : null,
+      sourceUrl: typeof m.sourceUrl === "string" ? m.sourceUrl : null,
+      attendees,
+    });
+  }
+  return meetings;
+}
+
+function parseMeetingEnrichment(payload: AgentStructuredPayload | null | undefined): {
+  context: string | null;
+  attendees: MeetingAttendeeEnrichment[];
+} {
+  const context = typeof payload?.context === "string" ? payload.context : null;
+  const attendees: MeetingAttendeeEnrichment[] = [];
+  const rawAttendees = payload?.attendees;
+  if (Array.isArray(rawAttendees)) {
+    for (const entry of rawAttendees) {
+      if (!entry || typeof entry !== "object") continue;
+      const a = entry as Record<string, unknown>;
+      attendees.push({
+        entityId: typeof a.entityId === "string" ? a.entityId : undefined,
+        name: typeof a.name === "string" ? a.name : undefined,
+        role: typeof a.role === "string" ? a.role : undefined,
+        note: typeof a.note === "string" ? a.note : undefined,
+        emphasis: typeof a.emphasis === "boolean" ? a.emphasis : undefined,
+      });
+    }
+  }
+  return { context, attendees };
+}
+
+function meetingFallbackSummary(meeting: TodaysMeeting): string {
+  const count = meeting.attendees.length;
+  if (count === 0) return "On your calendar today.";
+  return `${count} ${count === 1 ? "attendee" : "attendees"}.`;
+}
+
+function defaultMeetingPrompt(meeting: TodaysMeeting): string {
+  const names = meeting.attendees
+    .map((attendee) => attendee.name)
+    .slice(0, 5)
+    .join(", ");
+  const withWhom = names ? ` with ${names}` : "";
+  return `Prep me for my meeting "${meeting.title}"${withWhom}. Pull recent context on the attendees and the topic from our org knowledge, summarise what it is likely about, then give me three talking points and two questions to ask.`;
+}
+
+/**
+ * Reconciles the model's meetings items against the deterministic skeleton: the
+ * skeleton is the source of truth for which meetings exist and their identity
+ * (time, title, attendee identity); the model only supplies enrichment. Invented
+ * meetings are dropped, skipped meetings are backfilled skeleton-only, and the
+ * output is ordered by start time. When the skeleton is empty (no calendar or no
+ * meetings today) every meetings item is dropped.
+ */
+function reconcileMeetingItems(items: AgentOutputItemInput[], meetings: TodaysMeeting[]): AgentOutputItemInput[] {
+  const others = items.filter((item) => item.sectionKey !== DAILY_BRIEF_MEETINGS_SECTION_KEY);
+  if (meetings.length === 0) return others;
+
+  const meetingItems = items.filter((item) => item.sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY);
+  const skeletonIds = new Set(meetings.map((meeting) => meeting.fileId));
+  const enrichmentByFile = new Map<string, AgentOutputItemInput>();
+  for (const item of meetingItems) {
+    const fileId = item.knowledgeRefs.fileIds.find((id) => skeletonIds.has(id));
+    if (fileId && !enrichmentByFile.has(fileId)) enrichmentByFile.set(fileId, item);
+  }
+
+  const reconciled: AgentOutputItemInput[] = meetings.map((meeting, index) => {
+    const source = enrichmentByFile.get(meeting.fileId);
+    const enrichment = parseMeetingEnrichment(source?.structuredPayload);
+    const attendees: MeetingPayloadAttendee[] = meeting.attendees.map((attendee) => {
+      const match = enrichment.attendees.find(
+        (candidate) =>
+          (candidate.entityId && attendee.entityId && candidate.entityId === attendee.entityId) ||
+          (candidate.name && candidate.name.trim().toLowerCase() === attendee.name.trim().toLowerCase()),
+      );
+      return {
+        name: attendee.name,
+        entityId: attendee.entityId,
+        role: match?.role?.trim() || null,
+        note: match?.note?.trim() || null,
+        emphasis: match?.emphasis ?? false,
+      };
+    });
+    const entityIds = [...new Set(attendees.map((a) => a.entityId).filter((id): id is string => id !== null))];
+    const structuredPayload: MeetingStructuredPayload = {
+      startTime: meeting.startTime,
+      via: meeting.via,
+      attendees,
+    };
+    return {
+      sectionKey: DAILY_BRIEF_MEETINGS_SECTION_KEY,
+      title: meeting.title,
+      summary: enrichment.context?.trim() || source?.summary?.trim() || meetingFallbackSummary(meeting),
+      priority: "medium",
+      label: "meeting",
+      actionType: "meeting",
+      actionLabel: "Prep with Sketch",
+      actionPrompt: source?.actionPrompt?.trim() || defaultMeetingPrompt(meeting),
+      sourceUrl: meeting.sourceUrl,
+      structuredPayload: structuredPayload as AgentStructuredPayload,
+      knowledgeRefs: { entityIds, fileIds: [meeting.fileId] },
+      sortOrder: index,
+    };
+  });
+
+  return [...reconciled, ...others];
 }
 
 async function enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]> {
@@ -471,6 +796,7 @@ function toApiItem(item: AgentStoredItem): AgentApiItem {
     actionLabel: normalizeStoredActionLabel(item.section_key, item.label, item.action_label),
     actionPrompt: item.action_prompt,
     sourceUrl: item.source_url,
+    structuredPayload: item.structuredPayload,
     knowledgeRefs: item.knowledgeRefs,
     sortOrder: item.sort_order,
   };
@@ -491,6 +817,12 @@ export const dailyBriefDefinition: AgentDefinition = {
     maxItemsPerSection: 4,
   },
   sections: [
+    {
+      key: DAILY_BRIEF_MEETINGS_SECTION_KEY,
+      title: "Today's meetings",
+      enabledByDefault: true,
+      labels: DAILY_BRIEF_SECTION_LABELS.meetings,
+    },
     { key: "todos", title: "To-dos", enabledByDefault: true, labels: DAILY_BRIEF_SECTION_LABELS.todos },
     {
       key: "customer_updates",
@@ -509,9 +841,18 @@ export const dailyBriefDefinition: AgentDefinition = {
   itemsPerSectionRange: { min: 1, max: 10 },
   requiresKnowledgeRefs: true,
   buildInstructions,
-  buildRuntimeContext: async (params) => ({
-    dailyBriefCandidateContext: await buildDailyBriefCandidateContext(params),
-  }),
+  buildRuntimeContext: async (params) => {
+    const [dailyBriefCandidateContext, todaysMeetings] = await Promise.all([
+      buildDailyBriefCandidateContext(params),
+      buildTodaysMeetings(params),
+    ]);
+    return { dailyBriefCandidateContext, todaysMeetings };
+  },
+  reconcileItems: async ({ items, runtimeContext }) => {
+    const sections = Array.isArray(runtimeContext.sections) ? (runtimeContext.sections as string[]) : [];
+    if (!sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)) return items;
+    return reconcileMeetingItems(items, parseTodaysMeetings(runtimeContext.todaysMeetings));
+  },
   enrichItems,
   toApiItem,
 };

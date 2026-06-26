@@ -1,11 +1,15 @@
 import type { Kysely, Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentOutputItemInput } from "../../db/repositories/agent-outputs";
 import type { DB, UsersTable } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
 import {
   DAILY_BRIEF_ENTITY_WINDOW_DAYS,
   DAILY_BRIEF_EVIDENCE_WINDOW_DAYS,
+  DAILY_BRIEF_MEETINGS_SECTION_KEY,
+  type TodaysMeeting,
   buildDailyBriefCandidateContext,
+  buildTodaysMeetings,
   dailyBriefDefinition,
 } from "./daily-brief";
 
@@ -330,5 +334,259 @@ describe("buildDailyBriefCandidateContext", () => {
     expect(context.evidenceSince).toBe("2026-05-16T18:29:59.999Z");
     expect(context.recentEntities.map((entity) => entity.id)).toEqual(["entity-historical"]);
     expect(context.hotFallbackEntities).toEqual([]);
+  });
+});
+
+async function seedCalendarEvent(
+  db: Kysely<DB>,
+  params: {
+    id: string;
+    startTime: string;
+    title?: string;
+    sourcePath?: string | null;
+    providerUrl?: string | null;
+    archived?: boolean;
+    restrictedTo?: string;
+  },
+): Promise<void> {
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: params.id,
+      connector_config_id: "config-1",
+      provider_file_id: `cal-${params.id}`,
+      file_name: params.title ?? params.id,
+      file_type: "calendar_event",
+      content_category: "document",
+      source: "google_calendar",
+      source_path: params.sourcePath ?? "Google Calendar / Work",
+      provider_url: params.providerUrl ?? `https://calendar.google.com/${params.id}`,
+      content: "calendar event",
+      is_archived: params.archived ? 1 : 0,
+      source_updated_at: params.startTime,
+      source_created_at: params.startTime,
+      synced_at: NOW.toISOString(),
+      embedding_status: "pending",
+    })
+    .execute();
+
+  if (params.restrictedTo) {
+    await db.insertInto("file_access").values({ indexed_file_id: params.id, email: params.restrictedTo }).execute();
+  }
+}
+
+async function seedAttendeeFact(
+  db: Kysely<DB>,
+  params: { id: string; fileId: string; name: string; email?: string | null },
+): Promise<void> {
+  await db
+    .insertInto("indexed_file_facts")
+    .values({
+      id: params.id,
+      indexed_file_id: params.fileId,
+      source: "google_calendar",
+      fact_type: "attendee",
+      relation: "attendee",
+      subject_name: params.name,
+      subject_email: params.email ?? null,
+      fact_key: `${params.fileId}:${params.email ?? params.name}`,
+    })
+    .execute();
+}
+
+async function seedPerson(db: Kysely<DB>, params: { id: string; name: string; email: string }): Promise<void> {
+  const now = NOW.toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id: params.id,
+      name: params.name,
+      source_type: "person",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+    })
+    .execute();
+  await db
+    .insertInto("entity_contact_points")
+    .values({ id: `cp-${params.id}`, entity_id: params.id, kind: "email", value: params.email, source: "test" })
+    .execute();
+}
+
+const MEETINGS_RUNTIME_PARAMS = {
+  outputDate: "2026-06-25",
+  timezone: "UTC",
+  now: NOW,
+  adminCanReadAllFiles: false,
+  contentUserEmails: ["agent@example.com"],
+};
+
+describe("buildTodaysMeetings", () => {
+  let db: Kysely<DB>;
+  let user: Selectable<UsersTable>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    user = await seedUser(db);
+    await seedConnectorConfig(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("builds today's meetings sorted by start, resolving attendees to person entities", async () => {
+    await seedPerson(db, { id: "person-jane", name: "Jane Doe", email: "jane@example.com" });
+    await seedCalendarEvent(db, { id: "evt-late", startTime: "2026-06-25T14:00:00.000Z", title: "Late sync" });
+    await seedCalendarEvent(db, { id: "evt-early", startTime: "2026-06-25T09:00:00.000Z", title: "Early standup" });
+    await seedAttendeeFact(db, { id: "f1", fileId: "evt-early", name: "Jane Doe", email: "JANE@example.com" });
+    await seedAttendeeFact(db, { id: "f2", fileId: "evt-early", name: "Bob Stone", email: "bob@example.com" });
+
+    const meetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
+
+    expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-early", "evt-late"]);
+    expect(meetings[0]).toMatchObject({
+      title: "Early standup",
+      startTime: "2026-06-25T09:00:00.000Z",
+      via: "Work",
+      sourceUrl: "https://calendar.google.com/evt-early",
+    });
+    expect(meetings[0].attendees).toEqual([
+      { name: "Jane Doe", email: "jane@example.com", entityId: "person-jane" },
+      { name: "Bob Stone", email: "bob@example.com", entityId: null },
+    ]);
+    expect(meetings[1].attendees).toEqual([]);
+  });
+
+  it("excludes archived events, events outside the day, and files the reader cannot see", async () => {
+    await seedCalendarEvent(db, { id: "evt-today", startTime: "2026-06-25T10:00:00.000Z" });
+    await seedCalendarEvent(db, { id: "evt-archived", startTime: "2026-06-25T11:00:00.000Z", archived: true });
+    await seedCalendarEvent(db, { id: "evt-tomorrow", startTime: "2026-06-26T10:00:00.000Z" });
+    await seedCalendarEvent(db, {
+      id: "evt-restricted",
+      startTime: "2026-06-25T12:00:00.000Z",
+      restrictedTo: "someone-else@example.com",
+    });
+
+    const meetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
+
+    expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-today"]);
+  });
+});
+
+describe("dailyBriefDefinition.reconcileItems", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  const skeleton: TodaysMeeting[] = [
+    {
+      fileId: "evt-1",
+      startTime: "2026-06-25T09:00:00.000Z",
+      title: "Standup",
+      via: "Work",
+      sourceUrl: "https://calendar.google.com/evt-1",
+      attendees: [{ name: "Jane Doe", email: "jane@example.com", entityId: "person-jane" }],
+    },
+    {
+      fileId: "evt-2",
+      startTime: "2026-06-25T14:00:00.000Z",
+      title: "Customer call",
+      via: null,
+      sourceUrl: null,
+      attendees: [],
+    },
+  ];
+
+  function meetingItem(fileId: string, payload: AgentOutputItemInput["structuredPayload"]): AgentOutputItemInput {
+    return {
+      sectionKey: DAILY_BRIEF_MEETINGS_SECTION_KEY,
+      title: "Model title",
+      summary: "model summary",
+      priority: "medium",
+      label: "meeting",
+      structuredPayload: payload,
+      knowledgeRefs: { entityIds: [], fileIds: [fileId] },
+      sortOrder: 0,
+    };
+  }
+
+  it("uses the skeleton as truth: enriches matches, backfills skipped, drops invented meetings", async () => {
+    const items: AgentOutputItemInput[] = [
+      meetingItem("evt-1", {
+        context: "Kickoff for the new sprint.",
+        attendees: [{ entityId: "person-jane", role: "EM", note: "Owns delivery", emphasis: true }],
+      }),
+      meetingItem("ghost", { context: "Invented meeting." }),
+      {
+        sectionKey: "todos",
+        title: "Ship the thing",
+        summary: "do it",
+        priority: "high",
+        label: "todo",
+        knowledgeRefs: { entityIds: [], fileIds: [] },
+        sortOrder: 0,
+      },
+    ];
+
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items,
+        runtimeContext: { sections: ["meetings", "todos"], todaysMeetings: skeleton },
+      })) ?? [];
+
+    const meetings = result.filter((item) => item.sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY);
+    expect(meetings.map((item) => item.title)).toEqual(["Standup", "Customer call"]);
+    expect(meetings.map((item) => item.knowledgeRefs.fileIds)).toEqual([["evt-1"], ["evt-2"]]);
+
+    expect(meetings[0].summary).toBe("Kickoff for the new sprint.");
+    expect(meetings[0].sourceUrl).toBe("https://calendar.google.com/evt-1");
+    expect(meetings[0].structuredPayload).toMatchObject({
+      startTime: "2026-06-25T09:00:00.000Z",
+      via: "Work",
+      attendees: [{ name: "Jane Doe", entityId: "person-jane", role: "EM", note: "Owns delivery", emphasis: true }],
+    });
+    expect(meetings[0].knowledgeRefs.entityIds).toEqual(["person-jane"]);
+
+    expect(meetings[1].structuredPayload).toMatchObject({ startTime: "2026-06-25T14:00:00.000Z", attendees: [] });
+    expect(meetings[1].summary).toBe("On your calendar today.");
+
+    expect(result.some((item) => item.knowledgeRefs.fileIds.includes("ghost"))).toBe(false);
+    expect(result.some((item) => item.sectionKey === "todos")).toBe(true);
+  });
+
+  it("drops all meeting items when the skeleton is empty", async () => {
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [meetingItem("evt-1", null)],
+        runtimeContext: { sections: ["meetings"], todaysMeetings: [] },
+      })) ?? [];
+
+    expect(result).toEqual([]);
+  });
+
+  it("leaves items untouched when the meetings section is disabled", async () => {
+    const items = [meetingItem("evt-1", null)];
+    const result = await dailyBriefDefinition.reconcileItems?.({
+      db,
+      items,
+      runtimeContext: { sections: ["todos"], todaysMeetings: skeleton },
+    });
+
+    expect(result).toBe(items);
   });
 });

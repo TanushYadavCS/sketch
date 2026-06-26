@@ -598,12 +598,21 @@ function recurringCandidateIsBetter(
   return candidateStart > currentStart;
 }
 
+/**
+ * The calendar owner's own RSVP, when the event carries a `self` attendee.
+ * Used to skip events the owner declined, mirroring the cancelled-event guard.
+ */
+function ownerResponseStatus(event: GoogleCalendarEvent): string | null {
+  return event.attendees?.find((attendee) => attendee.self)?.responseStatus ?? null;
+}
+
 export function eventToSyncedItem(
   event: GoogleCalendarEvent,
   calendar: GoogleCalendarListEntry,
   ownerEmail: string | null | undefined,
 ): SyncedItem | null {
   if (!event.id || event.status === "cancelled") return null;
+  if (ownerResponseStatus(event) === "declined") return null;
 
   const content = eventContent(event, calendar);
   const calendlyPeople = calendlyDescriptionPeople(event);
