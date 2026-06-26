@@ -118,6 +118,12 @@ function assertFreshUpdate(result: { numUpdatedRows?: bigint | number }, fileId:
   if (noRowsUpdated(result)) throw new StaleEnrichmentError(fileId);
 }
 
+function minWordsForSmartEnrichment(fileType: string | null, threadContext: string | null): number {
+  if (fileType === "email_message") return threadContext ? 1 : 10;
+  if (fileType === "calendar_event") return 10;
+  return 100;
+}
+
 function contentVersionOf(file: {
   content_hash: string | null;
   content_category: string;
@@ -458,7 +464,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       if (needsSummaryOnly) {
         if (file.content && !isImage && !isStructured && hasGenerator()) {
           const wordCount = file.content.split(/\s+/).filter(Boolean).length;
-          const minWordsForSummary = isEmailMessage ? (threadContext ? 1 : 10) : 100;
+          const minWordsForSummary = minWordsForSmartEnrichment(file.file_type, threadContext);
           if (wordCount >= minWordsForSummary) {
             try {
               const generator = getGenerator();
@@ -737,13 +743,12 @@ async function enrichTextDocument(
   });
 
   // 4. Entity linking — AI-powered when Gemini available, deterministic fallback
-  // Skip LLM calls for tiny documents (<100 words) — not enough content to extract meaningful entities/summaries
+  // Skip LLM calls for tiny content; mail and calendar items use a lower threshold because the payload is often short.
   const wordCount = file.content.split(/\s+/).filter(Boolean).length;
   let usedSmartEnrichment = false;
   let smartEnrichmentFailed = false;
   const summaryAlreadyResolved = file.summary_status === "done" || file.summary_status === "skipped";
-  const isEmailMessage = file.file_type === "email_message";
-  const minWordsForSummary = isEmailMessage ? (threadContext ? 1 : 10) : 100;
+  const minWordsForSummary = minWordsForSmartEnrichment(file.file_type, threadContext);
   const generator =
     deps.generator ??
     (deps.geminiApiKey

@@ -37,6 +37,7 @@ import {
   searchFiles,
 } from "../connectors/search";
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
+import { removeConnectorSourceItems } from "../connectors/sync-reconcile";
 import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
@@ -140,6 +141,61 @@ function syncInBackground(
   runConnectorSync(db, connectorId, logger, config).catch((err) => {
     logger.error({ err, connectorId }, "Background sync failed");
   });
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function googleCalendarIdFromProviderFileId(providerFileId: string): string | null {
+  const separator = providerFileId.indexOf(":");
+  return separator > 0 ? providerFileId.slice(0, separator) : null;
+}
+
+export async function pruneGoogleCalendarFilesOutsideScope(params: {
+  db: Kysely<DB>;
+  connectorConfigId: string;
+  scopeConfig: Record<string, unknown>;
+  logger?: Logger;
+}): Promise<{ itemsDeleted: number; affectedIndexedFileIds: string[] }> {
+  if (!hasOwn(params.scopeConfig, "calendarIds")) return { itemsDeleted: 0, affectedIndexedFileIds: [] };
+
+  const selectedCalendarIds = new Set(stringArray(params.scopeConfig.calendarIds));
+  const rows = await params.db
+    .selectFrom("indexed_files")
+    .select("provider_file_id")
+    .where("connector_config_id", "=", params.connectorConfigId)
+    .where("source", "=", "google_calendar")
+    .where("is_archived", "=", 0)
+    .execute();
+
+  const providerFileIds = rows
+    .filter((row) => {
+      const calendarId = googleCalendarIdFromProviderFileId(row.provider_file_id);
+      return !calendarId || !selectedCalendarIds.has(calendarId);
+    })
+    .map((row) => row.provider_file_id);
+
+  const result = await removeConnectorSourceItems({
+    db: params.db,
+    connectorConfigId: params.connectorConfigId,
+    connectorType: "google_calendar",
+    providerFileIds,
+  });
+
+  if (result.itemsDeleted > 0) {
+    params.logger?.info(
+      { connectorId: params.connectorConfigId, itemsDeleted: result.itemsDeleted },
+      "Pruned Google Calendar files outside selected calendars",
+    );
+  }
+
+  return result;
 }
 
 const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account"] as const;
@@ -1669,6 +1725,15 @@ export function connectorRoutes(
       syncCursor: null,
       errorMessage: null,
     });
+
+    if (config.connector_type === "google_calendar") {
+      await pruneGoogleCalendarFilesOutsideScope({
+        db,
+        connectorConfigId: config.id,
+        scopeConfig: parsed.data.scopeConfig,
+        logger,
+      });
+    }
 
     // Auto-trigger re-sync + enrichment in background
     syncInBackground(db, config.id, logger, appConfig);

@@ -95,6 +95,8 @@ const CRM_ACTIVITY_FILE_TYPES_SQL = sql.join(
   ["crm_task", "crm_call", "crm_event", "crm_meeting", "crm_note"].map((t) => sql`${t}`),
 );
 
+const CONNECTOR_SCOPED_PROVIDER_FILE_ID_SOURCES = new Set<string>(["google_calendar", "teams"]);
+
 /**
  * The Files-list (browse) visibility rule, Gmail-style:
  *  - drop rollup *members* (activities shown under their parent object instead), and
@@ -394,7 +396,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .where("connector_config_id", "=", data.connectorConfigId)
             .where("provider_message_id", "=", data.providerMessageId)
             .executeTakeFirst()
-        : data.source === "teams"
+        : CONNECTOR_SCOPED_PROVIDER_FILE_ID_SOURCES.has(data.source)
           ? await db
               .selectFrom("indexed_files")
               .selectAll()
