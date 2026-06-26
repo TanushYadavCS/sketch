@@ -63,6 +63,7 @@ export async function materializeNonPersonLlmEntity(
       lookup: deps.lookup,
       logger: deps.logger,
       birthGateTypes: deps.birthGateTypes,
+      birthGateLiveTypes: deps.birthGateLiveTypes,
       birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
