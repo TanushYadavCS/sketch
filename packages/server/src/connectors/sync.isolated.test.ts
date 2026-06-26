@@ -1356,6 +1356,62 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     ]);
   });
 
+  it("materializes Google Calendar email-only attendees into graph relationships", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-calendar-graph-test",
+        connector_type: "google_calendar",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "primary:event-graph",
+        providerUrl: null,
+        fileName: "Customer planning",
+        fileType: "calendar_event",
+        contentCategory: "document" as const,
+        content: "Customer planning with Jane Doe from Acme.",
+        sourcePath: "Google Calendar / Work",
+        contentHash: "hash-calendar-graph",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ email: "jane.doe@acme.com" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const result = await runConnectorSync(db, "connector-calendar-graph-test", logger);
+    expect(result.itemsProcessed).toBe(1);
+
+    const entities = await db.selectFrom("entities").select(["name", "source_type"]).orderBy("name").execute();
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        { name: "Acme", source_type: "company" },
+        { name: "Jane Doe", source_type: "person" },
+      ]),
+    );
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as sourceName", "target.name as targetName", "entity_relationships.relationship_type"])
+      .execute();
+
+    expect(relationships).toEqual([{ sourceName: "Jane Doe", targetName: "Acme", relationship_type: "works_at" }]);
+  });
+
   it("writes author facts and materializes authored mentions", async () => {
     db = await createTestDb();
     await db

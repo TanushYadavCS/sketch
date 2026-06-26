@@ -20,11 +20,13 @@ const RETRY_BASE_MS = 1000;
 const CALENDAR_PAGE_SIZE = 250;
 const EVENTS_PAGE_SIZE = 2500;
 const DEFAULT_INITIAL_DAYS = 365;
+const DEFAULT_INITIAL_FUTURE_DAYS = 365;
 const FULL_WIPE_SOURCE_CREATED_BEFORE = "9999-12-31T23:59:59.999Z";
+const CURSOR_VERSION = 2;
 
 const CALENDAR_LIST_FIELDS = "nextPageToken,items(id,summary,primary,accessRole,hidden,deleted,timeZone)";
 const EVENT_LIST_FIELDS =
-  "nextPageToken,nextSyncToken,items(id,status,htmlLink,created,updated,summary,description,location,visibility,iCalUID,start(date,dateTime,timeZone),end(date,dateTime,timeZone),creator(id,email,displayName,self),organizer(id,email,displayName,self),attendees(email,displayName,self,organizer,responseStatus),hangoutLink,conferenceData(entryPoints(entryPointType,uri,label)))";
+  "nextPageToken,nextSyncToken,items(id,status,htmlLink,created,updated,summary,description,location,visibility,iCalUID,recurringEventId,originalStartTime(date,dateTime,timeZone),start(date,dateTime,timeZone),end(date,dateTime,timeZone),creator(id,email,displayName,self),organizer(id,email,displayName,self),attendees(email,displayName,self,organizer,responseStatus),hangoutLink,conferenceData(entryPoints(entryPointType,uri,label)))";
 
 export interface GoogleCalendarListEntry {
   id: string;
@@ -62,6 +64,8 @@ export interface GoogleCalendarEvent {
   location?: string;
   visibility?: string;
   iCalUID?: string;
+  recurringEventId?: string;
+  originalStartTime?: GoogleCalendarEventDate;
   start?: GoogleCalendarEventDate;
   end?: GoogleCalendarEventDate;
   creator?: GoogleCalendarEventPerson;
@@ -85,8 +89,14 @@ interface GoogleCalendarEventsResponse {
 }
 
 interface GoogleCalendarCursor {
+  version: typeof CURSOR_VERSION;
   calendars: Record<string, string>;
   lastSyncedAt?: string;
+}
+
+interface ParsedCursorState {
+  cursor: GoogleCalendarCursor | null;
+  needsFullReset: boolean;
 }
 
 interface CalendarEventCollection {
@@ -196,18 +206,19 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function parseCursor(cursor: string | null): GoogleCalendarCursor | null {
-  if (!cursor) return null;
+function parseCursor(cursor: string | null): ParsedCursorState {
+  if (!cursor) return { cursor: null, needsFullReset: false };
   try {
     const parsed = JSON.parse(cursor) as Partial<GoogleCalendarCursor>;
-    if (!parsed.calendars || typeof parsed.calendars !== "object") return null;
+    if (parsed.version !== CURSOR_VERSION) return { cursor: null, needsFullReset: true };
+    if (!parsed.calendars || typeof parsed.calendars !== "object") return { cursor: null, needsFullReset: true };
     const calendars: Record<string, string> = {};
     for (const [calendarId, syncToken] of Object.entries(parsed.calendars)) {
       if (typeof syncToken === "string" && syncToken) calendars[calendarId] = syncToken;
     }
-    return { calendars, lastSyncedAt: parsed.lastSyncedAt };
+    return { cursor: { version: CURSOR_VERSION, calendars, lastSyncedAt: parsed.lastSyncedAt }, needsFullReset: false };
   } catch {
-    return null;
+    return { cursor: null, needsFullReset: true };
   }
 }
 
@@ -218,6 +229,11 @@ function serializeCursor(cursor: GoogleCalendarCursor): string {
 function initialTimeMin(scopeConfig: Record<string, unknown>): string {
   const days = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, 3650);
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function initialTimeMax(scopeConfig: Record<string, unknown>): string {
+  const days = parsePositiveInt(scopeConfig.initialFutureDays, DEFAULT_INITIAL_FUTURE_DAYS, 3650);
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 function normalizeTimestamp(value: string | null | undefined): string | null {
@@ -245,6 +261,17 @@ function personLabel(person: GoogleCalendarEventPerson | undefined): string | nu
   return name || email;
 }
 
+function displayNameFromEmail(email: string | undefined): string | null {
+  const localPart = email?.split("@")[0]?.trim();
+  if (!localPart) return null;
+  const words = localPart
+    .replace(/[._+-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return null;
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(" ");
+}
+
 function personKey(person: GoogleCalendarEventPerson): string | null {
   return normalizeEmailValue(person.email) ?? person.displayName?.trim().toLowerCase() ?? null;
 }
@@ -258,7 +285,7 @@ function eventPeople(event: GoogleCalendarEvent): EventPerson[] {
     if (!key || seen.has(key)) continue;
     seen.add(key);
     const email = normalizeEmailValue(person.email) ?? undefined;
-    const name = person.displayName?.trim();
+    const name = cleanPersonName(person.displayName) ?? displayNameFromEmail(email) ?? undefined;
     if (name || email) people.push({ ...(name ? { name } : {}), ...(email ? { email } : {}) });
   }
   return people;
@@ -273,15 +300,13 @@ function eventAccessEmails(
   const owner = normalizeEmailValue(ownerEmail);
   if (owner) emails.add(owner);
 
-  if (event.visibility !== "private") {
-    for (const person of [event.organizer, event.creator, ...(event.attendees ?? [])]) {
-      const email = normalizeEmailValue(person?.email);
-      if (email) emails.add(email);
-    }
-    for (const person of extraPeople) {
-      const email = normalizeEmailValue(person.email);
-      if (email) emails.add(email);
-    }
+  for (const person of [event.organizer, event.creator, ...(event.attendees ?? [])]) {
+    const email = normalizeEmailValue(person?.email);
+    if (email) emails.add(email);
+  }
+  for (const person of extraPeople) {
+    const email = normalizeEmailValue(person.email);
+    if (email) emails.add(email);
   }
 
   return emails.size > 0 ? [...emails] : null;
@@ -400,7 +425,7 @@ function mergePeople(people: EventPerson[]): EventPerson[] {
 
   for (const person of people) {
     const email = normalizeEmailValue(person.email) ?? undefined;
-    const name = cleanPersonName(person.name) ?? undefined;
+    const name = cleanPersonName(person.name) ?? displayNameFromEmail(email) ?? undefined;
     if (!email && !name) continue;
 
     if (email && emailIndexes.has(email)) {
@@ -510,7 +535,7 @@ function eventContent(event: GoogleCalendarEvent, calendar: GoogleCalendarListEn
   if (start || end) lines.push(`When: ${[start, end].filter(Boolean).join(" - ")}`);
   if (event.location?.trim()) lines.push(`Location: ${event.location.trim()}`);
   if (organizer) lines.push(`Organizer: ${organizer}`);
-  if (attendeeLabels.length > 0 && event.visibility !== "private") {
+  if (attendeeLabels.length > 0) {
     lines.push(`Attendees: ${attendeeLabels.join(", ")}`);
   }
 
@@ -527,6 +552,41 @@ export function providerFileIdForEvent(calendarId: string, eventId: string): str
   return `${calendarId}:${eventId}`;
 }
 
+function recurringSeriesKey(event: GoogleCalendarEvent): string | null {
+  if (!event.recurringEventId) return null;
+  return event.iCalUID ?? event.recurringEventId;
+}
+
+function providerFileIdForSyncedEvent(calendarId: string, event: GoogleCalendarEvent): string {
+  const seriesKey = recurringSeriesKey(event);
+  return seriesKey ? `${calendarId}:recurring:${seriesKey}` : providerFileIdForEvent(calendarId, event.id);
+}
+
+function eventStartMs(event: GoogleCalendarEvent): number | null {
+  const start = eventDateToIso(event.start) ?? eventDateToIso(event.originalStartTime);
+  if (!start) return null;
+  const parsed = Date.parse(start);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function recurringCandidateIsBetter(
+  candidate: GoogleCalendarEvent,
+  current: GoogleCalendarEvent,
+  nowMs: number,
+): boolean {
+  const candidateStart = eventStartMs(candidate);
+  const currentStart = eventStartMs(current);
+  if (candidateStart === null) return false;
+  if (currentStart === null) return true;
+
+  const candidateFuture = candidateStart >= nowMs;
+  const currentFuture = currentStart >= nowMs;
+  if (candidateFuture && !currentFuture) return true;
+  if (!candidateFuture && currentFuture) return false;
+  if (candidateFuture && currentFuture) return candidateStart < currentStart;
+  return candidateStart > currentStart;
+}
+
 export function eventToSyncedItem(
   event: GoogleCalendarEvent,
   calendar: GoogleCalendarListEntry,
@@ -537,18 +597,19 @@ export function eventToSyncedItem(
   const content = eventContent(event, calendar);
   const calendlyPeople = calendlyDescriptionPeople(event);
   const people = mergePeople([...eventPeople(event), ...calendlyPeople]);
-  const privateEvent = event.visibility === "private";
   const author = event.creator ?? event.organizer;
+  const authorEmail = normalizeEmailValue(author?.email) ?? undefined;
+  const authorName = cleanPersonName(author?.displayName) ?? displayNameFromEmail(authorEmail) ?? undefined;
   const sourceCreatedAt = eventDateToIso(event.start) ?? normalizeTimestamp(event.created);
   const sourceUpdatedAt = normalizeTimestamp(event.updated) ?? sourceCreatedAt;
 
   return {
-    providerFileId: providerFileIdForEvent(calendar.id, event.id),
+    providerFileId: providerFileIdForSyncedEvent(calendar.id, event),
     threadId: event.iCalUID ?? undefined,
     providerUrl: event.htmlLink ?? null,
     fileName: event.summary?.trim() || "Untitled event",
     fileType: "calendar_event",
-    contentCategory: "structured",
+    contentCategory: "document",
     content,
     sourcePath: `Google Calendar / ${calendar.summary?.trim() || "Untitled calendar"}`,
     contentHash: contentHash(content),
@@ -556,9 +617,9 @@ export function eventToSyncedItem(
     sourceUpdatedAt,
     mimeType: "text/calendar",
     accessEmails: eventAccessEmails(event, ownerEmail, calendlyPeople),
-    attendees: !privateEvent && people.length > 0 ? people : undefined,
-    authorEmail: normalizeEmailValue(author?.email) ?? undefined,
-    authorName: author?.displayName?.trim() || undefined,
+    attendees: people.length > 0 ? people : undefined,
+    authorEmail,
+    authorName,
     authorSourceId: author?.id,
   };
 }
@@ -607,10 +668,12 @@ async function collectEventsForCalendar(params: {
   logger: Logger;
 }): Promise<CalendarEventCollection> {
   const items: SyncedItem[] = [];
+  const recurringItems = new Map<string, { event: GoogleCalendarEvent; item: SyncedItem }>();
   const removals: SourceItemRemovalRecord[] = [];
   const seenPageTokens = new Set<string>();
   let pageToken: string | undefined;
   let nextSyncToken: string | null = null;
+  const nowMs = Date.now();
 
   do {
     const requestParams: Record<string, string | undefined> = {
@@ -625,6 +688,7 @@ async function collectEventsForCalendar(params: {
       requestParams.showDeleted = "true";
     } else {
       requestParams.timeMin = initialTimeMin(params.scopeConfig);
+      requestParams.timeMax = initialTimeMax(params.scopeConfig);
       requestParams.showDeleted = "false";
     }
 
@@ -671,7 +735,16 @@ async function collectEventsForCalendar(params: {
       }
 
       const item = eventToSyncedItem(event, params.calendar, params.ownerEmail);
-      if (item) items.push(item);
+      const seriesKey = recurringSeriesKey(event);
+      if (item && seriesKey) {
+        const providerFileId = providerFileIdForSyncedEvent(params.calendar.id, event);
+        const existing = recurringItems.get(providerFileId);
+        if (!existing || recurringCandidateIsBetter(event, existing.event, nowMs)) {
+          recurringItems.set(providerFileId, { event, item });
+        }
+      } else if (item) {
+        items.push(item);
+      }
     }
 
     pageToken = result.nextPageToken;
@@ -687,6 +760,8 @@ async function collectEventsForCalendar(params: {
   if (!nextSyncToken) {
     params.logger.warn({ calendarId: params.calendar.id }, "Google Calendar response did not include nextSyncToken");
   }
+
+  items.push(...[...recurringItems.values()].map(({ item }) => item));
 
   return { items, removals, nextSyncToken: nextSyncToken ?? params.syncToken, expired: false };
 }
@@ -704,7 +779,11 @@ async function collectCalendarSet(params: {
   const selectedCalendarIds = new Set(parseStringArray(params.scopeConfig.calendarIds));
   const items: SyncedItem[] = [];
   const removals: SourceItemRemovalRecord[] = [];
-  const cursor: GoogleCalendarCursor = { calendars: {}, lastSyncedAt: new Date().toISOString() };
+  const cursor: GoogleCalendarCursor = {
+    version: CURSOR_VERSION,
+    calendars: {},
+    lastSyncedAt: new Date().toISOString(),
+  };
 
   for (const calendar of params.calendars) {
     if (hasCalendarSelection && !selectedCalendarIds.has(calendar.id)) continue;
@@ -768,8 +847,8 @@ export function createGoogleCalendarConnector(): Connector {
       let collection = await collectCalendarSet({
         accessToken: valid.access_token,
         calendars,
-        previousCursor: parsedCursor,
-        useSyncTokens: Boolean(parsedCursor),
+        previousCursor: parsedCursor.cursor,
+        useSyncTokens: Boolean(parsedCursor.cursor),
         scopeConfig,
         ownerEmail,
         logger,
@@ -788,6 +867,13 @@ export function createGoogleCalendarConnector(): Connector {
           scopeConfig,
           ownerEmail,
           logger,
+        });
+      }
+
+      if (parsedCursor.needsFullReset && !collection.expired) {
+        await onSourceItemRemoved?.({
+          sourceCreatedBefore: FULL_WIPE_SOURCE_CREATED_BEFORE,
+          reason: "google_calendar_recurring_dedup_upgrade",
         });
       }
 

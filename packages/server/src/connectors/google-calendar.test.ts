@@ -51,7 +51,7 @@ describe("Google Calendar connector", () => {
       providerUrl: "https://calendar.google.com/event?eid=event-1",
       fileName: "Planning review",
       fileType: "calendar_event",
-      contentCategory: "structured",
+      contentCategory: "document",
       sourcePath: "Google Calendar / Work",
       sourceCreatedAt: "2026-02-04T10:00:00.000Z",
       sourceUpdatedAt: "2026-02-02T10:00:00.000Z",
@@ -98,7 +98,29 @@ describe("Google Calendar connector", () => {
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Alice Buyer", email: "alice@example.com" },
       { name: "Bob Guest", email: "bob@example.com" },
-      { email: "carol@example.com" },
+      { name: "Carol", email: "carol@example.com" },
+    ]);
+  });
+
+  it("derives participant and author names when Calendar only returns email addresses", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("email-only", {
+        creator: undefined,
+        organizer: { email: "owner@canvasx.ai" },
+        attendees: [{ email: "jane.doe@example.com" }, { email: "sam+demo@example.com" }],
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item).toMatchObject({
+      authorEmail: "owner@canvasx.ai",
+      authorName: "Owner",
+    });
+    expect(item?.attendees).toEqual([
+      { name: "Owner", email: "owner@canvasx.ai" },
+      { name: "Jane Doe", email: "jane.doe@example.com" },
+      { name: "Sam Demo", email: "sam+demo@example.com" },
     ]);
   });
 
@@ -149,10 +171,9 @@ describe("Google Calendar connector", () => {
     expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
   });
 
-  it("does not extract description contacts from private Calendly events", () => {
+  it("extracts attendees and description contacts from private calendar events", () => {
     const item = eventToSyncedItem(
       calendarEvent("calendly-private", {
-        attendees: [],
         visibility: "private",
         description: [
           "Invitee:",
@@ -167,8 +188,13 @@ describe("Google Calendar connector", () => {
       "owner@canvasx.ai",
     );
 
-    expect(item?.accessEmails).toEqual(["owner@canvasx.ai"]);
-    expect(item?.attendees).toBeUndefined();
+    expect(item?.content).toContain("Attendees: Owner <owner@canvasx.ai>, Jane Doe <jane@example.com>");
+    expect(item?.accessEmails?.sort()).toEqual(["alice@example.com", "jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.attendees).toEqual([
+      { name: "Owner", email: "owner@canvasx.ai" },
+      { name: "Jane Doe", email: "jane@example.com" },
+      { name: "Alice Buyer", email: "alice@example.com" },
+    ]);
   });
 
   it("ignores labeled emails in non-Calendly descriptions", () => {
@@ -200,6 +226,7 @@ describe("Google Calendar connector", () => {
 
       if (url.pathname === "/calendar/v3/calendars/primary/events") {
         expect(url.searchParams.get("timeMin")).toBeTruthy();
+        expect(url.searchParams.get("timeMax")).toBeTruthy();
         expect(url.searchParams.get("syncToken")).toBeNull();
         return jsonResponse({ items: [calendarEvent("event-1")], nextSyncToken: "sync-primary-1" });
       }
@@ -227,8 +254,56 @@ describe("Google Calendar connector", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0].providerFileId).toBe("primary:event-1");
+    expect(cursor.version).toBe(2);
     expect(cursor.calendars).toEqual({ primary: "sync-primary-1" });
     expect(requests.some((url) => url.pathname.includes("busy-only"))).toBe(false);
+  });
+
+  it("collapses expanded recurring event instances into one series item", async () => {
+    const connector = createGoogleCalendarConnector();
+    const pastStart = isoRelativeDays(-7);
+    const nextStart = isoRelativeDays(7);
+    const laterStart = isoRelativeDays(30);
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        expect(url.searchParams.get("timeMin")).toBeTruthy();
+        expect(url.searchParams.get("timeMax")).toBeTruthy();
+        return jsonResponse({
+          items: [
+            calendarEvent("series_1", recurringEvent({ start: pastStart })),
+            calendarEvent("series_3", recurringEvent({ start: laterStart })),
+            calendarEvent("series_2", recurringEvent({ start: nextStart })),
+          ],
+          nextSyncToken: "sync-primary-1",
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      providerFileId: "primary:recurring:series@google.com",
+      threadId: "series@google.com",
+      sourceCreatedAt: nextStart,
+    });
   });
 
   it("browses readable calendars for scope selection", async () => {
@@ -357,7 +432,7 @@ describe("Google Calendar connector", () => {
       connector.sync({
         credentials: validCredentials(),
         scopeConfig: {},
-        cursor: JSON.stringify({ calendars: { primary: "sync-primary-old" } }),
+        cursor: currentCursor({ primary: "sync-primary-old" }),
         logger,
         ownerEmail: "owner@canvasx.ai",
         onSourceItemRemoved: async (record) => {
@@ -414,7 +489,7 @@ describe("Google Calendar connector", () => {
       connector.sync({
         credentials: validCredentials(),
         scopeConfig: {},
-        cursor: JSON.stringify({ calendars: { primary: "sync-primary-old", team: "sync-team-old" } }),
+        cursor: currentCursor({ primary: "sync-primary-old", team: "sync-team-old" }),
         logger,
         ownerEmail: "owner@canvasx.ai",
         onSourceItemRemoved: async (record) => {
@@ -470,7 +545,7 @@ describe("Google Calendar connector", () => {
       connector.sync({
         credentials: validCredentials(),
         scopeConfig: {},
-        cursor: JSON.stringify({ calendars: { primary: "expired-token" } }),
+        cursor: currentCursor({ primary: "expired-token" }),
         logger,
         ownerEmail: "owner@canvasx.ai",
         onSourceItemRemoved: async (record) => {
@@ -484,6 +559,49 @@ describe("Google Calendar connector", () => {
       sourceCreatedBefore: "9999-12-31T23:59:59.999Z",
       reason: "google_calendar_sync_token_expired",
     });
+    expect(items.map((item) => item.providerFileId)).toEqual(["primary:fresh"]);
+  });
+
+  it("full-syncs and wipes old rows when upgrading a legacy recurring cursor", async () => {
+    const connector = createGoogleCalendarConnector();
+    const removals: SourceItemRemovalRecord[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        expect(url.searchParams.get("syncToken")).toBeNull();
+        expect(url.searchParams.get("timeMin")).toBeTruthy();
+        expect(url.searchParams.get("timeMax")).toBeTruthy();
+        return jsonResponse({ items: [calendarEvent("fresh")], nextSyncToken: "fresh-token" });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: JSON.stringify({ calendars: { primary: "legacy-token" } }),
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(removals).toEqual([
+      {
+        sourceCreatedBefore: "9999-12-31T23:59:59.999Z",
+        reason: "google_calendar_recurring_dedup_upgrade",
+      },
+    ]);
     expect(items.map((item) => item.providerFileId)).toEqual(["primary:fresh"]);
   });
 
@@ -530,7 +648,7 @@ describe("Google Calendar connector", () => {
         providerUrl: null,
         fileName: "Owner A event",
         fileType: "calendar_event",
-        contentCategory: "structured",
+        contentCategory: "document",
         content: "Owner A event",
         sourcePath: null,
         contentHash: "hash-a",
@@ -544,7 +662,7 @@ describe("Google Calendar connector", () => {
         providerUrl: null,
         fileName: "Owner B event",
         fileType: "calendar_event",
-        contentCategory: "structured",
+        contentCategory: "document",
         content: "Owner B event",
         sourcePath: null,
         contentHash: "hash-b",
@@ -582,5 +700,24 @@ function validCredentials(): OAuthCredentials {
     client_id: "client",
     client_secret: "secret",
     expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+  };
+}
+
+function currentCursor(calendars: Record<string, string>): string {
+  return JSON.stringify({ version: 2, calendars });
+}
+
+function isoRelativeDays(days: number): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function recurringEvent(overrides: { start: string }): Partial<GoogleCalendarEvent> {
+  const end = new Date(Date.parse(overrides.start) + 30 * 60 * 1000).toISOString();
+  return {
+    iCalUID: "series@google.com",
+    recurringEventId: "series",
+    originalStartTime: { dateTime: overrides.start },
+    start: { dateTime: overrides.start },
+    end: { dateTime: end },
   };
 }

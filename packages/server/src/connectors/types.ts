@@ -108,8 +108,8 @@ export interface SyncedItem {
   assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
-   * Sync seeds person entities from entries where `name` is present; entries
-   * with only `email` are ignored — `accessEmails` already covers ACL.
+   * Sync seeds person entities from entries where `name` is present or can be
+   * derived from `email`; `accessEmails` separately covers ACL.
    */
   attendees?: Array<{ name?: string; email?: string }>;
   authorEmail?: string;
