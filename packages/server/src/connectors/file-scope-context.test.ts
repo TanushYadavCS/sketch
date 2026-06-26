@@ -79,7 +79,14 @@ async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | nu
 
 async function seedEntity(
   db: Kysely<DB>,
-  args: { id: string; name: string; sourceType: string; hotness?: number; metadata?: Record<string, unknown> },
+  args: {
+    id: string;
+    name: string;
+    sourceType: string;
+    hotness?: number;
+    metadata?: Record<string, unknown>;
+    provenanceTier?: string;
+  },
 ): Promise<void> {
   const now = new Date().toISOString();
   await db
@@ -93,6 +100,7 @@ async function seedEntity(
       metadata: args.metadata ? JSON.stringify(args.metadata) : null,
       source_ref_id: null,
       status: "confirmed",
+      provenance_tier: args.provenanceTier ?? "inferred",
       hotness: args.hotness ?? 0,
       created_at: now,
       updated_at: now,
@@ -425,6 +433,39 @@ describe("file-scope-context", () => {
     });
   });
 
+  it("loadBaselineKnownEntities excludes inferred products while preserving declared products and teams", async () => {
+    await seedEntity(db, {
+      id: "baseline-product-inferred",
+      name: "Inferred Product",
+      sourceType: "product",
+      provenanceTier: "inferred",
+    });
+    await seedEntity(db, {
+      id: "baseline-product-declared",
+      name: "Declared Product",
+      sourceType: "product",
+      provenanceTier: "declared",
+    });
+    await seedEntity(db, {
+      id: "baseline-product-confirmed",
+      name: "Confirmed Product",
+      sourceType: "product",
+      provenanceTier: "human_confirmed",
+    });
+    await seedEntity(db, {
+      id: "baseline-team-inferred",
+      name: "Inferred Team",
+      sourceType: "team",
+      provenanceTier: "inferred",
+    });
+
+    const baseline = await loadBaselineKnownEntities(db);
+    const names = baseline.map((entry) => entry.name);
+
+    expect(names).not.toContain("Inferred Product");
+    expect(names).toEqual(expect.arrayContaining(["Declared Product", "Confirmed Product", "Inferred Team"]));
+  });
+
   it("uses person anchors when company anchoring fails and skips ambiguous participant emails", async () => {
     const now = Date.UTC(2026, 4, 26);
     const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
@@ -522,7 +563,13 @@ describe("file-scope-context", () => {
     await seedFile(db, promptFile, recentDate);
     await seedFile(db, coMentionFile, recentDate);
     await seedEntity(db, { id: "ent-parity-company", name: "Parity Co", sourceType: "company", hotness: 10 });
-    await seedEntity(db, { id: "ent-parity-product", name: "Parity Product", sourceType: "product", hotness: 10 });
+    await seedEntity(db, {
+      id: "ent-parity-product",
+      name: "Parity Product",
+      sourceType: "product",
+      hotness: 10,
+      provenanceTier: "declared",
+    });
     await seedDomain(db, { entityId: "ent-parity-company", domain: "parity.example", kind: "corporate" });
     await seedAttendeeFact(db, { fileId: promptFile, name: "Parity Person", email: "person@parity.example" });
     await seedMention(db, { entityId: "ent-parity-company", fileId: coMentionFile });

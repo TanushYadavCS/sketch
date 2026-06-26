@@ -224,6 +224,7 @@ describe("A1 birth gate", () => {
       name: "Canvas Copilot",
       sourceType: "product",
       status: "confirmed",
+      provenanceTier: "declared",
     });
     await upsertLlmMention(db, "file-1", "Canvas Copilot", "product");
 

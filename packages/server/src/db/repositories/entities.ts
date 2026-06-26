@@ -324,6 +324,35 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirstOrThrow();
     },
 
+    async createEntity(data: UpsertEntityData) {
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      await db
+        .insertInto("entities")
+        .values({
+          id,
+          name: data.name,
+          source_type: data.sourceType,
+          subtype: data.subtype ?? null,
+          aliases: data.aliases ? JSON.stringify(data.aliases) : null,
+          metadata: data.metadata ? JSON.stringify(data.metadata) : null,
+          source_ref_id: data.sourceRefId ?? null,
+          status: data.status ?? "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+
+      return await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
+    },
+
     /**
      * Fetch an entity. When `viewer` is omitted the entity is returned without
      * RBAC — internal/server callers use this to operate on entities directly
