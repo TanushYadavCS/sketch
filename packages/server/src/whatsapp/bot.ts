@@ -58,6 +58,13 @@ interface WhatsAppBaseMessage {
   pushName: string;
   rawMessage: proto.IWebMessageInfo;
   mediaType?: string;
+  quotedMessage?: WhatsAppQuotedMessage;
+}
+
+export interface WhatsAppQuotedMessage {
+  providerMessageId: string;
+  participantJid: string | null;
+  text: string;
 }
 
 export interface WhatsAppDmMessage extends WhatsAppBaseMessage {
@@ -533,6 +540,7 @@ export class WhatsAppBot {
     }
 
     if (this.handler) {
+      const quotedMessage = extractQuotedMessage(msg.message ? extractContextInfo(msg.message) : undefined);
       this.lastMessageAt = Date.now();
       await this.handler({
         type: "dm",
@@ -543,6 +551,7 @@ export class WhatsAppBot {
         pushName: msg.pushName ?? "Unknown",
         rawMessage: msg,
         mediaType: hasMedia ? (messageType ?? undefined) : undefined,
+        ...(quotedMessage ? { quotedMessage } : {}),
       });
     }
   }
@@ -572,6 +581,7 @@ export class WhatsAppBot {
       : jidToPhoneNumber(senderJid);
 
     if (this.handler) {
+      const quotedMessage = extractQuotedMessage(contextInfo);
       this.lastMessageAt = Date.now();
       await this.handler({
         type: "group",
@@ -584,6 +594,7 @@ export class WhatsAppBot {
         isMentioned,
         senderJid,
         senderPhone,
+        ...(quotedMessage ? { quotedMessage } : {}),
       });
     }
   }
@@ -740,13 +751,15 @@ export class WhatsAppBot {
 // --- Pure utility functions (exported for testing) ---
 
 export function extractText(msg: proto.IWebMessageInfo): string | null {
-  if (!msg.message) return null;
+  return msg.message ? extractTextFromMessage(msg.message) : null;
+}
 
-  if (msg.message.conversation) return msg.message.conversation;
-  if (msg.message.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
-  if (msg.message.imageMessage?.caption) return msg.message.imageMessage.caption;
-  if (msg.message.videoMessage?.caption) return msg.message.videoMessage.caption;
-  if (msg.message.documentMessage?.caption) return msg.message.documentMessage.caption;
+export function extractTextFromMessage(message: proto.IMessage): string | null {
+  if (message.conversation) return message.conversation;
+  if (message.extendedTextMessage?.text) return message.extendedTextMessage.text;
+  if (message.imageMessage?.caption) return message.imageMessage.caption;
+  if (message.videoMessage?.caption) return message.videoMessage.caption;
+  if (message.documentMessage?.caption) return message.documentMessage.caption;
 
   return null;
 }
@@ -776,6 +789,18 @@ export function extractContextInfo(message: proto.IMessage): proto.IContextInfo 
     message.stickerMessage?.contextInfo ??
     undefined
   );
+}
+
+export function extractQuotedMessage(contextInfo: proto.IContextInfo | undefined): WhatsAppQuotedMessage | undefined {
+  const providerMessageId = contextInfo?.stanzaId;
+  if (!providerMessageId) return undefined;
+
+  const quotedMessage = contextInfo?.quotedMessage;
+  return {
+    providerMessageId,
+    participantJid: contextInfo?.participant ?? null,
+    text: quotedMessage ? (extractTextFromMessage(quotedMessage) ?? "") : "",
+  };
 }
 
 /**

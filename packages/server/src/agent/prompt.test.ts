@@ -869,6 +869,63 @@ describe("buildSketchContext", () => {
       expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/photo.jpg"]);
     });
 
+    it("renders quoted WhatsApp message context separately from missed backlog", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "please create this ticket",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        quotedMessage: {
+          id: 42,
+          providerMessageId: "wa-parent-1",
+          senderName: "Bob",
+          senderJid: "111@s.whatsapp.net",
+          text: "Checkout keeps failing for paid members",
+          attachments: [],
+          providerTimestamp: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:01.000Z",
+        },
+      });
+
+      expect(result).toContain("<quoted_message>");
+      expect(result).toContain("The current message is a WhatsApp reply to this quoted message.");
+      expect(result).toContain("sender: Bob");
+      expect(result).not.toContain("111@s.whatsapp.net");
+      expect(result).not.toContain("messageId=42");
+      expect(result).not.toContain("providerMessageId: wa-parent-1");
+      expect(result).toContain("text: Checkout keeps failing for paid members");
+    });
+
+    it("collects image paths from quoted WhatsApp message attachments", () => {
+      const sketchContext = {
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "please create a ticket for this",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        quotedMessage: {
+          providerMessageId: "wa-parent-1",
+          senderName: "Bob",
+          text: "",
+          attachments: [
+            {
+              originalName: "screenshot.jpg",
+              mimeType: "image/jpeg",
+              localPath: "/ws/attachments/screenshot.jpg",
+              sizeBytes: 120,
+            },
+          ],
+        },
+      };
+
+      const result = buildSketchContext(sketchContext);
+
+      expect(result).toContain("text: See attached files.");
+      expect(result).toContain('path="/ws/attachments/screenshot.jpg"');
+      expect(getImageAttachmentPathsFromSketchContext(sketchContext)).toEqual(["/ws/attachments/screenshot.jpg"]);
+    });
+
     it("tells the agent how to continue when backlog is truncated", () => {
       const result = buildSketchContext({
         messages: [],

@@ -81,6 +81,50 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(botSide.row.id).not.toBe(first.row.id);
     });
 
+    it("finds the latest message by provider message id within a conversation", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "group@g.us",
+      });
+      const otherConversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "other-group@g.us",
+      });
+      await repo.insertMessage({
+        conversationId: otherConversation.id,
+        providerMessageId: "MSG-1",
+        senderJid: "222@s.whatsapp.net",
+        senderName: "Other",
+        text: "wrong conversation",
+      });
+      const first = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "MSG-1",
+        senderJid: "111@s.whatsapp.net",
+        senderName: "Alice",
+        text: "human side",
+      });
+      const botSide = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "MSG-1",
+        senderJid: "bot",
+        senderName: "Sketch",
+        text: "bot side",
+        isBot: true,
+      });
+
+      const found = await repo.findMessageByProviderMessageId(conversation.id, "MSG-1");
+      const missing = await repo.findMessageByProviderMessageId(conversation.id, "missing");
+
+      expect(found?.id).toBe(botSide.row.id);
+      expect(found?.text).toBe("bot side");
+      expect(found?.id).not.toBe(first.row.id);
+      expect(missing).toBeUndefined();
+    });
+
     it("returns backlog by durable row bounds and excludes bot messages by default", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({
