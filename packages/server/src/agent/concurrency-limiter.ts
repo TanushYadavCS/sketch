@@ -12,13 +12,17 @@ interface Waiter {
   resolve: (waitMs: number) => void;
 }
 
+interface ActiveRunContext {
+  active: boolean;
+}
+
 export class AgentRunLimiter {
   private active = 0;
   private readonly waiting: Waiter[] = [];
   private readonly limit: number;
   private readonly logger: Pick<Logger, "info">;
   private readonly now: () => number;
-  private readonly activeRunContext = new AsyncLocalStorage<boolean>();
+  private readonly activeRunContext = new AsyncLocalStorage<ActiveRunContext>();
 
   constructor(options: AgentRunLimiterOptions) {
     this.limit = options.limit;
@@ -27,12 +31,13 @@ export class AgentRunLimiter {
   }
 
   async run<T>(work: () => Promise<T>): Promise<T> {
-    if (this.activeRunContext.getStore()) {
+    if (this.activeRunContext.getStore()?.active) {
       return this.runReentrant(work);
     }
 
     const waitMs = await this.acquire();
     const startedAt = this.now();
+    const runContext: ActiveRunContext = { active: true };
 
     this.logger.info(
       {
@@ -46,8 +51,9 @@ export class AgentRunLimiter {
     );
 
     try {
-      return await this.activeRunContext.run(true, work);
+      return await this.activeRunContext.run(runContext, work);
     } finally {
+      runContext.active = false;
       const durationMs = this.now() - startedAt;
       this.release();
       this.logger.info(

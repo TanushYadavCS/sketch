@@ -134,6 +134,41 @@ describe("AgentRunLimiter", () => {
     expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
   });
 
+  it("does not keep reentrant context active for timers after the parent run finishes", async () => {
+    const { logger } = captureLogger();
+    const limiter = createAgentRunLimiter({ limit: 1, logger });
+    const releaseBlocker = deferred<void>();
+    const timerDone = deferred<void>();
+    const started: string[] = [];
+
+    await limiter.run(async () => {
+      setTimeout(() => {
+        limiter
+          .run(async () => {
+            started.push("timer");
+          })
+          .then(timerDone.resolve, timerDone.reject);
+      }, 0);
+    });
+
+    const blocker = limiter.run(async () => {
+      started.push("blocker");
+      await releaseBlocker.promise;
+    });
+
+    await vi.waitFor(() => expect(started).toEqual(["blocker"]));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started).toEqual(["blocker"]);
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 1, waiting: 1 });
+
+    releaseBlocker.resolve();
+
+    await blocker;
+    await timerDone.promise;
+    expect(started).toEqual(["blocker", "timer"]);
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
+  });
+
   it("logs limiter wait, start, and finish fields", async () => {
     const { logger, entries } = captureLogger();
     const limiter = createAgentRunLimiter({ limit: 1, logger });
