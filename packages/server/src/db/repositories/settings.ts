@@ -6,6 +6,11 @@ import type { DB } from "../schema";
 export interface OrgContext {
   description?: string;
   industry?: string;
+  /**
+   * Dynamic extraction calibration is deliberately excluded from the prompt
+   * version/fact key, so edits affect only future extraction runs.
+   */
+  disambiguationGuidance?: string;
 }
 
 export function parseOrgContext(raw: string | null | undefined): OrgContext | null {
@@ -19,10 +24,24 @@ export function parseOrgContext(raw: string | null | undefined): OrgContext | nu
     if (typeof parsed.industry === "string" && parsed.industry.trim().length > 0) {
       result.industry = parsed.industry.trim();
     }
-    return result.description || result.industry ? result : null;
+    if (typeof parsed.disambiguationGuidance === "string" && parsed.disambiguationGuidance.trim().length > 0) {
+      result.disambiguationGuidance = parsed.disambiguationGuidance.trim();
+    }
+    return result.description || result.industry || result.disambiguationGuidance ? result : null;
   } catch {
     return null;
   }
+}
+
+export function serializeOrgContext(context: OrgContext): string | null {
+  const next: Record<string, string> = {};
+  const description = context.description?.trim() ?? "";
+  const industry = context.industry?.trim() ?? "";
+  const disambiguationGuidance = context.disambiguationGuidance?.trim() ?? "";
+  if (description.length > 0) next.description = description;
+  if (industry.length > 0) next.industry = industry;
+  if (disambiguationGuidance.length > 0) next.disambiguationGuidance = disambiguationGuidance;
+  return Object.keys(next).length > 0 ? JSON.stringify(next) : null;
 }
 
 const SENSITIVE_FIELDS = new Set<string>([

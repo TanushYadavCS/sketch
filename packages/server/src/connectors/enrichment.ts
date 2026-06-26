@@ -18,6 +18,7 @@ import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
+import { parseOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
@@ -377,7 +378,7 @@ export interface EnrichmentDeps {
   /** If set, only enrich these specific file IDs (ignoring pending status). */
   fileIds?: string[];
   /** Org context for enrichment prompts. Populated at start of enrichment run. */
-  orgContext?: { orgName?: string; description?: string; industry?: string } | null;
+  orgContext?: { orgName?: string; description?: string; industry?: string; disambiguationGuidance?: string } | null;
   /**
    * Org-wide baseline of confirmed entities used as a
    * fallback when a file has no resolvable anchors. The per-file scoped list
@@ -443,11 +444,12 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       .where("id", "=", "default")
       .executeTakeFirst();
     if (settings?.org_context) {
-      const parsed = JSON.parse(settings.org_context) as Record<string, string>;
+      const parsed = parseOrgContext(settings.org_context);
       deps.orgContext = {
         orgName: settings.org_name ?? undefined,
-        description: parsed.description,
-        industry: parsed.industry,
+        description: parsed?.description,
+        industry: parsed?.industry,
+        disambiguationGuidance: parsed?.disambiguationGuidance,
       };
     }
   } catch {

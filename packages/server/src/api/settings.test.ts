@@ -255,32 +255,48 @@ describe("Settings API — security", () => {
   });
 
   describe("PUT /api/settings/identity — org context", () => {
-    it("round-trips orgContext.description and survives a malformed stored blob", async () => {
+    it("round-trips disambiguation guidance and handles empty or malformed org context", async () => {
       const app = createApp(db, config, { logger });
       const adminCookie = await loginAdmin(app);
 
-      // Roundtrip: PUT then GET returns the saved value.
       const putRes = await app.request("/api/settings/identity", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: adminCookie },
         body: JSON.stringify({
           orgName: "Canvas Labs",
-          orgContext: { description: "AI services company. Sketch is one of our products." },
+          orgContext: {
+            description: "AI services company. Sketch is one of our products.",
+            disambiguationGuidance: "A dataset or a UI tab is not a product.",
+          },
         }),
       });
       expect(putRes.status).toBe(200);
       const putBody = (await putRes.json()) as {
         orgName: string;
-        orgContext: { description?: string } | null;
+        orgContext: { description?: string; disambiguationGuidance?: string } | null;
       };
       expect(putBody.orgName).toBe("Canvas Labs");
       expect(putBody.orgContext?.description).toBe("AI services company. Sketch is one of our products.");
+      expect(putBody.orgContext?.disambiguationGuidance).toBe("A dataset or a UI tab is not a product.");
 
       const getRes = await app.request("/api/settings/identity", { headers: { Cookie: adminCookie } });
-      const getBody = (await getRes.json()) as { orgContext: { description?: string } | null };
+      const getBody = (await getRes.json()) as {
+        orgContext: { description?: string; disambiguationGuidance?: string } | null;
+      };
       expect(getBody.orgContext?.description).toBe("AI services company. Sketch is one of our products.");
+      expect(getBody.orgContext?.disambiguationGuidance).toBe("A dataset or a UI tab is not a product.");
 
-      // Resilience: bad JSON in the column returns orgContext: null, not 500.
+      const emptyRes = await app.request("/api/settings/identity", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({
+          orgContext: { description: " ", disambiguationGuidance: " " },
+        }),
+      });
+      expect(emptyRes.status).toBe(200);
+      const emptyBody = (await emptyRes.json()) as { orgContext: unknown };
+      expect(emptyBody.orgContext).toBeNull();
+
       await db.updateTable("settings").set({ org_context: "{not valid json" }).where("id", "=", "default").execute();
       const afterCorruption = await app.request("/api/settings/identity", { headers: { Cookie: adminCookie } });
       expect(afterCorruption.status).toBe(200);
