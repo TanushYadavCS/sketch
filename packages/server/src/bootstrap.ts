@@ -140,6 +140,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const priceMap = new OpenRouterPriceMap({ ttlMs: config.OPENROUTER_PRICE_TTL_HOURS * 60 * 60 * 1000, logger });
   const pricing = createPricingService(priceMap, logger);
   const agentRunLimiter = createAgentRunLimiter({ limit: config.MAX_CONCURRENT_AGENT_RUNS, logger });
+  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => agentRunLimiter.run(work);
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -183,7 +184,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
           }
         : {}),
     };
-    return agentRunLimiter.run(() =>
+    return limitAgentExecution(() =>
       instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
     );
   };
@@ -328,6 +329,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
     recordWorkflowStep,
+    limitAgentExecution,
   });
   await scheduler.start();
 
@@ -432,6 +434,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     localDeviceGateway,
     localClaudeSessionService,
     agentRunService,
+    limitAgentExecution,
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
   localDeviceGateway.attach(server);

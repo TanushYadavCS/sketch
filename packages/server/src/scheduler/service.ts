@@ -60,6 +60,7 @@ export interface TaskSchedulerDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: Parameters<typeof runAgent>[0]["sendDm"];
   recordWorkflowStep?: RecordWorkflowStep;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export class TaskScheduler {
@@ -198,6 +199,7 @@ export class TaskScheduler {
       sendDm: this.deps.sendDm,
       sendMessage: sendMessage ?? undefined,
       recordWorkflowStep: this.deps.recordWorkflowStep,
+      limitAgentExecution: this.deps.limitAgentExecution,
     });
 
     const now = new Date().toISOString();
@@ -479,6 +481,7 @@ export class TaskScheduler {
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
       recordWorkflowStep: this.deps.recordWorkflowStep,
+      limitAgentExecution: this.deps.limitAgentExecution,
       stepId,
       input: options.input,
       useLatestUpstreamOutput: options.useLatestUpstreamOutput,
