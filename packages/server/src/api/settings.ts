@@ -118,9 +118,18 @@ export function settingsRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
+    const current = await settings.get();
     const updates: Parameters<typeof settings.update>[0] = {};
     if (parsed.data.geminiApiKey !== undefined) updates.geminiApiKey = parsed.data.geminiApiKey;
     if (parsed.data.embeddingProvider !== undefined) updates.embeddingProvider = parsed.data.embeddingProvider;
+    if (
+      parsed.data.embeddingProvider === undefined &&
+      parsed.data.geminiApiKey != null &&
+      parsed.data.geminiApiKey.length > 0 &&
+      current?.embedding_provider == null
+    ) {
+      updates.embeddingProvider = "gemini";
+    }
     if (parsed.data.enrichmentEnabled !== undefined) updates.enrichmentEnabled = parsed.data.enrichmentEnabled ? 1 : 0;
     if (parsed.data.syncIntervalMinutes !== undefined) updates.syncIntervalMinutes = parsed.data.syncIntervalMinutes;
 

@@ -126,6 +126,7 @@ describe("Settings API — security", () => {
 
       const stored = await createSettingsRepository(db).get();
       expect(stored?.gemini_api_key).toBe("AIza-super-secret-key-12345");
+      expect(stored?.embedding_provider).toBe("gemini");
     });
 
     it("round-trips embedding provider selection", async () => {
@@ -147,6 +148,24 @@ describe("Settings API — security", () => {
 
       const stored = await createSettingsRepository(db).get();
       expect(stored?.embedding_provider).toBe("gemini");
+    });
+
+    it("does not overwrite an explicit embedding provider when saving a Gemini key", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ embeddingProvider: "openrouter" });
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const res = await app.request("/api/settings/search", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ geminiApiKey: "AIza-super-secret-key-12345" }),
+      });
+
+      expect(res.status).toBe(200);
+      const stored = await settings.get();
+      expect(stored?.gemini_api_key).toBe("AIza-super-secret-key-12345");
+      expect(stored?.embedding_provider).toBe("openrouter");
     });
   });
 

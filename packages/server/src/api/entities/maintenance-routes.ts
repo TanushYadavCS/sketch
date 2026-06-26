@@ -377,6 +377,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           geminiMaxRpm: config.GEMINI_MAX_RPM,
           geminiMaxRetries: config.GEMINI_MAX_RETRIES,
           openRouterApiKey: config.OPENROUTER_API_KEY,
+          settingsEncryptionKey: config.ENCRYPTION_KEY,
           onPhase: (phase) => {
             job.phase = phase;
           },

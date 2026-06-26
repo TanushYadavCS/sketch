@@ -8,6 +8,7 @@ import {
   resolveOpenRouterEnrichmentConfig,
 } from "../connectors/enrichment-providers";
 import { type IndexedFileFactType, PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import type { MaterializeProgress } from "./materialize";
 import {
@@ -73,6 +74,7 @@ export interface ReenrichDeps {
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
   openRouterApiKey?: string | null;
+  settingsEncryptionKey?: string;
   /**
    * Set when the caller already promoted a pending recreate lock (two-step
    * rebuild flow). Skips the internal beginRecreateLock/endRecreateLock so
@@ -488,11 +490,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     deps.onPhase?.("wiping");
     deps.onProgress?.({ phase: "wipe", completed: 0, total: 1 });
-    const settings = await deps.db
-      .selectFrom("settings")
-      .select(["gemini_api_key", "embedding_provider", "llm_provider", "anthropic_api_key", "model_id"])
-      .where("id", "=", "default")
-      .executeTakeFirst();
+    const settings = await createSettingsRepository(deps.db, deps.settingsEncryptionKey).get();
     const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings ?? null, deps.openRouterApiKey);
     const embeddingProvider = createEnrichmentEmbeddingProvider({
       geminiApiKey: settings?.gemini_api_key,
