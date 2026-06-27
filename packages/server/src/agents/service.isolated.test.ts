@@ -43,6 +43,7 @@ function createWritingService(
   tasks: Array<() => Promise<void>>,
   item: AgentOutputItemInput,
   outputDelivery?: AgentOutputDeliveryPublisher,
+  afterWrite?: () => Promise<void>,
 ): AgentRunService {
   const runAgent = vi.fn(async (params) => {
     if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
@@ -53,6 +54,7 @@ function createWritingService(
       rawPayload: {},
       items: [item],
     });
+    await afterWrite?.();
     return {
       messageSent: true,
       sessionId: "agent-session",
@@ -683,6 +685,58 @@ describe("AgentRunService", () => {
       expect.objectContaining({
         delivery: expect.objectContaining({ targetId: "C_DAILY" }),
         output: expect.objectContaining({ id: row.id, outputDate: OUTPUT_DATE }),
+      }),
+    );
+  });
+
+  it("uses the latest delivery config after a scheduled run completes", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    await seedEntity(db, { id: "entity-delivery-latest", name: "Delivery Latest Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-delivery-latest"], fileIds: [] } }),
+      outputDelivery,
+      async () => {
+        await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+          delivery: {
+            enabled: true,
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C_NEW",
+            label: "#new",
+          },
+        });
+      },
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_OLD",
+        label: "#old",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ targetId: "C_NEW" }),
       }),
     );
   });
