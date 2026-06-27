@@ -312,7 +312,8 @@ export async function buildTodaysMeetings({
   if (visibleFiles.length === 0) return [];
 
   const readerConnectorIds = await readerOwnedCalendarConnectorIds(db, user.id);
-  const dedupedFiles = dedupeCalendarCopies(visibleFiles, readerConnectorIds);
+  const dedupedFiles = readerOwnedMeetingCopies(visibleFiles, readerConnectorIds);
+  if (dedupedFiles.length === 0) return [];
 
   const fileIds = dedupedFiles.map((file) => file.id);
   const attendeeFacts = await db
@@ -372,25 +373,26 @@ async function readerOwnedCalendarConnectorIds(db: Kysely<DB>, userId: string): 
 }
 
 /**
- * Collapses duplicate calendar copies of the same event. When several attendees
- * in an org connect their calendars, one real invite is indexed once per
- * connector (one row per attendee's copy) and the reader can see more than one.
- * Copies are keyed by `thread_id` (the event's iCalUID); the reader-owned copy
- * wins, then the lowest id, so the result is stable regardless of query order.
+ * Reduces calendar copies to one row per event, keeping only copies synced from
+ * the reader's own calendar connector.
+ *
+ * When several attendees connect their calendars, one real invite is indexed
+ * once per connector and calendar ACLs make every copy visible to all
+ * attendees. Requiring a reader-owned copy is what keeps the section scoped to
+ * the reader's own calendar: it both collapses the duplicates and honours the
+ * owner-declined filter, since a declined event's reader-owned copy is archived
+ * and only coworker copies would remain (those must not resurface the meeting).
+ *
+ * Deduped by `thread_id` (the event's iCalUID); the lowest id wins when the
+ * reader holds multiple copies, so the result is stable regardless of query order.
  */
-function dedupeCalendarCopies<T extends CalendarCopyFile>(files: T[], readerConnectorIds: Set<string>): T[] {
+function readerOwnedMeetingCopies<T extends CalendarCopyFile>(files: T[], readerConnectorIds: Set<string>): T[] {
   const ordered = [...files].sort((a, b) => a.id.localeCompare(b.id));
   const byIdentity = new Map<string, T>();
   for (const file of ordered) {
+    if (!readerConnectorIds.has(file.connector_config_id)) continue;
     const key = file.thread_id ?? `file:${file.id}`;
-    const existing = byIdentity.get(key);
-    if (!existing) {
-      byIdentity.set(key, file);
-      continue;
-    }
-    const existingOwned = readerConnectorIds.has(existing.connector_config_id);
-    const candidateOwned = readerConnectorIds.has(file.connector_config_id);
-    if (candidateOwned && !existingOwned) byIdentity.set(key, file);
+    if (!byIdentity.has(key)) byIdentity.set(key, file);
   }
   return [...byIdentity.values()];
 }

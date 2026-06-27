@@ -355,7 +355,7 @@ async function seedCalendarEvent(
     .insertInto("indexed_files")
     .values({
       id: params.id,
-      connector_config_id: params.connectorConfigId ?? "config-1",
+      connector_config_id: params.connectorConfigId ?? "cal-reader",
       provider_file_id: `cal-${params.id}`,
       thread_id: params.threadId ?? null,
       file_name: params.title ?? params.id,
@@ -452,6 +452,7 @@ describe("buildTodaysMeetings", () => {
     db = await createTestDb();
     user = await seedUser(db);
     await seedConnectorConfig(db);
+    await seedCalendarConnector(db, { id: "cal-reader", createdBy: "user-1" });
   });
 
   afterEach(async () => {
@@ -512,9 +513,8 @@ describe("buildTodaysMeetings", () => {
     expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-today"]);
   });
 
-  it("collapses duplicate calendar copies of one event, preferring the reader-owned copy", async () => {
+  it("collapses duplicate calendar copies of one event, keeping the reader-owned copy", async () => {
     await seedUser(db, { id: "coworker", email: "coworker@example.com" });
-    await seedCalendarConnector(db, { id: "cal-reader", createdBy: "user-1" });
     await seedCalendarConnector(db, { id: "cal-coworker", createdBy: "coworker" });
 
     await seedCalendarEvent(db, {
@@ -540,11 +540,31 @@ describe("buildTodaysMeetings", () => {
     expect(meetings[0].fileId).toBe("evt-reader-copy");
   });
 
+  it("drops a meeting visible only through a coworker's calendar copy (declined / not on my calendar)", async () => {
+    await seedUser(db, { id: "coworker", email: "coworker@example.com" });
+    await seedCalendarConnector(db, { id: "cal-coworker", createdBy: "coworker" });
+
+    await seedCalendarEvent(db, {
+      id: "evt-declined-coworker-copy",
+      startTime: "2026-06-25T09:00:00.000Z",
+      title: "Invite the reader declined",
+      threadId: "declined-invite@google.com",
+      connectorConfigId: "cal-coworker",
+      restrictedTo: "agent@example.com",
+    });
+
+    const meetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
+
+    expect(meetings).toEqual([]);
+  });
+
   it("scopes an admin's meetings to their own calendar even with the read-all bypass", async () => {
     const admin = await seedUser(db, { id: "admin-1", email: "admin@example.com", authRole: "admin" });
+    await seedCalendarConnector(db, { id: "cal-admin", createdBy: "admin-1" });
     await seedCalendarEvent(db, {
       id: "evt-mine",
       startTime: "2026-06-25T09:00:00.000Z",
+      connectorConfigId: "cal-admin",
       restrictedTo: "admin@example.com",
     });
     await seedCalendarEvent(db, {
