@@ -18,6 +18,7 @@ import type { Config } from "../config";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
 import {
   fetchCanvasCredential,
+  isCanvasOAuthConnector,
   loadCanvasProvider,
   resolveConnectorCredentials,
 } from "../connectors/credential-source";
@@ -266,13 +267,17 @@ const updateScopeSchema = z.object({
 
 const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
   google_drive: "google-drive-oauth",
+  google_calendar: "google-calendar-oauth",
+  gmail: "google-gmail-oauth",
+  outlook: "microsoft-outlook-oauth",
+  teams: "microsoft-teams-oauth",
   fireflies: "fireflies",
   clickup: "clickup-api-key",
   notion: "notion",
   linear: "linear",
 };
 
-const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>(["google_drive", "clickup", "notion"]);
+const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "clickup", "notion"]);
 
 export function connectorRoutes(
   connectorRepo: ConnectorRepo,
@@ -554,18 +559,17 @@ export function connectorRoutes(
     }
 
     const needsScope = SCOPE_REQUIRED_CONNECTORS.has(connectorType) && !parsed.data.scopeConfig;
-    const storedCredentials: ConnectorCredentials =
-      connectorType === "google_drive"
-        ? {
-            type: "oauth",
-            access_token: "",
-            refresh_token: "",
-            token_type: "Bearer",
-            expires_at: new Date(0).toISOString(),
-            client_id: "canvas",
-            client_secret: "canvas",
-          }
-        : validationCredentials;
+    const storedCredentials: ConnectorCredentials = isCanvasOAuthConnector(connectorType)
+      ? {
+          type: "oauth",
+          access_token: "",
+          refresh_token: "",
+          token_type: "Bearer",
+          expires_at: new Date(0).toISOString(),
+          client_id: "canvas",
+          client_secret: "canvas",
+        }
+      : validationCredentials;
 
     const credentialHint =
       validationCredentials.type === "api_key" && validationCredentials.api_key
@@ -574,7 +578,7 @@ export function connectorRoutes(
 
     const config = await connectorRepo.createConfig({
       connectorType,
-      authType: connectorType === "google_drive" ? "oauth" : "api_key",
+      authType: isCanvasOAuthConnector(connectorType) ? "oauth" : "api_key",
       credentials: serializeCredentials(storedCredentials),
       credentialSource: "canvas",
       scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,

@@ -11,8 +11,16 @@
  * Other integrations connect immediately after credential validation.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { ScopeCount, ScopeGroup, ScopeItem, ScopeList, ScopeSelectAll, ScopeSubItem } from "@/components/scope-picker";
-import { api } from "@/lib/api";
+import {
+  GenericScopePicker,
+  ScopeCount,
+  ScopeGroup,
+  ScopeItem,
+  ScopeList,
+  ScopeSelectAll,
+  ScopeSubItem,
+} from "@/components/scope-picker";
+import { type BrowseResult, api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
@@ -81,9 +89,9 @@ export function ConnectIntegrationDialog({
   const [region, setRegion] = useState<string>("com");
 
   // OAuth state
-  const [step, setStep] = useState<"credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "oauth-config">(
-    "credentials",
-  );
+  const [step, setStep] = useState<
+    "credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "generic-scope" | "oauth-config"
+  >("credentials");
   const [sharedDrives, setSharedDrives] = useState<SharedDrive[]>([]);
   const [selectedDriveIds, setSelectedDriveIds] = useState<Set<string>>(new Set());
   const [rootFolders, setRootFolders] = useState<SharedDrive[]>([]);
@@ -102,12 +110,18 @@ export function ConnectIntegrationDialog({
   const [notionScanDone, setNotionScanDone] = useState(false);
   const [managedConnectorId, setManagedConnectorId] = useState<string | null>(null);
   const [canvasPopupOpened, setCanvasPopupOpened] = useState(false);
+  const [genericBrowseData, setGenericBrowseData] = useState<BrowseResult | null>(null);
+  const [selectedGenericIds, setSelectedGenericIds] = useState<Set<string>>(new Set());
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
   const isZoho = integration?.type === "zoho_crm";
   const isMicrosoft = integration?.type === "outlook" || integration?.type === "teams";
   const canvasSupported =
     integration?.type === "google_drive" ||
+    integration?.type === "google_calendar" ||
+    integration?.type === "gmail" ||
+    integration?.type === "outlook" ||
+    integration?.type === "teams" ||
     integration?.type === "fireflies" ||
     integration?.type === "clickup" ||
     integration?.type === "notion" ||
@@ -318,6 +332,22 @@ export function ConnectIntegrationDialog({
     },
   });
 
+  const connectWithGenericScopeMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration || !managedConnectorId) throw new Error("No managed connector selected");
+      const key = integration.scopeConfigKey ?? "items";
+      return api.integrations.updateScope(managedConnectorId, { [key]: Array.from(selectedGenericIds) });
+    },
+    onSuccess: () => {
+      toast.success(`${integration?.name} connected successfully.`);
+      resetAndClose();
+      onConnected();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to connect.");
+    },
+  });
+
   /** Google Drive step 2: connect with selected drives or folders. */
   const connectWithDrivesMutation = useMutation({
     mutationFn: async () => {
@@ -372,6 +402,8 @@ export function ConnectIntegrationDialog({
     setNotionScanDone(false);
     setManagedConnectorId(null);
     setCanvasPopupOpened(false);
+    setGenericBrowseData(null);
+    setSelectedGenericIds(new Set());
     onOpenChange(false);
   };
 
@@ -427,6 +459,16 @@ export function ConnectIntegrationDialog({
         setNotionScanDone(true);
         setStep("notion-pages");
         return;
+      }
+
+      if (integration.scopeType === "flat") {
+        const result = await api.integrations.browseExisting(connector.id);
+        if (result.type === "flat") {
+          setGenericBrowseData(result);
+          setSelectedGenericIds(new Set(result.items.map((item) => item.id)));
+          setStep("generic-scope");
+          return;
+        }
       }
 
       toast.success(`${integration.name} connected successfully.`);
@@ -494,6 +536,7 @@ export function ConnectIntegrationDialog({
     connectWithDrivesMutation.isPending ||
     connectWithNotionPagesMutation.isPending ||
     connectWithClickUpMutation.isPending ||
+    connectWithGenericScopeMutation.isPending ||
     canvasConnectMutation.isPending ||
     canvasImportMutation.isPending ||
     configureOAuthMutation.isPending;
@@ -867,6 +910,55 @@ export function ConnectIntegrationDialog({
                   </>
                 ) : (
                   "Connect"
+                )}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : step === "generic-scope" && genericBrowseData ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Select {integration.scopeItemNoun ?? integration.scopeLabel}
+              </DialogTitle>
+              <DialogDescription>Choose what to sync. You can change this later.</DialogDescription>
+            </DialogHeader>
+
+            <GenericScopePicker
+              data={genericBrowseData}
+              selectedIds={selectedGenericIds}
+              onToggle={(id) => {
+                setSelectedGenericIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                });
+              }}
+              disabled={connectWithGenericScopeMutation.isPending}
+              noun={integration.scopeItemNoun ?? "items"}
+            />
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setStep("credentials")}
+                disabled={connectWithGenericScopeMutation.isPending}
+              >
+                <ArrowLeftIcon size={14} />
+                Back
+              </Button>
+              <Button
+                onClick={() => connectWithGenericScopeMutation.mutate()}
+                disabled={connectWithGenericScopeMutation.isPending || selectedGenericIds.size === 0}
+              >
+                {connectWithGenericScopeMutation.isPending ? (
+                  <>
+                    <SpinnerGapIcon size={14} className="animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  `Connect ${selectedGenericIds.size} ${integration.scopeItemNoun ?? "items"}`
                 )}
               </Button>
             </DialogFooter>

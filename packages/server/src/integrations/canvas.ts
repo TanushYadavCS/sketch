@@ -33,7 +33,16 @@ type CanvasAccountResponse = {
   connectedAt?: string;
 };
 
-export type CanvasSketchConnectorType = "google_drive" | "fireflies" | "clickup" | "notion" | "linear";
+export type CanvasSketchConnectorType =
+  | "google_drive"
+  | "google_calendar"
+  | "gmail"
+  | "outlook"
+  | "teams"
+  | "fireflies"
+  | "clickup"
+  | "notion"
+  | "linear";
 
 export interface CanvasConnectorCredentialResponse {
   connectorType: CanvasSketchConnectorType;

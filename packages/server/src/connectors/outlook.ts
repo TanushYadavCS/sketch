@@ -522,10 +522,13 @@ export function createOutlookConnector(): Connector {
       ownerEmail,
       onEmailSuppressed,
       onSourceItemRemoved,
+      accessTokenProvider,
     }) {
       assertOAuth(credentials);
-      const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
-      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const valid = accessTokenProvider
+        ? credentials
+        : await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE, accessTokenProvider });
       const parsedCursor = parseCursor(cursor);
       const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, 3650);
       const maxMessages = parsePositiveInt(scopeConfig.maxMessages, DEFAULT_MAX_MESSAGES, 5000);
@@ -581,12 +584,14 @@ export function createOutlookConnector(): Connector {
       yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
     },
 
-    async getCursor({ credentials, currentCursor, logger }) {
+    async getCursor({ credentials, accessTokenProvider, currentCursor, logger }) {
       assertOAuth(credentials);
       if (nextCursor) return serializeCursor(nextCursor);
 
-      const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
-      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const valid = accessTokenProvider
+        ? credentials
+        : await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE, accessTokenProvider });
       const parsedCursor = parseCursor(currentCursor);
       const cursorParts: Omit<OutlookCursor, "reciprocityEmails"> = {
         lastSyncedAt: parsedCursor?.lastSyncedAt ?? new Date().toISOString(),

@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { normalizeEmailValue } from "./email";
 import { ensureValidToken } from "./google-drive";
 import type {
+  AccessTokenProvider,
   BrowseResult,
   Connector,
   ConnectorCredentials,
@@ -23,6 +24,8 @@ const DEFAULT_INITIAL_DAYS = 365;
 const DEFAULT_INITIAL_FUTURE_DAYS = 365;
 const FULL_WIPE_SOURCE_CREATED_BEFORE = "9999-12-31T23:59:59.999Z";
 const CURSOR_VERSION = 2;
+
+type GoogleCalendarTokenSource = string | AccessTokenProvider;
 
 const CALENDAR_LIST_FIELDS = "nextPageToken,items(id,summary,primary,accessRole,hidden,deleted,timeZone)";
 const EVENT_LIST_FIELDS =
@@ -150,9 +153,10 @@ function sleep(ms: number): Promise<void> {
 
 async function calendarRequest(
   path: string,
-  accessToken: string,
+  accessToken: GoogleCalendarTokenSource,
   opts?: { params?: Record<string, string | undefined> },
   attempt = 1,
+  tokenRefreshed = false,
 ): Promise<unknown> {
   const url = new URL(`${CALENDAR_API}${path}`);
   for (const [key, value] of Object.entries(opts?.params ?? {})) {
@@ -161,14 +165,16 @@ async function calendarRequest(
 
   let response: Response;
   try {
+    const token =
+      typeof accessToken === "string" ? accessToken : (await accessToken({ forceRefresh: tokenRefreshed })).accessToken;
     response = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
     if (attempt < MAX_RETRIES) {
       await sleep(RETRY_BASE_MS * 2 ** (attempt - 1));
-      return calendarRequest(path, accessToken, opts, attempt + 1);
+      return calendarRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
     }
     throw err;
   }
@@ -176,11 +182,14 @@ async function calendarRequest(
   if (response.status === 429 || response.status >= 500) {
     if (attempt < MAX_RETRIES) {
       await sleep(retryDelayMs(response, attempt));
-      return calendarRequest(path, accessToken, opts, attempt + 1);
+      return calendarRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
     }
   }
 
   if (!response.ok) {
+    if (response.status === 401 && typeof accessToken !== "string" && !tokenRefreshed) {
+      return calendarRequest(path, accessToken, opts, attempt, true);
+    }
     throw new GoogleCalendarApiError(path, response.status, await response.text());
   }
 
@@ -638,7 +647,7 @@ export function eventToSyncedItem(
   };
 }
 
-async function listCalendars(accessToken: string): Promise<GoogleCalendarListEntry[]> {
+async function listCalendars(accessToken: GoogleCalendarTokenSource): Promise<GoogleCalendarListEntry[]> {
   const calendars: GoogleCalendarListEntry[] = [];
   const seenPageTokens = new Set<string>();
   let pageToken: string | undefined;
@@ -674,7 +683,7 @@ async function listCalendars(accessToken: string): Promise<GoogleCalendarListEnt
 }
 
 async function collectEventsForCalendar(params: {
-  accessToken: string;
+  accessToken: GoogleCalendarTokenSource;
   calendar: GoogleCalendarListEntry;
   syncToken: string | null;
   scopeConfig: Record<string, unknown>;
@@ -781,7 +790,7 @@ async function collectEventsForCalendar(params: {
 }
 
 async function collectCalendarSet(params: {
-  accessToken: string;
+  accessToken: GoogleCalendarTokenSource;
   calendars: GoogleCalendarListEntry[];
   previousCursor: GoogleCalendarCursor | null;
   useSyncTokens: boolean;
@@ -851,15 +860,15 @@ export function createGoogleCalendarConnector(): Connector {
       });
     },
 
-    async *sync({ credentials, scopeConfig, cursor, logger, ownerEmail, onSourceItemRemoved }) {
+    async *sync({ credentials, accessTokenProvider, scopeConfig, cursor, logger, ownerEmail, onSourceItemRemoved }) {
       assertOAuth(credentials);
-      const valid = await ensureValidToken(credentials);
-      const calendars = await listCalendars(valid.access_token);
+      const accessToken = accessTokenProvider ?? (await ensureValidToken(credentials)).access_token;
+      const calendars = await listCalendars(accessToken);
       const parsedCursor = parseCursor(cursor);
       nextCursor = null;
 
       let collection = await collectCalendarSet({
-        accessToken: valid.access_token,
+        accessToken,
         calendars,
         previousCursor: parsedCursor.cursor,
         useSyncTokens: Boolean(parsedCursor.cursor),
@@ -874,7 +883,7 @@ export function createGoogleCalendarConnector(): Connector {
           reason: "google_calendar_sync_token_expired",
         });
         collection = await collectCalendarSet({
-          accessToken: valid.access_token,
+          accessToken,
           calendars,
           previousCursor: null,
           useSyncTokens: false,
@@ -911,10 +920,10 @@ export function createGoogleCalendarConnector(): Connector {
       return valid.access_token !== credentials.access_token ? valid : null;
     },
 
-    async browseExisting({ credentials }) {
+    async browseExisting({ credentials, accessTokenProvider }) {
       assertOAuth(credentials);
-      const valid = await ensureValidToken(credentials);
-      return calendarBrowseResult(await listCalendars(valid.access_token));
+      const accessToken = accessTokenProvider ?? (await ensureValidToken(credentials)).access_token;
+      return calendarBrowseResult(await listCalendars(accessToken));
     },
   };
 }

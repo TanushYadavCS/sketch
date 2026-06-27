@@ -41,6 +41,30 @@ export interface ResolvedConnectorCredentials {
   accessTokenProvider?: AccessTokenProvider;
 }
 
+const CANVAS_CONNECTOR_TYPES = new Set<ConnectorType>([
+  "google_drive",
+  "google_calendar",
+  "gmail",
+  "outlook",
+  "teams",
+  "fireflies",
+  "clickup",
+  "notion",
+  "linear",
+]);
+
+const CANVAS_OAUTH_CONNECTORS = new Set<ConnectorType>([
+  "google_drive",
+  "google_calendar",
+  "gmail",
+  "outlook",
+  "teams",
+]);
+
+export function isCanvasOAuthConnector(connectorType: ConnectorType): boolean {
+  return CANVAS_OAUTH_CONNECTORS.has(connectorType);
+}
+
 function getPrivateKeyPem(
   config: Partial<Pick<Config, "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM" | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH">>,
 ): string {
@@ -71,14 +95,8 @@ export async function loadCanvasProvider(db: Kysely<DB>): Promise<CanvasProvider
 }
 
 function toCanvasConnectorType(connectorType: ConnectorType): CanvasSketchConnectorType {
-  if (
-    connectorType === "google_drive" ||
-    connectorType === "fireflies" ||
-    connectorType === "clickup" ||
-    connectorType === "notion" ||
-    connectorType === "linear"
-  ) {
-    return connectorType;
+  if (CANVAS_CONNECTOR_TYPES.has(connectorType)) {
+    return connectorType as CanvasSketchConnectorType;
   }
   throw new Error(`Unsupported Canvas connector type: ${connectorType}`);
 }
@@ -93,6 +111,7 @@ function toCredentials(payload: CanvasCredentialPayload): ConnectorCredentials {
       ...(payload.expiresAt ? { expires_at: payload.expiresAt } : {}),
       client_id: "canvas",
       client_secret: "canvas",
+      ...(payload.scope ? { scope: payload.scope } : {}),
     };
   }
 
@@ -188,7 +207,7 @@ export async function resolveConnectorCredentials(params: {
   const credentialSource = params.config.credential_source === "canvas" ? "canvas" : "local";
   const connectorType = params.config.connector_type as ConnectorType;
 
-  if (credentialSource === "canvas" && connectorType === "google_drive") {
+  if (credentialSource === "canvas" && isCanvasOAuthConnector(connectorType)) {
     const accessTokenProvider = createCanvasAccessTokenProvider({
       db: params.db,
       appConfig: params.appConfig,
