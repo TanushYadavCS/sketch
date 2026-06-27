@@ -677,7 +677,22 @@ describe("AgentRunService", () => {
     const users = createUserRepository(db);
     const alice = await users.create({ name: "Alice", email: "alice@example.com", slackUserId: "U_ALICE" });
     await users.create({ name: "Bob", email: "bob@example.com", slackUserId: "U_BOB" });
-    const service = createService(db, []);
+    const service = createService(db, [], {
+      getSlack: () => ({
+        listChannels: vi.fn(async () => []),
+        isUserInChannel: vi.fn(async () => false),
+      }),
+    });
+
+    await expect(
+      createService(db, []).resolveDeliveryConfigForUser(alice.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: "U_ALICE",
+        label: "Alice",
+      }),
+    ).rejects.toThrow("Slack is not connected");
 
     await expect(
       service.resolveDeliveryConfigForUser(alice.id, {

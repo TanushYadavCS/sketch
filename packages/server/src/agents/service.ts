@@ -337,6 +337,9 @@ export class AgentRunService {
         throw new AgentDeliveryTargetError("Slack delivery is not available for this user");
       }
 
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+
       if (delivery.targetType === "dm") {
         if (delivery.targetId !== user.slack_user_id) {
           throw new AgentDeliveryTargetError("Slack DM delivery must target the current user");
@@ -348,8 +351,6 @@ export class AgentRunService {
         };
       }
 
-      const slack = this.deps.getSlack?.() ?? null;
-      if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
       const channel = (await slack.listChannels()).find((candidate) => candidate.id === delivery.targetId);
       if (!channel?.isMember) {
         throw new AgentDeliveryTargetError("Slack channel is not available for delivery");
