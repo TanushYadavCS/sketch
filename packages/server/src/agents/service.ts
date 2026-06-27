@@ -20,6 +20,7 @@ import type { DB, UsersTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
+import type { SlackBot } from "../slack/bot";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
 import type { AgentApiItem, AgentDefinition } from "./types";
@@ -40,6 +41,7 @@ export interface AgentRunServiceDeps {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: QueueManager;
   outputDelivery?: AgentOutputDeliveryPublisher;
+  getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
 }
 
 export interface RequestAgentGenerationParams {
@@ -106,6 +108,8 @@ export interface AgentSummaryView {
   scheduleHour: number;
   scheduleMinute: number;
 }
+
+export class AgentDeliveryTargetError extends Error {}
 
 function localDateInTimezone(now: Date, timezone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -302,6 +306,60 @@ export class AgentRunService {
       },
     );
     return this.getConfigView(agentKey, userId);
+  }
+
+  async resolveDeliveryConfigForUser(
+    userId: string,
+    delivery: AgentDeliveryConfig | null,
+  ): Promise<AgentDeliveryConfig | null> {
+    if (!delivery) return null;
+
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new AgentDeliveryTargetError("User not found");
+
+    if (delivery.platform === "slack") {
+      if (!user.slack_user_id) {
+        throw new AgentDeliveryTargetError("Slack delivery is not available for this user");
+      }
+
+      if (delivery.targetType === "dm") {
+        if (delivery.targetId !== user.slack_user_id) {
+          throw new AgentDeliveryTargetError("Slack DM delivery must target the current user");
+        }
+        return {
+          ...delivery,
+          targetId: user.slack_user_id,
+          label: user.email ? `${user.name} <${user.email}>` : user.name,
+        };
+      }
+
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+      const channel = (await slack.listChannels()).find((candidate) => candidate.id === delivery.targetId);
+      if (!channel?.isMember) {
+        throw new AgentDeliveryTargetError("Slack channel is not available for delivery");
+      }
+      if (!(await slack.isUserInChannel(delivery.targetId, user.slack_user_id))) {
+        throw new AgentDeliveryTargetError("Slack channel is not available for this user");
+      }
+      return {
+        ...delivery,
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      };
+    }
+
+    const group = await this.deps.db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "name"])
+      .where("jid", "=", delivery.targetId)
+      .executeTakeFirst();
+    if (!group) throw new AgentDeliveryTargetError("WhatsApp group is not available for delivery");
+    return {
+      ...delivery,
+      targetId: group.jid,
+      label: group.name,
+    };
   }
 
   private toApiOutput(

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
-import type { AgentOutputApi, AgentRunService } from "./service";
+import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService } from "./service";
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
@@ -171,8 +171,11 @@ export function agentRoutes(service: AgentRunService) {
     let patch: ReturnType<typeof parseConfigPatch>;
     try {
       patch = parseConfigPatch(body);
+      if (patch.delivery !== undefined) {
+        patch.delivery = await service.resolveDeliveryConfigForUser(userId, patch.delivery);
+      }
     } catch (err) {
-      if (err instanceof ConfigPatchError) {
+      if (err instanceof ConfigPatchError || err instanceof AgentDeliveryTargetError) {
         return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
       }
       throw err;

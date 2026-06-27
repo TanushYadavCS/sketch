@@ -504,6 +504,20 @@ export class SlackBot {
     return channels;
   }
 
+  async isUserInChannel(channelId: string, slackUserId: string): Promise<boolean> {
+    let cursor: string | undefined;
+    do {
+      const result = await this.app.client.conversations.members({
+        channel: channelId,
+        limit: 1000,
+        ...(cursor ? { cursor } : {}),
+      });
+      if ((result.members ?? []).includes(slackUserId)) return true;
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return false;
+  }
+
   async getChannelHistory(channelId: string, limit = 5): Promise<Array<{ userId: string; text: string; ts: string }>> {
     const result = await this.app.client.conversations.history({ channel: channelId, limit });
     return (result.messages ?? [])

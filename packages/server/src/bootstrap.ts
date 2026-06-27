@@ -354,6 +354,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     loadIntegrationProvider,
     queueManager,
     outputDelivery: agentOutputDelivery,
+    getSlack: () => slack,
   });
   const agentScheduler = new AgentScheduler({ service: agentRunService, logger });
   agentScheduler.start();

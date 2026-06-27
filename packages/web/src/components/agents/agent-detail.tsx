@@ -558,6 +558,7 @@ function DeliveryEditor({
   const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
   const users = useQuery({ queryKey: ["users"], queryFn: () => api.users.list() });
   const whatsappGroups = useQuery({ queryKey: ["whatsapp-groups"], queryFn: () => api.channels.listWhatsAppGroups() });
+  const session = useQuery({ queryKey: ["auth", "session"], queryFn: () => api.auth.session() });
 
   const platform = value?.platform ?? "slack";
   const targetType = value?.targetType ?? (platform === "slack" ? "channel" : "group");
@@ -593,7 +594,9 @@ function DeliveryEditor({
   };
 
   const channelOptions = (slackChannels.data?.channels ?? []).filter((channel) => channel.isMember);
-  const dmOptions = (users.data?.users ?? []).filter((user) => user.type !== "agent" && user.slack_user_id);
+  const dmOptions = (users.data?.users ?? []).filter(
+    (user) => user.id === session.data?.userId && user.type !== "agent" && user.slack_user_id,
+  );
   const groupOptions = whatsappGroups.data?.groups ?? [];
 
   return (
