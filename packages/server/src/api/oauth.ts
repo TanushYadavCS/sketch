@@ -211,6 +211,27 @@ export function oauthRoutes(
   const microsoftClientSecret = typeof opts === "string" ? undefined : opts.microsoftClientSecret;
   const microsoftTenant = typeof opts === "string" ? "common" : (opts.microsoftTenant ?? "common");
 
+  function isCanvasCredentialSource(): boolean {
+    return appConfig?.CONNECTOR_CREDENTIAL_SOURCE === "canvas";
+  }
+
+  function isLocalCredentialEncryptionMissing(): boolean {
+    return appConfig?.CONNECTOR_CREDENTIAL_SOURCE === "local" && !appConfig.ENCRYPTION_KEY;
+  }
+
+  function encryptionRequiredResponse(c: Context, connectorType: ConnectorType) {
+    return c.json(
+      {
+        error: {
+          code: "ENCRYPTION_REQUIRED",
+          message: "Local OAuth credentials require ENCRYPTION_KEY so credentials are encrypted at rest",
+          connector: connectorType,
+        },
+      },
+      400,
+    );
+  }
+
   /**
    * GET /google/authorize
    * Derives the current user from the session, then redirects to Google's OAuth consent screen.
@@ -232,6 +253,23 @@ export function oauthRoutes(
     }
     const userId = user.id;
     const connectorType = googleConnectorFromQuery(c.req.query("connector"));
+
+    if (isCanvasCredentialSource()) {
+      return c.json(
+        {
+          error: {
+            code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED",
+            message: `${googleConnectorName(connectorType)} credentials are managed by Canvas in this deployment.`,
+            connector: connectorType,
+          },
+        },
+        400,
+      );
+    }
+
+    if (isLocalCredentialEncryptionMissing()) {
+      return encryptionRequiredResponse(c, connectorType);
+    }
 
     if (!config?.google_oauth_client_id || !config?.google_oauth_client_secret) {
       return c.json(
@@ -301,6 +339,14 @@ export function oauthRoutes(
       return c.redirect("/files?oauth=error&reason=invalid_state");
     }
     pendingStates.delete(nonce);
+
+    if (isCanvasCredentialSource()) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=canvas_credential_source`);
+    }
+
+    if (isLocalCredentialEncryptionMissing()) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=encryption_required`);
+    }
 
     const config = await settings.get();
     if (!config?.google_oauth_client_id || !config?.google_oauth_client_secret) {
@@ -426,6 +472,24 @@ export function oauthRoutes(
   routes.get("/microsoft/authorize", async (c) => {
     const connectorType = microsoftConnectorFromQuery(c.req.query("connector"));
     const connectorName = microsoftConnectorName(connectorType);
+
+    if (isCanvasCredentialSource()) {
+      return c.json(
+        {
+          error: {
+            code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED",
+            message: `${connectorName} credentials are managed by Canvas in this deployment.`,
+            connector: connectorType,
+          },
+        },
+        400,
+      );
+    }
+
+    if (isLocalCredentialEncryptionMissing()) {
+      return encryptionRequiredResponse(c, connectorType);
+    }
+
     const config = await settings.get();
     const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
       clientId: microsoftClientId,
@@ -501,6 +565,23 @@ export function oauthRoutes(
       );
     }
     const connectorType = connectorParam as ConnectorType;
+
+    if (isCanvasCredentialSource()) {
+      return c.json(
+        {
+          error: {
+            code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED",
+            message: "Microsoft OAuth credentials are managed by Canvas in this deployment.",
+            connector: connectorType,
+          },
+        },
+        400,
+      );
+    }
+
+    if (isLocalCredentialEncryptionMissing()) {
+      return encryptionRequiredResponse(c, connectorType);
+    }
 
     const config = await settings.get();
     const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
@@ -600,6 +681,14 @@ export function oauthRoutes(
       return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=invalid_state`);
     }
     pendingStates.delete(nonce);
+
+    if (isCanvasCredentialSource()) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=canvas_credential_source`);
+    }
+
+    if (isLocalCredentialEncryptionMissing()) {
+      return c.redirect(`/files?oauth=error&connector=${connectorType}&reason=encryption_required`);
+    }
 
     const config = await settings.get();
     const { clientId, clientSecret, tenant } = resolveMicrosoftOAuthConfig(config, {
@@ -730,6 +819,10 @@ export function oauthRoutes(
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
+    if (isLocalCredentialEncryptionMissing()) {
+      return encryptionRequiredResponse(c, "zoho_crm");
+    }
+
     if (!zohoClientId || !zohoClientSecret) {
       return c.json(
         {
@@ -828,6 +921,10 @@ export function oauthRoutes(
       return c.redirect("/files?oauth=error&connector=zoho_crm&reason=invalid_state");
     }
     pendingStates.delete(nonce);
+
+    if (isLocalCredentialEncryptionMissing()) {
+      return c.redirect("/files?oauth=error&connector=zoho_crm&reason=encryption_required");
+    }
 
     if (!zohoClientId || !zohoClientSecret) {
       return c.redirect("/files?oauth=error&connector=zoho_crm&reason=not_configured");

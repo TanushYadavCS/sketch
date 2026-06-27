@@ -269,6 +269,32 @@ describe("validateConfig", () => {
       expect(exitSpy).not.toHaveBeenCalled();
     });
   });
+
+  describe("connector credential encryption validation", () => {
+    it("exits when local connector credentials are enabled without ENCRYPTION_KEY", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ CONNECTOR_CREDENTIAL_SOURCE: "local" });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("does not exit when local connector credentials have ENCRYPTION_KEY", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        CONNECTOR_CREDENTIAL_SOURCE: "local",
+        ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not exit when Canvas connector credentials are enabled without ENCRYPTION_KEY", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ CONNECTOR_CREDENTIAL_SOURCE: "canvas" });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("configSchema SLACK_MODE field", () => {

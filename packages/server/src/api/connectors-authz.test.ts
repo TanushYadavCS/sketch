@@ -385,6 +385,35 @@ describe("Connectors API — authorization", () => {
   });
 
   describe("POST / — branch on perUserAuth", () => {
+    it("canvas credential source blocks local Canvas-supported connector creation", async () => {
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CONNECTOR_CREDENTIAL_SOURCE: "canvas",
+        }),
+        { logger },
+      );
+      const res = await canvasApp.request("/api/connectors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          connectorType: "gmail",
+          authType: "oauth",
+          credentials: {
+            access_token: "access",
+            refresh_token: "refresh",
+            client_id: "client",
+            client_secret: "secret",
+          },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: { code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED" },
+      });
+    });
+
     it("member → 403 creating an org-wide (notion) connector", async () => {
       const res = await app.request("/api/connectors", {
         method: "POST",

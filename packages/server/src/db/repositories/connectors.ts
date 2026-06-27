@@ -269,6 +269,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         errorMessage: string | null;
         browseCache: string | null;
         credentialHint: string | null;
+        credentialSource: "local" | "canvas";
       }>,
     ) {
       const values: Record<string, unknown> = {};
@@ -280,6 +281,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       if (data.errorMessage !== undefined) values.error_message = data.errorMessage;
       if (data.browseCache !== undefined) values.browse_cache = data.browseCache;
       if (data.credentialHint !== undefined) values.credential_hint = data.credentialHint;
+      if (data.credentialSource !== undefined) values.credential_source = data.credentialSource;
 
       if (Object.keys(values).length > 0) {
         values.updated_at = new Date().toISOString();

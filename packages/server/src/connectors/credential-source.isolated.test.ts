@@ -120,12 +120,49 @@ describe("Canvas credential source", () => {
     });
   });
 
+  it("rejects envelopes encrypted to an unexpected public key id", async () => {
+    await expect(
+      credentialSource.fetchCanvasCredential({
+        db: {} as never,
+        appConfig: {
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+          CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "other-key",
+        },
+        connectorType: "gmail",
+        userEmail: "priya@example.com",
+      }),
+    ).rejects.toThrow("Canvas credential envelope key id does not match the requested public key");
+  });
+
+  it("rejects decrypted payloads for a different connector", async () => {
+    decryptCredentialEnvelopeMock.mockReturnValueOnce({
+      type: "oauth_access_token",
+      connectorType: "google_drive",
+      provider: "google",
+      accessToken: "minted-token",
+      tokenType: "Bearer",
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    });
+
+    await expect(
+      credentialSource.fetchCanvasCredential({
+        db: {} as never,
+        appConfig: {
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+          CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
+        },
+        connectorType: "gmail",
+        userEmail: "priya@example.com",
+      }),
+    ).rejects.toThrow("Canvas credential payload connector type does not match the request");
+  });
+
   it("returns an access-token provider for Canvas OAuth configs", async () => {
     const resolved = await credentialSource.resolveConnectorCredentials({
       db: {} as never,
       config: {
         id: "connector-1",
-        connector_type: "outlook",
+        connector_type: "gmail",
         credential_source: "canvas",
         credentials: JSON.stringify({
           type: "oauth",

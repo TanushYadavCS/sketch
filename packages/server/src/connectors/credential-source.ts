@@ -65,6 +65,10 @@ export function isCanvasOAuthConnector(connectorType: ConnectorType): boolean {
   return CANVAS_OAUTH_CONNECTORS.has(connectorType);
 }
 
+export function isCanvasConnector(connectorType: ConnectorType): boolean {
+  return CANVAS_CONNECTOR_TYPES.has(connectorType);
+}
+
 function getPrivateKeyPem(
   config: Partial<Pick<Config, "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM" | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH">>,
 ): string {
@@ -118,6 +122,31 @@ function toCredentials(payload: CanvasCredentialPayload): ConnectorCredentials {
   return { type: "api_key", api_key: payload.apiKey };
 }
 
+function validateCanvasCredentialResponse(params: {
+  requestedConnectorType: ConnectorType;
+  requestedPublicKeyId?: string;
+  response: Awaited<ReturnType<CanvasProvider["mintConnectorCredential"]>>;
+  payload: CanvasCredentialPayload;
+}) {
+  const expectedKind = params.payload.type === "oauth_access_token" ? "oauth_access_token" : "api_key";
+
+  if (params.requestedPublicKeyId && params.response.envelope.keyId !== params.requestedPublicKeyId) {
+    throw new Error("Canvas credential envelope key id does not match the requested public key");
+  }
+  if (params.response.connectorType !== params.requestedConnectorType) {
+    throw new Error("Canvas credential response connector type does not match the request");
+  }
+  if (params.payload.connectorType !== params.requestedConnectorType) {
+    throw new Error("Canvas credential payload connector type does not match the request");
+  }
+  if (params.response.provider !== params.payload.provider) {
+    throw new Error("Canvas credential payload provider does not match the response");
+  }
+  if (params.response.credentialKind !== expectedKind) {
+    throw new Error("Canvas credential payload kind does not match the response");
+  }
+}
+
 export async function fetchCanvasCredential(params: {
   db: Kysely<DB>;
   appConfig: Partial<
@@ -145,6 +174,12 @@ export async function fetchCanvasCredential(params: {
     userOrgRole: params.userOrgRole,
   });
   const payload = decryptCredentialEnvelope<CanvasCredentialPayload>(response.envelope, privateKeyPem);
+  validateCanvasCredentialResponse({
+    requestedConnectorType: params.connectorType,
+    requestedPublicKeyId: params.appConfig.CANVAS_CREDENTIAL_PUBLIC_KEY_ID,
+    response,
+    payload,
+  });
   return toCredentials(payload);
 }
 
