@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { areJidsSameUser } from "@whiskeysockets/baileys";
 import type { Kysely, Selectable } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
@@ -21,6 +22,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
+import type { WhatsAppBot } from "../whatsapp/bot";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
 import type { AgentApiItem, AgentDefinition } from "./types";
@@ -42,6 +44,7 @@ export interface AgentRunServiceDeps {
   queueManager?: QueueManager;
   outputDelivery?: AgentOutputDeliveryPublisher;
   getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
+  getWhatsApp?: () => Pick<WhatsAppBot, "getGroupMetadata"> | null;
 }
 
 export interface RequestAgentGenerationParams {
@@ -110,6 +113,18 @@ export interface AgentSummaryView {
 }
 
 export class AgentDeliveryTargetError extends Error {}
+
+function whatsappNumberToJid(whatsappNumber: string): string {
+  return `${whatsappNumber.replace(/^\+/, "")}@s.whatsapp.net`;
+}
+
+function whatsappGroupHasParticipant(
+  group: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+  whatsappNumber: string,
+): boolean {
+  const userJid = whatsappNumberToJid(whatsappNumber);
+  return group?.participants?.some((participant) => areJidsSameUser(participant.id, userJid)) ?? false;
+}
 
 function localDateInTimezone(now: Date, timezone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -355,6 +370,17 @@ export class AgentRunService {
       .where("jid", "=", delivery.targetId)
       .executeTakeFirst();
     if (!group) throw new AgentDeliveryTargetError("WhatsApp group is not available for delivery");
+    if (!user.whatsapp_number) {
+      throw new AgentDeliveryTargetError("WhatsApp group delivery is not available for this user");
+    }
+
+    const whatsapp = this.deps.getWhatsApp?.() ?? null;
+    if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
+    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
+    if (!whatsappGroupHasParticipant(groupMetadata, user.whatsapp_number)) {
+      throw new AgentDeliveryTargetError("WhatsApp group is not available for this user");
+    }
+
     return {
       ...delivery,
       targetId: group.jid,
@@ -659,7 +685,9 @@ export class AgentRunService {
   ): Promise<void> {
     if (triggerType !== "scheduled" || !this.deps.outputDelivery) return;
     try {
-      const delivery = (await this.resolveConfig(def, userId)).delivery;
+      const configuredDelivery = (await this.resolveConfig(def, userId)).delivery;
+      if (!configuredDelivery) return;
+      const delivery = await this.resolveDeliveryConfigForUser(userId, configuredDelivery);
       if (!delivery) return;
       const completed = await this.getByIdForUser(def.key, outputId, userId);
       if (!completed) return;

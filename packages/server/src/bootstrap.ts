@@ -355,6 +355,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     queueManager,
     outputDelivery: agentOutputDelivery,
     getSlack: () => slack,
+    getWhatsApp: () => whatsapp,
   });
   const agentScheduler = new AgentScheduler({ service: agentRunService, logger });
   agentScheduler.start();
