@@ -340,18 +340,20 @@ describe("AutomationBuilderPage", () => {
 
     renderBuilder();
 
-    await screen.findByLabelText("Message Sketch");
+    const input = await screen.findByLabelText("Message Sketch");
     expect(screen.queryByText("Alice: Create a Trustpilot review automation")).not.toBeInTheDocument();
     expect(mocks.loadMessages).toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
     expect(mocks.originChatMessages).not.toHaveBeenCalled();
 
-    const input = screen.getByLabelText("Message Sketch");
+    await waitFor(() => expect(input).not.toBeDisabled());
     await user.type(input, "Tighten the filter");
     await user.click(screen.getByLabelText("Send message"));
 
-    expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Tighten the filter" }), {
-      body: { automationTaskId: "task-123" },
-    });
+    await waitFor(() =>
+      expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Tighten the filter" }), {
+        body: { automationTaskId: "task-123" },
+      }),
+    );
   });
 
   it("can stop a stuck builder chat run", async () => {
