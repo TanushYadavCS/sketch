@@ -55,6 +55,7 @@ describe("Google Calendar connector", () => {
       sourcePath: "Google Calendar / Work",
       sourceCreatedAt: "2026-02-04T10:00:00.000Z",
       sourceUpdatedAt: "2026-02-02T10:00:00.000Z",
+      isAllDay: false,
       mimeType: "text/calendar",
       authorEmail: "owner@canvasx.ai",
       authorName: "Owner",
@@ -66,6 +67,27 @@ describe("Google Calendar connector", () => {
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },
     ]);
+  });
+
+  it("flags all-day events (date-only start) so the brief can tell them from a midnight-UTC meeting", () => {
+    const allDay = eventToSyncedItem(
+      calendarEvent("offsite-1", { start: { date: "2026-02-04" }, end: { date: "2026-02-05" } }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+    expect(allDay?.isAllDay).toBe(true);
+    expect(allDay?.sourceCreatedAt).toBe("2026-02-04T00:00:00.000Z");
+
+    const midnightTimed = eventToSyncedItem(
+      calendarEvent("midnight-1", {
+        start: { dateTime: "2026-02-04T00:00:00Z" },
+        end: { dateTime: "2026-02-04T00:30:00Z" },
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+    expect(midnightTimed?.isAllDay).toBe(false);
+    expect(midnightTimed?.sourceCreatedAt).toBe("2026-02-04T00:00:00.000Z");
   });
 
   it("extracts Calendly invitees and guests from the event description when Google attendees are missing", () => {

@@ -249,6 +249,15 @@ function eventDateToIso(value: GoogleCalendarEventDate | undefined): string | nu
   return null;
 }
 
+/**
+ * All-day events carry a `date` (no `dateTime`) on their start. They are stored
+ * at the UTC-midnight sentinel, so they need an explicit flag to be told apart
+ * from a genuine timed meeting that happens to start at exactly 00:00 UTC.
+ */
+function isAllDayEvent(event: GoogleCalendarEvent): boolean {
+  return !event.start?.dateTime && Boolean(event.start?.date);
+}
+
 function eventDateLabel(value: GoogleCalendarEventDate | undefined): string | null {
   return value?.dateTime ?? value?.date ?? null;
 }
@@ -643,6 +652,7 @@ export function eventToSyncedItem(
     contentHash: contentHash(content),
     sourceCreatedAt,
     sourceUpdatedAt,
+    isAllDay: isAllDayEvent(event),
     mimeType: "text/calendar",
     accessEmails: eventAccessEmails(event, ownerEmail, calendlyPeople),
     attendees: people.length > 0 ? people : undefined,

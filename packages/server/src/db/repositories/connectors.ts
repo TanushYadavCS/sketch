@@ -384,6 +384,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       connectorConfigId: string;
       mimeType?: string | null;
       rollupGroupId?: string | null;
+      isAllDay?: boolean;
     }) {
       const now = new Date().toISOString();
       const sourceCreatedAt = normalizeSourceTimestampForStorage(data.sourceCreatedAt);
@@ -440,6 +441,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
+        if (data.isAllDay !== undefined) updates.is_all_day = data.isAllDay ? 1 : 0;
         if (contentChanged || categoryChanged || sourceVersionChanged) {
           updates.embedding_status = "pending";
           updates.summary_status = "pending";
@@ -475,6 +477,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           source_updated_at: sourceUpdatedAt,
           rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
+          is_all_day: data.isAllDay ? 1 : 0,
           mime_type: data.mimeType ?? null,
           embedding_status: "pending",
           summary_status: "pending",

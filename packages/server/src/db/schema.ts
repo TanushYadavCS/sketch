@@ -129,6 +129,7 @@ export interface IndexedFilesTable {
   is_archived: Generated<number>;
   source_created_at: string | null;
   source_updated_at: string | null;
+  is_all_day: Generated<number>;
   synced_at: string;
   indexed_at: Generated<string>;
   context_note: string | null;

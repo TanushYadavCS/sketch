@@ -112,6 +112,7 @@ import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
 import * as m110 from "./migrations/110-google-calendar-provider-file-scope";
 import * as m111 from "./migrations/111-settings-embedding-provider";
 import * as m112 from "./migrations/112-agent-output-structured-payload";
+import * as m113 from "./migrations/113-indexed-file-all-day-flag";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -228,6 +229,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "110-google-calendar-provider-file-scope": m110,
           "111-settings-embedding-provider": m111,
           "112-agent-output-structured-payload": m112,
+          "113-indexed-file-all-day-flag": m113,
         };
       },
     },

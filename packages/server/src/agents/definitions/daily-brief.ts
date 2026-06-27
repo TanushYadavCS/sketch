@@ -7,6 +7,7 @@ import type {
   AgentStructuredPayload,
 } from "../../db/repositories/agent-outputs";
 import { whereLiveEntity } from "../../db/repositories/entities";
+import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { parseTimestampMs } from "../../timestamps";
@@ -107,13 +108,6 @@ export const DAILY_BRIEF_MEETING_ATTENDEE_LIMIT = 12;
 
 const CALENDAR_SOURCE = "google_calendar";
 const CALENDAR_EVENT_FILE_TYPE = "calendar_event";
-
-/**
- * All-day Google Calendar events are stored with a UTC-midnight `source_created_at`
- * sentinel ("YYYY-MM-DDT00:00:00.000Z"). The meetings section is for timed meetings,
- * so they are excluded with this LIKE suffix (portable across SQLite and Postgres).
- */
-const ALL_DAY_INSTANT_SUFFIX = "%T00:00:00.000Z";
 
 export type TodaysMeetingAttendee = {
   name: string;
@@ -245,30 +239,6 @@ function meetingViaFromSourcePath(sourcePath: string | null): string | null {
 }
 
 /**
- * The reader's own email addresses (primary + linked provider identities). The
- * meetings section is always scoped to these, even for admins with the read-all
- * bypass (whose `contentUserEmails` is intentionally nulled upstream), so the
- * personal meetings view never includes other people's calendar events.
- */
-async function readerEmailsForUser(db: Kysely<DB>, userId: string): Promise<string[]> {
-  const [user, identities] = await Promise.all([
-    db.selectFrom("users").select("email").where("id", "=", userId).executeTakeFirst(),
-    db
-      .selectFrom("user_provider_identities")
-      .select("provider_email")
-      .where("user_id", "=", userId)
-      .where("provider_email", "is not", null)
-      .execute(),
-  ]);
-  const emails: string[] = [];
-  if (user?.email) emails.push(user.email);
-  for (const row of identities) {
-    if (row.provider_email && !emails.includes(row.provider_email)) emails.push(row.provider_email);
-  }
-  return emails;
-}
-
-/**
  * Deterministic skeleton for the meetings section: every non-archived calendar
  * event whose start lands on `outputDate` in the user's timezone, with attendees
  * resolved to person entities. This is the canonical list the model enriches;
@@ -278,8 +248,8 @@ async function readerEmailsForUser(db: Kysely<DB>, userId: string): Promise<stri
  * so an admin's meetings section never pulls in other people's meetings.
  *
  * Only timed events inside the timezone day window are included; all-day events
- * (stored at UTC midnight) are excluded since this section is about meetings to
- * prep for, not OOO/holiday/offsite entries. See {@link ALL_DAY_INSTANT_SUFFIX}.
+ * are excluded via the `is_all_day` flag the connector sets at sync time, since
+ * this section is about meetings to prep for, not OOO/holiday/offsite entries.
  */
 export async function buildTodaysMeetings({
   db,
@@ -296,13 +266,13 @@ export async function buildTodaysMeetings({
     .where("source", "=", CALENDAR_SOURCE)
     .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
     .where("is_archived", "=", 0)
+    .where("is_all_day", "=", 0)
     .where("source_created_at", ">=", dayStart)
     .where("source_created_at", "<=", dayEnd)
-    .where("source_created_at", "not like", ALL_DAY_INSTANT_SUFFIX)
     .execute();
   if (files.length === 0) return [];
 
-  const readerEmails = await readerEmailsForUser(db, user.id);
+  const readerEmails = await createUserRepository(db).getAllEmailsForUser(user.id);
   const visibleFileIds = await filterVisibleCandidateFileIds(
     db,
     files.map((file) => file.id),
@@ -405,7 +375,7 @@ async function resolveAttendeeEntities(db: Kysely<DB>, emails: Array<string | nu
   const rows = await db
     .selectFrom("entity_contact_points")
     .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
-    .select(["entity_contact_points.value as email", "entities.id as entity_id", "entities.name as entity_name"])
+    .select(["entity_contact_points.value as email", "entities.id as entity_id"])
     .where("entity_contact_points.kind", "=", "email")
     .where(sql<boolean>`lower(entity_contact_points.value) in (${sql.join(normalized)})`)
     .where("entities.source_type", "=", "person")

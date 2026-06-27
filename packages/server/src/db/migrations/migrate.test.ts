@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 108;
+const EXPECTED_MIGRATION_COUNT = 109;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -164,6 +164,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[105]).toBe("110-google-calendar-provider-file-scope");
     expect(names[106]).toBe("111-settings-embedding-provider");
     expect(names[107]).toBe("112-agent-output-structured-payload");
+    expect(names[108]).toBe("113-indexed-file-all-day-flag");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -529,7 +530,8 @@ describe("runMigrations — incremental upgrade", () => {
         '109-scheduled-task-origin-message-id',
         '110-google-calendar-provider-file-scope',
         '111-settings-embedding-provider',
-        '112-agent-output-structured-payload'
+        '112-agent-output-structured-payload',
+        '113-indexed-file-all-day-flag'
       )
     `.execute(db);
 
@@ -543,7 +545,8 @@ describe("runMigrations — incremental upgrade", () => {
         '109-scheduled-task-origin-message-id',
         '110-google-calendar-provider-file-scope',
         '111-settings-embedding-provider',
-        '112-agent-output-structured-payload'
+        '112-agent-output-structured-payload',
+        '113-indexed-file-all-day-flag'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -554,6 +557,7 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "110-google-calendar-provider-file-scope" },
       { name: "111-settings-embedding-provider" },
       { name: "112-agent-output-structured-payload" },
+      { name: "113-indexed-file-all-day-flag" },
     ]);
   });
 });

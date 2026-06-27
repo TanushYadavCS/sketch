@@ -349,6 +349,7 @@ async function seedCalendarEvent(
     restrictedTo?: string;
     connectorConfigId?: string;
     threadId?: string;
+    allDay?: boolean;
   },
 ): Promise<void> {
   await db
@@ -366,6 +367,7 @@ async function seedCalendarEvent(
       provider_url: params.providerUrl ?? `https://calendar.google.com/${params.id}`,
       content: "calendar event",
       is_archived: params.archived ? 1 : 0,
+      is_all_day: params.allDay ? 1 : 0,
       source_updated_at: params.startTime,
       source_created_at: params.startTime,
       synced_at: NOW.toISOString(),
@@ -482,12 +484,22 @@ describe("buildTodaysMeetings", () => {
     expect(meetings[1].attendees).toEqual([]);
   });
 
-  it("excludes all-day events (UTC-midnight sentinel) regardless of timezone", async () => {
-    await seedCalendarEvent(db, { id: "evt-all-day", startTime: "2026-06-25T00:00:00.000Z", title: "Team offsite" });
+  it("excludes all-day events by flag but keeps timed meetings that start at UTC midnight", async () => {
+    await seedCalendarEvent(db, {
+      id: "evt-all-day",
+      startTime: "2026-06-25T00:00:00.000Z",
+      title: "Team offsite",
+      allDay: true,
+    });
+    await seedCalendarEvent(db, {
+      id: "evt-midnight-utc",
+      startTime: "2026-06-25T00:00:00.000Z",
+      title: "5:30 AM IST standup",
+    });
     await seedCalendarEvent(db, { id: "evt-timed", startTime: "2026-06-25T09:00:00.000Z", title: "Standup" });
 
     const utcMeetings = await buildTodaysMeetings({ db, user, ...MEETINGS_RUNTIME_PARAMS });
-    expect(utcMeetings.map((meeting) => meeting.fileId)).toEqual(["evt-timed"]);
+    expect(utcMeetings.map((meeting) => meeting.fileId)).toEqual(["evt-midnight-utc", "evt-timed"]);
 
     const istMeetings = await buildTodaysMeetings({
       db,
@@ -495,7 +507,7 @@ describe("buildTodaysMeetings", () => {
       ...MEETINGS_RUNTIME_PARAMS,
       timezone: "Asia/Kolkata",
     });
-    expect(istMeetings.map((meeting) => meeting.fileId)).toEqual(["evt-timed"]);
+    expect(istMeetings.map((meeting) => meeting.fileId)).toEqual(["evt-midnight-utc", "evt-timed"]);
   });
 
   it("excludes archived events, events outside the day, and files the reader cannot see", async () => {
