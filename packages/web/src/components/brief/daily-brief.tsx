@@ -1,6 +1,6 @@
 import type { DailyBrief as DailyBriefData, DailyBriefItem } from "@/lib/api";
 import { SparkleIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BriefDetailDrawer } from "./brief-detail-drawer";
 import { BriefItemRow } from "./brief-item-row";
 import { BriefSection } from "./brief-section";
@@ -17,9 +17,8 @@ function formatBriefDate(value: string): string {
   }).format(date);
 }
 
-/** The current/next meeting: the earliest one whose start is still ahead of now. */
-function computeNextMeetingId(items: DailyBriefItem[]): string | null {
-  const now = Date.now();
+/** The current/next meeting: the earliest one whose start is still ahead of `now`. */
+function computeNextMeetingId(items: DailyBriefItem[], now: number): string | null {
   let next: { id: string; start: number } | null = null;
   for (const item of items) {
     const startIso = item.structuredPayload?.startTime;
@@ -28,6 +27,34 @@ function computeNextMeetingId(items: DailyBriefItem[]): string | null {
     if (!next || start < next.start) next = { id: item.id, start };
   }
   return next?.id ?? null;
+}
+
+/**
+ * Tracks the current/next meeting and advances it as start times pass.
+ *
+ * `nextMeetingId` is time-dependent, so without a clock the badge would freeze
+ * on a meeting that is no longer next once Home stays open across its start. A
+ * timeout scheduled to the current marker's start re-evaluates exactly when it
+ * elapses, then reschedules for the following meeting; it idles once none remain.
+ */
+function useNextMeetingId(items: DailyBriefItem[]): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  const nextMeetingId = computeNextMeetingId(items, now);
+  const nextStart = useMemo(() => {
+    const current = items.find((item) => item.id === nextMeetingId);
+    const startIso = current?.structuredPayload?.startTime;
+    const start = startIso ? new Date(startIso).getTime() : Number.NaN;
+    return Number.isNaN(start) ? null : start;
+  }, [items, nextMeetingId]);
+
+  useEffect(() => {
+    if (nextStart === null) return;
+    const delay = Math.max(0, nextStart - Date.now()) + 1000;
+    const timer = window.setTimeout(() => setNow(Date.now()), delay);
+    return () => window.clearTimeout(timer);
+  }, [nextStart]);
+
+  return nextMeetingId;
 }
 
 export function DailyBrief({
@@ -46,7 +73,7 @@ export function DailyBrief({
   onOpenChat: (prompt: string) => void;
 }) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
-  const nextMeetingId = computeNextMeetingId(brief.sections.meetings ?? []);
+  const nextMeetingId = useNextMeetingId(brief.sections.meetings ?? []);
   const subtitle =
     brief.masthead?.summary ?? brief.masthead?.title ?? "Today across your to-dos, customers, and projects.";
   const visibleSections = enabledSections
