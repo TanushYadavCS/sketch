@@ -13,6 +13,8 @@ const ENV_KEYS = [
   "AWS_REGION",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ] as const;
 
 function snapshotEnv() {
@@ -56,6 +58,8 @@ describe("applyLlmEnvFromSettings", () => {
     process.env.AWS_SECRET_ACCESS_KEY = "aws-secret";
     process.env.AWS_REGION = "us-east-1";
     process.env.ANTHROPIC_AUTH_TOKEN = "legacy";
+    process.env.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5-20251001";
+    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
     const logger = { warn: vi.fn(), info: vi.fn() };
 
     applyLlmEnvFromSettings(
@@ -71,6 +75,9 @@ describe("applyLlmEnvFromSettings", () => {
     );
 
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-live");
+    expect(process.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-6");
+    expect(process.env.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-4-6");
+    expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-4-6");
     expect(process.env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
     expect(process.env.AWS_ACCESS_KEY_ID).toBeUndefined();
     expect(process.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
@@ -108,6 +115,8 @@ describe("applyLlmEnvFromSettings", () => {
   it("configures bedrock and clears anthropic env", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-existing";
     process.env.ANTHROPIC_BASE_URL = "https://proxy.example.com";
+    process.env.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5-20251001";
+    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
     const logger = { warn: vi.fn(), info: vi.fn() };
 
     applyLlmEnvFromSettings(
@@ -126,6 +135,9 @@ describe("applyLlmEnvFromSettings", () => {
     expect(process.env.AWS_ACCESS_KEY_ID).toBe("AKIA...");
     expect(process.env.AWS_SECRET_ACCESS_KEY).toBe("secret");
     expect(process.env.AWS_REGION).toBe("us-west-2");
+    expect(process.env.ANTHROPIC_MODEL).toBe("us.anthropic.claude-sonnet-4-6");
+    expect(process.env.ANTHROPIC_SMALL_FAST_MODEL).toBe("us.anthropic.claude-sonnet-4-6");
+    expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("us.anthropic.claude-sonnet-4-6");
     expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(process.env.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(logger.info).toHaveBeenCalledWith(
@@ -168,6 +180,8 @@ describe("applyLlmEnvFromSettings", () => {
     process.env.AWS_SECRET_ACCESS_KEY = "aws-secret";
     process.env.AWS_REGION = "us-east-1";
     process.env.ANTHROPIC_API_KEY = "sk-ant-existing";
+    process.env.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5-20251001";
+    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
     const logger = { warn: vi.fn(), info: vi.fn() };
 
     applyLlmEnvFromSettings(
@@ -186,6 +200,8 @@ describe("applyLlmEnvFromSettings", () => {
     expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("sk-or-v1-tenant-key");
     expect(process.env.ANTHROPIC_API_KEY).toBe("");
     expect(process.env.ANTHROPIC_MODEL).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+    expect(process.env.ANTHROPIC_SMALL_FAST_MODEL).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
+    expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("anthropic/claude-sonnet-4.6@preset/sketch-bedrock");
     expect(process.env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
     expect(process.env.AWS_ACCESS_KEY_ID).toBeUndefined();
     expect(process.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
