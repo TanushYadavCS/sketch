@@ -51,6 +51,13 @@ export type PromoteBriefTaskResult =
   | { status: "collated"; taskId: string }
   | { status: "upserted"; taskId: string; created: boolean };
 
+export interface ReanchorNullParentTasksResult {
+  count: number;
+  taskIds: string[];
+  indexedFileIds: string[];
+  parentEntityIds: string[];
+}
+
 export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
   userEmails: string[];
@@ -170,7 +177,7 @@ export function createTaskRepository(db: Kysely<DB>) {
       return { status: "upserted", ...result };
     },
 
-    async reanchorNullParentTasks(): Promise<number> {
+    async reanchorNullParentTasks(): Promise<ReanchorNullParentTasksResult> {
       const rows = await db
         .selectFrom("tasks")
         .select(["id", "parent_source_ref", "parent_name"])
@@ -178,18 +185,39 @@ export function createTaskRepository(db: Kysely<DB>) {
         .where("valid_to", "is", null)
         .execute();
       let count = 0;
+      const taskIds: string[] = [];
+      const parentEntityIds = new Set<string>();
       for (const task of rows) {
         const parent = await findLiveProjectForTask(db, task.parent_source_ref, task.parent_name);
         if (!parent || parent.id === TEST_ACCOUNT_ENTITY_ID) continue;
-        await db
+        const result = await db
           .updateTable("tasks")
           .set({ parent_entity_id: parent.id, updated_at: new Date().toISOString() })
           .where("id", "=", task.id)
           .where("parent_entity_id", "is", null)
           .execute();
-        count++;
+        const updated = Number(result[0]?.numUpdatedRows ?? 0);
+        if (updated === 0) continue;
+        count += updated;
+        taskIds.push(task.id);
+        parentEntityIds.add(parent.id);
       }
-      return count;
+      const evidenceRows =
+        taskIds.length > 0
+          ? await db
+              .selectFrom("task_evidence")
+              .select("ref_id")
+              .distinct()
+              .where("task_id", "in", taskIds)
+              .where("kind", "=", "file")
+              .execute()
+          : [];
+      return {
+        count,
+        taskIds,
+        indexedFileIds: evidenceRows.map((row) => row.ref_id),
+        parentEntityIds: [...parentEntityIds],
+      };
     },
 
     async expireOrphanedTasks(source?: string): Promise<number> {

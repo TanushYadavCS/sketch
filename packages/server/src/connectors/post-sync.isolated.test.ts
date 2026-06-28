@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTaskRepository } from "../db/repositories/tasks";
 import { assignMembership, upsertWorkCycle } from "../db/repositories/work-cycles";
 import type { DB } from "../db/schema";
+import { reconcileStructuralAssigneeContributesTo } from "../entities/structural-assignee";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { floorRetryForDomains } from "./engagement-floor";
 import { runPostSyncGraphPipeline } from "./post-sync";
@@ -14,6 +15,17 @@ vi.mock("../entities/materialize", () => ({
 
 vi.mock("../entities/co-mention-sweep", () => ({
   sweepCoMentionContributesTo: vi.fn().mockResolvedValue({ examined: 0, promoted: 0 }),
+}));
+
+vi.mock("../entities/structural-assignee", () => ({
+  reconcileStructuralAssigneeContributesTo: vi.fn().mockResolvedValue({
+    scannedPairs: 0,
+    upsertedRelationships: 0,
+    addedEvidence: 0,
+    removedEvidence: 0,
+    removedCoMentionEvidence: 0,
+    removedRelationships: 0,
+  }),
 }));
 
 vi.mock("./engagement-floor", () => ({
@@ -51,10 +63,86 @@ describe("runPostSyncGraphPipeline", () => {
       });
 
       expect(materializeUnmaterializedFacts).toHaveBeenCalledTimes(1);
+      expect(reconcileStructuralAssigneeContributesTo).not.toHaveBeenCalled();
       expect(sweepCoMentionContributesTo).toHaveBeenCalledTimes(1);
       expect(sweepCoMentionContributesTo).toHaveBeenCalledWith(db, expect.anything(), {
         scope: { kind: "files", indexedFileIds: ["file-1", "file-2"] },
         threshold: 4,
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("runs the structural assignee producer for affected files before the co-mention sweep when experimental", async () => {
+    const { sweepCoMentionContributesTo } = await import("../entities/co-mention-sweep");
+    const db = await createTestDb();
+    const logger = createTestLogger();
+
+    try {
+      await runPostSyncGraphPipeline({
+        db,
+        syncLogger: logger,
+        affectedIndexedFileIds: ["file-1", "file-2"],
+        experimentalFlag: true,
+        coMentionContributesToThreshold: 4,
+      });
+
+      expect(reconcileStructuralAssigneeContributesTo).toHaveBeenCalledTimes(1);
+      expect(reconcileStructuralAssigneeContributesTo).toHaveBeenCalledWith(db, expect.anything(), {
+        scope: { kind: "files", indexedFileIds: ["file-1", "file-2"] },
+      });
+      expect(sweepCoMentionContributesTo).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(reconcileStructuralAssigneeContributesTo).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(sweepCoMentionContributesTo).mock.invocationCallOrder[0],
+      );
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("runs the structural assignee producer for reanchored task ids when files were not affected", async () => {
+    const db = await createTestDb();
+    const logger = createTestLogger();
+
+    try {
+      await seedConnector(db, "connector-reanchor");
+      await seedIndexedFile(db, "connector-reanchor", "old-file");
+      await seedProjectWithSourceRef(db, "old-project", "Old Project", "linear", "old-project");
+      const task = await createTaskRepository(db).upsertTask({
+        parentEntityId: null,
+        parentSourceRef: "linear:old-project",
+        parentName: "Old Project",
+        source: "linear",
+        externalRef: "old-task",
+        title: "Old task",
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "external",
+        assigneeEntityId: null,
+        priority: null,
+        dueAt: null,
+        provenance: "structural",
+        sourceTaskId: "old-task",
+      });
+      await createTaskRepository(db).upsertEvidence(task.taskId, "file", "old-file");
+      await seedStructuralTaskFact(db, {
+        connectorConfigId: "connector-reanchor",
+        fileId: "old-file",
+        source: "linear",
+        sourceTaskId: "old-task",
+      });
+
+      await runPostSyncGraphPipeline({
+        db,
+        syncLogger: logger,
+        affectedIndexedFileIds: [],
+        experimentalFlag: true,
+      });
+
+      expect(reconcileStructuralAssigneeContributesTo).toHaveBeenCalledTimes(1);
+      expect(reconcileStructuralAssigneeContributesTo).toHaveBeenCalledWith(db, expect.anything(), {
+        scope: { kind: "tasks", taskIds: [task.taskId] },
       });
     } finally {
       await db.destroy();
@@ -226,6 +314,90 @@ async function seedConnector(db: Kysely<DB>, connectorConfigId: string): Promise
       credentials: "{}",
       created_by: `${connectorConfigId}-user`,
       scope_config: "{}",
+    })
+    .execute();
+}
+
+async function seedIndexedFile(db: Kysely<DB>, connectorConfigId: string, indexedFileId: string): Promise<void> {
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: indexedFileId,
+      connector_config_id: connectorConfigId,
+      provider_file_id: indexedFileId,
+      file_name: `${indexedFileId}.txt`,
+      file_type: "issue",
+      content_category: "structured",
+      content: indexedFileId,
+      source: "linear",
+      content_hash: `hash-${indexedFileId}`,
+      synced_at: new Date().toISOString(),
+    })
+    .execute();
+}
+
+async function seedProjectWithSourceRef(
+  db: Kysely<DB>,
+  entityId: string,
+  name: string,
+  source: string,
+  sourceId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id: entityId,
+      name,
+      source_type: "project",
+      subtype: "external",
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+  await db
+    .insertInto("entity_source_refs")
+    .values({
+      id: `${entityId}-ref`,
+      entity_id: entityId,
+      source,
+      source_id: sourceId,
+      source_url: null,
+      last_seen_at: now,
+    })
+    .execute();
+}
+
+async function seedStructuralTaskFact(
+  db: Kysely<DB>,
+  input: { connectorConfigId: string; fileId: string; source: string; sourceTaskId: string },
+): Promise<void> {
+  await db
+    .insertInto("indexed_file_facts")
+    .values({
+      id: `${input.sourceTaskId}-fact`,
+      indexed_file_id: input.fileId,
+      connector_config_id: input.connectorConfigId,
+      created_by_user_id: `${input.connectorConfigId}-user`,
+      source: input.source,
+      fact_type: "structural_task",
+      relation: "mentioned",
+      subject_name: input.sourceTaskId,
+      subject_email: null,
+      subject_source: input.source,
+      subject_source_id: input.sourceTaskId,
+      context_snippet: null,
+      raw: "{}",
+      fact_key: `${input.source}:structural_task:${input.sourceTaskId}`,
+      last_seen_sync_run_id: "sync-new",
+      deleted_at: null,
+      content_hash: null,
+      materialized_at: new Date().toISOString(),
     })
     .execute();
 }

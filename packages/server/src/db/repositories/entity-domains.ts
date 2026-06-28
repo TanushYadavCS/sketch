@@ -81,6 +81,13 @@ export interface AddRelationshipEvidenceInput {
   sourceFactId?: string | null;
 }
 
+export function relationshipSourceRank(source: string | null | undefined): number {
+  if (source === "structural_assignee") return 3;
+  if (source === "llm_extraction") return 2;
+  if (source === "co_mention") return 1;
+  return 0;
+}
+
 /**
  * Lowercase + trim the part after `@`. Returns null for malformed input.
  * Subdomains are conservative: `mail.acme.com` only normalizes to `acme.com`
@@ -151,6 +158,14 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
   async function upsertRelationship(input: UpsertRelationshipInput): Promise<string> {
     const validFrom = input.validFrom ?? "";
     const id = randomUUID();
+    const incomingRank = relationshipSourceRank(input.source);
+    const existingRank = sql<number>`CASE entity_relationships.source
+      WHEN 'structural_assignee' THEN 3
+      WHEN 'llm_extraction' THEN 2
+      WHEN 'co_mention' THEN 1
+      ELSE 0
+    END`;
+    const preserveRankedOwner = sql<boolean>`EXCLUDED.relationship_type = 'contributes_to' AND ${incomingRank} < ${existingRank}`;
     const greatest = isPg(db)
       ? sql`GREATEST(entity_relationships.confidence_score, EXCLUDED.confidence_score)`
       : sql`max(entity_relationships.confidence_score, EXCLUDED.confidence_score)`;
@@ -161,9 +176,15 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         (${id}, ${input.sourceEntityId}, ${input.targetEntityId}, ${input.relationshipType}, ${input.confidence}, ${input.confidenceScore}, ${input.source}, ${validFrom}, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
       DO UPDATE SET
-        confidence = EXCLUDED.confidence,
+        confidence = CASE
+          WHEN ${preserveRankedOwner} THEN entity_relationships.confidence
+          ELSE EXCLUDED.confidence
+        END,
         confidence_score = ${greatest},
-        source = EXCLUDED.source,
+        source = CASE
+          WHEN ${preserveRankedOwner} THEN entity_relationships.source
+          ELSE EXCLUDED.source
+        END,
         updated_at = CURRENT_TIMESTAMP
     `.execute(db);
     const row = await db
@@ -372,6 +393,23 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         .where("relationship_id", "in", relationshipIds)
         .where("source_fact_id", "is", null)
         .where("note", "like", "co_mention:%");
+      const keep = [...keepEvidenceKeys];
+      if (keep.length > 0) {
+        query = query.where("evidence_key", "not in", keep);
+      }
+      const result = await query.executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async deleteStructuralAssigneeEvidenceForRelationships(
+      relationshipIds: string[],
+      keepEvidenceKeys: Set<string> = new Set(),
+    ): Promise<number> {
+      if (relationshipIds.length === 0) return 0;
+      let query = db
+        .deleteFrom("entity_relationship_evidence")
+        .where("relationship_id", "in", relationshipIds)
+        .where("note", "like", "structural_assignee:%");
       const keep = [...keepEvidenceKeys];
       if (keep.length > 0) {
         query = query.where("evidence_key", "not in", keep);
