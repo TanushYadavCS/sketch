@@ -26,17 +26,17 @@ export const PERSONAL_CANVAS_CONNECTOR_MAPPINGS: PersonalCanvasConnectorMapping[
   {
     connectorType: "gmail",
     appSlug: "google-gmail-oauth",
-    aliases: ["google-gmail-oauth", "google-gmail", "gmail"],
+    aliases: ["google-gmail-oauth", "google-gmail", "google_gmail", "gmail"],
   },
   {
     connectorType: "outlook",
     appSlug: "microsoft-outlook-oauth",
-    aliases: ["microsoft-outlook-oauth", "microsoft-outlook", "outlook"],
+    aliases: ["microsoft-outlook-oauth", "microsoft-outlook", "microsoft_outlook", "outlook"],
   },
   {
     connectorType: "teams",
     appSlug: "microsoft-teams-oauth",
-    aliases: ["microsoft-teams-oauth", "microsoft-teams", "teams"],
+    aliases: ["microsoft-teams-oauth", "microsoft-teams", "microsoft_teams", "teams"],
   },
   {
     connectorType: "fireflies",

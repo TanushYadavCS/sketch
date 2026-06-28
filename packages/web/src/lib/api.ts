@@ -1481,9 +1481,10 @@ export const api = {
         publicKeyId: string | null;
       }>("/api/connectors/credential-source");
     },
-    canvasSuggestion(appId: string, accountId?: string | null) {
+    canvasSuggestion(appId: string, connection?: Pick<IntegrationConnection, "id" | "source"> | null) {
       const params = new URLSearchParams({ appId });
-      if (accountId) params.set("accountId", accountId);
+      if (connection?.id) params.set("accountId", connection.id);
+      if (connection?.source) params.set("connectionSource", connection.source);
       return request<{ suggestion: { connectorType: string; appId: string; accountId?: string } | null }>(
         `/api/connectors/canvas/suggestions?${params.toString()}`,
       );

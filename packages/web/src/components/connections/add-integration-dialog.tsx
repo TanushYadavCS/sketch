@@ -1,6 +1,6 @@
 import { api } from "@/lib/api";
 import { CheckIcon, MagnifyingGlassIcon, SpinnerGapIcon, WarningIcon, XCircleIcon } from "@phosphor-icons/react";
-import type { IntegrationApp } from "@sketch/shared";
+import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 /**
  * Add Integration dialog: catalog search with infinite scroll + OAuth popup flow.
  */
@@ -54,7 +54,7 @@ export function AddIntegrationDialog({
   connectedAppIds: Set<string>;
   initialAppId?: string | null;
   initialSearch?: string | null;
-  onSuccess: (app?: IntegrationApp) => void;
+  onSuccess: (app?: IntegrationApp, connection?: IntegrationConnection) => void;
 }) {
   const [step, setStep] = useState<AddIntegrationStep>({ kind: "search" });
   const [search, setSearch] = useState("");
@@ -248,11 +248,11 @@ export function AddIntegrationDialog({
       finalizeAfterVerify = false;
       try {
         const connections = await api.mcpServers.listConnections(providerId);
-        const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
+        const connected = connections.find((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
         if (cancelledRef.current || oauthAttemptRef.current !== attemptId) return;
         if (connected) {
           toast.success("App connected successfully!");
-          onSuccess(app);
+          onSuccess({ ...app, connectionId: connected.id }, connected);
           resetAndClose();
         } else if (shouldFinalizeIfMissing) {
           stopPolling();
