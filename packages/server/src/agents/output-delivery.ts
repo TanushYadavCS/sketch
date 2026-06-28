@@ -9,6 +9,7 @@ import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture, providerTimestampFromWhatsApp } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
 import { isSlackDmChannelId, isSlackUserId } from "../workflows/delivery";
 import { type RenderableAgentOutput, renderAgentOutputForDelivery } from "./output-renderer";
 import type { AgentDefinition } from "./types";
@@ -64,16 +65,20 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
 
   async function sendWhatsApp(delivery: AgentDeliveryConfig, text: string): Promise<string[]> {
     if (!deps.whatsapp.isConnected) throw new Error("WhatsApp is not connected.");
-    const sent = await deps.whatsapp.sendText(delivery.targetId, text);
-    const messageRef = sent?.key?.id;
-    if (!messageRef) return [];
-    await capture.captureWhatsApp({
-      deliveryTarget: delivery.targetId,
-      messageRef,
-      providerTimestamp: providerTimestampFromWhatsApp(sent),
-      text,
-    });
-    return [messageRef];
+    const refs: string[] = [];
+    for (const chunk of chunkText(text, WHATSAPP_TEXT_LIMIT)) {
+      const sent = await deps.whatsapp.sendText(delivery.targetId, chunk);
+      const messageRef = sent?.key?.id;
+      if (!messageRef) continue;
+      refs.push(messageRef);
+      await capture.captureWhatsApp({
+        deliveryTarget: delivery.targetId,
+        messageRef,
+        providerTimestamp: providerTimestampFromWhatsApp(sent),
+        text: chunk,
+      });
+    }
+    return refs;
   }
 
   return {

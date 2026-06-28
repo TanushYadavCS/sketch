@@ -812,6 +812,48 @@ describe("AgentRunService", () => {
     expect(getGroupMetadata).toHaveBeenCalledWith("120363000000001@g.us");
   });
 
+  it("resolves WhatsApp group delivery when the current user's participant JID is a LID", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15551234567",
+    });
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "86702773280883@lid" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const resolveJidToPhone = vi.fn(async (jid: string) => (jid === "86702773280883@lid" ? "+15551234567" : null));
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata, resolveJidToPhone }) });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Spoofed",
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: "120363000000001@g.us",
+      label: "Leadership",
+    });
+    expect(resolveJidToPhone).toHaveBeenCalledWith("86702773280883@lid");
+  });
+
   it("rejects WhatsApp group delivery when the current user is not a participant", async () => {
     const users = createUserRepository(db);
     const user = await users.create({

@@ -93,6 +93,65 @@ describe("createAgentOutputDeliveryService", () => {
     expect(captured[0].provider_message_id).toBe("123.456");
   });
 
+  it("sends WhatsApp delivery chunks and records every message ref", async () => {
+    let sentCount = 0;
+    const whatsapp = {
+      isConnected: true,
+      sendText: vi.fn(async () => {
+        sentCount += 1;
+        return { key: { id: `wa-message-${sentCount}` }, messageTimestamp: 1717480800 };
+      }),
+    } as unknown as WhatsAppBot;
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Leadership",
+      },
+      output: {
+        id: "output-delivery",
+        outputDate: "2026-06-26",
+        masthead: { title: "Daily Brief", summary: "x".repeat(8500) },
+        sections: {},
+      },
+    });
+
+    expect(whatsapp.sendText).toHaveBeenCalledTimes(4);
+    for (const call of vi.mocked(whatsapp.sendText).mock.calls) {
+      expect(call[0]).toBe("120363000000001@g.us");
+      expect(call[1].length).toBeLessThanOrEqual(4000);
+    }
+
+    const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
+    expect(attempt.status).toBe("sent");
+    expect(attempt.message_refs_json).toBe(
+      JSON.stringify(["wa-message-1", "wa-message-2", "wa-message-3", "wa-message-4"]),
+    );
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .select(["text", "provider_message_id"])
+      .orderBy("provider_message_id")
+      .execute();
+    expect(captured.map((row) => row.provider_message_id)).toEqual([
+      "wa-message-1",
+      "wa-message-2",
+      "wa-message-3",
+      "wa-message-4",
+    ]);
+    expect(captured.every((row) => row.text.length <= 4000)).toBe(true);
+  });
+
   it("records a failed attempt when the target platform is unavailable", async () => {
     const whatsapp = { isConnected: false, sendText: vi.fn() } as unknown as WhatsAppBot;
     const service = createAgentOutputDeliveryService({

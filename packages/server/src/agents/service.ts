@@ -44,7 +44,11 @@ export interface AgentRunServiceDeps {
   queueManager?: QueueManager;
   outputDelivery?: AgentOutputDeliveryPublisher;
   getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
-  getWhatsApp?: () => Pick<WhatsAppBot, "getGroupMetadata"> | null;
+  getWhatsApp?: () =>
+    | (Pick<WhatsAppBot, "getGroupMetadata"> & {
+        resolveJidToPhone?: (jid: string) => Promise<string | null>;
+      })
+    | null;
 }
 
 export interface RequestAgentGenerationParams {
@@ -115,15 +119,29 @@ export interface AgentSummaryView {
 export class AgentDeliveryTargetError extends Error {}
 
 function whatsappNumberToJid(whatsappNumber: string): string {
-  return `${whatsappNumber.replace(/^\+/, "")}@s.whatsapp.net`;
+  return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
 }
 
-function whatsappGroupHasParticipant(
+function normalizeWhatsappNumber(whatsappNumber: string): string {
+  return whatsappNumber.replace(/^\+/, "");
+}
+
+async function whatsappGroupHasParticipant(
   group: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
   whatsappNumber: string,
-): boolean {
+  resolveJidToPhone?: (jid: string) => Promise<string | null>,
+): Promise<boolean> {
   const userJid = whatsappNumberToJid(whatsappNumber);
-  return group?.participants?.some((participant) => areJidsSameUser(participant.id, userJid)) ?? false;
+  const userNumber = normalizeWhatsappNumber(whatsappNumber);
+
+  for (const participant of group?.participants ?? []) {
+    if (areJidsSameUser(participant.id, userJid)) return true;
+
+    const participantPhone = await resolveJidToPhone?.(participant.id);
+    if (participantPhone && normalizeWhatsappNumber(participantPhone) === userNumber) return true;
+  }
+
+  return false;
 }
 
 function localDateInTimezone(now: Date, timezone: string): string {
@@ -378,7 +396,13 @@ export class AgentRunService {
     const whatsapp = this.deps.getWhatsApp?.() ?? null;
     if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
     const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
-    if (!whatsappGroupHasParticipant(groupMetadata, user.whatsapp_number)) {
+    if (
+      !(await whatsappGroupHasParticipant(
+        groupMetadata,
+        user.whatsapp_number,
+        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+      ))
+    ) {
       throw new AgentDeliveryTargetError("WhatsApp group is not available for this user");
     }
 
