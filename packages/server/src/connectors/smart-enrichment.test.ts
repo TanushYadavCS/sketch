@@ -1272,7 +1272,7 @@ describe("extractEntities prompt — v7 quality rules", () => {
       description: "AI services company. Sketch is one of our products.",
     });
 
-    expect(captured).toContain("Organization: Canvas Labs");
+    expect(captured).toContain("Background on the organization that operates this system (Canvas Labs)");
     expect(captured).toContain("AI services company. Sketch is one of our products.");
   });
 
@@ -1301,5 +1301,143 @@ describe("extractEntities prompt — v7 quality rules", () => {
     expect(productLine).toContain("injected known-products list");
     expect(captured).toContain("Known entities likely to appear in this file");
     expect(captured).toContain("Known Product (product)");
+  });
+});
+
+describe("smartEnrichFile — LLM leak gates", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    try {
+      await db.destroy();
+    } catch {
+      // already destroyed
+    }
+  });
+
+  function extractionGenerator(extraction: unknown): GeminiGenerator {
+    return {
+      generate: async () => "A short document summary.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) =>
+        (opts?.label?.startsWith("extractEntities") ? extraction : {}) as T,
+    } as GeminiGenerator;
+  }
+
+  async function extractedNames(fileId: string): Promise<string[]> {
+    const rows = await db
+      .selectFrom("indexed_file_facts")
+      .select("subject_name")
+      .where("indexed_file_id", "=", fileId)
+      .where("fact_type", "=", "llm_extracted")
+      .execute();
+    return rows.map((row) => row.subject_name ?? "");
+  }
+
+  async function relationEndpointNames(fileId: string): Promise<string[]> {
+    const rows = await db
+      .selectFrom("indexed_file_facts")
+      .select("raw")
+      .where("indexed_file_id", "=", fileId)
+      .where("fact_type", "=", "llm_relation")
+      .execute();
+    return rows.flatMap((row) => {
+      const raw = JSON.parse(row.raw ?? "{}") as { source?: { name?: string }; target?: { name?: string } };
+      return [raw.source?.name, raw.target?.name].filter((name): name is string => Boolean(name));
+    });
+  }
+
+  it("drops a personal email-provider company — mention and relation — but keeps a real company", async () => {
+    const fileId = randomUUID();
+    const content = "Anoushka Srivastava emailed about the project. Oliver Wyman is the client.";
+    await seedFile(db, fileId, { content, contentHash: "hash-provider" });
+    const generator = extractionGenerator({
+      mentions: [
+        { mention: "Anoushka Srivastava", type: "person", variations: [], confidence: 0.95 },
+        { mention: "Gmail", type: "company", variations: [], confidence: 0.95 },
+        { mention: "Oliver Wyman", type: "company", variations: [], confidence: 0.95 },
+      ],
+      relations: [
+        {
+          type: "works_at",
+          source: { name: "Anoushka Srivastava", type: "person", variations: [] },
+          target: { name: "Gmail", type: "company", variations: [] },
+          confidence: 0.95,
+          context: content,
+        },
+        {
+          type: "engaged_with",
+          source: { name: "Anoushka Srivastava", type: "person", variations: [] },
+          target: { name: "Oliver Wyman", type: "company", variations: [] },
+          confidence: 0.95,
+          context: content,
+        },
+      ],
+    });
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      smartFileContext(fileId, "hash-provider", { content }),
+    );
+
+    const names = await extractedNames(fileId);
+    expect(names).toContain("Oliver Wyman");
+    expect(names).toContain("Anoushka Srivastava");
+    expect(names).not.toContain("Gmail");
+
+    const endpoints = await relationEndpointNames(fileId);
+    expect(endpoints).toContain("Oliver Wyman");
+    expect(endpoints).not.toContain("Gmail");
+  });
+
+  it("drops a project mention that merely restates the email subject, keeps a body project", async () => {
+    const fileId = randomUUID();
+    const content = "Rajesh Chaudhary discussed the Branding and MVP Design Proposal. We also kicked off K8s Migration.";
+    await seedFile(db, fileId, { content, contentHash: "hash-subject" });
+    const generator = extractionGenerator({
+      mentions: [
+        { mention: "Rajesh Chaudhary", type: "person", variations: [], confidence: 0.95 },
+        { mention: "Branding and MVP Design Proposal", type: "project", variations: [], confidence: 0.95 },
+        { mention: "K8s Migration", type: "project", variations: [], confidence: 0.95 },
+      ],
+      relations: [],
+    });
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      smartFileContext(fileId, "hash-subject", {
+        content,
+        fileName: "Re: Branding and MVP Design Proposal",
+      }),
+    );
+
+    const names = await extractedNames(fileId);
+    expect(names).toContain("K8s Migration");
+    expect(names).not.toContain("Branding and MVP Design Proposal");
+  });
+
+  it("does not over-match: companies that merely contain a provider word survive", async () => {
+    const fileId = randomUUID();
+    const content = "Live Nation and Proton Labs announced a partnership.";
+    await seedFile(db, fileId, { content, contentHash: "hash-substring" });
+    const generator = extractionGenerator({
+      mentions: [
+        { mention: "Live Nation", type: "company", variations: [], confidence: 0.95 },
+        { mention: "Proton Labs", type: "company", variations: [], confidence: 0.95 },
+      ],
+      relations: [],
+    });
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      smartFileContext(fileId, "hash-substring", { content }),
+    );
+
+    const names = await extractedNames(fileId);
+    expect(names).toContain("Live Nation");
+    expect(names).toContain("Proton Labs");
   });
 });
