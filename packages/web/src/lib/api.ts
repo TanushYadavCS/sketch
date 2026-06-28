@@ -1474,8 +1474,17 @@ export const api = {
       });
     },
     credentialSource() {
-      return request<{ mode: "local" | "canvas"; canvasConfigured: boolean; publicKeyId: string | null }>(
-        "/api/connectors/credential-source",
+      return request<{
+        mode: "local" | "canvas";
+        canvasConfigured: boolean;
+        canvasCredentialImportConfigured: boolean;
+        publicKeyId: string | null;
+      }>("/api/connectors/credential-source");
+    },
+    canvasSuggestion(appId: string) {
+      const params = new URLSearchParams({ appId });
+      return request<{ suggestion: { connectorType: string; appId: string } | null }>(
+        `/api/connectors/canvas/suggestions?${params.toString()}`,
       );
     },
     canvasConnect(data: { connectorType: string; callbackUrl: string }) {

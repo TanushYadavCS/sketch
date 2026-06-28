@@ -10,6 +10,7 @@
  * Route ordering: static paths (/all-files, /search, /sources, /files/...)
  * must be registered before dynamic /:id to prevent param capture.
  */
+import { canvasAppSlugForPersonalConnector, personalCanvasConnectorTypeFromAppId } from "@sketch/shared";
 import { type Context, Hono } from "hono";
 import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
@@ -231,6 +232,10 @@ const canvasImportSchema = z.object({
   scopeConfig: z.record(z.string(), z.unknown()).optional(),
 });
 
+const canvasSuggestionSchema = z.object({
+  appId: z.string().trim().min(1).max(128),
+});
+
 const searchSchema = z.object({
   query: z.string().min(1, "Search query is required"),
   source: z.string().optional(),
@@ -353,6 +358,12 @@ export function connectorRoutes(
 
   function isCanvasMode(): boolean {
     return appConfig?.CONNECTOR_CREDENTIAL_SOURCE === "canvas";
+  }
+
+  function hasCanvasCredentialImportConfig(): boolean {
+    return Boolean(
+      appConfig?.CANVAS_CREDENTIAL_PRIVATE_KEY_PEM?.trim() || appConfig?.CANVAS_CREDENTIAL_PRIVATE_KEY_PATH?.trim(),
+    );
   }
 
   function isLocalConnectorBlockedInCanvasMode(connectorType: ConnectorType): boolean {
@@ -505,7 +516,47 @@ export function connectorRoutes(
     return c.json({
       mode: appConfig?.CONNECTOR_CREDENTIAL_SOURCE ?? "local",
       canvasConfigured,
+      canvasCredentialImportConfigured: canvasConfigured && hasCanvasCredentialImportConfig(),
       publicKeyId: appConfig?.CANVAS_CREDENTIAL_PUBLIC_KEY_ID ?? null,
+    });
+  });
+
+  routes.get("/canvas/suggestions", async (c) => {
+    const sub = c.get("sub");
+    if (!sub || typeof sub !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
+    }
+
+    const parsed = canvasSuggestionSchema.safeParse({ appId: c.req.query("appId") });
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const connectorType = personalCanvasConnectorTypeFromAppId(parsed.data.appId);
+    if (!connectorType) {
+      return c.json({ suggestion: null });
+    }
+
+    const connectorMeta = getConnector(connectorType);
+    if (!connectorMeta.perUserAuth) {
+      return c.json({ suggestion: null });
+    }
+
+    const [provider, existingConnector] = await Promise.all([
+      createMcpServerRepository(db).findByType("canvas"),
+      connectorRepo.findByTypeAndOwner(connectorType, sub),
+    ]);
+
+    if (!provider || !hasCanvasCredentialImportConfig() || existingConnector) {
+      return c.json({ suggestion: null });
+    }
+
+    return c.json({
+      suggestion: {
+        connectorType,
+        appId: canvasAppSlugForPersonalConnector(connectorType),
+      },
     });
   });
 
@@ -514,10 +565,6 @@ export function connectorRoutes(
     const email = c.get("email");
     if (!sub || typeof sub !== "string" || !email) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in with an email is required" } }, 401);
-    }
-
-    if (appConfig?.CONNECTOR_CREDENTIAL_SOURCE !== "canvas") {
-      return c.json({ error: { code: "BAD_REQUEST", message: "Canvas credential source is not enabled" } }, 400);
     }
 
     const parsed = canvasConnectSchema.safeParse(await c.req.json().catch(() => ({})));
@@ -551,8 +598,16 @@ export function connectorRoutes(
       return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in with an email is required" } }, 401);
     }
 
-    if (appConfig?.CONNECTOR_CREDENTIAL_SOURCE !== "canvas") {
-      return c.json({ error: { code: "BAD_REQUEST", message: "Canvas credential source is not enabled" } }, 400);
+    if (!hasCanvasCredentialImportConfig()) {
+      return c.json(
+        {
+          error: {
+            code: "CANVAS_CREDENTIAL_IMPORT_NOT_CONFIGURED",
+            message: "Canvas credential import requires a configured private key",
+          },
+        },
+        400,
+      );
     }
 
     const parsed = canvasImportSchema.safeParse(await c.req.json().catch(() => ({})));

@@ -74,6 +74,8 @@ interface ConnectIntegrationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
+  preferCanvasCredentialSource?: boolean;
+  canvasConnectionReady?: boolean;
 }
 
 export function ConnectIntegrationDialog({
@@ -81,6 +83,8 @@ export function ConnectIntegrationDialog({
   open,
   onOpenChange,
   onConnected,
+  preferCanvasCredentialSource = false,
+  canvasConnectionReady = false,
 }: ConnectIntegrationDialogProps) {
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
@@ -136,6 +140,9 @@ export function ConnectIntegrationDialog({
     enabled: open,
   });
   const isCanvasMode = credentialSource.data?.mode === "canvas" && canvasSupported;
+  const useCanvasCredentialFlow = canvasSupported && (isCanvasMode || preferCanvasCredentialSource);
+  const canvasCredentialImportConfigured = credentialSource.data?.canvasCredentialImportConfigured !== false;
+  const canvasConnectionCanImport = canvasConnectionReady || canvasPopupOpened;
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -176,7 +183,7 @@ export function ConnectIntegrationDialog({
     queryKey: [isZoho ? "zoho-oauth-status" : isMicrosoft ? "microsoft-oauth-status" : "google-oauth-status"],
     queryFn: () =>
       isZoho ? api.zohoOAuth.status() : isMicrosoft ? api.microsoftOAuth.status() : api.googleOAuth.status(),
-    enabled: open && isOAuthRedirect && !isCanvasMode,
+    enabled: open && isOAuthRedirect && !useCanvasCredentialFlow,
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
@@ -190,7 +197,7 @@ export function ConnectIntegrationDialog({
 
   // For OAuth redirect: start with oauth-config step if client setup is required and missing.
   useEffect(() => {
-    if (open && isCanvasMode) {
+    if (open && useCanvasCredentialFlow) {
       setStep("credentials");
       return;
     }
@@ -199,7 +206,7 @@ export function ConnectIntegrationDialog({
         setStep(needsClientSetup && !isOAuthConfigured ? "oauth-config" : "credentials");
       }
     }
-  }, [open, isCanvasMode, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured, needsClientSetup]);
+  }, [open, useCanvasCredentialFlow, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured, needsClientSetup]);
 
   /** Save provider OAuth client_id + client_secret. */
   const configureOAuthMutation = useMutation({
@@ -230,7 +237,7 @@ export function ConnectIntegrationDialog({
   const validateMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      if (isCanvasMode && managedConnectorId) {
+      if (useCanvasCredentialFlow && managedConnectorId) {
         return api.integrations.updateScope(managedConnectorId, { rootPages: Array.from(selectedNotionPageIds) });
       }
       const credentials = buildCredentials();
@@ -281,7 +288,7 @@ export function ConnectIntegrationDialog({
   const connectWithNotionPagesMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      if (isCanvasMode && managedConnectorId) {
+      if (useCanvasCredentialFlow && managedConnectorId) {
         return api.integrations.updateScope(managedConnectorId, { rootPages: Array.from(selectedNotionPageIds) });
       }
       const credentials = buildCredentials();
@@ -311,7 +318,7 @@ export function ConnectIntegrationDialog({
         workspaces: Array.from(selectedWorkspaceIds),
         spaces: Array.from(selectedSpaceIds),
       };
-      if (isCanvasMode && managedConnectorId) {
+      if (useCanvasCredentialFlow && managedConnectorId) {
         return api.integrations.updateScope(managedConnectorId, scopeConfig);
       }
       const credentials = buildCredentials();
@@ -356,7 +363,7 @@ export function ConnectIntegrationDialog({
         sharedDrives.length > 0
           ? { sharedDrives: Array.from(selectedDriveIds) }
           : { folders: Array.from(selectedFolderIds) };
-      if (isCanvasMode && managedConnectorId) {
+      if (useCanvasCredentialFlow && managedConnectorId) {
         return api.integrations.updateScope(managedConnectorId, scopeConfig);
       }
       const credentials = buildCredentials();
@@ -650,47 +657,70 @@ export function ConnectIntegrationDialog({
               </Button>
             </DialogFooter>
           </>
-        ) : step === "credentials" && isCanvasMode ? (
+        ) : step === "credentials" && useCanvasCredentialFlow ? (
           <>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2.5">
                 <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
                 Connect {integration.name}
               </DialogTitle>
-              <DialogDescription>Connect in Canvas, then continue here to choose sync scope.</DialogDescription>
+              <DialogDescription>
+                {canvasConnectionReady
+                  ? "Use the account you connected in Canvas, then choose what to sync."
+                  : "Connect in Canvas, then continue here to choose sync scope."}
+              </DialogDescription>
             </DialogHeader>
 
             <div className="flex flex-col gap-3 py-4">
+              {!canvasConnectionReady && (
+                <Button
+                  size="lg"
+                  className="w-full"
+                  onClick={() => canvasConnectMutation.mutate()}
+                  disabled={isPending || credentialSource.data?.canvasConfigured === false}
+                >
+                  {canvasConnectMutation.isPending ? (
+                    <>
+                      <SpinnerGapIcon size={14} className="animate-spin" />
+                      Opening Canvas...
+                    </>
+                  ) : (
+                    "Connect in Canvas"
+                  )}
+                </Button>
+              )}
               <Button
-                size="lg"
-                className="w-full"
-                onClick={() => canvasConnectMutation.mutate()}
-                disabled={isPending || credentialSource.data?.canvasConfigured === false}
-              >
-                {canvasConnectMutation.isPending ? (
-                  <>
-                    <SpinnerGapIcon size={14} className="animate-spin" />
-                    Opening Canvas...
-                  </>
-                ) : (
-                  "Connect in Canvas"
-                )}
-              </Button>
-              <Button
-                variant="outline"
+                variant={canvasConnectionReady ? "default" : "outline"}
                 className="w-full"
                 onClick={() => canvasImportMutation.mutate()}
-                disabled={isPending || !canvasPopupOpened}
+                disabled={
+                  isPending ||
+                  !canvasConnectionCanImport ||
+                  credentialSource.data?.canvasConfigured === false ||
+                  !canvasCredentialImportConfigured
+                }
               >
                 {canvasImportMutation.isPending ? (
                   <>
                     <SpinnerGapIcon size={14} className="animate-spin" />
                     Importing...
                   </>
+                ) : canvasConnectionReady ? (
+                  "Continue with connected account"
                 ) : (
                   "Continue"
                 )}
               </Button>
+              {credentialSource.data?.canvasConfigured === false && (
+                <p className="text-center text-xs text-muted-foreground">
+                  Canvas integration provider is not configured.
+                </p>
+              )}
+              {!canvasCredentialImportConfigured && credentialSource.data?.canvasConfigured !== false && (
+                <p className="text-center text-xs text-muted-foreground">
+                  Canvas credential import is not configured for this workspace.
+                </p>
+              )}
             </div>
           </>
         ) : step === "credentials" && isOAuthRedirect && isZoho ? (

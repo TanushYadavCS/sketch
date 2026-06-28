@@ -184,6 +184,41 @@ describe("ConnectionsPage direct connect", () => {
     expect(intent).not.toHaveBeenCalled();
   });
 
+  it("nudges users to connect a matching personal connector after Canvas connection verification", async () => {
+    setupCommonHandlers([
+      {
+        id: "secrets:user-1:gmail:google-gmail-oauth",
+        providerId: "provider-1",
+        source: "canvas_user_secrets",
+        appId: "google-gmail-oauth",
+        appName: "Gmail",
+        status: "active",
+        accessLevel: "personal",
+        isOwnedByViewer: true,
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    window.history.replaceState({}, "", "/integrations?verify_connected=google-gmail-oauth");
+
+    server.use(
+      http.get("/api/connectors/canvas/suggestions", ({ request }) => {
+        expect(new URL(request.url).searchParams.get("appId")).toBe("google-gmail-oauth");
+        return HttpResponse.json({
+          suggestion: {
+            connectorType: "gmail",
+            appId: "google-gmail-oauth",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+
+    expect(await screen.findByText("Gmail is connected")).toBeInTheDocument();
+    expect(await screen.findByText("Sync Gmail into Files?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect connector" })).toBeInTheDocument();
+  });
+
   it("keeps polling callback verification until the provider returns the connection", async () => {
     const connection = {
       id: "secrets:user-1:github:github",

@@ -10,6 +10,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createConnectorRepository } from "../db/repositories/connectors";
+import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -128,6 +129,17 @@ async function insertFile(db: Kysely<DB>, opts: { connectorConfigId: string; fil
   });
   await repo.linkConnectorFile(opts.connectorConfigId, result.id);
   return result.id;
+}
+
+async function insertCanvasProvider(db: Kysely<DB>) {
+  return createMcpServerRepository(db).create({
+    type: "canvas",
+    displayName: "Canvas",
+    url: "https://canvas.example.com/mcp",
+    apiUrl: "https://canvas.example.com",
+    credentials: JSON.stringify({ apiKey: "sk-test" }),
+    mode: "skill",
+  });
 }
 
 describe("Connectors API — authorization", () => {
@@ -440,6 +452,66 @@ describe("Connectors API — authorization", () => {
         }),
       });
       expect(res.status).toBe(409);
+    });
+  });
+
+  describe("GET /canvas/suggestions — personal connector nudges", () => {
+    it("returns a personal connector suggestion for a matching Canvas app", async () => {
+      await insertCanvasProvider(db);
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        }),
+        { logger },
+      );
+
+      const res = await canvasApp.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        suggestion: {
+          connectorType: "gmail",
+          appId: "google-gmail-oauth",
+        },
+      });
+    });
+
+    it("does not suggest org-level connectors or already-connected personal connectors", async () => {
+      await insertCanvasProvider(db);
+      await insertConfig(db, { connectorType: "gmail", createdBy: memberId });
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        }),
+        { logger },
+      );
+
+      const existing = await canvasApp.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
+      const orgLevel = await canvasApp.request("/api/connectors/canvas/suggestions?appId=notion", {
+        headers: { Cookie: memberCookie },
+      });
+
+      expect(existing.status).toBe(200);
+      expect(orgLevel.status).toBe(200);
+      await expect(existing.json()).resolves.toEqual({ suggestion: null });
+      await expect(orgLevel.json()).resolves.toEqual({ suggestion: null });
+    });
+
+    it("does not suggest a connector when Canvas credential import is not configured", async () => {
+      await insertCanvasProvider(db);
+
+      const res = await app.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ suggestion: null });
     });
   });
 

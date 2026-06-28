@@ -32,7 +32,7 @@ export function ChatIntegrationConnectionFrame({
   popupWindow: Window | null;
   onOpenChange: (open: boolean) => void;
   onStatusChange: (requestId: string, status: ChatThreadIntegrationConnectionStatus) => void;
-  onConnected: () => void;
+  onConnected: (app?: IntegrationApp) => void;
 }) {
   const requestRef = useRef(0);
   const connectedRef = useRef(false);
@@ -86,7 +86,7 @@ export function ChatIntegrationConnectionFrame({
       if (intervalId !== null) window.clearInterval(intervalId);
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       updateStatus("connected");
-      onConnected();
+      onConnected(app);
       toast.success(`${app.name} connected`);
       closeConnection();
     };

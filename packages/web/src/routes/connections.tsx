@@ -12,6 +12,7 @@ import { AddIntegrationDialog } from "@/components/connections/add-integration-d
 import { AddMcpDialog } from "@/components/connections/add-mcp-dialog";
 import { AddProviderDialog, ProviderSelectorDialog } from "@/components/connections/add-provider-dialog";
 import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
+import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
 import { EditMcpDialog } from "@/components/connections/edit-mcp-dialog";
 import { EditProviderDialog } from "@/components/connections/edit-provider-dialog";
 import {
@@ -27,7 +28,12 @@ import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
 import { CheckCircleIcon, MagnifyingGlassIcon, PlusIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
-import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
+import type {
+  AgentEnvironmentVariableRecord,
+  IntegrationApp,
+  IntegrationConnection,
+  McpServerRecord,
+} from "@sketch/shared";
 import { Button } from "@sketch/ui/components/button";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
@@ -361,10 +367,22 @@ export function ConnectionsPage() {
   const [showAddIntegrationDialog, setShowAddIntegrationDialog] = useState(false);
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
+  const [connectorNudge, setConnectorNudge] = useState<ConnectorNudgeSuggestion | null>(null);
 
   const invalidateConnections = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["connections"] });
   }, [queryClient]);
+
+  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name">) => {
+    try {
+      const result = await api.integrations.canvasSuggestion(app.id);
+      if (result.suggestion) {
+        setConnectorNudge({ ...result.suggestion, appName: app.name });
+      }
+    } catch {
+      return;
+    }
+  }, []);
 
   useEffect(() => {
     if (connectError) {
@@ -405,6 +423,7 @@ export function ConnectionsPage() {
         setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
         toast.success(`${connection.appName} connected`);
         invalidateConnections();
+        void maybeShowConnectorNudge({ id: connection.appId, name: connection.appName });
       };
 
       const failVerification = (message: string) => {
@@ -471,6 +490,7 @@ export function ConnectionsPage() {
     connectionsQuery.data,
     connectionsQuery.refetch,
     invalidateConnections,
+    maybeShowConnectorNudge,
   ]);
 
   useEffect(() => {
@@ -738,9 +758,20 @@ export function ConnectionsPage() {
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
           initialAppId={null}
           initialSearch={requestedAppSearch}
-          onSuccess={invalidateAll}
+          onSuccess={(app) => {
+            invalidateAll();
+            if (app) void maybeShowConnectorNudge(app);
+          }}
         />
       )}
+
+      <ConnectorNudgeDialog
+        suggestion={connectorNudge}
+        onOpenChange={(open) => {
+          if (!open) setConnectorNudge(null);
+        }}
+        onConnected={invalidateAll}
+      />
     </div>
   );
 }

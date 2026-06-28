@@ -85,4 +85,51 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
     expect(await screen.findByRole("button", { name: "Connect with Microsoft" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reconfigure OAuth" })).toBeInTheDocument();
   });
+
+  it("imports a connector from an already-connected Canvas app without OAuth setup", async () => {
+    const user = userEvent.setup();
+    const importedBodies: unknown[] = [];
+    const onConnected = vi.fn();
+    const integration = INTEGRATIONS.find((item) => item.type === "gmail");
+    if (!integration) throw new Error("Gmail integration is missing");
+
+    server.use(
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "local",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+      http.post("/api/connectors/canvas/import", async ({ request }) => {
+        importedBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: {
+            id: "connector-1",
+            connectorType: "gmail",
+            syncStatus: "pending",
+            alreadyConnected: false,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ConnectIntegrationDialog
+        integration={integration}
+        open={true}
+        onOpenChange={() => {}}
+        onConnected={onConnected}
+        preferCanvasCredentialSource={true}
+        canvasConnectionReady={true}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Continue with connected account" }));
+
+    await waitFor(() => expect(importedBodies).toEqual([{ connectorType: "gmail" }]));
+    expect(onConnected).toHaveBeenCalled();
+    expect(screen.queryByText("Configure Gmail")).not.toBeInTheDocument();
+  });
 });

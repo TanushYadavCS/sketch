@@ -115,7 +115,16 @@ export const handlers = [
   }),
 
   http.get("/api/connectors/credential-source", () => {
-    return HttpResponse.json({ mode: "local", canvasConfigured: false, publicKeyId: null });
+    return HttpResponse.json({
+      mode: "local",
+      canvasConfigured: false,
+      canvasCredentialImportConfigured: false,
+      publicKeyId: null,
+    });
+  }),
+
+  http.get("/api/connectors/canvas/suggestions", () => {
+    return HttpResponse.json({ suggestion: null });
   }),
 
   http.get("/api/users", () => {

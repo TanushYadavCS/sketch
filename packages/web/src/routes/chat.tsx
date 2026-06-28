@@ -1,4 +1,5 @@
 import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
+import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
 import {
@@ -30,6 +31,7 @@ import {
 } from "@/lib/chat-target";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
+import type { IntegrationApp } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -846,6 +848,7 @@ export function ChatPage() {
   const [localIntegrationConnectionStatuses, setLocalIntegrationConnectionStatuses] = useState<
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
+  const [connectorNudge, setConnectorNudge] = useState<ConnectorNudgeSuggestion | null>(null);
   const queryClient = useQueryClient();
   const transport = useMemo(
     () =>
@@ -996,6 +999,17 @@ export function ChatPage() {
     [],
   );
 
+  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name">) => {
+    try {
+      const result = await api.integrations.canvasSuggestion(app.id);
+      if (result.suggestion) {
+        setConnectorNudge({ ...result.suggestion, appName: app.name });
+      }
+    } catch {
+      return;
+    }
+  }, []);
+
   const handleConnectIntegration = useCallback(
     (connection: ChatThreadIntegrationConnection) => {
       if (providerLoading) return;
@@ -1016,10 +1030,14 @@ export function ChatPage() {
     [provider, providerLoading],
   );
 
-  const handleIntegrationConnected = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ["connections"] });
-    queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
-  }, [queryClient]);
+  const handleIntegrationConnected = useCallback(
+    (app?: IntegrationApp) => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
+      if (app) void maybeShowConnectorNudge(app);
+    },
+    [maybeShowConnectorNudge, queryClient],
+  );
 
   const handleIntegrationConnectionOpenChange = useCallback((open: boolean) => {
     if (!open) setActiveIntegrationConnection(null);
@@ -1151,6 +1169,17 @@ export function ChatPage() {
         onOpenChange={handleIntegrationConnectionOpenChange}
         onStatusChange={handleIntegrationConnectionStatusChange}
         onConnected={handleIntegrationConnected}
+      />
+
+      <ConnectorNudgeDialog
+        suggestion={connectorNudge}
+        onOpenChange={(open) => {
+          if (!open) setConnectorNudge(null);
+        }}
+        onConnected={() => {
+          queryClient.invalidateQueries({ queryKey: ["integrations"] });
+          queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
+        }}
       />
     </TabContentContainer>
   );

@@ -54,7 +54,7 @@ export function AddIntegrationDialog({
   connectedAppIds: Set<string>;
   initialAppId?: string | null;
   initialSearch?: string | null;
-  onSuccess: () => void;
+  onSuccess: (app?: IntegrationApp) => void;
 }) {
   const [step, setStep] = useState<AddIntegrationStep>({ kind: "search" });
   const [search, setSearch] = useState("");
@@ -252,7 +252,7 @@ export function AddIntegrationDialog({
         if (cancelledRef.current || oauthAttemptRef.current !== attemptId) return;
         if (connected) {
           toast.success("App connected successfully!");
-          onSuccess();
+          onSuccess(app);
           resetAndClose();
         } else if (shouldFinalizeIfMissing) {
           stopPolling();
@@ -559,7 +559,7 @@ export function AddIntegrationDialog({
                 variant="ghost"
                 className="w-full gap-1.5 hover:bg-brand-accent/8"
                 onClick={() => {
-                  onSuccess();
+                  onSuccess(step.app);
                   resetAndClose();
                 }}
               >
