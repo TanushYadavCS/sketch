@@ -42,7 +42,7 @@ export function productRoutes(db: Kysely<DB>) {
   });
 
   routes.get("/", async (c) => {
-    const products = await repo.listDeclaredProducts();
+    const products = await repo.listCuratedProducts();
     return c.json({ products });
   });
 

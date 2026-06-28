@@ -93,6 +93,13 @@ export interface ConfirmOptions {
   mergeIntoEntityId?: string;
   /** From the client's view of the row — must match row.candidate_generated_at. */
   candidateGeneratedAt: string;
+  /**
+   * Rename the entity at confirm time (births only). When creating from a seed,
+   * the entity is created under this name instead of `proposed_name`, and the
+   * original `proposed_name` is preserved as an alias so the connector's name
+   * still resolves. Ignored on a merge into an existing target.
+   */
+  nameOverride?: string;
 }
 
 export interface RejectOptions {
@@ -120,6 +127,12 @@ export interface RejectResult {
   /** New entity id when step 3 created one; same as targetEntityId in that case. */
   createdEntityId: string | null;
   /** True when the 200 is a no-op replay of an already-rejected row. */
+  idempotent: boolean;
+}
+
+export interface DismissResult {
+  row: QueueRow;
+  /** True when the 200 is a no-op replay of an already-dismissed row. */
   idempotent: boolean;
 }
 
@@ -680,6 +693,12 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         currentRow: row,
       });
     }
+    if (row.status === "dismissed") {
+      throw new ResolveError("CANDIDATE_DRIFT", "row already dismissed", {
+        currentStatus: row.status,
+        currentRow: row,
+      });
+    }
     if (row.status === "confirming") {
       throw new ResolveError("ALREADY_CONFIRMING", "row is mid-confirm (chunked backfill in progress)");
     }
@@ -701,12 +720,14 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
       opts.mergeIntoEntityId !== row.candidate_entity_id;
 
     // 2. Existence check + type check.
+    const createName = opts.nameOverride?.trim() || row.proposed_name;
+    const renamed = createName !== row.proposed_name;
     let target: Entity;
     if (!targetId) {
       if (!row.seed_source || !row.seed_source_id) {
         if (row.candidate_reason === "birth-gated" && row.source && row.source_id) {
           target = await trxCtx.entityRepo.upsertEntityFromTool({
-            name: row.proposed_name,
+            name: createName,
             sourceType: row.entity_type,
             source: row.source,
             sourceId: row.source_id,
@@ -723,13 +744,14 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         }
       } else {
         target = await trxCtx.entityRepo.upsertEntityFromTool({
-          name: row.proposed_name,
+          name: createName,
           sourceType: row.entity_type,
           source: row.seed_source,
           sourceId: row.seed_source_id,
           provenanceTier: "human_confirmed",
         });
       }
+      if (renamed) await trxCtx.entityRepo.appendAlias(target.id, row.proposed_name);
     } else {
       const fetchedTarget = await fetchEntity(trxCtx, targetId);
       if (!fetchedTarget) {
@@ -907,6 +929,12 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
         currentRow: row,
       });
     }
+    if (row.status === "dismissed") {
+      throw new ResolveError("CANDIDATE_DRIFT", "row already dismissed", {
+        currentStatus: row.status,
+        currentRow: row,
+      });
+    }
     if (row.status === "confirming") {
       throw new ResolveError("ALREADY_CONFIRMING", "row is mid-confirm");
     }
@@ -1027,6 +1055,68 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     const refreshedRow = await markResolvedOrThrow(trxCtx, row, "rejected", target.id);
 
     return { row: refreshedRow, targetEntityId: target.id, reResolvedToExisting, createdEntityId, idempotent: false };
+  });
+}
+
+/**
+ * Dismiss a pending review row: drop the proposal WITHOUT creating an entity.
+ * Used for birth rows the reviewer judges not real (e.g. a junk structural
+ * seed). Mirrors {@link rejectReview}'s terminal/drift guards but writes no
+ * entity, no mention, and no alias rejection. The terminal `dismissed` status
+ * suppresses the same key from being re-proposed (it is in `TERMINAL_STATUSES`).
+ */
+export async function dismissReview(
+  ctx: ResolveCtx,
+  reviewId: string,
+  opts: { candidateGeneratedAt: string },
+): Promise<DismissResult> {
+  return ctx.db.transaction().execute(async (trx) => {
+    const trxCtx: ResolveTxnCtx = {
+      db: trx,
+      repo: createEntityReviewRepo(trx),
+      entityRepo: createEntityRepository(trx),
+      userId: ctx.userId,
+      now: ctx.now ?? new Date().toISOString(),
+      logger: ctx.logger,
+    };
+    const row = await fetchRow(trxCtx, reviewId);
+
+    // Idempotent replay against an already-dismissed row.
+    if (row.status === "dismissed") {
+      return { row, idempotent: true };
+    }
+    // Any other terminal status cannot transition to dismissed.
+    if (row.status === "confirmed" || row.status === "rejected") {
+      throw new ResolveError("CANDIDATE_DRIFT", `row already ${row.status}`, {
+        currentStatus: row.status,
+        currentRow: row,
+      });
+    }
+    if (row.status === "confirming") {
+      throw new ResolveError("ALREADY_CONFIRMING", "row is mid-confirm");
+    }
+
+    // Compare-and-swap on the candidate snapshot this request validated.
+    if (row.candidate_generated_at !== opts.candidateGeneratedAt) {
+      throw new ResolveError("CANDIDATE_DRIFT", "candidate_generated_at mismatch", {
+        actual: row.candidate_generated_at,
+        provided: opts.candidateGeneratedAt,
+        currentRow: row,
+      });
+    }
+    if (!row.candidate_generated_at) {
+      throw new ResolveError("CANDIDATE_DRIFT", "row missing candidate_generated_at", { currentRow: row });
+    }
+
+    const won = await trxCtx.repo.markDismissed(row.id, ctx.userId, row.candidate_generated_at);
+    if (!won) {
+      const currentRow = await fetchRow(trxCtx, row.id);
+      throw new ResolveError("CANDIDATE_DRIFT", "row was resolved or refreshed by another request", {
+        currentStatus: currentRow.status,
+        currentRow,
+      });
+    }
+    return { row: await fetchRow(trxCtx, row.id), idempotent: false };
   });
 }
 

@@ -88,7 +88,7 @@ export interface UpsertEvidenceInput {
   seenAt?: string;
 }
 
-const TERMINAL_STATUSES = new Set(["confirmed", "rejected", "confirming"]);
+const TERMINAL_STATUSES = new Set(["confirmed", "rejected", "confirming", "dismissed"]);
 const SPINE_ENTITY_TYPES = new Set(["project", "product", "team"]);
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 
@@ -426,8 +426,12 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       limit: number;
       offset?: number;
       search?: string;
+      types?: string[];
     }) {
       let q = db.selectFrom("entity_review_queue").selectAll().where("status", "=", "pending");
+      if (opts.types && opts.types.length > 0) {
+        q = q.where("entity_type", "in", opts.types);
+      }
       if (!opts.isAdmin) {
         if (!opts.ownerUserId) return [];
         const ownerUserId = opts.ownerUserId;
@@ -463,11 +467,19 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
      * Count of `pending` rows under the same visibility predicate as
      * `listPending`. Used by the badge endpoint and by list pagination.
      */
-    async countPending(opts: { ownerUserId?: string; isAdmin: boolean; search?: string }): Promise<number> {
+    async countPending(opts: {
+      ownerUserId?: string;
+      isAdmin: boolean;
+      search?: string;
+      types?: string[];
+    }): Promise<number> {
       let q = db
         .selectFrom("entity_review_queue")
         .select(db.fn.countAll<number>().as("c"))
         .where("status", "=", "pending");
+      if (opts.types && opts.types.length > 0) {
+        q = q.where("entity_type", "in", opts.types);
+      }
       if (!opts.isAdmin) {
         if (!opts.ownerUserId) return 0;
         const ownerUserId = opts.ownerUserId;
@@ -777,6 +789,29 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         .set({
           status,
           resolved_entity_id: resolvedEntityId,
+          resolved_by: by,
+          resolved_at: new Date().toISOString(),
+        })
+        .where("id", "=", reviewId)
+        .where("status", "=", "pending")
+        .where("candidate_generated_at", "=", candidateGeneratedAt)
+        .execute();
+      return Number(result[0]?.numUpdatedRows ?? 0) > 0;
+    },
+
+    /**
+     * Terminal "dismissed" transition: the proposal is dropped without creating
+     * an entity. Same compare-and-swap as {@link markResolved} (only a still-
+     * pending row at the validated candidate snapshot wins), but leaves
+     * `resolved_entity_id` null — a dismissed row has no entity. A `dismissed`
+     * status is terminal (in `TERMINAL_STATUSES`), so the same key is never
+     * re-proposed.
+     */
+    async markDismissed(reviewId: string, by: string, candidateGeneratedAt: string): Promise<boolean> {
+      const result = await db
+        .updateTable("entity_review_queue")
+        .set({
+          status: "dismissed",
           resolved_by: by,
           resolved_at: new Date().toISOString(),
         })

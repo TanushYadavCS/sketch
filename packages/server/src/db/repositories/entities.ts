@@ -493,12 +493,21 @@ export function createEntityRepository(db: Kysely<DB>) {
       });
     },
 
-    async listDeclaredProducts(): Promise<DeclaredProductListEntry[]> {
+    /**
+     * The curated product closed list shown on the Your Org surface: products
+     * the user has blessed, either by declaring them (`declared`) or by
+     * approving a proposal from the review queue (`human_confirmed`). This is
+     * the same tier set extraction matches against
+     * ({@link PRODUCT_MATCH_TARGET_PROVENANCE_TIERS}); raw `inferred` guesses are
+     * excluded so the curation home only shows trusted products. Each row keeps
+     * its tier so the UI can chip declared vs confirmed.
+     */
+    async listCuratedProducts(): Promise<DeclaredProductListEntry[]> {
       const rows = await db
         .selectFrom("entities")
         .selectAll()
         .where("source_type", "=", "product")
-        .where("provenance_tier", "=", "declared")
+        .where("provenance_tier", "in", ["declared", "human_confirmed"])
         .where(whereLiveEntity())
         .orderBy("name", "asc")
         .execute();

@@ -7,6 +7,7 @@
  *                             AFTER the owner-scope check passes
  *   POST   /:id/confirm       resolve via confirmReview()
  *   POST   /:id/reject        resolve via rejectReview()
+ *   POST   /:id/dismiss       drop a pending row (no entity) via dismissReview()
  *
  * Owner-scope: matches row.triggered_by_user_id OR is admin. Rows whose
  * evidence files were created by other users are admin-only — detected
@@ -33,9 +34,10 @@ import { isAdmin } from "../api/auth-helpers";
 import type { Config } from "../config";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo, readReviewFreezeMs } from "../db/repositories/entity-review";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
-import { ResolveError, confirmReview, reclassifyReview, rejectReview } from "./resolve";
+import { ResolveError, confirmReview, dismissReview, reclassifyReview, rejectReview } from "./resolve";
 
 function readEmail(metadata: string | null): string | null {
   if (!metadata) return null;
@@ -144,12 +146,33 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
       return c.json({ error: { code: "BAD_REQUEST", message: "only status=pending supported in v1" } }, 400);
     }
     const search = c.req.query("q")?.trim() || undefined;
+    // Optional `types` CSV filter on entity_type — a generic allow-list each
+    // caller scopes itself (Your Org passes the taxonomy spine; the Files band
+    // passes person/company). Tokens are trimmed/de-duped; unknown values are
+    // harmless (they match no rows under the parameterized `in`).
+    const typesRaw = c.req.query("types");
+    const types = typesRaw
+      ? Array.from(
+          new Set(
+            typesRaw
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean),
+          ),
+        )
+      : undefined;
+    const typesFilter = types && types.length > 0 ? types : undefined;
 
     const repo = createEntityReviewRepo(db);
     const callerIsAdmin = isAdmin(c);
     const callerId = c.get("sub");
 
-    const total = await repo.countPending({ ownerUserId: callerId, isAdmin: callerIsAdmin, search });
+    const total = await repo.countPending({
+      ownerUserId: callerId,
+      isAdmin: callerIsAdmin,
+      search,
+      types: typesFilter,
+    });
 
     if (countOnly) {
       return c.json({ rows: [], total });
@@ -161,6 +184,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
       limit,
       offset,
       search,
+      types: typesFilter,
     });
 
     // Evidence summary per visible row.
@@ -386,6 +410,21 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
     }));
 
     const enrichedRow = { ...baseRow, evidenceCount: evidence.length, sourceBreakdown, candidate };
+
+    // Structural-seed rows (project/team pulled from a tracker) carry no file
+    // evidence — the seed fact has no indexed_file_id. Surface the child tasks
+    // that sit under the parent instead, so review has context. Read-only join;
+    // skipped entirely for non-seed rows.
+    if (baseRow.seed_source && baseRow.seed_source_id) {
+      const factRepo = createIndexedFileFactRepository(db);
+      const { tasks, total } = await factRepo.childTasksForParent({
+        source: baseRow.seed_source,
+        parentSourceId: baseRow.seed_source_id,
+        limit: 50,
+      });
+      return c.json({ row: enrichedRow, evidence: enrichedEvidence, childTasks: tasks, childTaskCount: total });
+    }
+
     return c.json({ row: enrichedRow, evidence: enrichedEvidence });
   });
 
@@ -394,6 +433,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
     const body = (await c.req.json().catch(() => ({}))) as {
       mergeIntoEntityId?: string;
       candidateGeneratedAt?: string;
+      nameOverride?: string;
     };
     if (!body.candidateGeneratedAt) {
       return c.json({ error: { code: "BAD_REQUEST", message: "candidateGeneratedAt is required" } }, 400);
@@ -409,6 +449,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
       const result = await confirmReview({ db, userId: c.get("sub") }, id, {
         mergeIntoEntityId: body.mergeIntoEntityId,
         candidateGeneratedAt: body.candidateGeneratedAt,
+        nameOverride: body.nameOverride,
       });
       return c.json({
         row: result.row,
@@ -450,6 +491,29 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
         createdEntityId: result.createdEntityId,
         idempotent: result.idempotent,
       });
+    } catch (err) {
+      return handleResolveError(c, err);
+    }
+  });
+
+  app.post("/:id/dismiss", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { candidateGeneratedAt?: string };
+    if (!body.candidateGeneratedAt) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "candidateGeneratedAt is required" } }, 400);
+    }
+
+    const repo = createEntityReviewRepo(db);
+    const row = await repo.getById(id);
+    if (!row) return c.json({ error: { code: "NOT_FOUND", message: "review row not found" } }, 404);
+    const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+    if (denied) return denied;
+
+    try {
+      const result = await dismissReview({ db, userId: c.get("sub") }, id, {
+        candidateGeneratedAt: body.candidateGeneratedAt,
+      });
+      return c.json({ row: result.row, idempotent: result.idempotent });
     } catch (err) {
       return handleResolveError(c, err);
     }
