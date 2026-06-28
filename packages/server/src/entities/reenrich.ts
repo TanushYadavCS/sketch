@@ -547,6 +547,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         lockAlreadyHeld: true,
         llmPromotionThreshold: deps.llmPromotionThreshold,
         coMentionContributesToThreshold: deps.coMentionContributesToThreshold,
+        experimentalFlag: deps.experimentalFlag,
         materializeFactTypes: deps.materializeFactTypes ?? [...AI_EXTRACTION_FACT_TYPES],
         onProgress: deps.onProgress,
         shouldCancel: deps.shouldCancel,

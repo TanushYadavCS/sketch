@@ -201,6 +201,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           lockAlreadyHeld: true,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+          experimentalFlag: config.EXPERIMENTAL_FLAG,
           onProgress: (progress) => {
             job.progress = progress;
           },
@@ -583,6 +584,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           lockAlreadyHeld: true,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+          experimentalFlag: config.EXPERIMENTAL_FLAG,
           materializeFactTypes: factTypes.length > 0 ? factTypes : undefined,
           onProgress: (progress) => {
             job.progress = progress;
