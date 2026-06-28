@@ -219,6 +219,18 @@ export function createTaskRepository(db: Kysely<DB>) {
       };
     },
 
+    async listStructuralTaskIdsByParentEntityIds(parentEntityIds: string[]): Promise<string[]> {
+      if (parentEntityIds.length === 0) return [];
+      const rows = await db
+        .selectFrom("tasks")
+        .select("id")
+        .where("provenance", "=", "structural")
+        .where("valid_to", "is", null)
+        .where("parent_entity_id", "in", parentEntityIds)
+        .execute();
+      return rows.map((row) => row.id);
+    },
+
     async expireOrphanedTasks(source?: string): Promise<number> {
       const now = new Date().toISOString();
       let query = db

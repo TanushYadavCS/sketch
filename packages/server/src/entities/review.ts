@@ -30,6 +30,7 @@
  */
 import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
+import type { Logger } from "pino";
 import { isAdmin } from "../api/auth-helpers";
 import type { Config } from "../config";
 import { createEntityRepository } from "../db/repositories/entities";
@@ -38,6 +39,7 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
 import { ResolveError, confirmReview, dismissReview, reclassifyReview, rejectReview } from "./resolve";
+import { reconcileStructuralAssigneeContributesTo } from "./structural-assignee";
 
 function readEmail(metadata: string | null): string | null {
   if (!metadata) return null;
@@ -126,7 +128,25 @@ function batchError(err: unknown): { code: string; message: string } {
   return { code: "INTERNAL_ERROR", message: "unexpected batch item failure" };
 }
 
-export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, "EXPERIMENTAL_FLAG"> }) {
+async function backfillStructuralAssigneeForConfirmedProjects(
+  db: Kysely<DB>,
+  logger: Logger,
+  projectEntityIds: string[],
+): Promise<void> {
+  const uniqueProjectEntityIds = [...new Set(projectEntityIds)];
+  if (uniqueProjectEntityIds.length === 0) return;
+  const taskRepo = createTaskRepository(db);
+  const reanchored = await taskRepo.reanchorNullParentTasks();
+  const existingTaskIds = await taskRepo.listStructuralTaskIdsByParentEntityIds(uniqueProjectEntityIds);
+  const taskIds = [...new Set([...reanchored.taskIds, ...existingTaskIds])];
+  if (taskIds.length === 0) return;
+  await reconcileStructuralAssigneeContributesTo(db, logger, { scope: { kind: "tasks", taskIds } });
+}
+
+export function entityReviewRoutes(
+  db: Kysely<DB>,
+  deps: { config: Pick<Config, "EXPERIMENTAL_FLAG">; logger: Logger },
+) {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -237,7 +257,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
         targetEntityId?: string;
         error?: { code: string; message: string };
       }> = [];
-      let confirmedProject = false;
+      const confirmedProjectTargetEntityIds = new Set<string>();
       for (const item of body.items) {
         const reviewId = item.reviewId ?? "";
         if (!item.reviewId || !item.candidateGeneratedAt) {
@@ -267,14 +287,14 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
             mergeIntoEntityId: item.mergeIntoEntityId,
             candidateGeneratedAt: item.candidateGeneratedAt,
           });
-          confirmedProject ||= result.row.entity_type === "project";
+          if (result.row.entity_type === "project") confirmedProjectTargetEntityIds.add(result.targetEntityId);
           results.push({ reviewId: item.reviewId, ok: true, targetEntityId: result.targetEntityId });
         } catch (err) {
           results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
         }
       }
-      if (confirmedProject) {
-        await createTaskRepository(db).reanchorNullParentTasks();
+      if (deps.config.EXPERIMENTAL_FLAG && confirmedProjectTargetEntityIds.size > 0) {
+        await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [...confirmedProjectTargetEntityIds]);
       }
       return c.json({ results });
     });
@@ -451,6 +471,9 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
         candidateGeneratedAt: body.candidateGeneratedAt,
         nameOverride: body.nameOverride,
       });
+      if (deps.config.EXPERIMENTAL_FLAG && result.row.entity_type === "project") {
+        await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [result.targetEntityId]);
+      }
       return c.json({
         row: result.row,
         targetEntityId: result.targetEntityId,

@@ -204,6 +204,83 @@ async function seedReviewRow(
   return { id, candidateGeneratedAt: now };
 }
 
+async function seedEntity(
+  db: Kysely<DB>,
+  opts: { name: string; sourceType: string; id?: string; status?: string },
+): Promise<string> {
+  const id = opts.id ?? randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name: opts.name,
+      source_type: opts.sourceType,
+      subtype: "external",
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: opts.status ?? "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+  return id;
+}
+
+async function seedStructuralTask(
+  db: Kysely<DB>,
+  opts: {
+    sourceTaskId: string;
+    fileId: string;
+    assigneeEntityId: string | null;
+    parentEntityId: string | null;
+    parentName: string | null;
+    parentSourceRef?: string | null;
+  },
+): Promise<string> {
+  const repo = createTaskRepository(db);
+  const result = await repo.upsertTask({
+    parentEntityId: opts.parentEntityId,
+    parentSourceRef: opts.parentSourceRef ?? null,
+    parentName: opts.parentName,
+    source: "linear",
+    externalRef: opts.sourceTaskId,
+    title: opts.sourceTaskId,
+    status: "open",
+    statusRaw: "open",
+    statusAuthority: "external",
+    assigneeEntityId: opts.assigneeEntityId,
+    priority: null,
+    dueAt: null,
+    provenance: "structural",
+    sourceTaskId: opts.sourceTaskId,
+  });
+  await repo.upsertEvidence(result.taskId, "file", opts.fileId);
+  return result.taskId;
+}
+
+async function structuralContributesToRows(db: Kysely<DB>) {
+  return db
+    .selectFrom("entity_relationships")
+    .selectAll()
+    .where("relationship_type", "=", "contributes_to")
+    .where("source", "=", "structural_assignee")
+    .orderBy("source_entity_id")
+    .execute();
+}
+
+async function structuralContributesToEvidenceNotes(db: Kysely<DB>, relationshipId: string): Promise<string[]> {
+  const rows = await db
+    .selectFrom("entity_relationship_evidence")
+    .select("note")
+    .where("relationship_id", "=", relationshipId)
+    .orderBy("note")
+    .execute();
+  return rows.map((row) => row.note ?? "");
+}
+
 describe("entity-review routes — mounting", () => {
   it("returns 200 without EXPERIMENTAL_FLAG (Files is GA, route always mounted)", async () => {
     const db = await createTestDb();
@@ -732,6 +809,166 @@ describe("entity-review A4 backend", () => {
     expect(rejectReplay.status).toBe(200);
     const rejectReplayBody = (await rejectReplay.json()) as { results: Array<{ ok: boolean }> };
     expect(rejectReplayBody.results.every((result) => result.ok)).toBe(true);
+  });
+
+  it("batch confirm backfills structural assignee contributes_to for confirmed project tasks", async () => {
+    const projectName = "A4 Batch Backfill Project";
+    const personId = await seedEntity(db, { name: "A4 Batch Person", sourceType: "person" });
+    const projectId = await seedEntity(db, { name: projectName, sourceType: "project" });
+    const review = await seedReviewRow(db, {
+      proposedName: projectName,
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      candidateEntityId: projectId,
+    });
+    const anchoredTaskId = await seedStructuralTask(db, {
+      sourceTaskId: "a4-batch-anchored-task",
+      fileId: "a4-owner-file",
+      assigneeEntityId: personId,
+      parentEntityId: projectId,
+      parentName: projectName,
+    });
+    const reanchoredTaskId = await seedStructuralTask(db, {
+      sourceTaskId: "a4-batch-reanchored-task",
+      fileId: "a4-owner-file",
+      assigneeEntityId: personId,
+      parentEntityId: null,
+      parentName: projectName,
+    });
+
+    const res = await app.request("/api/entity-review/confirm-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        items: [{ reviewId: review.id, candidateGeneratedAt: review.candidateGeneratedAt }],
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const relationships = await structuralContributesToRows(db);
+    expect(relationships).toHaveLength(1);
+    expect(relationships[0]).toMatchObject({
+      source_entity_id: personId,
+      target_entity_id: projectId,
+      confidence: "INFERRED",
+      confidence_score: 0.9,
+      source: "structural_assignee",
+    });
+    await expect(structuralContributesToEvidenceNotes(db, relationships[0].id)).resolves.toEqual(
+      [`structural_assignee:task:${anchoredTaskId}`, `structural_assignee:task:${reanchoredTaskId}`].sort(),
+    );
+    const reanchoredTask = await db
+      .selectFrom("tasks")
+      .select("parent_entity_id")
+      .where("id", "=", reanchoredTaskId)
+      .executeTakeFirstOrThrow();
+    expect(reanchoredTask.parent_entity_id).toBe(projectId);
+  });
+
+  it("single confirm backfills structural assignee contributes_to for confirmed project tasks", async () => {
+    const projectName = "A4 Single Backfill Project";
+    const personId = await seedEntity(db, { name: "A4 Single Person", sourceType: "person" });
+    const review = await seedReviewRow(db, {
+      proposedName: projectName,
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "a4-single-backfill-project",
+      candidateReason: "birth-gated",
+    });
+    const taskId = await seedStructuralTask(db, {
+      sourceTaskId: "a4-single-reanchored-task",
+      fileId: "a4-owner-file",
+      assigneeEntityId: personId,
+      parentEntityId: null,
+      parentName: projectName,
+      parentSourceRef: "linear:a4-single-backfill-project",
+    });
+
+    const res = await app.request(`/api/entity-review/${review.id}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ candidateGeneratedAt: review.candidateGeneratedAt }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { targetEntityId: string };
+
+    const relationships = await structuralContributesToRows(db);
+    expect(relationships).toHaveLength(1);
+    expect(relationships[0]).toMatchObject({
+      source_entity_id: personId,
+      target_entity_id: body.targetEntityId,
+      confidence: "INFERRED",
+      confidence_score: 0.9,
+      source: "structural_assignee",
+    });
+    await expect(structuralContributesToEvidenceNotes(db, relationships[0].id)).resolves.toEqual([
+      `structural_assignee:task:${taskId}`,
+    ]);
+    const task = await db
+      .selectFrom("tasks")
+      .select("parent_entity_id")
+      .where("id", "=", taskId)
+      .executeTakeFirstOrThrow();
+    expect(task.parent_entity_id).toBe(body.targetEntityId);
+  });
+
+  it("does not run confirm-time structural assignee backfill when experimental flag is off", async () => {
+    const projectName = "A4 Flag Off Backfill Project";
+    const personId = await seedEntity(db, { name: "A4 Flag Off Person", sourceType: "person" });
+    const single = await seedReviewRow(db, {
+      proposedName: projectName,
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "a4-flag-off-backfill-project",
+      candidateReason: "birth-gated",
+    });
+    const singleTaskId = await seedStructuralTask(db, {
+      sourceTaskId: "a4-flag-off-single-task",
+      fileId: "a4-owner-file",
+      assigneeEntityId: personId,
+      parentEntityId: null,
+      parentName: projectName,
+      parentSourceRef: "linear:a4-flag-off-backfill-project",
+    });
+
+    const offCookie = await login(offApp, OWNER_EMAIL);
+    const singleRes = await offApp.request(`/api/entity-review/${single.id}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: offCookie },
+      body: JSON.stringify({ candidateGeneratedAt: single.candidateGeneratedAt }),
+    });
+    expect(singleRes.status).toBe(200);
+    const singleTask = await db
+      .selectFrom("tasks")
+      .select("parent_entity_id")
+      .where("id", "=", singleTaskId)
+      .executeTakeFirstOrThrow();
+    expect(singleTask.parent_entity_id).toBeNull();
+    await expect(structuralContributesToRows(db)).resolves.toHaveLength(0);
+
+    const batch = await seedReviewRow(db, {
+      proposedName: "A4 Flag Off Batch Backfill Project",
+      entityType: "project",
+      triggeredBy: ownerId,
+      evidenceFileIds: ["a4-owner-file"],
+      source: "linear",
+      sourceId: "a4-flag-off-batch-backfill-project",
+      candidateReason: "birth-gated",
+    });
+    const batchRes = await offApp.request("/api/entity-review/confirm-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: offCookie },
+      body: JSON.stringify({
+        items: [{ reviewId: batch.id, candidateGeneratedAt: batch.candidateGeneratedAt }],
+      }),
+    });
+    expect(batchRes.status).toBe(404);
+    await expect(structuralContributesToRows(db)).resolves.toHaveLength(0);
   });
 
   it("reclassify changes type, merges compatible collisions, and refuses incompatible source or seed refs", async () => {
