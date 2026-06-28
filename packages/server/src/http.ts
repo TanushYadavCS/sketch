@@ -460,7 +460,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   if (config.EXPERIMENTAL_FLAG) {
     app.route("/api/products", productRoutes(db));
   }
-  app.route("/api/entity-review", entityReviewRoutes(db, { config }));
+  app.route("/api/entity-review", entityReviewRoutes(db, { config, logger }));
   app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
   mountPublicMcpServer({
     app,
