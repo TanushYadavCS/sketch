@@ -66,4 +66,25 @@ describe("ProjectsPage", () => {
 
     expect(await screen.findByText(/No projects yet/i)).toBeInTheDocument();
   });
+
+  it("renders the Your Org surface with a product tier chip when experimental", async () => {
+    server.use(
+      http.get("/api/setup/status", () =>
+        HttpResponse.json({ completed: true, botName: "Sketch", experimentalFlag: true }),
+      ),
+      http.get("/api/products", () =>
+        HttpResponse.json({
+          products: [{ id: "prod-1", name: "Canvas Copilot", aliases: [], hotness: 3, provenance_tier: "declared" }],
+        }),
+      ),
+      http.get("/api/entities", () => HttpResponse.json({ entities: [], total: 0 })),
+    );
+    projectsReturn([DERIVED_WIRED]);
+    renderWithProviders(<ProjectsPage />);
+
+    expect(await screen.findByText("Your org")).toBeInTheDocument();
+    expect(await screen.findByText("Canvas Copilot")).toBeInTheDocument();
+    expect(screen.getByText("declared")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add/i })).toBeInTheDocument();
+  });
 });

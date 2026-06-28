@@ -228,10 +228,16 @@ export interface EntityReviewQueueRow {
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
+  /** LLM-extraction origin (e.g. "fireflies"); null for structural seeds. */
+  source: string | null;
+  source_id: string | null;
+  /** Structural-seed origin (e.g. "clickup"); null for LLM extractions. */
+  seed_source: string | null;
+  seed_source_id: string | null;
   first_seen_at: string;
   last_seen_at: string;
   occurrence_count: number;
-  status: "pending" | "confirmed" | "rejected" | "confirming";
+  status: "pending" | "confirmed" | "rejected" | "confirming" | "dismissed";
   triggered_by_user_id: string;
   review_started_at: string | null;
   review_started_by: string | null;
@@ -279,9 +285,30 @@ export interface EntityReviewListResponse {
   total: number;
 }
 
+/** A product on the curated closed list (declared or human_confirmed). */
+export interface CuratedProduct {
+  id: string;
+  name: string;
+  aliases: string[];
+  hotness: number;
+  provenance_tier: string;
+}
+
+/** A tracker task/issue under a seed's parent project/team (review preview). */
+export interface ChildTask {
+  indexedFileId: string;
+  name: string;
+  fileType: string | null;
+  providerUrl: string | null;
+  source: string;
+}
+
 export interface EntityReviewDetailResponse {
   row: EntityReviewQueueRow;
   evidence: EntityReviewEvidenceRow[];
+  /** Present only for structural-seed rows: tasks under the parent. */
+  childTasks?: ChildTask[];
+  childTaskCount?: number;
 }
 
 export interface EntityReviewConfirmResult {
@@ -297,6 +324,11 @@ export interface EntityReviewRejectResult {
   targetEntityId: string;
   reResolvedToExisting: boolean;
   createdEntityId: string | null;
+  idempotent: boolean;
+}
+
+export interface EntityReviewDismissResult {
+  row: EntityReviewQueueRow;
   idempotent: boolean;
 }
 
@@ -2256,21 +2288,33 @@ export const api = {
       return request<{ containers: BindableContainer[] }>("/api/projects/bindable-containers");
     },
   },
+  products: {
+    list() {
+      return request<{ products: CuratedProduct[] }>("/api/products");
+    },
+    create(body: { name: string; aliases?: string[] }) {
+      return request<{ entity: CuratedProduct }>("/api/products", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+  },
   entityReview: {
-    list(opts?: { limit?: number; offset?: number; search?: string }) {
+    list(opts?: { limit?: number; offset?: number; search?: string; types?: string[] }) {
       const params = new URLSearchParams();
       // `limit=0` is a meaningful value (count-only mode) — send it explicitly.
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
       const search = opts?.search?.trim();
       if (search) params.set("q", search);
+      if (opts?.types && opts.types.length > 0) params.set("types", opts.types.join(","));
       const qs = params.toString();
       return request<EntityReviewListResponse>(`/api/entity-review${qs ? `?${qs}` : ""}`);
     },
     get(id: string) {
       return request<EntityReviewDetailResponse>(`/api/entity-review/${id}`);
     },
-    confirm(id: string, body: { candidateGeneratedAt: string; mergeIntoEntityId?: string }) {
+    confirm(id: string, body: { candidateGeneratedAt: string; mergeIntoEntityId?: string; nameOverride?: string }) {
       return request<EntityReviewConfirmResult>(`/api/entity-review/${id}/confirm`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -2278,6 +2322,12 @@ export const api = {
     },
     reject(id: string, body: { candidateGeneratedAt: string; rejectAgainstEntityId?: string }) {
       return request<EntityReviewRejectResult>(`/api/entity-review/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    dismiss(id: string, body: { candidateGeneratedAt: string }) {
+      return request<EntityReviewDismissResult>(`/api/entity-review/${id}/dismiss`, {
         method: "POST",
         body: JSON.stringify(body),
       });
