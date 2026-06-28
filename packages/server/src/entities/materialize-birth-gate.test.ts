@@ -226,6 +226,31 @@ describe("A1 birth gate", () => {
     });
   });
 
+  it("does not let structural auto-birth bypass the LLM project birth gate", async () => {
+    await seedConnector(db);
+    await seedFile(db, "file-1");
+    await upsertLlmMention(db, "file-1", "Atlas Migration", "project");
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      llmPromotionThreshold: 1,
+      birthGateTypes: new Set<ProposeEntityType>(["project", "product", "team"]),
+      birthGateLiveTypes: new Set<ProposeEntityType>(),
+      structuralAutoBirthTypes: new Set<ProposeEntityType>(["project"]),
+      birthGateDryRun: false,
+    });
+
+    expect(await countEntitiesByType(db, "project")).toBe(0);
+    expect(await countQueueRows(db)).toBe(1);
+    const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      entity_type: "project",
+      proposed_name: "Atlas Migration",
+      candidate_reason: "birth-gated",
+      source: "llm_extraction",
+      status: "pending",
+    });
+  });
+
   it("auto-creates product mentions with the gate off (EXPERIMENTAL_FLAG invisible)", async () => {
     await seedConnector(db);
     await seedFile(db, "file-1");

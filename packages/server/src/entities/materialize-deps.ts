@@ -29,6 +29,7 @@ let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
+let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
 let configuredExperimentalFlag = false;
 
@@ -43,6 +44,7 @@ export function configureMaterializeDefaults(opts: {
   llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }): void {
@@ -54,6 +56,7 @@ export function configureMaterializeDefaults(opts: {
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
+  if (opts.structuralAutoBirthTypes) configuredStructuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
   if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
 }
@@ -254,6 +257,7 @@ export interface BuildMaterializeDepsOptions {
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }
@@ -277,6 +281,7 @@ export async function buildMaterializeDeps(
       : configuredLlmTaskCorroborationThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
   const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
+  const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
   const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
 
@@ -339,6 +344,7 @@ export async function buildMaterializeDeps(
     llmTaskCorroborationThreshold,
     birthGateTypes,
     birthGateLiveTypes,
+    structuralAutoBirthTypes,
     birthGateDryRun,
     experimentalFlag,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),

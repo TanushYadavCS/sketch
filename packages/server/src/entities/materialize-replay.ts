@@ -178,6 +178,7 @@ export async function replaySourceFacts(
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
+    structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
     birthGateDryRun: opts.birthGateDryRun,
     experimentalFlag: opts.experimentalFlag,
   });
@@ -250,6 +251,7 @@ async function materializeUnmaterializedFactsInner(
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
+    structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
     birthGateDryRun: opts.birthGateDryRun,
     experimentalFlag: opts.experimentalFlag,
   });
