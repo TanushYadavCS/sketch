@@ -950,19 +950,22 @@ describe("AgentRunService", () => {
     );
   });
 
-  it("does not deliver manual outputs even when delivery is configured", async () => {
+  it("delivers manual outputs when delivery is configured", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
     await seedEntity(db, { id: "entity-manual", name: "Manual Project" });
     const outputDelivery = {
       deliver: vi.fn(async () => {}),
     } satisfies AgentOutputDeliveryPublisher;
+    const slackDelivery = allowSlackDelivery();
     const service = createWritingService(
       db,
       tasks,
       briefItem({ knowledgeRefs: { entityIds: ["entity-manual"], fileIds: [] } }),
       outputDelivery,
+      undefined,
+      slackDelivery,
     );
     await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
       delivery: {
@@ -983,7 +986,14 @@ describe("AgentRunService", () => {
     if (!row) throw new Error("Expected a generated output row");
     await tasks[0]();
 
-    expect(outputDelivery.deliver).not.toHaveBeenCalled();
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(slackDelivery.isUserInChannel).toHaveBeenCalledWith("C_DAILY", "U_AGENT");
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ targetId: "C_DAILY" }),
+        output: expect.objectContaining({ id: row.id, outputDate: OUTPUT_DATE }),
+      }),
+    );
   });
 
   it("keeps the brief completed when scheduled delivery fails", async () => {

@@ -400,7 +400,7 @@ const EDIT_META: Record<Exclude<EditField, null>, { title: string; hint: string 
   schedule: { title: "Runs on", hint: "When the agent runs each day, in your timezone." },
   focus: { title: "Focus", hint: "Plain-language emphasis. Added as a hint — it never overrides what the agent does." },
   volume: { title: "Volume", hint: "How many items each section can hold." },
-  delivery: { title: "Deliver to", hint: "Where scheduled runs send the saved brief after generation finishes." },
+  delivery: { title: "Deliver to", hint: "Where completed briefs are sent after generation finishes." },
 };
 
 function EditDrawer({
@@ -602,11 +602,11 @@ function DeliveryEditor({
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-3 rounded-lg border-[0.5px] border-border px-3 py-2.5">
-        <span className="text-[13px] font-medium text-foreground">Send scheduled briefs</span>
+        <span className="text-[13px] font-medium text-foreground">Send completed briefs</span>
         <Switch
           checked={enabled}
           onCheckedChange={setEnabled}
-          aria-label="Send scheduled briefs"
+          aria-label="Send completed briefs"
           className="data-[state=checked]:bg-emerald-500"
         />
       </div>

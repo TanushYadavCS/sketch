@@ -669,7 +669,7 @@ export class AgentRunService {
           .set({ agent_run_id: result.sessionId || null })
           .where("id", "=", outputId)
           .execute();
-        await this.deliverCompletedOutput(def, outputId, user.id, output.trigger_type);
+        await this.deliverCompletedOutput(def, outputId, user.id);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -678,13 +678,8 @@ export class AgentRunService {
     }
   }
 
-  private async deliverCompletedOutput(
-    def: AgentDefinition,
-    outputId: string,
-    userId: string,
-    triggerType: string,
-  ): Promise<void> {
-    if (triggerType !== "scheduled" || !this.deps.outputDelivery) return;
+  private async deliverCompletedOutput(def: AgentDefinition, outputId: string, userId: string): Promise<void> {
+    if (!this.deps.outputDelivery) return;
     try {
       const configuredDelivery = (await this.resolveConfig(def, userId)).delivery;
       if (!configuredDelivery) return;
