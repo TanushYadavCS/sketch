@@ -11,6 +11,56 @@ export type LlmMentionValidationResult =
 
 export type LearnedFactValidationResult = { ok: true } | { ok: false; reason: "negation" | "hedge" | "placeholder" };
 
+/**
+ * Consumer webmail brands the LLM tends to mint as a "company" after seeing a
+ * personal email address (e.g. `anoushka@gmail.com` -> a `Gmail` company with a
+ * spurious `works_at` edge). The deterministic affiliation path already drops
+ * these via the personal/shared domain check, but the LLM extraction path has no
+ * domain to check — only the brand name — so it needs this name-based gate.
+ *
+ * Whole-name equality only (see {@link isEmailProviderName}); collision-prone
+ * bare words (`live`, `me`, `mac`, `msn`) are deliberately excluded so real
+ * companies like "Live Nation" survive.
+ */
+const EMAIL_PROVIDER_NAMES = new Set([
+  "gmail",
+  "googlemail",
+  "google mail",
+  "outlook",
+  "hotmail",
+  "yahoo",
+  "ymail",
+  "rocketmail",
+  "aol",
+  "icloud",
+  "proton",
+  "protonmail",
+  "proton mail",
+  "gmx",
+  "yandex",
+  "fastmail",
+  "zoho mail",
+  "qq",
+  "163",
+  "naver",
+  "hey",
+]);
+
+/**
+ * True when `name` is exactly a consumer email-provider brand (after lowercasing,
+ * collapsing whitespace, and stripping a trailing TLD like `.com`). Matches the
+ * whole name only — "Proton Labs" or "Live Nation" return false.
+ */
+export function isEmailProviderName(name: string): boolean {
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/\.(com|net|org|co|io|me)$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return EMAIL_PROVIDER_NAMES.has(normalized);
+}
+
 export function validateLlmMention(input: {
   displayName: string;
   entityType?: string;

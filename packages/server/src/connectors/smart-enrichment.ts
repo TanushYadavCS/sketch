@@ -42,7 +42,7 @@ import {
 } from "../entities/materialize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
-import { validateLearnedFact, validateLlmMention } from "../entities/validators";
+import { isEmailProviderName, validateLearnedFact, validateLlmMention } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
 import type { EmbeddingProvider } from "./embeddings/types";
@@ -284,7 +284,7 @@ export async function extractEntities(
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
   const orgSection = orgContext?.description
-    ? `\nOrganization: ${orgContext.orgName ?? "Unknown"}. ${orgContext.description}${orgContext.industry ? ` (Industry: ${orgContext.industry})` : ""}\n`
+    ? `\nBackground on the organization that operates this system (${orgContext.orgName ?? "Unknown"}${orgContext.industry ? `, industry: ${orgContext.industry}` : ""}). This is context for disambiguation only — do NOT extract an entity merely because it is named in this background. Extract only entities the document content below actually refers to:\n${orgContext.description}\n`
     : "";
   const disambiguationSection = orgContext?.disambiguationGuidance
     ? `\nProduct/disambiguation guidance:\n${orgContext.disambiguationGuidance}\n`
@@ -1005,6 +1005,23 @@ async function reconcileLlmExtractionFacts(
         );
         continue;
       }
+      if (mention.type === "company" && isEmailProviderName(mention.mention)) {
+        deps.logger.info(
+          { fileId: file.id, displayName: mention.mention },
+          "Dropped email-provider company mention",
+        );
+        continue;
+      }
+      if (
+        mention.type === "project" &&
+        normalizeDocumentTitle(mention.mention) === normalizeDocumentTitle(file.fileName)
+      ) {
+        deps.logger.info(
+          { fileId: file.id, displayName: mention.mention },
+          "Dropped project mention matching document title",
+        );
+        continue;
+      }
       if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
       const validation = validateLlmMention({
         displayName: mention.mention,
@@ -1138,6 +1155,22 @@ async function tombstoneWrittenLlmFacts(deps: SmartEnrichmentDeps, factKeys: str
     .execute();
 }
 
+/**
+ * Normalize a document title for comparison against an extracted project name:
+ * strip leading reply/forward prefixes (`Re:`, `Fwd:`, `Fw:`, possibly repeated)
+ * then lowercase/collapse whitespace via {@link normalizeName}. Used to drop a
+ * `project` mention that is merely the email subject / file title restated.
+ */
+function normalizeDocumentTitle(title: string | null | undefined): string {
+  let current = title ?? "";
+  let previous: string;
+  do {
+    previous = current;
+    current = current.replace(/^\s*(re|fwd|fw)\s*:\s*/i, "");
+  } while (current !== previous);
+  return normalizeName(current);
+}
+
 function buildRelationFactInput(input: {
   file: FileContext;
   ownerUserId: string | null;
@@ -1163,6 +1196,12 @@ function buildRelationFactInput(input: {
   if (
     !input.allowedTypes.has(sourceType as ProposeEntityType) ||
     !input.allowedTypes.has(targetType as ProposeEntityType)
+  ) {
+    return null;
+  }
+  if (
+    (sourceType === "company" && isEmailProviderName(sourceName)) ||
+    (targetType === "company" && isEmailProviderName(targetName))
   ) {
     return null;
   }
