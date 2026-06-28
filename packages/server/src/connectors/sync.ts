@@ -17,6 +17,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
+import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
 import { resolveConnectorCredentials } from "./credential-providers";
@@ -541,7 +542,9 @@ const SYNC_CONCURRENCY = 4;
 const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
 const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const FEATURE_ARCHIVE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const CO_MENTION_FULL_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let lastFeatureArchiveSweepAt = 0;
+let lastCoMentionFullSweepAt = 0;
 
 async function resolveConnectorCredentialsForSync(params: {
   db: Kysely<DB>;
@@ -629,6 +632,18 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
       });
     } catch (err) {
       logger.error({ err }, "Feature archive sweep failed");
+    }
+  }
+
+  if (now - lastCoMentionFullSweepAt >= CO_MENTION_FULL_SWEEP_INTERVAL_MS) {
+    lastCoMentionFullSweepAt = now;
+    try {
+      await sweepCoMentionContributesTo(db, logger.child({ component: "co-mention-full-sweep" }), {
+        scope: { kind: "full" },
+        threshold: deps?.appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+      });
+    } catch (err) {
+      logger.error({ err }, "Co-mention full sweep failed");
     }
   }
 }
