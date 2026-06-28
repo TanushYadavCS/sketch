@@ -210,4 +210,32 @@ describe("declared products API", () => {
       .execute();
     expect(mentions).toHaveLength(1);
   });
+
+  it("lists human_confirmed products alongside declared ones, excluding inferred", async () => {
+    const repo = createEntityRepository(db);
+    await repo.createEntity({
+      name: "Declared One",
+      sourceType: "product",
+      status: "confirmed",
+      provenanceTier: "declared",
+    });
+    await repo.createEntity({
+      name: "Confirmed One",
+      sourceType: "product",
+      status: "confirmed",
+      provenanceTier: "human_confirmed",
+    });
+    await repo.createEntity({
+      name: "Inferred One",
+      sourceType: "product",
+      status: "confirmed",
+      provenanceTier: "inferred",
+    });
+
+    const res = await app.request("/api/products", { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { products: Array<{ name: string; provenance_tier: string }> };
+    expect(body.products.map((p) => p.name)).toEqual(["Confirmed One", "Declared One"]);
+    expect(body.products.map((p) => p.provenance_tier)).toEqual(["human_confirmed", "declared"]);
+  });
 });
