@@ -19,7 +19,7 @@ import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
-import { resolveConnectorCredentials } from "./credential-source";
+import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import {

@@ -16,6 +16,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { verifyJwt } from "../auth/jwt";
 import type { Config } from "../config";
+import { isCanvasCredentialMode, storedCredentialEncryptionMissing } from "../connectors/credential-providers";
 import { GOOGLE_CALENDAR_SCOPE } from "../connectors/google-calendar";
 import { ensureValidToken } from "../connectors/google-drive";
 import {
@@ -212,11 +213,11 @@ export function oauthRoutes(
   const microsoftTenant = typeof opts === "string" ? "common" : (opts.microsoftTenant ?? "common");
 
   function isCanvasCredentialSource(): boolean {
-    return appConfig?.CONNECTOR_CREDENTIAL_SOURCE === "canvas";
+    return isCanvasCredentialMode(appConfig);
   }
 
   function isLocalCredentialEncryptionMissing(): boolean {
-    return appConfig?.CONNECTOR_CREDENTIAL_SOURCE === "local" && !appConfig.ENCRYPTION_KEY;
+    return storedCredentialEncryptionMissing(appConfig);
   }
 
   function encryptionRequiredResponse(c: Context, connectorType: ConnectorType) {
@@ -224,7 +225,7 @@ export function oauthRoutes(
       {
         error: {
           code: "ENCRYPTION_REQUIRED",
-          message: "Local OAuth credentials require ENCRYPTION_KEY so credentials are encrypted at rest",
+          message: "Set ENCRYPTION_KEY or CONNECTOR_CREDENTIAL_SOURCE=canvas before storing connector credentials",
           connector: connectorType,
         },
       },

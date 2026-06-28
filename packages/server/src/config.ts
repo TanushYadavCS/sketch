@@ -158,8 +158,4 @@ export function validateConfig(config: Config): void {
     console.error("SLACK_MODE=http requires SLACK_SIGNING_SECRET");
     process.exit(1);
   }
-  if (config.CONNECTOR_CREDENTIAL_SOURCE === "local" && !config.ENCRYPTION_KEY) {
-    console.error("CONNECTOR_CREDENTIAL_SOURCE=local requires ENCRYPTION_KEY");
-    process.exit(1);
-  }
 }

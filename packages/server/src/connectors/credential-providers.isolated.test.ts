@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type * as CredentialSource from "./credential-source";
+import type * as CredentialProviders from "./credential-providers";
 import type { ConnectorType } from "./types";
 
 const { mcpRepoMock, decryptCredentialEnvelopeMock } = vi.hoisted(() => ({
@@ -19,7 +19,7 @@ vi.mock("./credential-envelope", () => ({
 
 const privateKey = ["-----BEGIN PRIVATE KEY-----", "test", "-----END PRIVATE KEY-----"].join("\n");
 
-let credentialSource: typeof CredentialSource;
+let credentialProviders: typeof CredentialProviders;
 
 function canvasResponse() {
   return {
@@ -33,10 +33,10 @@ function canvasResponse() {
   };
 }
 
-describe("Canvas credential source", () => {
+describe("connector credential providers", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    credentialSource = await import("./credential-source");
+    credentialProviders = await import("./credential-providers");
     mcpRepoMock.findByType.mockResolvedValue({
       id: "provider-1",
       api_url: "https://canvas.example.com",
@@ -80,17 +80,20 @@ describe("Canvas credential source", () => {
   it.each(["google_drive", "google_calendar", "gmail", "outlook", "teams"] as ConnectorType[])(
     "treats %s as Canvas OAuth",
     (connectorType) => {
-      expect(credentialSource.isCanvasOAuthConnector(connectorType)).toBe(true);
+      expect(credentialProviders.isCanvasOAuthConnector(connectorType)).toBe(true);
     },
   );
 
   it("decrypts Canvas OAuth credentials and preserves token metadata", async () => {
-    const credentials = await credentialSource.fetchCanvasCredential({
+    const provider = new credentialProviders.CanvasConnectorCredentialProvider({
       db: {} as never,
       appConfig: {
         CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
         CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
       },
+      logger: { debug: vi.fn() } as never,
+    });
+    const credentials = await provider.mint({
       connectorType: "gmail",
       userEmail: "priya@example.com",
       userName: "Priya Shah",
@@ -121,13 +124,17 @@ describe("Canvas credential source", () => {
   });
 
   it("rejects envelopes encrypted to an unexpected public key id", async () => {
+    const provider = new credentialProviders.CanvasConnectorCredentialProvider({
+      db: {} as never,
+      appConfig: {
+        CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+        CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "other-key",
+      },
+      logger: { debug: vi.fn() } as never,
+    });
+
     await expect(
-      credentialSource.fetchCanvasCredential({
-        db: {} as never,
-        appConfig: {
-          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
-          CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "other-key",
-        },
+      provider.mint({
         connectorType: "gmail",
         userEmail: "priya@example.com",
       }),
@@ -144,13 +151,17 @@ describe("Canvas credential source", () => {
       expiresAt: "2026-01-01T01:00:00.000Z",
     });
 
+    const provider = new credentialProviders.CanvasConnectorCredentialProvider({
+      db: {} as never,
+      appConfig: {
+        CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+        CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
+      },
+      logger: { debug: vi.fn() } as never,
+    });
+
     await expect(
-      credentialSource.fetchCanvasCredential({
-        db: {} as never,
-        appConfig: {
-          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
-          CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
-        },
+      provider.mint({
         connectorType: "gmail",
         userEmail: "priya@example.com",
       }),
@@ -158,7 +169,7 @@ describe("Canvas credential source", () => {
   });
 
   it("returns an access-token provider for Canvas OAuth configs", async () => {
-    const resolved = await credentialSource.resolveConnectorCredentials({
+    const resolved = await credentialProviders.resolveConnectorCredentials({
       db: {} as never,
       config: {
         id: "connector-1",
@@ -194,10 +205,14 @@ describe("Canvas credential source", () => {
   });
 
   it("rejects unsupported Canvas connector types", async () => {
+    const provider = new credentialProviders.CanvasConnectorCredentialProvider({
+      db: {} as never,
+      appConfig: { CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey },
+      logger: { debug: vi.fn() } as never,
+    });
+
     await expect(
-      credentialSource.fetchCanvasCredential({
-        db: {} as never,
-        appConfig: { CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey },
+      provider.mint({
         connectorType: "zoho_crm",
         userEmail: "priya@example.com",
       }),

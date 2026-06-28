@@ -426,6 +426,30 @@ describe("Connectors API — authorization", () => {
       });
     });
 
+    it("local credential source requires ENCRYPTION_KEY before storing connector credentials", async () => {
+      const localApp = createApp(
+        db,
+        createTestConfig({
+          CONNECTOR_CREDENTIAL_SOURCE: "local",
+        }),
+        { logger },
+      );
+      const res = await localApp.request("/api/connectors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          connectorType: "fireflies",
+          authType: "api_key",
+          credentials: { api_key: "stub" },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: { code: "ENCRYPTION_REQUIRED" },
+      });
+    });
+
     it("member → 403 creating an org-wide (notion) connector", async () => {
       const res = await app.request("/api/connectors", {
         method: "POST",

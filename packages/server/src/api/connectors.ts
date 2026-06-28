@@ -18,12 +18,15 @@ import { z } from "zod";
 import type { Config } from "../config";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
 import {
-  fetchCanvasCredential,
-  isCanvasConnector,
+  CanvasConnectorCredentialProvider,
+  ConnectorCredentialConfigError,
+  assertStoredCredentialStorageConfigured,
+  canvasOAuthPlaceholderCredentials,
+  connectorCredentialSourceStatus,
   isCanvasOAuthConnector,
-  loadCanvasProvider,
+  isLocalConnectorBlockedInCanvasMode,
   resolveConnectorCredentials,
-} from "../connectors/credential-source";
+} from "../connectors/credential-providers";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/envelope-metadata";
 import type { EmailAddr } from "../connectors/email/normalized-email";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
@@ -53,7 +56,6 @@ import { createEntityRepository, whereLiveEntity } from "../db/repositories/enti
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
-import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -310,6 +312,11 @@ export function connectorRoutes(
 ) {
   const routes = new Hono();
   const fileSharesRepo = createFileSharesRepository(db);
+  const canvasCredentialProvider = new CanvasConnectorCredentialProvider({
+    db,
+    appConfig: appConfig ?? {},
+    logger,
+  });
 
   type ConfigForPermissions = {
     connector_type: string;
@@ -356,26 +363,24 @@ export function connectorRoutes(
     return configVisible(config) && config.sync_status !== "disabled";
   }
 
-  function isCanvasMode(): boolean {
-    return appConfig?.CONNECTOR_CREDENTIAL_SOURCE === "canvas";
-  }
-
-  function hasCanvasCredentialImportConfig(): boolean {
-    return Boolean(
-      appConfig?.CANVAS_CREDENTIAL_PRIVATE_KEY_PEM?.trim() || appConfig?.CANVAS_CREDENTIAL_PRIVATE_KEY_PATH?.trim(),
-    );
-  }
-
-  function isLocalConnectorBlockedInCanvasMode(connectorType: ConnectorType): boolean {
-    return isCanvasMode() && isCanvasConnector(connectorType);
-  }
-
   function localConnectorBlockedResponse(c: Context, connectorType: ConnectorType) {
     return c.json(
       {
         error: {
           code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED",
           message: `${connectorType} credentials are managed by Canvas in this deployment. Use the Canvas connect flow.`,
+        },
+      },
+      400,
+    );
+  }
+
+  function localCredentialEncryptionRequiredResponse(c: Context) {
+    return c.json(
+      {
+        error: {
+          code: "ENCRYPTION_REQUIRED",
+          message: "Set ENCRYPTION_KEY or CONNECTOR_CREDENTIAL_SOURCE=canvas before storing connector credentials",
         },
       },
       400,
@@ -512,13 +517,7 @@ export function connectorRoutes(
   });
 
   routes.get("/credential-source", async (c) => {
-    const canvasConfigured = Boolean(await createMcpServerRepository(db).findByType("canvas"));
-    return c.json({
-      mode: appConfig?.CONNECTOR_CREDENTIAL_SOURCE ?? "local",
-      canvasConfigured,
-      canvasCredentialImportConfigured: canvasConfigured && hasCanvasCredentialImportConfig(),
-      publicKeyId: appConfig?.CANVAS_CREDENTIAL_PUBLIC_KEY_ID ?? null,
-    });
+    return c.json(await connectorCredentialSourceStatus({ db, appConfig: appConfig ?? {} }));
   });
 
   routes.get("/canvas/suggestions", async (c) => {
@@ -543,12 +542,12 @@ export function connectorRoutes(
       return c.json({ suggestion: null });
     }
 
-    const [provider, existingConnector] = await Promise.all([
-      createMcpServerRepository(db).findByType("canvas"),
+    const [status, existingConnector] = await Promise.all([
+      connectorCredentialSourceStatus({ db, appConfig: appConfig ?? {} }),
       connectorRepo.findByTypeAndOwner(connectorType, sub),
     ]);
 
-    if (!provider || !hasCanvasCredentialImportConfig() || existingConnector) {
+    if (!status.canvasConfigured || !status.canvasCredentialImportConfigured || existingConnector) {
       return c.json({ suggestion: null });
     }
 
@@ -579,16 +578,22 @@ export function connectorRoutes(
       return c.json({ error: { code: "NOT_SUPPORTED", message: "Connector is not supported in Canvas mode" } }, 400);
     }
 
-    const provider = await loadCanvasProvider(db);
-    const result = await provider.initiateConnection(
-      email,
-      appSlug,
-      parsed.data.callbackUrl,
-      undefined,
-      c.get("role") === "admin" ? "admin" : "member",
-    );
-
-    return c.json(result);
+    try {
+      const provider = await canvasCredentialProvider.loadProvider();
+      const result = await provider.initiateConnection(
+        email,
+        appSlug,
+        parsed.data.callbackUrl,
+        undefined,
+        c.get("role") === "admin" ? "admin" : "member",
+      );
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return c.json({ error: { code: err.code, message: err.message } }, 400);
+      }
+      throw err;
+    }
   });
 
   routes.post("/canvas/import", async (c) => {
@@ -598,7 +603,7 @@ export function connectorRoutes(
       return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in with an email is required" } }, 401);
     }
 
-    if (!hasCanvasCredentialImportConfig()) {
+    if (!canvasCredentialProvider.hasCredentialImportConfig()) {
       return c.json(
         {
           error: {
@@ -634,9 +639,7 @@ export function connectorRoutes(
 
     let validationCredentials: ConnectorCredentials;
     try {
-      validationCredentials = await fetchCanvasCredential({
-        db,
-        appConfig: appConfig ?? {},
+      validationCredentials = await canvasCredentialProvider.mint({
         connectorType,
         userEmail: email,
         userOrgRole: c.get("role") === "admin" ? "admin" : "member",
@@ -650,6 +653,9 @@ export function connectorRoutes(
         err.status === 409
       ) {
         return c.json(existingConnectorResponse(existingConnector));
+      }
+      if (err instanceof ConnectorCredentialConfigError) {
+        return c.json({ error: { code: err.code, message: err.message } }, 400);
       }
       const message = err instanceof Error ? err.message : "Canvas credential import failed";
       logger.warn({ err, connectorType }, "Canvas credential import failed");
@@ -673,15 +679,7 @@ export function connectorRoutes(
       !parsed.data.scopeConfig &&
       !hasUsableExistingScopeConfig(connectorType, existingConnector);
     const storedCredentials: ConnectorCredentials = isCanvasOAuthConnector(connectorType)
-      ? {
-          type: "oauth",
-          access_token: "",
-          refresh_token: "",
-          token_type: "Bearer",
-          expires_at: new Date(0).toISOString(),
-          client_id: "canvas",
-          client_secret: "canvas",
-        }
+      ? canvasOAuthPlaceholderCredentials()
       : validationCredentials;
 
     const credentialHint =
@@ -756,20 +754,17 @@ export function connectorRoutes(
     const connectorType = parsed.data.connectorType as ConnectorType;
     const connectorMeta = getConnector(connectorType);
 
-    if (isLocalConnectorBlockedInCanvasMode(connectorType)) {
+    if (isLocalConnectorBlockedInCanvasMode(appConfig, connectorType)) {
       return localConnectorBlockedResponse(c, connectorType);
     }
 
-    if (appConfig?.CONNECTOR_CREDENTIAL_SOURCE && !appConfig.ENCRYPTION_KEY) {
-      return c.json(
-        {
-          error: {
-            code: "ENCRYPTION_REQUIRED",
-            message: "Local connector credentials require ENCRYPTION_KEY so credentials are encrypted at rest",
-          },
-        },
-        400,
-      );
+    try {
+      assertStoredCredentialStorageConfigured(appConfig);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return localCredentialEncryptionRequiredResponse(c);
+      }
+      throw err;
     }
 
     // Org-wide connectors (perUserAuth: false) are admin-only.
@@ -2083,6 +2078,19 @@ export function connectorRoutes(
     const { permissions } = permissionsForConfig(c, config);
     const denied = denyUnless(c, permissions.canUpdateCredentials);
     if (denied) return denied;
+
+    if (config.credential_source === "canvas") {
+      return localConnectorBlockedResponse(c, config.connector_type as ConnectorType);
+    }
+
+    try {
+      assertStoredCredentialStorageConfigured(appConfig);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return localCredentialEncryptionRequiredResponse(c);
+      }
+      throw err;
+    }
 
     const parsed = z.object({ api_key: z.string().min(1) }).safeParse(await c.req.json());
     if (!parsed.success) {
