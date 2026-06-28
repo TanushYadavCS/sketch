@@ -5,6 +5,7 @@ import { reconcileWorkCycles } from "../db/repositories/work-cycles";
 import type { DB } from "../db/schema";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { reconcileStructuralAssigneeContributesTo } from "../entities/structural-assignee";
 import { floorRetryForDomains } from "./engagement-floor";
 import { sweepDomainPromotions } from "./smart-enrichment";
 
@@ -40,8 +41,28 @@ export async function runPostSyncGraphPipeline({
   const taskRepo = createTaskRepository(db);
   const reanchoredTasks = await taskRepo.reanchorNullParentTasks();
   const expiredTasks = await taskRepo.expireOrphanedTasks(source);
-  if (reanchoredTasks > 0 || expiredTasks > 0) {
-    syncLogger.info({ reanchoredTasks, expiredTasks }, "Post-sync task sweep complete");
+  if (reanchoredTasks.count > 0 || expiredTasks > 0) {
+    syncLogger.info({ reanchoredTasks: reanchoredTasks.count, expiredTasks }, "Post-sync task sweep complete");
+  }
+  if (experimentalFlag) {
+    if (affectedIndexedFileIds.length > 0) {
+      await reconcileStructuralAssigneeContributesTo(
+        db,
+        syncLogger.child({ component: "structural-assignee-producer" }),
+        {
+          scope: { kind: "files", indexedFileIds: affectedIndexedFileIds },
+        },
+      );
+    }
+    if (reanchoredTasks.taskIds.length > 0) {
+      await reconcileStructuralAssigneeContributesTo(
+        db,
+        syncLogger.child({ component: "structural-assignee-producer" }),
+        {
+          scope: { kind: "tasks", taskIds: reanchoredTasks.taskIds },
+        },
+      );
+    }
   }
   if (experimentalFlag && runCycleReconcile && connectorConfigId && syncRunId) {
     const closedWorkCycles = await reconcileWorkCycles(db, {
