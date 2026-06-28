@@ -63,6 +63,11 @@ interface NavItem {
   experimentalOnly?: boolean;
   /** Optional render-prop for a trailing element (e.g. a count badge). */
   trailing?: React.ReactNode;
+  /**
+   * When experimental, relabel to "Your org" and show a pending-review count
+   * badge scoped to the org-taxonomy spine.
+   */
+  yourOrgBadge?: boolean;
 }
 
 const allPrimaryNav: NavItem[] = [
@@ -71,7 +76,7 @@ const allPrimaryNav: NavItem[] = [
   { label: "Chat", icon: <ChatCircleIcon size={18} />, href: "/chat" },
   { label: "Channels", icon: <HashIcon size={18} />, href: "/channels" },
   { label: "Files", icon: <FolderSimpleIcon size={18} />, href: "/files" },
-  { label: "Projects", icon: <FoldersIcon size={18} />, href: "/projects", adminOnly: true },
+  { label: "Projects", icon: <FoldersIcon size={18} />, href: "/projects", adminOnly: true, yourOrgBadge: true },
   { label: "Team", icon: <UsersThreeIcon size={18} />, href: "/team" },
   { label: "Automations", icon: <CalendarDotsIcon size={18} />, href: "/scheduled-tasks" },
   { label: "Skills", icon: <BrainIcon size={18} />, href: "/skills" },
@@ -122,6 +127,13 @@ export function AppSidebar({
   });
 
   const experimentalEnabled = setupStatus?.experimentalFlag === true;
+  const { data: yourOrgReview } = useQuery({
+    queryKey: ["entity-review", "band-count", "spine"],
+    queryFn: () => api.entityReview.list({ limit: 0, types: ["product", "project", "team"] }),
+    enabled: experimentalEnabled && role === "admin",
+    refetchInterval: 30000,
+  });
+  const yourOrgCount = yourOrgReview?.total ?? 0;
   const primaryNav = allPrimaryNav.filter((item) => {
     if (item.adminOnly && role !== "admin" && !(item.memberVisibleWhenExperimental && experimentalEnabled))
       return false;
@@ -164,19 +176,28 @@ export function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {primaryNav.map((item) => (
-                <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton
-                    isActive={isNavItemActive(location.pathname, item.href)}
-                    onClick={() => !item.disabled && navigate({ to: item.href })}
-                    disabled={item.disabled}
-                    tooltip={item.label}
-                  >
-                    {item.icon}
-                    <span className="flex-1">{item.label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
+              {primaryNav.map((item) => {
+                const yourOrg = item.yourOrgBadge && experimentalEnabled;
+                const label = yourOrg ? "Your org" : item.label;
+                return (
+                  <SidebarMenuItem key={item.href}>
+                    <SidebarMenuButton
+                      isActive={isNavItemActive(location.pathname, item.href)}
+                      onClick={() => !item.disabled && navigate({ to: item.href })}
+                      disabled={item.disabled}
+                      tooltip={label}
+                    >
+                      {item.icon}
+                      <span className="flex-1">{label}</span>
+                      {yourOrg && yourOrgCount > 0 ? (
+                        <Badge variant="secondary" className="h-4 min-w-4 justify-center px-1 text-[10px] tabular-nums">
+                          {yourOrgCount}
+                        </Badge>
+                      ) : null}
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
               {setupStatus?.managedUrl && role === "admin" ? (
                 <SidebarMenuItem>
                   <SidebarMenuButton asChild tooltip="Account">

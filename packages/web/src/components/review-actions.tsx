@@ -33,8 +33,8 @@ export const countKey = (search?: string) => ["entity-review", "count", search ?
 export const detailKey = (id: string) => ["entity-review", "detail", id] as const;
 
 export interface ResolveResult {
-  kind: "confirmed" | "rejected";
-  targetEntityId: string;
+  kind: "confirmed" | "rejected" | "dismissed";
+  targetEntityId: string | null;
 }
 
 export interface ResolveCopy {
@@ -88,12 +88,17 @@ function copyForError(err: unknown): ResolveCopy {
  * resolve path needs.
  */
 export interface UseReviewMutationsResult {
-  /** Confirm the row's default suggested candidate. No-op if the row has no candidate. */
-  confirm: () => void;
+  /**
+   * Confirm the row. For a birth (no candidate) this creates the entity from
+   * its seed; pass `nameOverride` to create it under a different name.
+   */
+  confirm: (opts?: { nameOverride?: string }) => void;
   /** Reject the proposal — server creates a brand-new entity. */
   reject: () => void;
   /** Confirm with a host-picked target entity (overrides the row's suggested candidate). */
   mergeInto: (entityId: string) => void;
+  /** Drop a pending birth row without creating an entity; suppresses re-proposal. */
+  dismiss: () => void;
   isPending: boolean;
   errorCopy: ResolveCopy | null;
   clearError: () => void;
@@ -140,10 +145,11 @@ export function useReviewMutations(
   };
 
   const confirmMutation = useMutation({
-    mutationFn: (input: { mergeIntoEntityId?: string }) =>
+    mutationFn: (input: { mergeIntoEntityId?: string; nameOverride?: string }) =>
       api.entityReview.confirm(row.id, {
         candidateGeneratedAt,
         ...(input.mergeIntoEntityId ? { mergeIntoEntityId: input.mergeIntoEntityId } : {}),
+        ...(input.nameOverride ? { nameOverride: input.nameOverride } : {}),
       }),
     onMutate,
     onError,
@@ -163,11 +169,22 @@ export function useReviewMutations(
     },
   });
 
+  const dismissMutation = useMutation({
+    mutationFn: (_: undefined) => api.entityReview.dismiss(row.id, { candidateGeneratedAt }),
+    onMutate,
+    onError,
+    onSuccess: () => {
+      onSuccessCommon();
+      onResolved?.({ kind: "dismissed", targetEntityId: null });
+    },
+  });
+
   return {
-    confirm: () => confirmMutation.mutate({}),
+    confirm: (opts?: { nameOverride?: string }) => confirmMutation.mutate({ nameOverride: opts?.nameOverride }),
     reject: () => rejectMutation.mutate(undefined),
     mergeInto: (entityId: string) => confirmMutation.mutate({ mergeIntoEntityId: entityId }),
-    isPending: confirmMutation.isPending || rejectMutation.isPending,
+    dismiss: () => dismissMutation.mutate(undefined),
+    isPending: confirmMutation.isPending || rejectMutation.isPending || dismissMutation.isPending,
     errorCopy,
     clearError: () => setErrorCopy(null),
   };
