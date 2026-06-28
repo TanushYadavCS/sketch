@@ -373,23 +373,16 @@ export function ConnectionsPage() {
     queryClient.invalidateQueries({ queryKey: ["connections"] });
   }, [queryClient]);
 
-  const maybeShowConnectorNudge = useCallback(
-    async (
-      app: Pick<IntegrationApp, "id" | "name">,
-      connection?: Pick<IntegrationConnection, "id" | "source"> | null,
-    ) => {
-      if (connection?.source !== "canvas_user_secrets") return;
-      try {
-        const result = await api.integrations.canvasSuggestion(app.id, connection);
-        if (result.suggestion) {
-          setConnectorNudge({ ...result.suggestion, appName: app.name });
-        }
-      } catch {
-        return;
+  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name" | "connectionId">) => {
+    try {
+      const result = await api.integrations.canvasSuggestion(app.id, app.connectionId);
+      if (result.suggestion) {
+        setConnectorNudge({ ...result.suggestion, appName: app.name });
       }
-    },
-    [],
-  );
+    } catch {
+      return;
+    }
+  }, []);
 
   useEffect(() => {
     if (connectError) {
@@ -430,7 +423,7 @@ export function ConnectionsPage() {
         setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
         toast.success(`${connection.appName} connected`);
         invalidateConnections();
-        void maybeShowConnectorNudge({ id: connection.appId, name: connection.appName }, connection);
+        void maybeShowConnectorNudge({ id: connection.appId, name: connection.appName, connectionId: connection.id });
       };
 
       const failVerification = (message: string) => {
@@ -765,9 +758,9 @@ export function ConnectionsPage() {
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
           initialAppId={null}
           initialSearch={requestedAppSearch}
-          onSuccess={(app, connection) => {
+          onSuccess={(app) => {
             invalidateAll();
-            if (app) void maybeShowConnectorNudge(app, connection);
+            if (app) void maybeShowConnectorNudge(app);
           }}
         />
       )}

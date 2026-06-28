@@ -31,7 +31,7 @@ import {
 } from "@/lib/chat-target";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
-import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
+import type { IntegrationApp } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -999,23 +999,16 @@ export function ChatPage() {
     [],
   );
 
-  const maybeShowConnectorNudge = useCallback(
-    async (
-      app: Pick<IntegrationApp, "id" | "name">,
-      connection?: Pick<IntegrationConnection, "id" | "source"> | null,
-    ) => {
-      if (connection?.source !== "canvas_user_secrets") return;
-      try {
-        const result = await api.integrations.canvasSuggestion(app.id, connection);
-        if (result.suggestion) {
-          setConnectorNudge({ ...result.suggestion, appName: app.name });
-        }
-      } catch {
-        return;
+  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name" | "connectionId">) => {
+    try {
+      const result = await api.integrations.canvasSuggestion(app.id, app.connectionId);
+      if (result.suggestion) {
+        setConnectorNudge({ ...result.suggestion, appName: app.name });
       }
-    },
-    [],
-  );
+    } catch {
+      return;
+    }
+  }, []);
 
   const handleConnectIntegration = useCallback(
     (connection: ChatThreadIntegrationConnection) => {
@@ -1038,10 +1031,10 @@ export function ChatPage() {
   );
 
   const handleIntegrationConnected = useCallback(
-    (app?: IntegrationApp, connection?: IntegrationConnection) => {
+    (app?: IntegrationApp) => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
       queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
-      if (app) void maybeShowConnectorNudge(app, connection);
+      if (app) void maybeShowConnectorNudge(app);
     },
     [maybeShowConnectorNudge, queryClient],
   );

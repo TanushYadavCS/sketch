@@ -32,7 +32,7 @@ export function ChatIntegrationConnectionFrame({
   popupWindow: Window | null;
   onOpenChange: (open: boolean) => void;
   onStatusChange: (requestId: string, status: ChatThreadIntegrationConnectionStatus) => void;
-  onConnected: (app?: IntegrationApp, connection?: IntegrationConnection) => void;
+  onConnected: (app?: IntegrationApp) => void;
 }) {
   const requestRef = useRef(0);
   const connectedRef = useRef(false);
@@ -79,14 +79,14 @@ export function ChatIntegrationConnectionFrame({
       return connections.find((item) => item.appId === app.id && isOwnedOrPersonalAppConnection(item)) ?? null;
     };
 
-    const complete = (app: IntegrationApp, connection?: IntegrationConnection) => {
+    const complete = (app: IntegrationApp) => {
       if (cancelled || requestRef.current !== requestId || connectedRef.current) return;
       connectedRef.current = true;
       activeAppRef.current = app;
       if (intervalId !== null) window.clearInterval(intervalId);
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       updateStatus("connected");
-      onConnected(app, connection);
+      onConnected(app);
       toast.success(`${app.name} connected`);
       closeConnection();
     };
@@ -106,7 +106,7 @@ export function ChatIntegrationConnectionFrame({
         try {
           const verifiedConnection = await verifyConnected(app);
           if (verifiedConnection) {
-            complete({ ...app, connectionId: verifiedConnection.id }, verifiedConnection);
+            complete({ ...app, connectionId: verifiedConnection.id });
             return;
           }
           if (popup?.closed) {
@@ -163,7 +163,7 @@ export function ChatIntegrationConnectionFrame({
       const current = activeAppRef.current ?? fallbackApp(connection);
       void verifyConnected(current)
         .then((verifiedConnection) => {
-          if (verifiedConnection) complete({ ...current, connectionId: verifiedConnection.id }, verifiedConnection);
+          if (verifiedConnection) complete({ ...current, connectionId: verifiedConnection.id });
         })
         .catch(() => undefined);
     };

@@ -530,19 +530,15 @@ describe("Connectors API — authorization", () => {
         { logger },
       );
 
-      const res = await canvasApp.request(
-        "/api/connectors/canvas/suggestions?appId=google_gmail&accountId=secrets:member:google:google-gmail-oauth&connectionSource=canvas_user_secrets",
-        {
-          headers: { Cookie: memberCookie },
-        },
-      );
+      const res = await canvasApp.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
 
       expect(res.status).toBe(200);
       await expect(res.json()).resolves.toEqual({
         suggestion: {
           connectorType: "gmail",
           appId: "google-gmail-oauth",
-          accountId: "secrets:member:google:google-gmail-oauth",
         },
       });
     });
@@ -558,18 +554,12 @@ describe("Connectors API — authorization", () => {
         { logger },
       );
 
-      const existing = await canvasApp.request(
-        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&accountId=secrets:member:google:google-gmail-oauth&connectionSource=canvas_user_secrets",
-        {
-          headers: { Cookie: memberCookie },
-        },
-      );
-      const orgLevel = await canvasApp.request(
-        "/api/connectors/canvas/suggestions?appId=notion&accountId=secrets:member:notion:notion&connectionSource=canvas_user_secrets",
-        {
-          headers: { Cookie: memberCookie },
-        },
-      );
+      const existing = await canvasApp.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
+      const orgLevel = await canvasApp.request("/api/connectors/canvas/suggestions?appId=notion", {
+        headers: { Cookie: memberCookie },
+      });
 
       expect(existing.status).toBe(200);
       expect(orgLevel.status).toBe(200);
@@ -580,24 +570,9 @@ describe("Connectors API — authorization", () => {
     it("does not suggest a connector when Canvas credential import is not configured", async () => {
       await insertCanvasProvider(db);
 
-      const res = await app.request(
-        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&accountId=secrets:member:google:google-gmail-oauth&connectionSource=canvas_user_secrets",
-        {
-          headers: { Cookie: memberCookie },
-        },
-      );
-
-      expect(res.status).toBe(200);
-      await expect(res.json()).resolves.toEqual({ suggestion: null });
-    });
-
-    it("does not suggest a connector for matching Pipedream apps", async () => {
-      const res = await app.request(
-        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&accountId=apn_123&connectionSource=pipedream",
-        {
-          headers: { Cookie: memberCookie },
-        },
-      );
+      const res = await app.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
 
       expect(res.status).toBe(200);
       await expect(res.json()).resolves.toEqual({ suggestion: null });

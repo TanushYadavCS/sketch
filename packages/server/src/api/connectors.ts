@@ -237,7 +237,6 @@ const canvasImportSchema = z.object({
 const canvasSuggestionSchema = z.object({
   appId: z.string().trim().min(1).max(128),
   accountId: z.string().trim().min(1).optional(),
-  connectionSource: z.string().trim().min(1).optional(),
 });
 
 const searchSchema = z.object({
@@ -531,15 +530,10 @@ export function connectorRoutes(
     const parsed = canvasSuggestionSchema.safeParse({
       appId: c.req.query("appId"),
       accountId: c.req.query("accountId"),
-      connectionSource: c.req.query("connectionSource"),
     });
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
-    }
-
-    if (parsed.data.connectionSource !== "canvas_user_secrets" || !parsed.data.accountId?.startsWith("secrets:")) {
-      return c.json({ suggestion: null });
     }
 
     const connectorType = personalCanvasConnectorTypeFromAppId(parsed.data.appId);
