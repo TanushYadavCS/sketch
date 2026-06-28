@@ -373,9 +373,9 @@ export function ConnectionsPage() {
     queryClient.invalidateQueries({ queryKey: ["connections"] });
   }, [queryClient]);
 
-  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name">) => {
+  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name" | "connectionId">) => {
     try {
-      const result = await api.integrations.canvasSuggestion(app.id);
+      const result = await api.integrations.canvasSuggestion(app.id, app.connectionId);
       if (result.suggestion) {
         setConnectorNudge({ ...result.suggestion, appName: app.name });
       }
@@ -423,7 +423,7 @@ export function ConnectionsPage() {
         setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
         toast.success(`${connection.appName} connected`);
         invalidateConnections();
-        void maybeShowConnectorNudge({ id: connection.appId, name: connection.appName });
+        void maybeShowConnectorNudge({ id: connection.appId, name: connection.appName, connectionId: connection.id });
       };
 
       const failVerification = (message: string) => {

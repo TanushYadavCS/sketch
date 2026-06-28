@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DB } from "../db/schema";
+import { CanvasProviderRequestError } from "../integrations/canvas";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { migrateManagedConnectorCredentialsToCanvas } from "./managed-credential-migration";
 
@@ -180,8 +181,8 @@ describe("migrateManagedConnectorCredentialsToCanvas", () => {
     expect(identity.token_expires_at).toBeNull();
   });
 
-  it("pauses local managed OAuth connector rows when Canvas cannot mint", async () => {
-    await seedUser({ email: null });
+  it("pauses local managed OAuth connector rows when the user has no Canvas connection", async () => {
+    await seedUser();
     await seedConnector({ connectorType: "google_drive" });
     await seedIdentity({ provider: "google_drive" });
 
@@ -190,7 +191,7 @@ describe("migrateManagedConnectorCredentialsToCanvas", () => {
       appConfig: { CONNECTOR_CREDENTIAL_SOURCE: "canvas" },
       logger: createTestLogger(),
       mintCredential: vi.fn(async () => {
-        throw new Error("Canvas missing connection");
+        throw new CanvasProviderRequestError(404, "NOT_FOUND", "Canvas missing connection");
       }),
     });
 
@@ -214,6 +215,132 @@ describe("migrateManagedConnectorCredentialsToCanvas", () => {
     expect(connector.credentials).not.toContain("local-refresh");
     expect(identity.access_token).toBeNull();
     expect(identity.refresh_token).toBeNull();
+  });
+
+  it("leaves local credentials untouched on unsafe migration failures", async () => {
+    await seedUser();
+    await seedConnector({ connectorType: "google_drive" });
+    await seedIdentity({ provider: "google_drive" });
+
+    const result = await migrateManagedConnectorCredentialsToCanvas({
+      db,
+      appConfig: { CONNECTOR_CREDENTIAL_SOURCE: "canvas" },
+      logger: createTestLogger(),
+      mintCredential: vi.fn(async () => {
+        throw new CanvasProviderRequestError(500, "UPSTREAM_ERROR", "Canvas is unavailable");
+      }),
+    });
+
+    const connector = await db
+      .selectFrom("connector_configs")
+      .selectAll()
+      .where("id", "=", "connector-1")
+      .executeTakeFirstOrThrow();
+    const identity = await db
+      .selectFrom("user_provider_identities")
+      .selectAll()
+      .where("id", "=", "identity-1")
+      .executeTakeFirstOrThrow();
+
+    expect(result).toMatchObject({ scannedConnectorRows: 1, convertedConnectorRows: 0, pausedConnectorRows: 0 });
+    expect(connector.credential_source).toBe("local");
+    expect(connector.sync_status).toBe("active");
+    expect(connector.credentials).toContain("local-refresh");
+    expect(identity.access_token).toBe("identity-access");
+    expect(identity.refresh_token).toBe("identity-refresh");
+  });
+
+  it("scrubs migrated identity tokens while preserving identities tied to unsafe failures", async () => {
+    await seedUser({ id: "user-1", email: "safe@example.com" });
+    await seedUser({ id: "user-2", email: "unsafe@example.com" });
+    await seedConnector({ id: "safe-connector", connectorType: "gmail", createdBy: "user-1" });
+    await seedConnector({ id: "unsafe-connector", connectorType: "google_drive", createdBy: "user-2" });
+    await seedIdentity({ id: "safe-identity", userId: "user-1", provider: "gmail" });
+    await seedIdentity({ id: "unsafe-identity", userId: "user-2", provider: "google_drive" });
+
+    const result = await migrateManagedConnectorCredentialsToCanvas({
+      db,
+      appConfig: { CONNECTOR_CREDENTIAL_SOURCE: "canvas" },
+      logger: createTestLogger(),
+      mintCredential: vi.fn(async ({ userEmail }) => {
+        if (userEmail === "unsafe@example.com") {
+          throw new CanvasProviderRequestError(500, "UPSTREAM_ERROR", "Canvas is unavailable");
+        }
+        return {
+          type: "oauth" as const,
+          access_token: "minted-access",
+          refresh_token: "",
+          client_id: "canvas",
+          client_secret: "canvas",
+        };
+      }),
+    });
+
+    const safeConnector = await db
+      .selectFrom("connector_configs")
+      .selectAll()
+      .where("id", "=", "safe-connector")
+      .executeTakeFirstOrThrow();
+    const unsafeConnector = await db
+      .selectFrom("connector_configs")
+      .selectAll()
+      .where("id", "=", "unsafe-connector")
+      .executeTakeFirstOrThrow();
+    const identities = await db
+      .selectFrom("user_provider_identities")
+      .select(["id", "access_token", "refresh_token"])
+      .orderBy("id")
+      .execute();
+
+    expect(result).toMatchObject({
+      scannedConnectorRows: 2,
+      convertedConnectorRows: 1,
+      pausedConnectorRows: 0,
+      scrubbedIdentityRows: 1,
+    });
+    expect(safeConnector.credential_source).toBe("canvas");
+    expect(unsafeConnector.credential_source).toBe("local");
+    expect(identities).toEqual([
+      { id: "safe-identity", access_token: null, refresh_token: null },
+      { id: "unsafe-identity", access_token: "identity-access", refresh_token: "identity-refresh" },
+    ]);
+  });
+
+  it("leaves local credentials untouched when Canvas reports a public key mismatch", async () => {
+    await seedUser();
+    await seedConnector({ connectorType: "google_drive" });
+    await seedIdentity({ provider: "google_drive" });
+
+    const result = await migrateManagedConnectorCredentialsToCanvas({
+      db,
+      appConfig: { CONNECTOR_CREDENTIAL_SOURCE: "canvas" },
+      logger: createTestLogger(),
+      mintCredential: vi.fn(async () => {
+        throw new CanvasProviderRequestError(
+          409,
+          "PUBLIC_KEY_MISMATCH",
+          "Sketch credential public key id does not match Canvas registration",
+        );
+      }),
+    });
+
+    const connector = await db
+      .selectFrom("connector_configs")
+      .selectAll()
+      .where("id", "=", "connector-1")
+      .executeTakeFirstOrThrow();
+    const identity = await db
+      .selectFrom("user_provider_identities")
+      .selectAll()
+      .where("id", "=", "identity-1")
+      .executeTakeFirstOrThrow();
+
+    expect(result).toMatchObject({ scannedConnectorRows: 1, convertedConnectorRows: 0, pausedConnectorRows: 0 });
+    expect(connector.credential_source).toBe("local");
+    expect(connector.sync_status).toBe("active");
+    expect(connector.credentials).toContain("local-refresh");
+    expect(identity.access_token).toBe("identity-access");
+    expect(identity.refresh_token).toBe("identity-refresh");
   });
 
   it("scrubs managed provider identity tokens even when there is no connector row", async () => {

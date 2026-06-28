@@ -45,6 +45,7 @@ export interface OAuthCredentials {
   accounts_server?: string;
   api_domain?: string;
   region?: string;
+  canvas_account_id?: string;
 }
 
 export interface ApiKeyCredentials {

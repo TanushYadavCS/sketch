@@ -59,7 +59,6 @@ import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
-import { CanvasProviderRequestError } from "../integrations/canvas";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -231,11 +230,13 @@ const canvasConnectSchema = z.object({
 
 const canvasImportSchema = z.object({
   connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
+  accountId: z.string().trim().min(1).optional(),
   scopeConfig: z.record(z.string(), z.unknown()).optional(),
 });
 
 const canvasSuggestionSchema = z.object({
   appId: z.string().trim().min(1).max(128),
+  accountId: z.string().trim().min(1).optional(),
 });
 
 const searchSchema = z.object({
@@ -526,7 +527,10 @@ export function connectorRoutes(
       return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
     }
 
-    const parsed = canvasSuggestionSchema.safeParse({ appId: c.req.query("appId") });
+    const parsed = canvasSuggestionSchema.safeParse({
+      appId: c.req.query("appId"),
+      accountId: c.req.query("accountId"),
+    });
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
@@ -555,6 +559,7 @@ export function connectorRoutes(
       suggestion: {
         connectorType,
         appId: canvasAppSlugForPersonalConnector(connectorType),
+        ...(parsed.data.accountId ? { accountId: parsed.data.accountId } : {}),
       },
     });
   });
@@ -573,9 +578,14 @@ export function connectorRoutes(
     }
 
     const connectorType = parsed.data.connectorType as ConnectorType;
+    const connectorMeta = getConnector(connectorType);
     const appSlug = CANVAS_APP_BY_CONNECTOR[connectorType];
     if (!appSlug) {
       return c.json({ error: { code: "NOT_SUPPORTED", message: "Connector is not supported in Canvas mode" } }, 400);
+    }
+    if (!connectorMeta.perUserAuth) {
+      const denied = denyIfNotAdmin(c);
+      if (denied) return denied;
     }
 
     try {
@@ -642,18 +652,11 @@ export function connectorRoutes(
       validationCredentials = await canvasCredentialProvider.mint({
         connectorType,
         userEmail: email,
+        accountId: parsed.data.accountId,
         userOrgRole: c.get("role") === "admin" ? "admin" : "member",
       });
       await connectorMeta.validateCredentials(validationCredentials);
     } catch (err) {
-      if (
-        existingConnector &&
-        !isCanvasOAuthConnector(connectorType) &&
-        err instanceof CanvasProviderRequestError &&
-        err.status === 409
-      ) {
-        return c.json(existingConnectorResponse(existingConnector));
-      }
       if (err instanceof ConnectorCredentialConfigError) {
         return c.json({ error: { code: err.code, message: err.message } }, 400);
       }
@@ -679,7 +682,7 @@ export function connectorRoutes(
       !parsed.data.scopeConfig &&
       !hasUsableExistingScopeConfig(connectorType, existingConnector);
     const storedCredentials: ConnectorCredentials = isCanvasOAuthConnector(connectorType)
-      ? canvasOAuthPlaceholderCredentials()
+      ? canvasOAuthPlaceholderCredentials(parsed.data.accountId)
       : validationCredentials;
 
     const credentialHint =

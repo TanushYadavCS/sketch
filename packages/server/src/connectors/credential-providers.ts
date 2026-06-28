@@ -1,6 +1,8 @@
+import { createPrivateKey } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { z } from "zod";
 import type { Config } from "../config";
 import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { DB } from "../db/schema";
@@ -72,7 +74,7 @@ export class ConnectorCredentialConfigError extends Error {
   }
 }
 
-const CANVAS_CONNECTOR_TYPES = new Set<ConnectorType>([
+const CANVAS_CONNECTOR_TYPE_VALUES = [
   "google_drive",
   "google_calendar",
   "gmail",
@@ -82,7 +84,9 @@ const CANVAS_CONNECTOR_TYPES = new Set<ConnectorType>([
   "clickup",
   "notion",
   "linear",
-]);
+] as const satisfies readonly CanvasSketchConnectorType[];
+
+const CANVAS_CONNECTOR_TYPES = new Set<ConnectorType>(CANVAS_CONNECTOR_TYPE_VALUES);
 
 export const CANVAS_OAUTH_CONNECTOR_TYPES = [
   "google_drive",
@@ -93,6 +97,25 @@ export const CANVAS_OAUTH_CONNECTOR_TYPES = [
 ] as const satisfies readonly ConnectorType[];
 
 const CANVAS_OAUTH_CONNECTORS = new Set<ConnectorType>(CANVAS_OAUTH_CONNECTOR_TYPES);
+
+const canvasConnectorTypeSchema = z.enum(CANVAS_CONNECTOR_TYPE_VALUES);
+const canvasCredentialPayloadSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("oauth_access_token"),
+    connectorType: canvasConnectorTypeSchema,
+    provider: z.string().min(1),
+    accessToken: z.string().min(1),
+    tokenType: z.string().min(1).optional(),
+    expiresAt: z.string().min(1).optional(),
+    scope: z.string().min(1).optional(),
+  }),
+  z.object({
+    type: z.literal("api_key"),
+    connectorType: canvasConnectorTypeSchema,
+    provider: z.string().min(1),
+    apiKey: z.string().min(1),
+  }),
+]);
 
 export function connectorCredentialMode(config?: CredentialProviderConfig): ConnectorCredentialSource {
   return config?.CONNECTOR_CREDENTIAL_SOURCE === "canvas" ? "canvas" : "local";
@@ -121,6 +144,11 @@ export function hasCanvasCredentialImportConfig(config?: CredentialProviderConfi
   return Boolean(
     config?.CANVAS_CREDENTIAL_PRIVATE_KEY_PEM?.trim() || config?.CANVAS_CREDENTIAL_PRIVATE_KEY_PATH?.trim(),
   );
+}
+
+export function assertCanvasCredentialImportConfigured(config?: CredentialProviderConfig): void {
+  const privateKeyPem = getPrivateKeyPem(config ?? {});
+  createPrivateKey(privateKeyPem);
 }
 
 export function storedCredentialEncryptionMissing(config?: CredentialProviderConfig): boolean {
@@ -185,7 +213,15 @@ function toCredentials(payload: CanvasCredentialPayload): ConnectorCredentials {
   return { type: "api_key", api_key: payload.apiKey };
 }
 
-export function canvasOAuthPlaceholderCredentials(): OAuthCredentials {
+function parseCanvasCredentialPayload(value: unknown): CanvasCredentialPayload {
+  const parsed = canvasCredentialPayloadSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error("Canvas credential payload is invalid");
+  }
+  return parsed.data;
+}
+
+export function canvasOAuthPlaceholderCredentials(accountId?: string): OAuthCredentials {
   return {
     type: "oauth",
     access_token: "",
@@ -194,6 +230,7 @@ export function canvasOAuthPlaceholderCredentials(): OAuthCredentials {
     expires_at: new Date(0).toISOString(),
     client_id: "canvas",
     client_secret: "canvas",
+    ...(accountId ? { canvas_account_id: accountId } : {}),
   };
 }
 
@@ -231,7 +268,6 @@ class LocalConnectorCredentialProvider implements ConnectorCredentialProvider {
     config: ConnectorConfigCredentialRow;
     ownerEmail: string | null;
   }): Promise<ResolvedConnectorCredentials> {
-    assertStoredCredentialStorageConfigured(this.appConfig);
     return {
       credentialSource: "local",
       credentials: parseCredentials(params.config.credentials),
@@ -274,6 +310,7 @@ export class CanvasConnectorCredentialProvider implements ConnectorCredentialPro
   async mint(params: {
     connectorType: ConnectorType;
     userEmail: string | null;
+    accountId?: string;
     userName?: string | null;
     userOrgRole?: "admin" | "member";
   }): Promise<ConnectorCredentials> {
@@ -287,10 +324,11 @@ export class CanvasConnectorCredentialProvider implements ConnectorCredentialPro
       userEmail: params.userEmail,
       connectorType: toCanvasConnectorType(params.connectorType),
       publicKeyId: this.deps.appConfig.CANVAS_CREDENTIAL_PUBLIC_KEY_ID,
+      accountId: params.accountId,
       userName: params.userName ?? undefined,
       userOrgRole: params.userOrgRole,
     });
-    const payload = decryptCredentialEnvelope<CanvasCredentialPayload>(response.envelope, privateKeyPem);
+    const payload = parseCanvasCredentialPayload(decryptCredentialEnvelope<unknown>(response.envelope, privateKeyPem));
     validateCanvasCredentialResponse({
       requestedConnectorType: params.connectorType,
       requestedPublicKeyId: this.deps.appConfig.CANVAS_CREDENTIAL_PUBLIC_KEY_ID,
@@ -300,7 +338,11 @@ export class CanvasConnectorCredentialProvider implements ConnectorCredentialPro
     return toCredentials(payload);
   }
 
-  createAccessTokenProvider(params: { connectorType: ConnectorType; userEmail: string | null }): AccessTokenProvider {
+  createAccessTokenProvider(params: {
+    connectorType: ConnectorType;
+    userEmail: string | null;
+    accountId?: string;
+  }): AccessTokenProvider {
     let cached: { accessToken: string; expiresAt?: string } | null = null;
 
     return async (opts) => {
@@ -314,6 +356,7 @@ export class CanvasConnectorCredentialProvider implements ConnectorCredentialPro
       const credentials = await this.mint({
         connectorType: params.connectorType,
         userEmail: params.userEmail,
+        accountId: params.accountId,
       });
       if (credentials.type !== "oauth") {
         throw new Error("Canvas credential mint did not return OAuth credentials");
@@ -335,15 +378,18 @@ export class CanvasConnectorCredentialProvider implements ConnectorCredentialPro
     const connectorType = params.config.connector_type as ConnectorType;
 
     if (isCanvasOAuthConnector(connectorType)) {
+      const storedCredentials = parseCredentials(params.config.credentials);
+      const accountId = storedCredentials.type === "oauth" ? storedCredentials.canvas_account_id : undefined;
       const accessTokenProvider = this.createAccessTokenProvider({
         connectorType,
         userEmail: params.ownerEmail,
+        accountId,
       });
       const minted = await accessTokenProvider();
       return {
         credentialSource: "canvas",
         credentials: {
-          ...canvasOAuthPlaceholderCredentials(),
+          ...canvasOAuthPlaceholderCredentials(accountId),
           access_token: minted.accessToken,
           expires_at: minted.expiresAt,
         },

@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from "react";
 export interface ConnectorNudgeSuggestion {
   connectorType: string;
   appId: string;
+  accountId?: string;
   appName?: string;
 }
 
@@ -96,6 +97,7 @@ export function ConnectorNudgeDialog({
         }}
         preferCanvasCredentialSource={true}
         canvasConnectionReady={true}
+        canvasAccountId={suggestion.accountId}
       />
     </>
   );

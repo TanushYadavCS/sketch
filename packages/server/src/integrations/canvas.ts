@@ -9,6 +9,7 @@
  */
 import { join } from "node:path";
 import type { IntegrationApp, IntegrationConnection, PageInfo } from "@sketch/shared";
+import { z } from "zod";
 import type { CredentialEnvelope } from "../connectors/credential-envelope";
 import type { BrokerSpec, IntegrationProvider, IntegrationUserOrgRole } from "./types";
 
@@ -51,6 +52,41 @@ export interface CanvasConnectorCredentialResponse {
   expiresAt?: string;
   envelope: CredentialEnvelope;
 }
+
+const credentialEnvelopeSchema = z.object({
+  version: z.literal(1),
+  algorithm: z.literal("RSA-OAEP-256+A256GCM"),
+  keyId: z.string().min(1),
+  encryptedKey: z.string().min(1),
+  iv: z.string().min(1),
+  tag: z.string().min(1),
+  ciphertext: z.string().min(1),
+});
+
+const canvasSketchConnectorTypeSchema = z.enum([
+  "google_drive",
+  "google_calendar",
+  "gmail",
+  "outlook",
+  "teams",
+  "fireflies",
+  "clickup",
+  "notion",
+  "linear",
+] satisfies [CanvasSketchConnectorType, ...CanvasSketchConnectorType[]]);
+
+const canvasConnectorCredentialResponseSchema = z.object({
+  connectorType: canvasSketchConnectorTypeSchema,
+  provider: z.string().min(1),
+  credentialKind: z.enum(["oauth_access_token", "api_key"]),
+  expiresAt: z.string().min(1).optional(),
+  envelope: credentialEnvelopeSchema,
+});
+
+const canvasCredentialMintResponseSchema = z.object({
+  success: z.literal(true),
+  data: canvasConnectorCredentialResponseSchema,
+});
 
 function hasCanvasAccessMetadata(account: CanvasAccountResponse): boolean {
   return (
@@ -143,7 +179,11 @@ export class CanvasProvider implements IntegrationProvider {
       error?: string | { code?: string; message?: string };
       message?: string;
     } | null;
-    const message = (typeof body?.error === "string" ? body.error : body?.error?.message) ?? body?.message ?? fallback;
+    const message =
+      (typeof body?.error === "object" ? body.error.message : undefined) ??
+      body?.message ??
+      (typeof body?.error === "string" ? body.error : undefined) ??
+      fallback;
     const code =
       (typeof body?.error === "object" ? body.error.code : undefined) ??
       (res.status === 401
@@ -317,6 +357,7 @@ export class CanvasProvider implements IntegrationProvider {
     userEmail: string;
     connectorType: CanvasSketchConnectorType;
     publicKeyId?: string;
+    accountId?: string;
     userName?: string;
     userOrgRole?: IntegrationUserOrgRole;
   }): Promise<CanvasConnectorCredentialResponse> {
@@ -326,6 +367,7 @@ export class CanvasProvider implements IntegrationProvider {
       body: JSON.stringify({
         connectorType: params.connectorType,
         ...(params.publicKeyId ? { publicKeyId: params.publicKeyId } : {}),
+        ...(params.accountId ? { accountId: params.accountId } : {}),
       }),
     });
 
@@ -333,10 +375,10 @@ export class CanvasProvider implements IntegrationProvider {
       throw await this.parseError(res, `Canvas credential mint failed: ${res.status} ${res.statusText}`);
     }
 
-    const raw = (await res.json()) as {
-      success: boolean;
-      data: CanvasConnectorCredentialResponse;
-    };
-    return raw.data;
+    const parsed = canvasCredentialMintResponseSchema.safeParse(await res.json().catch(() => null));
+    if (!parsed.success) {
+      throw new Error("Canvas credential mint returned an invalid response");
+    }
+    return parsed.data.data;
   }
 }

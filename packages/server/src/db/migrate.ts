@@ -110,7 +110,8 @@ import * as m107 from "./migrations/107-scheduled-task-builder-revisions";
 import * as m108 from "./migrations/108-scheduled-task-origin-chat";
 import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
 import * as m110 from "./migrations/110-google-calendar-provider-file-scope";
-import * as m111 from "./migrations/111-connector-credential-source";
+import * as m111 from "./migrations/111-settings-embedding-provider";
+import * as m112 from "./migrations/112-connector-credential-source";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -225,7 +226,8 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "108-scheduled-task-origin-chat": m108,
           "109-scheduled-task-origin-message-id": m109,
           "110-google-calendar-provider-file-scope": m110,
-          "111-connector-credential-source": m111,
+          "111-settings-embedding-provider": m111,
+          "112-connector-credential-source": m112,
         };
       },
     },

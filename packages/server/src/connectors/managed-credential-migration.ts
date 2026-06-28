@@ -3,9 +3,12 @@ import type { Logger } from "pino";
 import { encodeSecretField } from "../auth/secret-fields";
 import type { Config } from "../config";
 import type { DB } from "../db/schema";
+import { CanvasProviderRequestError } from "../integrations/canvas";
 import {
   CANVAS_OAUTH_CONNECTOR_TYPES,
   CanvasConnectorCredentialProvider,
+  ConnectorCredentialConfigError,
+  assertCanvasCredentialImportConfigured,
   canvasOAuthPlaceholderCredentials,
   isCanvasCredentialMode,
 } from "./credential-providers";
@@ -57,6 +60,10 @@ function statusAfterCanvasMigrationPause(syncStatus: string): SyncStatus {
 
 function managedCanvasOAuthIdentityProviders(): string[] {
   return [...new Set(CANVAS_OAUTH_CONNECTOR_TYPES.flatMap(providerIdentityNamesForConnector))];
+}
+
+function identityTokenProtectionKey(userId: string, provider: string): string {
+  return `${userId}:${provider}`;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -118,32 +125,86 @@ async function updateConnectorForCanvasCredentials(params: {
     .execute();
 }
 
-async function scrubManagedProviderIdentityTokens(db: Kysely<DB>): Promise<number> {
+async function scrubManagedProviderIdentityTokens(
+  db: Kysely<DB>,
+  protectedKeys: ReadonlySet<string> = new Set(),
+): Promise<number> {
   const providers = managedCanvasOAuthIdentityProviders();
-  const rows = await db
-    .selectFrom("user_provider_identities")
-    .select("id")
-    .where("provider", "in", providers)
-    .where((eb) => eb.or([eb("access_token", "is not", null), eb("refresh_token", "is not", null)]))
-    .execute();
+  if (protectedKeys.size > 0) {
+    const identities = await db
+      .selectFrom("user_provider_identities")
+      .select(["id", "user_id", "provider"])
+      .where("provider", "in", providers)
+      .where((eb) => eb.or([eb("access_token", "is not", null), eb("refresh_token", "is not", null)]))
+      .execute();
 
-  if (rows.length === 0) return 0;
+    let scrubbedRows = 0;
+    for (const identity of identities) {
+      if (protectedKeys.has(identityTokenProtectionKey(identity.user_id, identity.provider))) {
+        continue;
+      }
+      const result = await db
+        .updateTable("user_provider_identities")
+        .set({
+          access_token: null,
+          refresh_token: null,
+          token_expires_at: null,
+        })
+        .where("id", "=", identity.id)
+        .executeTakeFirst();
+      scrubbedRows += Number(result.numUpdatedRows ?? 0);
+    }
+    return scrubbedRows;
+  }
 
-  await db
+  const result = await db
     .updateTable("user_provider_identities")
     .set({
       access_token: null,
       refresh_token: null,
       token_expires_at: null,
     })
-    .where(
-      "id",
-      "in",
-      rows.map((row) => row.id),
-    )
-    .execute();
+    .where("provider", "in", providers)
+    .where((eb) => eb.or([eb("access_token", "is not", null), eb("refresh_token", "is not", null)]))
+    .executeTakeFirst();
 
-  return rows.length;
+  return Number(result.numUpdatedRows ?? 0);
+}
+
+function protectIdentityTokensForConnectorRow(
+  protections: Set<string>,
+  row: ManagedLocalOAuthConnectorRow,
+  connectorType: ConnectorType,
+) {
+  for (const provider of providerIdentityNamesForConnector(connectorType)) {
+    protections.add(identityTokenProtectionKey(row.created_by, provider));
+  }
+}
+
+function isPerUserCanvasCredentialUnavailable(err: unknown): boolean {
+  return err instanceof CanvasProviderRequestError && err.status === 404;
+}
+
+async function hasDefaultCanvasCredentialMigrationReadiness(params: {
+  provider: CanvasConnectorCredentialProvider;
+  appConfig: ManagedCredentialMigrationConfig;
+  logger: Logger;
+}): Promise<boolean> {
+  if (!params.provider.hasCredentialImportConfig()) {
+    params.logger.warn("Skipping managed Canvas credential migration because credential import is not configured");
+    return false;
+  }
+
+  try {
+    assertCanvasCredentialImportConfigured(params.appConfig);
+    await params.provider.loadProvider();
+    return true;
+  } catch (err) {
+    const message =
+      err instanceof ConnectorCredentialConfigError ? err.message : "Canvas credential migration preflight failed";
+    params.logger.warn({ err }, message);
+    return false;
+  }
 }
 
 export async function migrateManagedConnectorCredentialsToCanvas(params: {
@@ -171,14 +232,40 @@ export async function migrateManagedConnectorCredentialsToCanvas(params: {
     appConfig: params.appConfig,
     logger: params.logger,
   });
+  if (
+    !params.mintCredential &&
+    !(await hasDefaultCanvasCredentialMigrationReadiness({
+      provider: canvasCredentialProvider,
+      appConfig: params.appConfig,
+      logger: params.logger,
+    }))
+  ) {
+    return {
+      scannedConnectorRows: 0,
+      convertedConnectorRows: 0,
+      pausedConnectorRows: 0,
+      scrubbedIdentityRows: 0,
+    };
+  }
+
   const mintCredential = params.mintCredential ?? ((request) => canvasCredentialProvider.mint(request));
   const rows = await listManagedLocalOAuthConnectorRows(params.db);
 
   let convertedConnectorRows = 0;
   let pausedConnectorRows = 0;
+  const protectedIdentityTokens = new Set<string>();
 
   for (const row of rows) {
     const connectorType = row.connector_type as ConnectorType;
+
+    if (!row.owner_email) {
+      params.logger.warn(
+        { connectorId: row.id, connectorType, ownerUserId: row.created_by },
+        "Skipped managed Canvas credential migration for connector without an owner email",
+      );
+      protectIdentityTokensForConnectorRow(protectedIdentityTokens, row, connectorType);
+      continue;
+    }
 
     try {
       const minted = await withTimeout(
@@ -202,6 +289,15 @@ export async function migrateManagedConnectorCredentialsToCanvas(params: {
       });
       convertedConnectorRows += 1;
     } catch (err) {
+      if (!isPerUserCanvasCredentialUnavailable(err)) {
+        params.logger.warn(
+          { err, connectorId: row.id, connectorType },
+          "Skipped managed Canvas credential migration for connector after unsafe credential mint failure",
+        );
+        protectIdentityTokensForConnectorRow(protectedIdentityTokens, row, connectorType);
+        continue;
+      }
+
       params.logger.warn(
         { err, connectorId: row.id, connectorType },
         "Managed Canvas credential migration paused a local OAuth connector",
@@ -217,7 +313,7 @@ export async function migrateManagedConnectorCredentialsToCanvas(params: {
     }
   }
 
-  const scrubbedIdentityRows = await scrubManagedProviderIdentityTokens(params.db);
+  const scrubbedIdentityRows = await scrubManagedProviderIdentityTokens(params.db, protectedIdentityTokens);
 
   if (rows.length > 0 || scrubbedIdentityRows > 0) {
     params.logger.info(

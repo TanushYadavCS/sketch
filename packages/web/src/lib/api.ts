@@ -1481,9 +1481,10 @@ export const api = {
         publicKeyId: string | null;
       }>("/api/connectors/credential-source");
     },
-    canvasSuggestion(appId: string) {
+    canvasSuggestion(appId: string, accountId?: string | null) {
       const params = new URLSearchParams({ appId });
-      return request<{ suggestion: { connectorType: string; appId: string } | null }>(
+      if (accountId) params.set("accountId", accountId);
+      return request<{ suggestion: { connectorType: string; appId: string; accountId?: string } | null }>(
         `/api/connectors/canvas/suggestions?${params.toString()}`,
       );
     },
@@ -1493,7 +1494,7 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    canvasImport(data: { connectorType: string; scopeConfig?: Record<string, unknown> }) {
+    canvasImport(data: { connectorType: string; accountId?: string; scopeConfig?: Record<string, unknown> }) {
       return request<{
         connector: {
           id: string;

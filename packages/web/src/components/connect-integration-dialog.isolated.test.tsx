@@ -4,7 +4,7 @@ import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConnectIntegrationDialog } from "./connect-integration-dialog";
 
 const mockAuth = vi.hoisted(() => ({
@@ -14,6 +14,10 @@ const mockAuth = vi.hoisted(() => ({
 vi.mock("@/routes/dashboard", () => ({
   useDashboardAuth: () => mockAuth.value,
 }));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function renderMicrosoftDialog(options: {
   configured?: boolean;
@@ -123,13 +127,122 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
         onConnected={onConnected}
         preferCanvasCredentialSource={true}
         canvasConnectionReady={true}
+        canvasAccountId="secrets:user-1:google:google-gmail-oauth"
       />,
     );
 
     await user.click(await screen.findByRole("button", { name: "Continue with connected account" }));
 
-    await waitFor(() => expect(importedBodies).toEqual([{ connectorType: "gmail" }]));
+    await waitFor(() =>
+      expect(importedBodies).toEqual([
+        { connectorType: "gmail", accountId: "secrets:user-1:google:google-gmail-oauth" },
+      ]),
+    );
     expect(onConnected).toHaveBeenCalled();
     expect(screen.queryByText("Configure Gmail")).not.toBeInTheDocument();
+  });
+
+  it("imports a Canvas flat-scope connector and saves the selected scope", async () => {
+    const user = userEvent.setup();
+    const scopeBodies: unknown[] = [];
+    const onConnected = vi.fn();
+    const integration = INTEGRATIONS.find((item) => item.type === "google_calendar");
+    if (!integration) throw new Error("Google Calendar integration is missing");
+
+    server.use(
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "local",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+      http.post("/api/connectors/canvas/import", () =>
+        HttpResponse.json({
+          connector: {
+            id: "calendar-connector",
+            connectorType: "google_calendar",
+            syncStatus: "paused",
+            alreadyConnected: true,
+          },
+        }),
+      ),
+      http.get("/api/connectors/calendar-connector/browse", () =>
+        HttpResponse.json({
+          type: "flat",
+          items: [
+            { id: "cal-1", name: "Personal" },
+            { id: "cal-2", name: "Work" },
+          ],
+          scopeConfig: { calendarIds: ["cal-2"] },
+        }),
+      ),
+      http.patch("/api/connectors/calendar-connector/scope", async ({ request }) => {
+        scopeBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: {
+            id: "calendar-connector",
+            connectorType: "google_calendar",
+            syncStatus: "pending",
+            scopeConfig: { calendarIds: ["cal-2"] },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ConnectIntegrationDialog
+        integration={integration}
+        open={true}
+        onOpenChange={() => {}}
+        onConnected={onConnected}
+        preferCanvasCredentialSource={true}
+        canvasConnectionReady={true}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Continue with connected account" }));
+    expect(await screen.findByRole("heading", { name: "Select calendars" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Connect 1 calendars" }));
+
+    await waitFor(() => expect(scopeBodies).toEqual([{ scopeConfig: { calendarIds: ["cal-2"] } }]));
+    expect(onConnected).toHaveBeenCalled();
+  });
+
+  it("does not enable Canvas import when the connect popup is blocked", async () => {
+    const user = userEvent.setup();
+    const integration = INTEGRATIONS.find((item) => item.type === "gmail");
+    if (!integration) throw new Error("Gmail integration is missing");
+    vi.spyOn(window, "open").mockReturnValue(null);
+
+    server.use(
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "local",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+      http.post("/api/connectors/canvas/connect", () =>
+        HttpResponse.json({ redirectUrl: "https://canvas.example.com/connect" }),
+      ),
+    );
+
+    renderWithProviders(
+      <ConnectIntegrationDialog
+        integration={integration}
+        open={true}
+        onOpenChange={() => {}}
+        onConnected={() => {}}
+        preferCanvasCredentialSource={true}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Connect in Canvas" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled());
   });
 });

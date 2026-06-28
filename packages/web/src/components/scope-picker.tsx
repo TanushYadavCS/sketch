@@ -327,7 +327,7 @@ export function GenericScopePicker({
   );
 }
 
-function getAllItemIds(data: BrowseResult): string[] {
+export function getAllItemIds(data: BrowseResult): string[] {
   switch (data.type) {
     case "flat":
       return data.items.map((i) => i.id);
@@ -502,7 +502,7 @@ export function GenericScopeEditor({
  * - nested: scopeConfig.spaces / group item IDs
  * - tree: scopeConfig.sharedDrives + scopeConfig.folders / scopeConfig.items
  */
-function computeSelectedFromScope(
+export function computeSelectedFromScope(
   data: BrowseResult,
   scope: Record<string, unknown>,
   flatScopeKey?: string,
@@ -549,7 +549,7 @@ function isString(value: unknown): value is string {
  * Build scope config from selected IDs + browse result shape.
  * Preserves the key names expected by each connector's sync().
  */
-function buildScopeFromSelection(
+export function buildScopeFromSelection(
   data: BrowseResult,
   selectedIds: Set<string>,
   flatScopeKey = "rootPages",

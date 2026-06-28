@@ -19,6 +19,8 @@ import {
   ScopeList,
   ScopeSelectAll,
   ScopeSubItem,
+  buildScopeFromSelection,
+  computeSelectedFromScope,
 } from "@/components/scope-picker";
 import { type BrowseResult, api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
@@ -69,6 +71,8 @@ interface ClickUpWorkspace {
   spaces: Array<{ id: string; name: string; private: boolean }>;
 }
 
+type BrowseResultWithScope = BrowseResult & { scopeConfig?: Record<string, unknown> };
+
 interface ConnectIntegrationDialogProps {
   integration: IntegrationDefinition | null;
   open: boolean;
@@ -76,6 +80,7 @@ interface ConnectIntegrationDialogProps {
   onConnected: () => void;
   preferCanvasCredentialSource?: boolean;
   canvasConnectionReady?: boolean;
+  canvasAccountId?: string | null;
 }
 
 export function ConnectIntegrationDialog({
@@ -85,6 +90,7 @@ export function ConnectIntegrationDialog({
   onConnected,
   preferCanvasCredentialSource = false,
   canvasConnectionReady = false,
+  canvasAccountId = null,
 }: ConnectIntegrationDialogProps) {
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
@@ -341,9 +347,19 @@ export function ConnectIntegrationDialog({
 
   const connectWithGenericScopeMutation = useMutation({
     mutationFn: async () => {
-      if (!integration || !managedConnectorId) throw new Error("No managed connector selected");
-      const key = integration.scopeConfigKey ?? "items";
-      return api.integrations.updateScope(managedConnectorId, { [key]: Array.from(selectedGenericIds) });
+      if (!integration || !genericBrowseData) throw new Error("No scope selection available");
+      const scopeConfig = buildScopeFromSelection(genericBrowseData, selectedGenericIds, integration.scopeConfigKey);
+      if (useCanvasCredentialFlow) {
+        if (!managedConnectorId) throw new Error("No managed connector selected");
+        return api.integrations.updateScope(managedConnectorId, scopeConfig);
+      }
+      const credentials = buildCredentials();
+      return api.integrations.connect({
+        connectorType: integration.type,
+        authType: integration.authType,
+        credentials,
+        scopeConfig,
+      });
     },
     onSuccess: () => {
       toast.success(`${integration?.name} connected successfully.`);
@@ -421,7 +437,10 @@ export function ConnectIntegrationDialog({
         connectorType: integration.type,
         callbackUrl: window.location.href,
       });
-      window.open(result.redirectUrl, "canvas-connect", "width=640,height=760");
+      const popup = window.open(result.redirectUrl, "canvas-connect", "width=640,height=760");
+      if (!popup || popup.closed) {
+        throw new Error("Popup blocked. Allow popups for this site, then try again.");
+      }
       setCanvasPopupOpened(true);
     },
     onError: (error: Error) => {
@@ -432,7 +451,10 @@ export function ConnectIntegrationDialog({
   const canvasImportMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      return api.integrations.canvasImport({ connectorType: integration.type });
+      return api.integrations.canvasImport({
+        connectorType: integration.type,
+        ...(canvasAccountId ? { accountId: canvasAccountId } : {}),
+      });
     },
     onSuccess: async ({ connector }) => {
       if (!integration) return;
@@ -471,8 +493,11 @@ export function ConnectIntegrationDialog({
       if (integration.scopeType === "flat") {
         const result = await api.integrations.browseExisting(connector.id);
         if (result.type === "flat") {
+          const scopedResult = result as BrowseResultWithScope;
           setGenericBrowseData(result);
-          setSelectedGenericIds(new Set(result.items.map((item) => item.id)));
+          setSelectedGenericIds(
+            computeSelectedFromScope(scopedResult, scopedResult.scopeConfig ?? {}, integration.scopeConfigKey),
+          );
           setStep("generic-scope");
           return;
         }

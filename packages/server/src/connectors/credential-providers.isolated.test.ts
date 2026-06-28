@@ -168,6 +168,79 @@ describe("connector credential providers", () => {
     ).rejects.toThrow("Canvas credential payload connector type does not match the request");
   });
 
+  it("rejects decrypted payloads without a usable secret", async () => {
+    decryptCredentialEnvelopeMock.mockReturnValueOnce({
+      type: "oauth_access_token",
+      connectorType: "gmail",
+      provider: "google",
+      accessToken: "",
+      tokenType: "Bearer",
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    });
+
+    const provider = new credentialProviders.CanvasConnectorCredentialProvider({
+      db: {} as never,
+      appConfig: {
+        CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+        CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
+      },
+      logger: { debug: vi.fn() } as never,
+    });
+
+    await expect(
+      provider.mint({
+        connectorType: "gmail",
+        userEmail: "priya@example.com",
+      }),
+    ).rejects.toThrow("Canvas credential payload is invalid");
+  });
+
+  it("passes selected Canvas account ids to credential minting", async () => {
+    const provider = new credentialProviders.CanvasConnectorCredentialProvider({
+      db: {} as never,
+      appConfig: {
+        CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+        CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
+      },
+      logger: { debug: vi.fn() } as never,
+    });
+
+    await provider.mint({
+      connectorType: "gmail",
+      userEmail: "priya@example.com",
+      accountId: "secrets:user-1:google:google-gmail-oauth",
+    });
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      connectorType: "gmail",
+      publicKeyId: "key-1",
+      accountId: "secrets:user-1:google:google-gmail-oauth",
+    });
+  });
+
+  it("resolves existing local credentials without requiring new credential storage configuration", async () => {
+    const resolved = await credentialProviders.resolveConnectorCredentials({
+      db: {} as never,
+      config: {
+        id: "connector-1",
+        connector_type: "fireflies",
+        credential_source: "local",
+        credentials: JSON.stringify({ type: "api_key", api_key: "existing-key" }),
+      },
+      appConfig: {
+        CONNECTOR_CREDENTIAL_SOURCE: "local",
+      },
+      ownerEmail: null,
+      logger: { debug: vi.fn() } as never,
+    });
+
+    expect(resolved).toEqual({
+      credentialSource: "local",
+      credentials: { type: "api_key", api_key: "existing-key" },
+    });
+  });
+
   it("returns an access-token provider for Canvas OAuth configs", async () => {
     const resolved = await credentialProviders.resolveConnectorCredentials({
       db: {} as never,
@@ -202,6 +275,40 @@ describe("connector credential providers", () => {
     expect(resolved.accessTokenProvider).toBeDefined();
     await resolved.accessTokenProvider?.({ forceRefresh: true });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the stored Canvas account id when refreshing Canvas OAuth credentials", async () => {
+    const resolved = await credentialProviders.resolveConnectorCredentials({
+      db: {} as never,
+      config: {
+        id: "connector-1",
+        connector_type: "gmail",
+        credential_source: "canvas",
+        credentials: JSON.stringify({
+          type: "oauth",
+          access_token: "",
+          refresh_token: "",
+          client_id: "canvas",
+          client_secret: "canvas",
+          canvas_account_id: "secrets:user-1:google:google-gmail-oauth",
+        }),
+      },
+      appConfig: {
+        CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey,
+        CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
+      },
+      ownerEmail: "priya@example.com",
+      logger: { debug: vi.fn() } as never,
+    });
+
+    expect(resolved.credentials).toMatchObject({
+      type: "oauth",
+      canvas_account_id: "secrets:user-1:google:google-gmail-oauth",
+    });
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      accountId: "secrets:user-1:google:google-gmail-oauth",
+    });
   });
 
   it("rejects unsupported Canvas connector types", async () => {

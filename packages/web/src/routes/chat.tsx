@@ -999,9 +999,9 @@ export function ChatPage() {
     [],
   );
 
-  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name">) => {
+  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name" | "connectionId">) => {
     try {
-      const result = await api.integrations.canvasSuggestion(app.id);
+      const result = await api.integrations.canvasSuggestion(app.id, app.connectionId);
       if (result.suggestion) {
         setConnectorNudge({ ...result.suggestion, appName: app.name });
       }
