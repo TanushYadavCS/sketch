@@ -61,6 +61,7 @@ export interface MaterializeDeps {
   llmTaskCorroborationThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateLiveTypes: Set<ProposeEntityType>;
+  structuralAutoBirthTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
   experimentalFlag: boolean;
 }
@@ -92,6 +93,7 @@ export interface ReplaySourceFactsOptions {
   llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }
@@ -107,6 +109,7 @@ export interface MaterializeUnmaterializedOptions {
   llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
   factTypes?: IndexedFileFactType[];

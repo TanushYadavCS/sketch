@@ -78,7 +78,10 @@ export async function materializeSpineCandidate(
     return { kind: "entity_linked", entity, mentionWritten: Boolean(fact.indexed_file_id), countEntity: false };
   }
 
-  if (args.forceQueue || (deps.birthGateTypes.has(spineType) && !deps.birthGateDryRun)) {
+  const reviewRow = await deps.reviewRepo.findSeedReviewRow(args.subjectSource, args.subjectSourceId);
+  const autoBirth = !args.forceQueue && deps.structuralAutoBirthTypes.has(spineType) && !reviewRow;
+
+  if (!autoBirth && (args.forceQueue || (deps.birthGateTypes.has(spineType) && !deps.birthGateDryRun))) {
     const owner = deps.resolveOwner(fact);
     if (!owner) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
