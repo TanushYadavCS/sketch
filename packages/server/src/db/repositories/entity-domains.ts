@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { normalizeEntityMatchName } from "../../entities/match-normalize";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
 import { whereLiveEntity } from "./entities";
@@ -154,6 +155,27 @@ function parseJsonArray(raw: string | null): string[] {
   return [];
 }
 
+function compactNameKey(value: string): string {
+  return normalizeEntityMatchName("company", value.replace(/[._-]+/g, " ")).replace(/\s+/g, "");
+}
+
+function domainMatchesName(domain: string, name: string): boolean {
+  const nameKey = compactNameKey(name);
+  if (!nameKey) return false;
+  const normalizedDomain = normalizeWebsiteDomain(domain) ?? domain.trim().toLowerCase();
+  const labels = normalizedDomain.split(".").filter(Boolean);
+  if (labels.length === 0) return false;
+  const candidates = new Set<string>([labels.join(" ")]);
+  if (labels.length > 1) {
+    candidates.add(labels.slice(0, -1).join(" "));
+    candidates.add(labels[labels.length - 2]);
+  }
+  for (const candidate of candidates) {
+    if (compactNameKey(candidate) === nameKey) return true;
+  }
+  return false;
+}
+
 export function createEntityDomainsRepository(db: Kysely<DB>) {
   async function upsertRelationship(input: UpsertRelationshipInput): Promise<string> {
     const validFrom = input.validFrom ?? "";
@@ -232,6 +254,14 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .execute();
       return rows.flatMap((row) => (row.entity_id ? [row.entity_id] : []));
+    },
+
+    async findCorporateDomainMatchingName(name: string): Promise<string | null> {
+      const rows = await db.selectFrom("entity_domains").select("domain").where("kind", "=", "corporate").execute();
+      for (const row of rows) {
+        if (domainMatchesName(row.domain, name)) return row.domain;
+      }
+      return null;
     },
 
     async upsertDomain(input: UpsertDomainInput): Promise<void> {

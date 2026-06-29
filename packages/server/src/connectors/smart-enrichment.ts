@@ -85,7 +85,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v9";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v10";
 /**
  * `team` is intentionally absent: teams are never proposed by the LLM. A team
  * is a structural object (e.g. a Linear team) and is born only through
@@ -369,7 +369,7 @@ Type: ${file.contentCategory}
 Extract entities that a business team would want to track and reference across documents. Focus on:
 - **People**: named individuals (employees, clients, contacts)
 - **Companies**: external businesses, clients, partners, vendors
-- **Products**: named products or services your org builds or uses. When product entries appear in the Known entities section, treat that injected known-products list as the source of truth instead of inventing product names.
+- **Products**: named products or services your org or your client builds or owns. When product entries appear in the Known entities section, treat that injected known-products list as the source of truth instead of inventing product names.
 - **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
 ${toolFocusLine}${featureFocusLine}
 
@@ -405,6 +405,7 @@ Name shape rules (person mentions only):
 
 Type disambiguation:
 - Any mention ending in "Pvt Ltd", "Private Limited", "Inc", "LLC", "Ltd", "GmbH", "Consulting", "Solutions", or "Technologies" is type "company", never "person", regardless of where it appears (including the participant block).
+- Third-party data sources, market-data providers, and SaaS you merely integrate with or pull data from are type "tool", not "product"; e.g. a flight/hotel/market-data API or provider you consume is a tool.
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
 ${featureSchemaInstruction}
@@ -622,6 +623,13 @@ export async function handleCandidates(
           logger.info(
             { entityName: mention.mention, reviewId: proposal.reviewId },
             "Queued entity candidate promotion",
+          );
+          continue;
+        }
+        if (proposal.kind === "suppressed") {
+          logger.info(
+            { entityName: mention.mention, reason: proposal.reason },
+            "Suppressed entity candidate promotion",
           );
           continue;
         }

@@ -26,6 +26,7 @@ import type { EntityDomainsRepository } from "../db/repositories/entity-domains"
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
+import { TOOL_NAME_DENYLIST } from "./graph";
 import { normalizeMatchName } from "./match-normalize";
 import { type ProvenanceTier, canUseEntityAsMatchTarget } from "./provenance";
 
@@ -84,7 +85,8 @@ export interface ProposeInput {
 export type ProposeResult =
   | { kind: "linked"; entity: Entity }
   | { kind: "created"; entity: Entity }
-  | { kind: "queued"; reviewId: string; candidateEntityId: string | null };
+  | { kind: "queued"; reviewId: string; candidateEntityId: string | null }
+  | { kind: "suppressed"; reason: string };
 
 /**
  * Ambiguity-aware lookup over existing entities, keyed by `normalizeName(entity.name)`.
@@ -121,6 +123,9 @@ export type EntityLookup = {
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
   getPersonScopeKeys?(entityId: string): string[];
+  findLlmExtractedThirdPartyMention?(
+    name: string,
+  ): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null>;
 };
 
 export interface ProposeDeps {
@@ -177,6 +182,63 @@ function hasTokenOverlap(a: string[], b: string[]): boolean {
   if (a.length === 0 || b.length === 0) return false;
   const bSet = new Set(b);
   return a.some((token) => bSet.has(token));
+}
+
+function lookupHasEntityTypeName(
+  lookup: EntityLookup,
+  entityType: Extract<ProposeEntityType, "company" | "tool">,
+  normalized: string,
+): boolean {
+  const directMatches = lookup
+    .getByNormalizedName(normalized)
+    .some((entity) => entity.source_type === entityType && normalizeMatchName(entityType, entity.name) === normalized);
+  if (directMatches) return true;
+  return lookup.listByType(entityType).some((entity) => normalizeMatchName(entityType, entity.name) === normalized);
+}
+
+async function repoHasEntityTypeName(
+  deps: ProposeDeps,
+  entityType: Extract<ProposeEntityType, "company" | "tool">,
+  normalized: string,
+): Promise<boolean> {
+  const entities = await deps.entityRepo.getEntitiesBySourceType(entityType);
+  return entities.some((entity) => normalizeMatchName(entityType, entity.name) === normalized);
+}
+
+function hasTrailingApiSdkToken(name: string): boolean {
+  return /(?:^|[\s\p{P}\p{S}])(?:api|sdk)[\s\p{P}\p{S}]*$/iu.test(name.trim());
+}
+
+async function productCollidesWithThirdParty(
+  deps: ProposeDeps,
+  name: string,
+): Promise<{ hit: boolean; signal?: string }> {
+  const companyNormalized = normalizeMatchName("company", name);
+  if (
+    lookupHasEntityTypeName(deps.lookup, "company", companyNormalized) ||
+    (await repoHasEntityTypeName(deps, "company", companyNormalized))
+  ) {
+    return { hit: true, signal: "existing_company_entity" };
+  }
+
+  const toolNormalized = normalizeMatchName("tool", name);
+  if (
+    lookupHasEntityTypeName(deps.lookup, "tool", toolNormalized) ||
+    (await repoHasEntityTypeName(deps, "tool", toolNormalized))
+  ) {
+    return { hit: true, signal: "existing_tool_entity" };
+  }
+
+  const matchingDomain = await deps.domainsRepo?.findCorporateDomainMatchingName(name);
+  if (matchingDomain) return { hit: true, signal: "corporate_domain" };
+
+  if (TOOL_NAME_DENYLIST.has(name.trim().toLowerCase())) return { hit: true, signal: "tool_name_denylist" };
+  if (hasTrailingApiSdkToken(name)) return { hit: true, signal: "api_sdk_suffix" };
+
+  const extracted = await deps.lookup.findLlmExtractedThirdPartyMention?.(name);
+  if (extracted) return { hit: true, signal: `llm_extracted_${extracted.type}_fact` };
+
+  return { hit: false };
 }
 
 function canAutoLinkNameDedupCandidate(input: ProposeInput, candidate: RankedCandidate): boolean {
@@ -531,6 +593,17 @@ async function decideNameCandidates(
 
 export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
   const normalized = normalizeMatchName(input.entityType, input.name);
+
+  if (input.entityType === "product") {
+    const collision = await productCollidesWithThirdParty(deps, input.name);
+    if (collision.hit) {
+      deps.logger?.info(
+        { entityName: input.name, signal: collision.signal },
+        "Suppressed product proposal due to third-party vendor collision",
+      );
+      return { kind: "suppressed", reason: "third_party_vendor_collision" };
+    }
+  }
 
   if (input.source && input.sourceId) {
     const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);

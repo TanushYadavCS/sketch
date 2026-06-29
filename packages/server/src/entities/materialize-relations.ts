@@ -278,6 +278,7 @@ async function materializeRelationEndpoint(
   if (result.kind === "queued") {
     return { kind: "queued_held", reviewId: result.reviewId, reason: "relation_endpoint" };
   }
+  if (result.kind === "suppressed") return { kind: "suppressed_endpoint" };
   const entity = result.entity as unknown as EntityRow;
   registerEntity(deps.index, entity);
   return { kind: "resolved", entity, created: result.kind === "created" };
