@@ -513,6 +513,65 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     });
   });
 
+  it("drops feature mentions whose parent product is domain-shaped while writing valid feature facts", async () => {
+    const fileId = randomUUID();
+    const content = "beaconvendor.com exposes Vendor Analytics. Canvas CRM includes CRM Analytics.";
+    await seedFile(db, fileId, { content, contentHash: "hash-feature-domain-parent" });
+    const generator = {
+      generate: async () => "Canvas CRM includes CRM Analytics.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              {
+                mention: "Vendor Analytics",
+                type: "feature",
+                parentProduct: "beaconvendor.com",
+                variations: [],
+                confidence: 0.93,
+              },
+              {
+                mention: "CRM Analytics",
+                type: "feature",
+                parentProduct: "Canvas CRM",
+                variations: [],
+                confidence: 0.94,
+              },
+            ],
+            relations: [],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null, experimentalFlag: true },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content,
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-feature-domain-parent",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const featureFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "subject_name"])
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .where("fact_type", "=", "feature")
+      .where("deleted_at", "is", null)
+      .execute();
+    expect(featureFacts).toEqual([{ fact_type: "feature", subject_name: "CRM Analytics" }]);
+  });
+
   it("preserves prior LLM facts when extractEntities throws", async () => {
     // Regression guard: smartEnrichFile re-throws on Gemini failure, so the
     // file-scope reconcile must never run with an empty mention set. If a
@@ -1395,7 +1454,8 @@ describe("smartEnrichFile — LLM leak gates", () => {
 
   it("drops a project mention that merely restates the email subject, keeps a body project", async () => {
     const fileId = randomUUID();
-    const content = "Rajesh Chaudhary discussed the Branding and MVP Design Proposal. We also kicked off K8s Migration.";
+    const content =
+      "Rajesh Chaudhary discussed the Branding and MVP Design Proposal. We also kicked off K8s Migration.";
     await seedFile(db, fileId, { content, contentHash: "hash-subject" });
     const generator = extractionGenerator({
       mentions: [

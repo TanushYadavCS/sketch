@@ -37,6 +37,25 @@ describe("validateLlmMention", () => {
     ).toEqual({ ok: false, reason: "type_removed" });
   });
 
+  it("rejects domain-shaped LLM names while preserving normal project names", () => {
+    expect(
+      validateLlmMention({
+        displayName: "beaconvendor.com",
+        entityType: "project",
+        fileContent: "The team reviewed beaconvendor.com during planning.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: false, reason: "name_is_domain_or_url" });
+    expect(
+      validateLlmMention({
+        displayName: "Maaden Dashboard",
+        entityType: "project",
+        fileContent: "Maaden Dashboard is ready for stakeholder review.",
+        source: "llm_extraction",
+      }),
+    ).toEqual({ ok: true });
+  });
+
   it("permits connector extracted facts whose display name is absent", () => {
     expect(
       validateLlmMention({
