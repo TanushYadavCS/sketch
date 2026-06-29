@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { buildMaterializeDeps, type BuildMaterializeDepsOptions, configureMaterializeDefaults } from "./materialize";
+import { type BuildMaterializeDepsOptions, buildMaterializeDeps, configureMaterializeDefaults } from "./materialize";
 import type { ProposeEntityType } from "./propose";
 import { recreateEntityGraph } from "./recreate";
 
@@ -17,6 +17,7 @@ type MaterializeDefaultsSnapshot = Pick<
   BuildMaterializeDepsOptions,
   | "llmPromotionThreshold"
   | "llmTaskCorroborationThreshold"
+  | "featureAutoMintThreshold"
   | "birthGateTypes"
   | "birthGateLiveTypes"
   | "structuralAutoBirthTypes"
@@ -29,6 +30,7 @@ async function snapshotMaterializeDefaults(db: Kysely<DB>): Promise<MaterializeD
   return {
     llmPromotionThreshold: deps.llmPromotionThreshold,
     llmTaskCorroborationThreshold: deps.llmTaskCorroborationThreshold,
+    featureAutoMintThreshold: deps.featureAutoMintThreshold,
     birthGateTypes: new Set(deps.birthGateTypes),
     birthGateLiveTypes: new Set(deps.birthGateLiveTypes),
     structuralAutoBirthTypes: new Set(deps.structuralAutoBirthTypes),

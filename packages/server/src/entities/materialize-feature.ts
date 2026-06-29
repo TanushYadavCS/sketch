@@ -1,8 +1,12 @@
+import { isCodeShapedFeatureName } from "../connectors/feature-name-filter";
 import { normalizeName } from "../connectors/name-normalize";
 import { type SubEntityRow, createSubEntityRepository } from "../db/repositories/sub-entities";
 import { type SubEntityParentInput, resolveParent } from "./materialize-commitment";
+import { normalizeEntityMatchName } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+
+export type FeatureReconcileReason = "minted" | "feature_parent_absent" | "below_threshold" | "noise_rejected";
 
 export async function materializeFeature(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
@@ -15,7 +19,7 @@ export async function materializeFeature(deps: MaterializeDeps, fact: IndexedFil
     const result = await reconcileFeatureSubEntity(deps, feature.corroborationKey);
     return result.materialized
       ? { kind: "feature_materialized" }
-      : { kind: "deferred_below_threshold", reason: "feature_ungated" };
+      : { kind: "deferred_below_threshold", reason: result.reason };
   }
 
   const parent = resolveParent(deps, feature, ["product"]);
@@ -46,36 +50,46 @@ export async function materializeFeature(deps: MaterializeDeps, fact: IndexedFil
 export async function reconcileFeatureSubEntity(
   deps: MaterializeDeps,
   corroborationKey: string,
-): Promise<{ support: number; materialized: boolean; subEntityId?: string }> {
-  if (!deps.experimentalFlag) return { support: 0, materialized: false };
+): Promise<{ support: number; materialized: boolean; reason: FeatureReconcileReason; subEntityId?: string }> {
+  if (!deps.experimentalFlag) return { support: 0, materialized: false, reason: "below_threshold" };
   const entries = await loadCorroboratingFeatureFacts(deps, corroborationKey);
   const support = distinctIndexedFileCount(entries);
-  if (support >= deps.llmPromotionThreshold) {
-    const supported = resolveSupportedFeature(deps, entries);
-    if (!supported) {
-      await closeCurrentFeatureSubEntity(deps, corroborationKey, null);
-      return { support, materialized: false };
-    }
-    const repo = createSubEntityRepository(deps.db);
-    const result = await repo.upsertSubEntity({
-      parentEntityId: supported.parent.id,
-      kind: "feature",
-      dedupName: supported.feature.featureName,
-      displayName: supported.feature.featureName,
-      status: supported.feature.status,
-      provenance: "corroborated_llm",
-      dueAt: supported.feature.dueAt ?? null,
-      ownerUserId: deps.resolveOwner(supported.fact),
-      sourceFactId: supported.fact.id,
-      metadata: { corroborationKey },
-    });
-    await replaceCurrentEvidence(deps, result.subEntityId, evidenceForEntries(entries, supported.parent.id));
-    return { support, materialized: true, subEntityId: result.subEntityId };
+  if (entries.length === 0) {
+    await closeCurrentFeatureSubEntity(deps, corroborationKey, null);
+    return { support, materialized: false, reason: "below_threshold" };
+  }
+  const supported = resolveSupportedFeature(deps, entries);
+
+  if (supported.reason === "noise_rejected") {
+    await closeCurrentFeatureSubEntity(deps, corroborationKey, null);
+    return { support, materialized: false, reason: "noise_rejected" };
   }
 
-  const supported = resolveSupportedFeature(deps, entries);
-  await closeCurrentFeatureSubEntity(deps, corroborationKey, supported);
-  return { support, materialized: false };
+  if (support < deps.featureAutoMintThreshold) {
+    await closeCurrentFeatureSubEntity(deps, corroborationKey, supported.feature);
+    return { support, materialized: false, reason: "below_threshold" };
+  }
+
+  if (!supported.feature) {
+    await closeCurrentFeatureSubEntity(deps, corroborationKey, null);
+    return { support, materialized: false, reason: supported.reason };
+  }
+
+  const repo = createSubEntityRepository(deps.db);
+  const result = await repo.upsertSubEntity({
+    parentEntityId: supported.feature.parent.id,
+    kind: "feature",
+    dedupName: supported.feature.feature.featureName,
+    displayName: supported.feature.feature.featureName,
+    status: supported.feature.feature.status,
+    provenance: "corroborated_llm",
+    dueAt: supported.feature.feature.dueAt ?? null,
+    ownerUserId: deps.resolveOwner(supported.feature.fact),
+    sourceFactId: supported.feature.fact.id,
+    metadata: { corroborationKey },
+  });
+  await replaceCurrentEvidence(deps, result.subEntityId, evidenceForEntries(entries, supported.feature.parent.id));
+  return { support, materialized: true, reason: "minted", subEntityId: result.subEntityId };
 }
 
 interface FeatureInput extends SubEntityParentInput {
@@ -83,6 +97,7 @@ interface FeatureInput extends SubEntityParentInput {
   featureName: string;
   corroborationKey?: string;
   status: "proposed" | "building" | "shipped" | "deprecated";
+  parentProductName?: string;
   dueAt?: string;
   evidence: { fileIds: string[]; entityIds: string[] };
 }
@@ -104,6 +119,7 @@ function readFeature(raw: Record<string, unknown>): FeatureInput | null {
     featureName: raw.featureName,
     corroborationKey: readOptionalString(raw.corroborationKey),
     parentRef: readParentProductRef(raw.parentProductRef),
+    parentProductName: readOptionalString(raw.parentProductName),
     parentEntityId: readOptionalString(raw.parentEntityId),
     status: raw.status,
     dueAt: readOptionalString(raw.dueAt),
@@ -133,6 +149,11 @@ function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * LLM feature provenance is still named `corroborated_llm`; for feature facts
+ * in the experimental path, corroboration means attachment under a trusted
+ * product or project parent rather than necessarily multiple supporting files.
+ */
 function featureProvenance(source: string): string {
   return isLlmFeatureSource(source) ? "corroborated_llm" : "structural";
 }
@@ -168,12 +189,34 @@ function distinctIndexedFileCount(entries: Array<{ fact: IndexedFileFactRow }>):
 function resolveSupportedFeature(
   deps: MaterializeDeps,
   entries: Array<{ fact: IndexedFileFactRow; feature: FeatureInput }>,
-): { fact: IndexedFileFactRow; feature: FeatureInput; parent: EntityRow } | null {
+): {
+  feature: { fact: IndexedFileFactRow; feature: FeatureInput; parent: EntityRow } | null;
+  reason: Exclude<FeatureReconcileReason, "minted" | "below_threshold">;
+} {
+  let sawNonNoise = false;
   for (const entry of entries) {
-    const parent = resolveParent(deps, entry.feature, ["product"]);
-    if (parent) return { ...entry, parent };
+    if (isCodeShapedFeatureName(entry.feature.featureName)) continue;
+    sawNonNoise = true;
+    const parent = resolveFeatureParentByName(deps, entry.feature.parentProductName);
+    if (parent) return { feature: { ...entry, parent }, reason: "feature_parent_absent" };
   }
-  return null;
+  return { feature: null, reason: sawNonNoise ? "feature_parent_absent" : "noise_rejected" };
+}
+
+export function resolveFeatureParentByName(
+  deps: MaterializeDeps,
+  parentName: string | null | undefined,
+): EntityRow | null {
+  const productKey = normalizeEntityMatchName("product", parentName ?? "");
+  const projectKey = normalizeEntityMatchName("project", parentName ?? "");
+  const matches = [
+    ...deps.lookup.getByNormalizedName(productKey),
+    ...(deps.lookup.getByAlias?.(productKey) ?? []),
+    ...deps.lookup.getByNormalizedName(projectKey),
+    ...(deps.lookup.getByAlias?.(projectKey) ?? []),
+  ].filter((entity) => entity.source_type === "product" || entity.source_type === "project");
+  const unique = new Map(matches.map((entity) => [entity.id, entity]));
+  return unique.size === 1 ? [...unique.values()][0] : null;
 }
 
 function evidenceForEntries(

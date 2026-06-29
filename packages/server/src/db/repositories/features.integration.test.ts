@@ -134,7 +134,7 @@ describe("feature sub-entities postgres", () => {
     });
   }, 30000);
 
-  it("skips non-product parents and feature materialization when the flag is off", async () => {
+  it("materializes LLM features by parent name under products or projects and stays disabled when the flag is off", async () => {
     db = await createTestPgDb();
     await seedBase(db);
     const project = await seedEntity(db, { id: "feature-project-parent", name: "Feature Project", type: "project" });
@@ -145,22 +145,33 @@ describe("feature sub-entities postgres", () => {
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
-      source: "linear",
-      featureId: "feature-project-only",
-      featureName: "Project-only feature",
-      parentEntityId: project.id,
+      source: "llm_extraction",
+      featureId: "feature-project-by-name",
+      featureName: "Project by name feature",
+      corroborationKey: "feature-project-by-name-key",
+      parentProductName: "Feature Project",
       status: "proposed",
-      evidence: { fileIds: ["feature-file-1"], entityIds: [project.id] },
+      evidence: { fileIds: ["feature-file-1"], entityIds: [] },
     });
     const projectFact = await db
       .selectFrom("indexed_file_facts")
       .selectAll()
-      .where("subject_source_id", "=", "feature-project-only")
+      .where("subject_source_id", "=", "feature-project-by-name")
       .executeTakeFirstOrThrow();
+    const raw = JSON.parse(projectFact.raw ?? "{}") as { parentProductName?: unknown; parentEntityId?: unknown };
+    expect(raw.parentProductName).toBe("Feature Project");
+    expect(raw.parentEntityId).toBeUndefined();
     await expect(
-      materializeFromFact(await buildMaterializeDeps(db, { experimentalFlag: true }), projectFact),
-    ).resolves.toEqual({ kind: "skipped", reason: "missing_feature_parent" });
-    await expect(countFeatureRows(db)).resolves.toBe(0);
+      materializeFromFact(
+        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        projectFact,
+      ),
+    ).resolves.toEqual({ kind: "feature_materialized" });
+    await expect(featureRow(db, "project by name feature")).resolves.toMatchObject({
+      parent_entity_id: project.id,
+      provenance: "corroborated_llm",
+      valid_to: null,
+    });
 
     await expect(
       upsertFeatureFact(db, {
@@ -197,7 +208,152 @@ describe("feature sub-entities postgres", () => {
     await expect(
       materializeFromFact(await buildMaterializeDeps(db, { experimentalFlag: false }), flagOffFact),
     ).resolves.toEqual({ kind: "skipped", reason: "experimental_off" });
+    await expect(countFeatureRows(db)).resolves.toBe(1);
+  }, 30000);
+
+  it("defers LLM features until parent approval and rejects inferred or ambiguous parents", async () => {
+    db = await createTestPgDb();
+    await seedBase(db);
+
+    await upsertFeatureFact(db, {
+      experimentalFlag: true,
+      indexedFileId: "feature-file-1",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: USER_ID,
+      source: "llm_extraction",
+      featureId: "feature-defer-product",
+      featureName: "Smart Search",
+      corroborationKey: "feature-defer-product-key",
+      parentProductName: "Canvas CRM",
+      status: "proposed",
+      evidence: { fileIds: ["feature-file-1"], entityIds: [] },
+    });
+    const deferredFact = await featureFact(db, "feature-defer-product");
+    await expect(
+      materializeFromFact(
+        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        deferredFact,
+      ),
+    ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "feature_parent_absent" });
     await expect(countFeatureRows(db)).resolves.toBe(0);
+    await expect(db.selectFrom("entity_mentions").selectAll().execute()).resolves.toEqual([]);
+    await expect(
+      db.selectFrom("entity_candidates").selectAll().where("name", "=", "Smart Search").execute(),
+    ).resolves.toEqual([]);
+    await expect(db.selectFrom("entities").selectAll().where("name", "=", "Smart Search").execute()).resolves.toEqual(
+      [],
+    );
+
+    const product = await seedEntity(db, {
+      id: "feature-approved-product",
+      name: "Canvas CRM",
+      type: "product",
+      provenanceTier: "human_confirmed",
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      experimentalFlag: true,
+      featureAutoMintThreshold: 1,
+      factTypes: ["feature"],
+    });
+    await expect(featureRow(db, "smart search")).resolves.toMatchObject({
+      parent_entity_id: product.id,
+      provenance: "corroborated_llm",
+      valid_to: null,
+    });
+
+    const project = await seedEntity(db, {
+      id: "feature-structural-project",
+      name: "Referral Service",
+      type: "project",
+      provenanceTier: "structural",
+    });
+    await upsertFeatureFact(db, {
+      experimentalFlag: true,
+      indexedFileId: "feature-file-1",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: USER_ID,
+      source: "llm_extraction",
+      featureId: "feature-project-parent",
+      featureName: "Daily Habits",
+      corroborationKey: "feature-project-parent-key",
+      parentProductName: "Referral Service",
+      status: "proposed",
+      evidence: { fileIds: ["feature-file-1"], entityIds: [] },
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      experimentalFlag: true,
+      featureAutoMintThreshold: 1,
+      factTypes: ["feature"],
+    });
+    await expect(featureRow(db, "daily habits")).resolves.toMatchObject({
+      parent_entity_id: project.id,
+      provenance: "corroborated_llm",
+      valid_to: null,
+    });
+
+    await seedEntity(db, {
+      id: "feature-inferred-product",
+      name: "Inferred Product",
+      type: "product",
+      provenanceTier: "inferred",
+    });
+    await upsertFeatureFact(db, {
+      experimentalFlag: true,
+      indexedFileId: "feature-file-1",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: USER_ID,
+      source: "llm_extraction",
+      featureId: "feature-inferred-product",
+      featureName: "Inferred Product Feature",
+      corroborationKey: "feature-inferred-product-key",
+      parentProductName: "Inferred Product",
+      status: "proposed",
+      evidence: { fileIds: ["feature-file-1"], entityIds: [] },
+    });
+    await expect(
+      materializeFromFact(
+        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        await featureFact(db, "feature-inferred-product"),
+      ),
+    ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "feature_parent_absent" });
+    await expect(
+      db.selectFrom("sub_entities").selectAll().where("normalized_name", "=", "inferred product feature").execute(),
+    ).resolves.toEqual([]);
+
+    await seedEntity(db, {
+      id: "feature-ambiguous-product",
+      name: "Ambiguous Parent",
+      type: "product",
+      provenanceTier: "human_confirmed",
+    });
+    await seedEntity(db, {
+      id: "feature-ambiguous-project",
+      name: "Ambiguous Parent",
+      type: "project",
+      provenanceTier: "structural",
+    });
+    await upsertFeatureFact(db, {
+      experimentalFlag: true,
+      indexedFileId: "feature-file-1",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: USER_ID,
+      source: "llm_extraction",
+      featureId: "feature-ambiguous-parent",
+      featureName: "Ambiguous Parent Feature",
+      corroborationKey: "feature-ambiguous-parent-key",
+      parentProductName: "Ambiguous Parent",
+      status: "proposed",
+      evidence: { fileIds: ["feature-file-1"], entityIds: [] },
+    });
+    await expect(
+      materializeFromFact(
+        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        await featureFact(db, "feature-ambiguous-parent"),
+      ),
+    ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "feature_parent_absent" });
+    await expect(
+      db.selectFrom("sub_entities").selectAll().where("normalized_name", "=", "ambiguous parent feature").execute(),
+    ).resolves.toEqual([]);
   }, 30000);
 
   it("keeps the shared parent resolver scoped by explicit allowed types", async () => {
@@ -281,7 +437,7 @@ async function seedBase(db: Kysely<DB>): Promise<void> {
     .execute();
 }
 
-async function seedEntity(db: Kysely<DB>, input: { id: string; name: string; type: string }) {
+async function seedEntity(db: Kysely<DB>, input: { id: string; name: string; type: string; provenanceTier?: string }) {
   const repo = createEntityRepository(db);
   const now = new Date().toISOString();
   await db
@@ -295,7 +451,7 @@ async function seedEntity(db: Kysely<DB>, input: { id: string; name: string; typ
       metadata: null,
       source_ref_id: null,
       status: "confirmed",
-      provenance_tier: input.type === "product" ? "declared" : "inferred",
+      provenance_tier: input.provenanceTier ?? (input.type === "product" ? "declared" : "inferred"),
       hotness: 0,
       created_at: now,
       updated_at: now,
@@ -303,6 +459,14 @@ async function seedEntity(db: Kysely<DB>, input: { id: string; name: string; typ
     .execute();
   await repo.upsertSourceRef({ entityId: input.id, source: "linear", sourceId: `${input.id}-source` });
   return db.selectFrom("entities").selectAll().where("id", "=", input.id).executeTakeFirstOrThrow();
+}
+
+async function featureFact(db: Kysely<DB>, featureId: string) {
+  return db
+    .selectFrom("indexed_file_facts")
+    .selectAll()
+    .where("subject_source_id", "=", featureId)
+    .executeTakeFirstOrThrow();
 }
 
 function resolverInput(entityId: string) {

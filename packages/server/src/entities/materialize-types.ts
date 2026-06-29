@@ -59,6 +59,7 @@ export interface MaterializeDeps {
   llmPromotionThreshold: number;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
   llmTaskCorroborationThreshold: number;
+  featureAutoMintThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateLiveTypes: Set<ProposeEntityType>;
   structuralAutoBirthTypes: Set<ProposeEntityType>;
@@ -91,6 +92,7 @@ export type MaterializeResult =
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
@@ -107,6 +109,7 @@ export interface MaterializeProgress {
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
