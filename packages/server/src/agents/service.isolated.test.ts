@@ -3,10 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AgentOutputItemInput, createAgentOutputRepository } from "../db/repositories/agent-outputs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
+import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import type { WhatsAppBot } from "../whatsapp/bot";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
+import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { AgentRunService, type AgentRunServiceDeps } from "./service";
 
 const NOW = new Date("2026-06-15T08:05:00.000Z");
@@ -22,7 +25,11 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
   } as unknown as QueueManager;
 }
 
-function createService(db: Kysely<DB>, tasks: Array<() => Promise<void>>): AgentRunService {
+function createService(
+  db: Kysely<DB>,
+  tasks: Array<() => Promise<void>>,
+  overrides: Partial<AgentRunServiceDeps> = {},
+): AgentRunService {
   const runAgent = vi.fn(async () => {
     throw new Error("runAgent should not be called by these tests");
   }) as unknown as AgentRunServiceDeps["runAgent"];
@@ -34,6 +41,7 @@ function createService(db: Kysely<DB>, tasks: Array<() => Promise<void>>): Agent
     settings: createSettingsRepository(db),
     runAgent,
     queueManager: createPausedQueueManager(tasks),
+    ...overrides,
   });
 }
 
@@ -41,6 +49,9 @@ function createWritingService(
   db: Kysely<DB>,
   tasks: Array<() => Promise<void>>,
   item: AgentOutputItemInput,
+  outputDelivery?: AgentOutputDeliveryPublisher,
+  afterWrite?: () => Promise<void>,
+  overrides: Partial<AgentRunServiceDeps> = {},
 ): AgentRunService {
   const runAgent = vi.fn(async (params) => {
     if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
@@ -51,6 +62,7 @@ function createWritingService(
       rawPayload: {},
       items: [item],
     });
+    await afterWrite?.();
     return {
       messageSent: true,
       sessionId: "agent-session",
@@ -90,7 +102,26 @@ function createWritingService(
     settings: createSettingsRepository(db),
     runAgent,
     queueManager: createPausedQueueManager(tasks),
+    outputDelivery,
+    ...overrides,
   });
+}
+
+function allowSlackDelivery(
+  channels: Array<{ id: string; name: string }> = [{ id: "C_DAILY", name: "daily" }],
+  isUserInChannel = vi.fn(async () => true),
+): Pick<AgentRunServiceDeps, "getSlack"> & {
+  isUserInChannel: typeof isUserInChannel;
+} {
+  return {
+    isUserInChannel,
+    getSlack: () => ({
+      listChannels: vi.fn(async () =>
+        channels.map((channel) => ({ ...channel, type: "public_channel", isMember: true })),
+      ),
+      isUserInChannel,
+    }),
+  };
 }
 
 async function seedIndexedFile(
@@ -613,5 +644,445 @@ describe("AgentRunService", () => {
     const latest = await service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, user.id);
     expect(latest.enabledSections).toContain("todos");
     expect(latest.enabledSections).not.toContain("customer_updates");
+  });
+
+  it("persists delivery config with the other agent preferences", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const service = createService(db, []);
+
+    const updated = await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    expect(updated?.delivery).toEqual({
+      enabled: true,
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C_DAILY",
+      label: "#daily",
+    });
+
+    const reread = await service.getConfigView(DAILY_BRIEF_AGENT_KEY, user.id);
+    expect(reread?.delivery?.targetId).toBe("C_DAILY");
+  });
+
+  it("resolves delivery config to the current user's Slack DM", async () => {
+    const users = createUserRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@example.com", slackUserId: "U_ALICE" });
+    await users.create({ name: "Bob", email: "bob@example.com", slackUserId: "U_BOB" });
+    const service = createService(db, [], {
+      getSlack: () => ({
+        listChannels: vi.fn(async () => []),
+        isUserInChannel: vi.fn(async () => false),
+      }),
+    });
+
+    await expect(
+      createService(db, []).resolveDeliveryConfigForUser(alice.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: "U_ALICE",
+        label: "Alice",
+      }),
+    ).rejects.toThrow("Slack is not connected");
+
+    await expect(
+      service.resolveDeliveryConfigForUser(alice.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: "U_BOB",
+        label: "Bob",
+      }),
+    ).rejects.toThrow("current user");
+
+    await expect(
+      service.resolveDeliveryConfigForUser(alice.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: "U_ALICE",
+        label: "Spoofed",
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "slack",
+      targetType: "dm",
+      targetId: "U_ALICE",
+      label: "Alice <alice@example.com>",
+    });
+  });
+
+  it("requires current-user membership for Slack channel delivery", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const listChannels = vi.fn(async () => [{ id: "C_DAILY", name: "daily", type: "private_channel", isMember: true }]);
+    const isUserInChannel = vi.fn(async () => false);
+    const service = createService(db, [], {
+      getSlack: () => ({ listChannels, isUserInChannel }),
+    });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      }),
+    ).rejects.toThrow("not available for this user");
+    expect(isUserInChannel).toHaveBeenCalledWith("C_DAILY", "U_AGENT");
+
+    isUserInChannel.mockResolvedValueOnce(true);
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#spoofed",
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C_DAILY",
+      label: "#daily",
+    });
+  });
+
+  it("resolves WhatsApp group delivery only when the current user is a participant", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15551234567",
+    });
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "15551234567@s.whatsapp.net" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "unknown@g.us",
+        label: "Unknown",
+      }),
+    ).rejects.toThrow("WhatsApp group");
+
+    expect(getGroupMetadata).not.toHaveBeenCalled();
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Spoofed",
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: "120363000000001@g.us",
+      label: "Leadership",
+    });
+    expect(getGroupMetadata).toHaveBeenCalledWith("120363000000001@g.us");
+  });
+
+  it("resolves WhatsApp group delivery when the current user's participant JID is a LID", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15551234567",
+    });
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "86702773280883@lid" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const resolveJidToPhone = vi.fn(async (jid: string) => (jid === "86702773280883@lid" ? "+15551234567" : null));
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata, resolveJidToPhone }) });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Spoofed",
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: "120363000000001@g.us",
+      label: "Leadership",
+    });
+    expect(resolveJidToPhone).toHaveBeenCalledWith("86702773280883@lid");
+  });
+
+  it("rejects WhatsApp group delivery when the current user is not a participant", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15551234567",
+    });
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "15557654321@s.whatsapp.net" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Spoofed",
+      }),
+    ).rejects.toThrow("WhatsApp group is not available for this user");
+  });
+
+  it("delivers scheduled outputs after saving the brief", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await seedEntity(db, { id: "entity-delivery", name: "Delivery Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const slackDelivery = allowSlackDelivery();
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-delivery"], fileIds: [] } }),
+      outputDelivery,
+      undefined,
+      slackDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(slackDelivery.isUserInChannel).toHaveBeenCalledWith("C_DAILY", "U_AGENT");
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ targetId: "C_DAILY" }),
+        output: expect.objectContaining({ id: row.id, outputDate: OUTPUT_DATE }),
+      }),
+    );
+  });
+
+  it("uses the latest delivery config after a scheduled run completes", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await seedEntity(db, { id: "entity-delivery-latest", name: "Delivery Latest Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const slackDelivery = allowSlackDelivery([
+      { id: "C_OLD", name: "old" },
+      { id: "C_NEW", name: "new" },
+    ]);
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-delivery-latest"], fileIds: [] } }),
+      outputDelivery,
+      async () => {
+        await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+          delivery: {
+            enabled: true,
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C_NEW",
+            label: "#new",
+          },
+        });
+      },
+      slackDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_OLD",
+        label: "#old",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(slackDelivery.isUserInChannel).toHaveBeenCalledWith("C_NEW", "U_AGENT");
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ targetId: "C_NEW" }),
+      }),
+    );
+  });
+
+  it("delivers manual outputs when delivery is configured", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await seedEntity(db, { id: "entity-manual", name: "Manual Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const slackDelivery = allowSlackDelivery();
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-manual"], fileIds: [] } }),
+      outputDelivery,
+      undefined,
+      slackDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(slackDelivery.isUserInChannel).toHaveBeenCalledWith("C_DAILY", "U_AGENT");
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ targetId: "C_DAILY" }),
+        output: expect.objectContaining({ id: row.id, outputDate: OUTPUT_DATE }),
+      }),
+    );
+  });
+
+  it("keeps the brief completed when scheduled delivery fails", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await seedEntity(db, { id: "entity-delivery-failure", name: "Delivery Failure Project" });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {
+        throw new Error("Slack unavailable");
+      }),
+    } satisfies AgentOutputDeliveryPublisher;
+    const slackDelivery = allowSlackDelivery();
+    const service = createWritingService(
+      db,
+      tasks,
+      briefItem({ knowledgeRefs: { entityIds: ["entity-delivery-failure"], fileIds: [] } }),
+      outputDelivery,
+      undefined,
+      slackDelivery,
+    );
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+    });
+
+    const row = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    const output = await db
+      .selectFrom("agent_outputs")
+      .select(["status", "error_message"])
+      .where("id", "=", row.id)
+      .executeTakeFirstOrThrow();
+    expect(output.status).toBe("completed");
+    expect(output.error_message).toBeNull();
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
   });
 });

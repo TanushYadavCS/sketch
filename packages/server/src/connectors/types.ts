@@ -86,6 +86,11 @@ export interface SyncedItem {
   contentHash: string | null;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
+  /**
+   * Whole-day item with no specific time of day (e.g. a Google Calendar all-day
+   * event). Calendar connectors always set this; other sources leave it unset.
+   */
+  isAllDay?: boolean;
   /** MIME type of the original file (e.g. "image/png", "application/pdf"). */
   mimeType?: string;
   /**

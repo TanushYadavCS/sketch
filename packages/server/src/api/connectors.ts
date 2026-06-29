@@ -975,6 +975,7 @@ export function connectorRoutes(
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
       openRouterApiKey: appConfig?.OPENROUTER_API_KEY,
       settingsEncryptionKey: appConfig?.ENCRYPTION_KEY,
+      logger,
     });
     return c.json({ results });
   });
@@ -2284,6 +2285,7 @@ export function connectorRoutes(
     const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
     const providerConfig = {
       geminiApiKey: settings?.gemini_api_key,
+      embeddingProvider: settings?.embedding_provider,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
       logger,

@@ -285,8 +285,10 @@ describe("executeAutomation agent steps", () => {
 
   it("keeps light-mode agent steps on the lightweight SDK path", async () => {
     const runAgent = vi.fn();
+    const limitAgentExecution = vi.fn((work: () => Promise<unknown>) => work());
     const params = makeParams({
       runAgent,
+      limitAgentExecution,
       task: makeTask({
         steps: JSON.stringify([
           { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
@@ -305,6 +307,7 @@ describe("executeAutomation agent steps", () => {
     await executeAutomation(params as never);
 
     expect(runAgent).not.toHaveBeenCalled();
+    expect(limitAgentExecution).toHaveBeenCalledTimes(1);
     expect(params.sendMessage).toHaveBeenCalledWith("light result");
   });
 

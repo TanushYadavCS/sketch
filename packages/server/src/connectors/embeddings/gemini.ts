@@ -17,8 +17,7 @@ const GEMINI_BATCH_URL =
 /** Gemini embedding-2-preview outputs 3072 dimensions by default. */
 const DIMENSIONS = 3072;
 
-/** Max texts per batch request. */
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 25;
 
 export function createGeminiEmbeddingProvider(apiKey: string, options?: GeminiClientOptions): EmbeddingProvider {
   async function request(url: string, body: unknown): Promise<unknown> {

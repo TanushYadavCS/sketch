@@ -80,6 +80,7 @@ export interface SettingsTable {
   microsoft_oauth_client_secret: string | null;
   microsoft_oauth_tenant: string | null;
   gemini_api_key: string | null;
+  embedding_provider: string | null;
   enrichment_enabled: Generated<number>;
   admin_can_read_all_files: Generated<number>;
   sync_interval_minutes: Generated<number>;
@@ -129,6 +130,7 @@ export interface IndexedFilesTable {
   is_archived: Generated<number>;
   source_created_at: string | null;
   source_updated_at: string | null;
+  is_all_day: Generated<number>;
   synced_at: string;
   indexed_at: Generated<string>;
   context_note: string | null;
@@ -553,8 +555,24 @@ export interface AgentOutputItemsTable {
   action_prompt: string | null;
   knowledge_refs_json: string;
   source_url: string | null;
+  /** Optional section-specific structured data (e.g. meetings: start time, attendees). */
+  structured_payload_json: string | null;
   sort_order: number;
   created_at: Generated<string>;
+}
+
+export interface AgentOutputDeliveriesTable {
+  id: string;
+  agent_output_id: string;
+  platform: string;
+  target_type: string;
+  target_id: string;
+  status: string;
+  message_refs_json: string | null;
+  error_message: string | null;
+  sent_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface AgentUserConfigsTable {
@@ -908,6 +926,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
+  agent_output_deliveries: AgentOutputDeliveriesTable;
   agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;

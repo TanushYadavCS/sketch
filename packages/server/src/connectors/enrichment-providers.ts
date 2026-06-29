@@ -1,15 +1,16 @@
 import type { Logger } from "pino";
-import { type EmbeddingProvider, createEmbeddingProvider } from "./embeddings";
-import { createGeminiQueryEmbedder } from "./embeddings/gemini";
-import { createOpenRouterEmbeddingProvider } from "./embeddings/openrouter";
+import { type EmbeddingProvider, createEmbeddingProvider, createQueryEmbedder } from "./embeddings";
 import { type GeminiGenerator, createGeminiGenerator } from "./gemini-generate";
 import { createOpenRouterGenerator } from "./openrouter-generate";
 import { isRetryableProviderError, withProviderFallback } from "./provider-fallback";
+
+export type EmbeddingProviderName = "openrouter" | "gemini";
 
 export interface EnrichmentProviderConfig {
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
+  embeddingProvider?: string | null;
   openRouterApiKey?: string | null;
   openRouterModel?: string | null;
   logger?: Logger;
@@ -32,6 +33,12 @@ export function resolveOpenRouterEnrichmentConfig(
     openRouterApiKey: dbKey || envApiKey?.trim() || null,
     openRouterModel: useDbSettings ? settings?.model_id?.trim() || null : null,
   };
+}
+
+export function resolveEmbeddingProviderName(provider?: string | null): EmbeddingProviderName | null {
+  if (provider == null || provider.trim() === "") return "openrouter";
+  if (provider === "openrouter" || provider === "gemini") return provider;
+  return null;
 }
 
 export function createEnrichmentGenerator(config: EnrichmentProviderConfig): GeminiGenerator | null {
@@ -99,74 +106,57 @@ export function createEnrichmentGenerator(config: EnrichmentProviderConfig): Gem
 }
 
 export function createEnrichmentEmbeddingProvider(config: EnrichmentProviderConfig): EmbeddingProvider | null {
-  const primary = config.geminiApiKey
-    ? createEmbeddingProvider({
-        provider: "gemini",
-        apiKey: config.geminiApiKey,
-        maxRpm: config.geminiMaxRpm,
-        maxRetries: config.geminiMaxRetries,
-      })
-    : null;
-  const fallback = config.openRouterApiKey ? createOpenRouterEmbeddingProvider(config.openRouterApiKey) : null;
+  const provider = resolveEmbeddingProviderName(config.embeddingProvider);
+  if (!provider) {
+    config.logger?.warn({ embeddingProvider: config.embeddingProvider }, "Unsupported embedding provider configured");
+    return null;
+  }
 
-  if (!primary) return fallback;
-  if (!fallback) return primary;
+  if (provider === "gemini") {
+    if (!config.geminiApiKey?.trim()) {
+      config.logger?.warn({ embeddingProvider: provider, reason: "missing_api_key" }, "Embedding provider disabled");
+      return null;
+    }
+    return createEmbeddingProvider({
+      provider,
+      apiKey: config.geminiApiKey.trim(),
+      maxRpm: config.geminiMaxRpm,
+      maxRetries: config.geminiMaxRetries,
+    });
+  }
 
-  const primaryEmbedImage = primary.embedImage;
-  const fallbackEmbedImage = fallback.supportsImages ? fallback.embedImage : undefined;
-
-  return {
-    name: `${primary.name}+openrouter-fallback`,
-    dimensions: primary.dimensions,
-    supportsImages: primary.supportsImages,
-    embedTexts(texts) {
-      return withProviderFallback({
-        operation: "embedTexts",
-        primary: () => primary.embedTexts(texts),
-        fallback: () => fallback.embedTexts(texts),
-        logger: config.logger,
-      });
-    },
-    embedImage: primaryEmbedImage
-      ? (imageBuffer, mimeType) =>
-          withProviderFallback({
-            operation: "embedImage",
-            primary: () => primaryEmbedImage(imageBuffer, mimeType),
-            fallback: fallbackEmbedImage ? () => fallbackEmbedImage(imageBuffer, mimeType) : null,
-            shouldFallback: (err) => fallback.supportsImages && isRetryableProviderError(err),
-            logger: config.logger,
-          })
-      : undefined,
-  };
+  if (!config.openRouterApiKey?.trim()) {
+    config.logger?.warn({ embeddingProvider: provider, reason: "missing_api_key" }, "Embedding provider disabled");
+    return null;
+  }
+  return createEmbeddingProvider({ provider, apiKey: config.openRouterApiKey.trim() });
 }
 
 export function createEnrichmentQueryEmbedder(
   config: EnrichmentProviderConfig,
 ): ((query: string) => Promise<number[]>) | null {
-  const primary = config.geminiApiKey
-    ? createGeminiQueryEmbedder(config.geminiApiKey, {
-        maxRpm: config.geminiMaxRpm,
-        maxRetries: config.geminiMaxRetries,
-      })
-    : null;
-  const fallbackProvider = config.openRouterApiKey ? createOpenRouterEmbeddingProvider(config.openRouterApiKey) : null;
-  const fallback = fallbackProvider
-    ? async (query: string) => {
-        const [embedding] = await fallbackProvider.embedTexts([query]);
-        if (!embedding) throw new Error("OpenRouter did not return a query embedding");
-        return embedding;
-      }
-    : null;
+  const provider = resolveEmbeddingProviderName(config.embeddingProvider);
+  if (!provider) {
+    config.logger?.warn({ embeddingProvider: config.embeddingProvider }, "Unsupported embedding provider configured");
+    return null;
+  }
 
-  if (!primary) return fallback;
-  if (!fallback) return primary;
-
-  return (query) => {
-    return withProviderFallback({
-      operation: "embedQuery",
-      primary: () => primary(query),
-      fallback: () => fallback(query),
-      logger: config.logger,
+  if (provider === "gemini") {
+    if (!config.geminiApiKey?.trim()) {
+      config.logger?.warn({ embeddingProvider: provider, reason: "missing_api_key" }, "Embedding provider disabled");
+      return null;
+    }
+    return createQueryEmbedder({
+      provider,
+      apiKey: config.geminiApiKey.trim(),
+      maxRpm: config.geminiMaxRpm,
+      maxRetries: config.geminiMaxRetries,
     });
-  };
+  }
+
+  if (!config.openRouterApiKey?.trim()) {
+    config.logger?.warn({ embeddingProvider: provider, reason: "missing_api_key" }, "Embedding provider disabled");
+    return null;
+  }
+  return createQueryEmbedder({ provider, apiKey: config.openRouterApiKey.trim() });
 }

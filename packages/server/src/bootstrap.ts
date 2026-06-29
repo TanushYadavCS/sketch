@@ -5,10 +5,12 @@
  */
 import { serve } from "@hono/node-server";
 import type { Kysely } from "kysely";
+import { createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
+import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
@@ -140,6 +142,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const tracer = telemetry.tracer;
   const priceMap = new OpenRouterPriceMap({ ttlMs: config.OPENROUTER_PRICE_TTL_HOURS * 60 * 60 * 1000, logger });
   const pricing = createPricingService(priceMap, logger);
+  const agentRunLimiter = createAgentRunLimiter({ limit: config.MAX_CONCURRENT_AGENT_RUNS, logger });
+  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => agentRunLimiter.run(work);
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -183,7 +187,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
           }
         : {}),
     };
-    return instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams));
+    return limitAgentExecution(() =>
+      instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
+    );
   };
 
   // 4. LLM env from DB
@@ -326,11 +332,19 @@ export async function createServer(config: Config, options?: CreateServerOptions
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
     recordWorkflowStep,
+    limitAgentExecution,
   });
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const agentOutputDelivery = createAgentOutputDeliveryService({
+    db,
+    logger,
+    getSlack: () => slack,
+    whatsapp,
+    settingsRepo,
+  });
   const agentRunService = new AgentRunService({
     db,
     config,
@@ -341,6 +355,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     buildMcpServers,
     loadIntegrationProvider,
     queueManager,
+    outputDelivery: agentOutputDelivery,
+    getSlack: () => slack,
+    getWhatsApp: () => whatsapp,
   });
   const agentScheduler = new AgentScheduler({ service: agentRunService, logger });
   agentScheduler.start();
@@ -430,6 +447,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     localDeviceGateway,
     localClaudeSessionService,
     agentRunService,
+    limitAgentExecution,
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
   localDeviceGateway.attach(server);

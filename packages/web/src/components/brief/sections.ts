@@ -10,6 +10,11 @@ export interface BriefSectionMeta {
 
 export const BRIEF_SECTIONS: BriefSectionMeta[] = [
   {
+    key: "meetings",
+    label: "Today's meetings",
+    promise: "Your calendar for today, with who's in the room and why they matter.",
+  },
+  {
     key: "todos",
     label: "Top to-dos",
     promise: "Your most pressing tasks, pulled from your tools and ranked for today.",

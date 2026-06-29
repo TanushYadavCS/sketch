@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { areJidsSameUser } from "@whiskeysockets/baileys";
 import type { Kysely, Selectable } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
@@ -6,6 +7,7 @@ import type { AgentOutputWriter, WriteAgentOutputPayload } from "../agent/tools/
 import { ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import {
+  type AgentDeliveryConfig,
   type AgentMasthead,
   type AgentOutputItemInput,
   type AgentOutputRow,
@@ -19,6 +21,9 @@ import type { DB, UsersTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
+import type { SlackBot } from "../slack/bot";
+import type { WhatsAppBot } from "../whatsapp/bot";
+import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
 import type { AgentApiItem, AgentDefinition } from "./types";
 
@@ -37,6 +42,13 @@ export interface AgentRunServiceDeps {
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: QueueManager;
+  outputDelivery?: AgentOutputDeliveryPublisher;
+  getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
+  getWhatsApp?: () =>
+    | (Pick<WhatsAppBot, "getGroupMetadata"> & {
+        resolveJidToPhone?: (jid: string) => Promise<string | null>;
+      })
+    | null;
 }
 
 export interface RequestAgentGenerationParams {
@@ -55,6 +67,7 @@ export interface ResolvedAgentConfig {
   maxItemsPerSection: number;
   enabledSections: Record<string, boolean>;
   focus: string | null;
+  delivery: AgentDeliveryConfig | null;
 }
 
 export interface AgentSectionView {
@@ -75,6 +88,7 @@ export interface AgentConfigView {
   maxItemsPerSection: number;
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
+  delivery: AgentDeliveryConfig | null;
   sections: AgentSectionView[];
 }
 
@@ -100,6 +114,34 @@ export interface AgentSummaryView {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+}
+
+export class AgentDeliveryTargetError extends Error {}
+
+function whatsappNumberToJid(whatsappNumber: string): string {
+  return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
+}
+
+function normalizeWhatsappNumber(whatsappNumber: string): string {
+  return whatsappNumber.replace(/^\+/, "");
+}
+
+async function whatsappGroupHasParticipant(
+  group: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+  whatsappNumber: string,
+  resolveJidToPhone?: (jid: string) => Promise<string | null>,
+): Promise<boolean> {
+  const userJid = whatsappNumberToJid(whatsappNumber);
+  const userNumber = normalizeWhatsappNumber(whatsappNumber);
+
+  for (const participant of group?.participants ?? []) {
+    if (areJidsSameUser(participant.id, userJid)) return true;
+
+    const participantPhone = await resolveJidToPhone?.(participant.id);
+    if (participantPhone && normalizeWhatsappNumber(participantPhone) === userNumber) return true;
+  }
+
+  return false;
 }
 
 function localDateInTimezone(now: Date, timezone: string): string {
@@ -191,6 +233,7 @@ export class AgentRunService {
       maxItemsPerSection: raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection,
       enabledSections,
       focus: prefs.focus ?? null,
+      delivery: prefs.delivery ?? null,
     };
   }
 
@@ -233,6 +276,7 @@ export class AgentRunService {
       maxItemsPerSection: config.maxItemsPerSection,
       itemsPerSectionRange: def.itemsPerSectionRange,
       focus: config.focus,
+      delivery: config.delivery,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -251,6 +295,7 @@ export class AgentRunService {
       maxItemsPerSection?: number;
       sections?: Record<string, boolean>;
       focus?: string | null;
+      delivery?: AgentDeliveryConfig | null;
     },
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
@@ -264,7 +309,7 @@ export class AgentRunService {
         : undefined;
 
     let prefs: AgentUserPrefs | undefined;
-    if (patch.sections !== undefined || patch.focus !== undefined) {
+    if (patch.sections !== undefined || patch.focus !== undefined || patch.delivery !== undefined) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
       if (patch.sections) {
         for (const section of def.sections) {
@@ -272,7 +317,8 @@ export class AgentRunService {
         }
       }
       const focus = patch.focus !== undefined ? (patch.focus?.trim() ? patch.focus.trim() : null) : current.focus;
-      prefs = { sections, focus };
+      const delivery = patch.delivery !== undefined ? patch.delivery : current.delivery;
+      prefs = { sections, focus, delivery };
     }
 
     await this.repo.upsertConfig(
@@ -293,6 +339,78 @@ export class AgentRunService {
       },
     );
     return this.getConfigView(agentKey, userId);
+  }
+
+  async resolveDeliveryConfigForUser(
+    userId: string,
+    delivery: AgentDeliveryConfig | null,
+  ): Promise<AgentDeliveryConfig | null> {
+    if (!delivery) return null;
+
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new AgentDeliveryTargetError("User not found");
+
+    if (delivery.platform === "slack") {
+      if (!user.slack_user_id) {
+        throw new AgentDeliveryTargetError("Slack delivery is not available for this user");
+      }
+
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+
+      if (delivery.targetType === "dm") {
+        if (delivery.targetId !== user.slack_user_id) {
+          throw new AgentDeliveryTargetError("Slack DM delivery must target the current user");
+        }
+        return {
+          ...delivery,
+          targetId: user.slack_user_id,
+          label: user.email ? `${user.name} <${user.email}>` : user.name,
+        };
+      }
+
+      const channel = (await slack.listChannels()).find((candidate) => candidate.id === delivery.targetId);
+      if (!channel?.isMember) {
+        throw new AgentDeliveryTargetError("Slack channel is not available for delivery");
+      }
+      if (!(await slack.isUserInChannel(delivery.targetId, user.slack_user_id))) {
+        throw new AgentDeliveryTargetError("Slack channel is not available for this user");
+      }
+      return {
+        ...delivery,
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      };
+    }
+
+    const group = await this.deps.db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "name"])
+      .where("jid", "=", delivery.targetId)
+      .executeTakeFirst();
+    if (!group) throw new AgentDeliveryTargetError("WhatsApp group is not available for delivery");
+    if (!user.whatsapp_number) {
+      throw new AgentDeliveryTargetError("WhatsApp group delivery is not available for this user");
+    }
+
+    const whatsapp = this.deps.getWhatsApp?.() ?? null;
+    if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
+    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
+    if (
+      !(await whatsappGroupHasParticipant(
+        groupMetadata,
+        user.whatsapp_number,
+        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+      ))
+    ) {
+      throw new AgentDeliveryTargetError("WhatsApp group is not available for this user");
+    }
+
+    return {
+      ...delivery,
+      targetId: group.jid,
+      label: group.name,
+    };
   }
 
   private toApiOutput(
@@ -479,15 +597,6 @@ export class AgentRunService {
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
     const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
-    const writer = this.createWriter(def, {
-      outputId,
-      enabledSections: new Set(enabledSections),
-      expectedOutputDate: output.output_date,
-      expectedTimezone: output.timezone,
-      onSaved: () => {
-        saved = true;
-      },
-    });
 
     try {
       const now = new Date();
@@ -526,6 +635,16 @@ export class AgentRunService {
         previousDayOutput: this.formatOutputForContext(previousDay.output),
         ...definitionContext,
       };
+      const writer = this.createWriter(def, {
+        outputId,
+        enabledSections: new Set(enabledSections),
+        expectedOutputDate: output.output_date,
+        expectedTimezone: output.timezone,
+        runtimeContext,
+        onSaved: () => {
+          saved = true;
+        },
+      });
       const userMessage = buildSketchContext({
         messages: [],
         currentUserName: user.name,
@@ -575,11 +694,27 @@ export class AgentRunService {
           .set({ agent_run_id: result.sessionId || null })
           .where("id", "=", outputId)
           .execute();
+        await this.deliverCompletedOutput(def, outputId, user.id);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.repo.markFailed(outputId, message);
       this.deps.logger.error({ err, agentKey, outputId, userId }, "Agent: generation failed");
+    }
+  }
+
+  private async deliverCompletedOutput(def: AgentDefinition, outputId: string, userId: string): Promise<void> {
+    if (!this.deps.outputDelivery) return;
+    try {
+      const configuredDelivery = (await this.resolveConfig(def, userId)).delivery;
+      if (!configuredDelivery) return;
+      const delivery = await this.resolveDeliveryConfigForUser(userId, configuredDelivery);
+      if (!delivery) return;
+      const completed = await this.getByIdForUser(def.key, outputId, userId);
+      if (!completed) return;
+      await this.deps.outputDelivery.deliver({ definition: def, output: completed, delivery });
+    } catch (err) {
+      this.deps.logger.warn({ err, agentKey: def.key, outputId, userId }, "Agent: output delivery failed");
     }
   }
 
@@ -590,6 +725,7 @@ export class AgentRunService {
       enabledSections: Set<string>;
       expectedOutputDate: string;
       expectedTimezone: string;
+      runtimeContext: Record<string, unknown>;
       onSaved: () => void;
     },
   ): AgentOutputWriter {
@@ -611,7 +747,10 @@ export class AgentRunService {
         const filtered = payload.items.filter(
           (item) => sectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
         );
-        const items = await def.enrichItems(this.deps.db, filtered);
+        const reconciled = def.reconcileItems
+          ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
+          : filtered;
+        const items = await def.enrichItems(this.deps.db, reconciled);
         await this.validateItemRefs(def, items);
         await this.repo.completeOutput({
           outputId: params.outputId,

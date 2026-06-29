@@ -29,6 +29,7 @@ describe("configSchema", () => {
         expect(result.data.SQLITE_PATH).toBe("./data/sketch.db");
         expect(result.data.SLACK_CHANNEL_HISTORY_LIMIT).toBe(5);
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
+        expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
       }
@@ -126,6 +127,14 @@ describe("configSchema", () => {
         expect(result.data.MAX_FILE_SIZE_MB).toBe(50);
       }
     });
+
+    it("coerces MAX_CONCURRENT_AGENT_RUNS string to number", () => {
+      const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "2" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(2);
+      }
+    });
   });
 
   describe("invalid configs", () => {
@@ -152,6 +161,11 @@ describe("configSchema", () => {
     it("rejects Microsoft connector concurrency outside the bounded Graph limit", () => {
       expect(configSchema.safeParse({ OUTLOOK_MAX_INFLIGHT: "32" }).success).toBe(false);
       expect(configSchema.safeParse({ TEAMS_MAX_INFLIGHT: "32" }).success).toBe(false);
+    });
+
+    it("rejects agent concurrency below one", () => {
+      const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "0" });
+      expect(result.success).toBe(false);
     });
   });
 });

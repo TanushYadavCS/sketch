@@ -95,6 +95,7 @@ function buildDeps(
     whatsapp?: ReturnType<typeof buildMockWhatsApp>;
     runAgent?: ReturnType<typeof vi.fn>;
     queueManager?: QueueManager;
+    limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   } = {},
 ) {
   const mockRunAgent =
@@ -119,6 +120,7 @@ function buildDeps(
     runAgent: mockRunAgent,
     buildMcpServers: vi.fn().mockResolvedValue({}),
     loadIntegrationProvider: vi.fn().mockResolvedValue(null),
+    limitAgentExecution: overrides.limitAgentExecution ?? ((work) => work()),
     automationRunsRepo: {
       create: vi.fn().mockResolvedValue("run-1"),
       update: vi.fn().mockResolvedValue(undefined),
@@ -495,6 +497,7 @@ describe("executeTask() invokes automation runtime", () => {
         inboxMessagesRepo: deps.inboxMessagesRepo,
         sendDm: deps.sendDm,
         userRepo: deps.userRepo,
+        limitAgentExecution: deps.limitAgentExecution,
       }),
     );
   });

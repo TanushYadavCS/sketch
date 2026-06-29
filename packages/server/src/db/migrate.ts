@@ -111,7 +111,10 @@ import * as m108 from "./migrations/108-scheduled-task-origin-chat";
 import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
 import * as m110 from "./migrations/110-google-calendar-provider-file-scope";
 import * as m111 from "./migrations/111-settings-embedding-provider";
-import * as m112 from "./migrations/112-connector-credential-source";
+import * as m112 from "./migrations/112-agent-output-structured-payload";
+import * as m113 from "./migrations/113-indexed-file-all-day-flag";
+import * as m114 from "./migrations/114-agent-output-deliveries";
+import * as m115 from "./migrations/115-connector-credential-source";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -227,7 +230,10 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "109-scheduled-task-origin-message-id": m109,
           "110-google-calendar-provider-file-scope": m110,
           "111-settings-embedding-provider": m111,
-          "112-connector-credential-source": m112,
+          "112-agent-output-structured-payload": m112,
+          "113-indexed-file-all-day-flag": m113,
+          "114-agent-output-deliveries": m114,
+          "115-connector-credential-source": m115,
         };
       },
     },

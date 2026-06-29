@@ -4,6 +4,9 @@ export const LABEL_META: Record<
   DailyBriefItem["sectionKey"],
   Record<string, { label: string; dot: string; eyebrow: string }>
 > = {
+  meetings: {
+    meeting: { label: "Meeting", dot: "bg-muted-foreground/40", eyebrow: "Meeting" },
+  },
   todos: {
     todo: { label: "Todo", dot: "bg-muted-foreground/40", eyebrow: "Task" },
     in_progress: { label: "In Progress", dot: "bg-amber-400", eyebrow: "Task" },

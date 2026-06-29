@@ -258,6 +258,15 @@ function eventDateToIso(value: GoogleCalendarEventDate | undefined): string | nu
   return null;
 }
 
+/**
+ * All-day events carry a `date` (no `dateTime`) on their start. They are stored
+ * at the UTC-midnight sentinel, so they need an explicit flag to be told apart
+ * from a genuine timed meeting that happens to start at exactly 00:00 UTC.
+ */
+function isAllDayEvent(event: GoogleCalendarEvent): boolean {
+  return !event.start?.dateTime && Boolean(event.start?.date);
+}
+
 function eventDateLabel(value: GoogleCalendarEventDate | undefined): string | null {
   return value?.dateTime ?? value?.date ?? null;
 }
@@ -607,12 +616,26 @@ function recurringCandidateIsBetter(
   return candidateStart > currentStart;
 }
 
+/**
+ * The calendar owner's own RSVP, when the event carries a `self` attendee.
+ * Used to skip events the owner declined, mirroring the cancelled-event guard.
+ */
+function ownerResponseStatus(event: GoogleCalendarEvent): string | null {
+  return event.attendees?.find((attendee) => attendee.self)?.responseStatus ?? null;
+}
+
+/** True when the calendar owner declined the event (their own RSVP is "declined"). */
+export function ownerDeclinedEvent(event: GoogleCalendarEvent): boolean {
+  return ownerResponseStatus(event) === "declined";
+}
+
 export function eventToSyncedItem(
   event: GoogleCalendarEvent,
   calendar: GoogleCalendarListEntry,
   ownerEmail: string | null | undefined,
 ): SyncedItem | null {
   if (!event.id || event.status === "cancelled") return null;
+  if (ownerDeclinedEvent(event)) return null;
 
   const content = eventContent(event, calendar);
   const calendlyPeople = calendlyDescriptionPeople(event);
@@ -638,6 +661,7 @@ export function eventToSyncedItem(
     contentHash: contentHash(content),
     sourceCreatedAt,
     sourceUpdatedAt,
+    isAllDay: isAllDayEvent(event),
     mimeType: "text/calendar",
     accessEmails: eventAccessEmails(event, ownerEmail, calendlyPeople),
     attendees: people.length > 0 ? people : undefined,
@@ -754,6 +778,15 @@ async function collectEventsForCalendar(params: {
           providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
           reason: "google_calendar_event_cancelled",
         });
+        continue;
+      }
+      if (ownerDeclinedEvent(event)) {
+        if (!recurringSeriesKey(event)) {
+          removals.push({
+            providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
+            reason: "google_calendar_event_declined",
+          });
+        }
         continue;
       }
 

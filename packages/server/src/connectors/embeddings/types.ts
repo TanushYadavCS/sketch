@@ -18,7 +18,7 @@ export interface EmbeddingProvider {
 }
 
 export interface EmbeddingProviderConfig {
-  provider: "gemini";
+  provider: "gemini" | "openrouter";
   apiKey: string;
   maxRpm?: number;
   maxRetries?: number;
