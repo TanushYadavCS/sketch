@@ -4,9 +4,26 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import type { SlackBot } from "../slack/bot";
 import { createTestDb, createTestLogger } from "../test-utils";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { dailyBriefDefinition } from "./definitions/daily-brief";
 import { createAgentOutputDeliveryService } from "./output-delivery";
+
+function createMockWhatsApp(overrides: Partial<WhatsAppRuntime> = {}): WhatsAppRuntime {
+  return {
+    isConnected: false,
+    onMessage: vi.fn(),
+    sendText: vi.fn(),
+    sendFile: vi.fn(),
+    startComposing: vi.fn(),
+    stopComposing: vi.fn(),
+    addReaction: vi.fn(),
+    removeReaction: vi.fn(),
+    downloadMedia: vi.fn(),
+    getGroupMetadata: vi.fn(),
+    resolveJidToPhone: vi.fn(),
+    ...overrides,
+  } as unknown as WhatsAppRuntime;
+}
 
 describe("createAgentOutputDeliveryService", () => {
   let db: Kysely<DB>;
@@ -38,7 +55,7 @@ describe("createAgentOutputDeliveryService", () => {
       postMessage: vi.fn(async () => "123.456"),
       openDmChannel: vi.fn(),
     } as unknown as SlackBot;
-    const whatsapp = { isConnected: false, sendText: vi.fn() } as unknown as WhatsAppBot;
+    const whatsapp = createMockWhatsApp();
     const service = createAgentOutputDeliveryService({
       db,
       logger: createTestLogger(),
@@ -96,13 +113,17 @@ describe("createAgentOutputDeliveryService", () => {
 
   it("sends WhatsApp delivery chunks and records every message ref", async () => {
     let sentCount = 0;
-    const whatsapp = {
+    const whatsapp = createMockWhatsApp({
       isConnected: true,
       sendText: vi.fn(async () => {
         sentCount += 1;
-        return { key: { id: `wa-message-${sentCount}` }, messageTimestamp: 1717480800 };
+        return {
+          providerMessageId: `wa-message-${sentCount}`,
+          providerConversationId: "120363000000001@g.us",
+          providerTimestamp: "2024-06-04T07:20:00.000Z",
+        };
       }),
-    } as unknown as WhatsAppBot;
+    });
     const service = createAgentOutputDeliveryService({
       db,
       logger: createTestLogger(),
@@ -130,7 +151,7 @@ describe("createAgentOutputDeliveryService", () => {
 
     expect(whatsapp.sendText).toHaveBeenCalledTimes(4);
     for (const call of vi.mocked(whatsapp.sendText).mock.calls) {
-      expect(call[0]).toBe("120363000000001@g.us");
+      expect(call[0]).toEqual({ kind: "group", groupId: "120363000000001@g.us" });
       expect(call[1].length).toBeLessThanOrEqual(4000);
     }
 
@@ -154,7 +175,7 @@ describe("createAgentOutputDeliveryService", () => {
   });
 
   it("records a failed attempt when the target platform is unavailable", async () => {
-    const whatsapp = { isConnected: false, sendText: vi.fn() } as unknown as WhatsAppBot;
+    const whatsapp = createMockWhatsApp();
     const service = createAgentOutputDeliveryService({
       db,
       logger: createTestLogger(),

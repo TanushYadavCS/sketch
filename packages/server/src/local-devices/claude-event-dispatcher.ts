@@ -21,6 +21,8 @@ import type { SlackBot } from "../slack/bot";
 import { createSlackMessageHandler } from "../slack/message-handler";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
+import { type WhatsAppSendResult, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import type { LocalClaudeEventDelivery } from "./claude-sessions";
 
 export interface LocalClaudeEventDispatcherDeps {
@@ -40,6 +42,7 @@ export interface LocalClaudeEventDispatcherDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   getSlack?: () => SlackBot | null;
   whatsapp?: WhatsAppBot;
+  whatsappRuntime?: WhatsAppRuntime;
   sendDm?: RunAgentParams["sendDm"];
 }
 
@@ -133,11 +136,12 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
 
   async function captureWhatsAppBotReply(params: {
     conversationId: number;
-    sent: Awaited<ReturnType<ReturnType<typeof createWhatsAppMessageHandler>>>;
+    sent: WhatsAppSendResult | Awaited<ReturnType<WhatsAppBot["sendText"]>> | null;
     text: string;
     botName?: string | null;
   }): Promise<void> {
-    const providerMessageId = params.sent?.key?.id;
+    const providerMessageId =
+      params.sent && "providerMessageId" in params.sent ? params.sent.providerMessageId : params.sent?.key?.id;
     if (!providerMessageId) return;
     await deps.conversations.insertMessage({
       conversationId: params.conversationId,
@@ -147,7 +151,10 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       isBot: true,
       addressedToSketch: false,
       text: params.text,
-      providerTimestamp: providerTimestampFromWhatsApp(params.sent),
+      providerTimestamp:
+        params.sent && "providerTimestamp" in params.sent
+          ? params.sent.providerTimestamp
+          : providerTimestampFromWhatsApp(params.sent),
     });
   }
 
@@ -185,10 +192,23 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       return;
     }
 
+    if (deps.whatsappRuntime?.isConnected) {
+      const whatsAppTarget = whatsappTargetFromDeliveryTarget(target);
+      const onFinalMessage = createWhatsAppMessageHandler(deps.whatsappRuntime, whatsAppTarget);
+      if (finalText) {
+        const sent = await onFinalMessage(finalText);
+        if (conversationId) await captureWhatsAppBotReply({ conversationId, sent, text: finalText, botName });
+      }
+      for (const filePath of pendingUploads) {
+        const ext = filePath.split(".").pop() ?? "";
+        await deps.whatsappRuntime.sendFile(whatsAppTarget, filePath, extensionToMime(ext), basename(filePath));
+      }
+      return;
+    }
+
     if (!deps.whatsapp?.isConnected) return;
-    const onFinalMessage = createWhatsAppMessageHandler(deps.whatsapp, target);
     if (finalText) {
-      const sent = await onFinalMessage(finalText);
+      const sent = await deps.whatsapp.sendText(target, finalText);
       if (conversationId) await captureWhatsAppBotReply({ conversationId, sent, text: finalText, botName });
     }
     for (const filePath of pendingUploads) {

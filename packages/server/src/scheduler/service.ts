@@ -33,11 +33,12 @@ import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { RecordWorkflowStep } from "../telemetry/agent-run-telemetry";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
 import { testAutomationStep } from "../workflows/runtime";
-import { createWorkflowDeliveryCapture, providerTimestampFromWhatsApp } from "./delivery-capture";
+import { createWorkflowDeliveryCapture } from "./delivery-capture";
 import { parseOnceSchedule } from "./parse-once";
 import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
@@ -48,7 +49,7 @@ export interface TaskSchedulerDeps {
   logger: Logger;
   queueManager: QueueManager;
   getSlack: () => SlackBot | null;
-  whatsapp: WhatsAppBot;
+  whatsapp: WhatsAppRuntime;
   settingsRepo: ReturnType<typeof createSettingsRepository>;
   runAgent: typeof runAgent;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -302,13 +303,13 @@ export class TaskScheduler {
     }
 
     return async (text) => {
-      const sent = await whatsapp.sendText(delivery.targetId, text);
-      const messageRef = sent?.key?.id;
+      const sent = await whatsapp.sendText(whatsappTargetFromDeliveryTarget(delivery.targetId), text);
+      const messageRef = sent?.providerMessageId;
       if (!messageRef) return;
       await this.deliveryCapture.captureWhatsApp({
         deliveryTarget: delivery.targetId,
         messageRef,
-        providerTimestamp: providerTimestampFromWhatsApp(sent),
+        providerTimestamp: sent.providerTimestamp,
         text,
       });
     };

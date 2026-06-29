@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
-import { downloadWhatsAppMedia } from "../files";
+import { type Attachment, downloadWhatsAppMedia } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
 import type { WhatsAppAdapterDeps } from "./adapter";
 import { wireWhatsAppHandlers } from "./adapter";
+import type { WhatsAppInboundMessage, WhatsAppTarget } from "./provider";
 
 // --- Fixtures ---
 
@@ -34,6 +35,49 @@ function makeUser(overrides: Record<string, unknown> = {}) {
 
 function createMockWhatsApp(connected = true) {
   const handler = { fn: null as unknown };
+  const targetId = (target: WhatsAppTarget | string) =>
+    typeof target === "string"
+      ? target
+      : target.kind === "group"
+        ? target.groupId
+        : (target.providerConversationId ?? `${target.phoneE164.replace("+", "")}@s.whatsapp.net`);
+  const normalizeLastCall = (mockFn: ReturnType<typeof vi.fn>, args: unknown[]) => {
+    mockFn.mock.calls[mockFn.mock.calls.length - 1] = args;
+  };
+  const baileysOptions = (options: unknown) => {
+    const quotedMessage = (options as { quotedMessage?: WhatsAppInboundMessage } | undefined)?.quotedMessage;
+    if (!quotedMessage) return options;
+    return { quoted: quotedMessage.rawProviderPayload };
+  };
+  const sendText = vi.fn(async (target: WhatsAppTarget | string, text: string, options?: unknown) => {
+    const id = targetId(target);
+    const normalizedOptions = baileysOptions(options);
+    normalizeLastCall(sendText, normalizedOptions === undefined ? [id, text] : [id, text, normalizedOptions]);
+    return { providerMessageId: "sent-1", providerConversationId: id, providerTimestamp: null };
+  });
+  const sendFile = vi.fn(
+    async (target: WhatsAppTarget | string, filePath: string, mimeType: string, fileName: string) => {
+      normalizeLastCall(sendFile, [targetId(target), filePath, mimeType, fileName]);
+    },
+  );
+  const startComposing = vi.fn((target: WhatsAppTarget | string) => {
+    normalizeLastCall(startComposing, [targetId(target)]);
+  });
+  const stopComposing = vi.fn((target: WhatsAppTarget | string) => {
+    normalizeLastCall(stopComposing, [targetId(target)]);
+  });
+  const addReaction = vi.fn(async (message: WhatsAppInboundMessage, emoji: string) => {
+    const rawMessage = message.rawProviderPayload as { key?: { remoteJid?: string } };
+    normalizeLastCall(addReaction, [
+      rawMessage.key?.remoteJid ?? message.providerConversationId,
+      rawMessage.key,
+      emoji,
+    ]);
+  });
+  const removeReaction = vi.fn(async (message: WhatsAppInboundMessage) => {
+    const rawMessage = message.rawProviderPayload as { key?: { remoteJid?: string } };
+    normalizeLastCall(removeReaction, [rawMessage.key?.remoteJid ?? message.providerConversationId, rawMessage.key]);
+  });
   return {
     mock: {
       isConnected: connected,
@@ -41,17 +85,82 @@ function createMockWhatsApp(connected = true) {
       onMessage: vi.fn().mockImplementation((fn) => {
         handler.fn = fn;
       }),
-      sendText: vi.fn().mockResolvedValue({ key: { remoteJid: "jid", id: "sent-1", fromMe: true } }),
-      editText: vi.fn().mockResolvedValue({ key: { remoteJid: "jid", id: "edit-1", fromMe: true } }),
-      sendFile: vi.fn().mockResolvedValue(undefined),
-      addReaction: vi.fn().mockResolvedValue(undefined),
-      removeReaction: vi.fn().mockResolvedValue(undefined),
-      startComposing: vi.fn(),
-      stopComposing: vi.fn(),
+      sendText,
+      editText: vi.fn(),
+      sendFile,
+      addReaction,
+      removeReaction,
+      startComposing,
+      stopComposing,
+      downloadMedia: vi.fn(async (message: WhatsAppInboundMessage, workspaceDir: string) => {
+        if (!message.mediaType) return [] as Attachment[];
+        const attachment = await downloadWhatsAppMedia(
+          message.rawProviderPayload as never,
+          {} as never,
+          `${workspaceDir}/attachments`,
+          20 * 1024 * 1024,
+          {} as never,
+        );
+        return [attachment];
+      }),
       getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Test Group", desc: "A test group" }),
       getGroupName: vi.fn().mockResolvedValue("Test Group"),
+      resolveJidToPhone: vi.fn().mockResolvedValue(null),
     },
-    getHandler: () => handler.fn as (msg: unknown) => Promise<void>,
+    getHandler: () => async (msg: unknown) => {
+      await (handler.fn as (message: WhatsAppInboundMessage) => Promise<void>)(normalizeInboundTestMessage(msg));
+    },
+  };
+}
+
+function providerTimestamp(rawMessage: unknown): string | null {
+  const seconds = Number((rawMessage as { messageTimestamp?: unknown })?.messageTimestamp);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(seconds * 1000).toISOString();
+}
+
+function normalizeInboundTestMessage(message: unknown): WhatsAppInboundMessage {
+  const input = message as Record<string, unknown>;
+  if (input.kind === "dm" || input.kind === "group") return input as unknown as WhatsAppInboundMessage;
+
+  if (input.type === "dm") {
+    const phoneNumber = String(input.phoneNumber);
+    const providerConversationId = `${phoneNumber.replace("+", "")}@s.whatsapp.net`;
+    return {
+      kind: "dm",
+      providerId: "baileys",
+      providerMessageId: String(input.messageId),
+      providerConversationId,
+      canonicalConversationId: `dm:${phoneNumber}`,
+      providerTimestamp: providerTimestamp(input.rawMessage),
+      senderName: String(input.pushName ?? "Unknown"),
+      senderProviderId: String(input.jid ?? providerConversationId),
+      senderPhoneE164: phoneNumber,
+      target: { kind: "dm", phoneE164: phoneNumber, providerConversationId },
+      text: String(input.text ?? ""),
+      rawProviderPayload: input.rawMessage,
+      ...(typeof input.mediaType === "string" ? { mediaType: input.mediaType } : {}),
+      ...(input.quotedMessage ? { quotedMessage: input.quotedMessage as WhatsAppInboundMessage["quotedMessage"] } : {}),
+    };
+  }
+
+  const groupId = String(input.jid);
+  return {
+    kind: "group",
+    providerId: "baileys",
+    providerMessageId: String(input.messageId),
+    providerConversationId: groupId,
+    canonicalConversationId: `group:${groupId}`,
+    providerTimestamp: providerTimestamp(input.rawMessage),
+    senderName: String(input.pushName ?? "Unknown"),
+    senderProviderId: String(input.senderJid ?? ""),
+    senderPhoneE164: typeof input.senderPhone === "string" ? input.senderPhone : null,
+    target: { kind: "group", groupId },
+    text: String(input.text ?? ""),
+    isMentioned: Boolean(input.isMentioned),
+    rawProviderPayload: input.rawMessage,
+    ...(typeof input.mediaType === "string" ? { mediaType: input.mediaType } : {}),
+    ...(input.quotedMessage ? { quotedMessage: input.quotedMessage as WhatsAppInboundMessage["quotedMessage"] } : {}),
   };
 }
 
@@ -430,7 +539,7 @@ describe("whatsapp/adapter", () => {
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", PROMPT_TOO_LONG_RECOVERY_MESSAGE);
     });
 
-    it("flushes buffered progress before sending the DM error reply", async () => {
+    it("does not send buffered progress before sending the DM error reply", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
@@ -456,14 +565,8 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(mock.editText).toHaveBeenCalled();
-      const errorCallIndex = mock.sendText.mock.calls.findIndex(
-        ([jid, text]) => jid === "1234567890@s.whatsapp.net" && text === "Something went wrong, try again.",
-      );
-      expect(errorCallIndex).toBeGreaterThanOrEqual(0);
-      const errorOrder = mock.sendText.mock.invocationCallOrder[errorCallIndex];
-      const flushOrder = mock.editText.mock.invocationCallOrder.at(-1);
-      expect(flushOrder).toBeLessThan(errorOrder);
+      expect(mock.editText).not.toHaveBeenCalled();
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "Something went wrong, try again.");
     });
 
     it("still sends the final reply when progress flush fails", async () => {
@@ -684,8 +787,9 @@ describe("whatsapp/adapter", () => {
       );
     });
 
-    it("updates the DM user's tool progress on /toolprogress", async () => {
+    it("ignores DM /toolprogress without updating settings or sending text", async () => {
       const deps = makeDeps();
+      vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(makeUser({ timezone: "America/New_York" }));
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
       const handler = getHandler();
@@ -701,9 +805,9 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(deps.repos.users.update).toHaveBeenCalledWith("u1", { toolProgress: "technical" });
+      expect(deps.repos.users.update).not.toHaveBeenCalled();
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "🛠️ Tool progress set to technical.");
+      expect(mock.sendText).not.toHaveBeenCalled();
     });
 
     it("injects inbox messages into DM context and marks them consumed after success", async () => {
@@ -863,7 +967,7 @@ describe("whatsapp/adapter", () => {
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
     });
 
-    it("wires DM tool progress when explicitly enabled", async () => {
+    it("does not wire DM tool progress when explicitly enabled", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockImplementation(async ({ onProgressEvent }) => {
           await onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "src/index.ts" } });
@@ -888,11 +992,8 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(mock.sendText.mock.calls[0]).toEqual([
-        "1234567890@s.whatsapp.net",
-        expect.stringMatching(/^📖 /),
-        undefined,
-      ]);
+      expect(mock.editText).not.toHaveBeenCalled();
+      expect(mock.sendText).toHaveBeenCalledTimes(1);
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
     });
 
@@ -1767,7 +1868,7 @@ describe("whatsapp/adapter", () => {
       );
     });
 
-    it("upserts the group tool progress on /toolprogress", async () => {
+    it("ignores group /toolprogress without updating settings or sending text", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -1787,19 +1888,9 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(deps.repos.whatsappGroups.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          jid: "group@g.us",
-          name: "Test Group",
-          description: "A test group",
-          tool_progress: "friendly",
-          reasoning_text: 0,
-        }),
-      );
+      expect(deps.repos.whatsappGroups.upsert).not.toHaveBeenCalled();
       expect(deps.runAgent).not.toHaveBeenCalled();
-      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "🪄 Tool progress set to friendly.", {
-        quoted: rawMessage,
-      });
+      expect(mock.sendText).not.toHaveBeenCalled();
     });
 
     it("does not send group tool progress by default", async () => {
@@ -1831,7 +1922,7 @@ describe("whatsapp/adapter", () => {
       expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "hello back", { quoted: rawMessage });
     });
 
-    it("wires group tool progress when explicitly enabled", async () => {
+    it("does not wire group tool progress when explicitly enabled", async () => {
       const deps = makeDeps({
         runAgent: vi.fn().mockImplementation(async ({ onProgressEvent }) => {
           await onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "src/index.ts" } });
@@ -1865,11 +1956,8 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(mock.sendText.mock.calls[0]).toEqual([
-        "group@g.us",
-        expect.stringMatching(/^📖 /),
-        { quoted: rawMessage },
-      ]);
+      expect(mock.editText).not.toHaveBeenCalled();
+      expect(mock.sendText).toHaveBeenCalledTimes(1);
       expect(mock.sendText).toHaveBeenCalledWith("group@g.us", "hello back", { quoted: rawMessage });
     });
 

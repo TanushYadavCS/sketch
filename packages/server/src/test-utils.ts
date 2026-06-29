@@ -160,6 +160,8 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     SQLITE_PATH: ":memory:",
     SLACK_CHANNEL_HISTORY_LIMIT: 5,
     SLACK_THREAD_HISTORY_LIMIT: 50,
+    WHATSAPP_DM_PROVIDER: "baileys",
+    WHATSAPP_GROUP_PROVIDER: "baileys",
     MAX_CONCURRENT_AGENT_RUNS: 4,
     MAX_FILE_SIZE_MB: 20,
     MAX_UPLOAD_SIZE_MB: 50,

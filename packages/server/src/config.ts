@@ -57,6 +57,10 @@ export const configSchema = z.object({
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
   SLACK_SIGNING_SECRET: z.string().optional(),
 
+  // WhatsApp providers
+  WHATSAPP_DM_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
+  WHATSAPP_GROUP_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
+
   // Security
   ENCRYPTION_KEY: z.string().optional(),
   SYSTEM_SECRET: z.string().optional(),

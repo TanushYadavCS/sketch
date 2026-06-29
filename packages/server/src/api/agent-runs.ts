@@ -25,6 +25,8 @@ import type { SlackBot } from "../slack/bot";
 import { createSlackMessageHandler } from "../slack/message-handler";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type ChannelRepo = ReturnType<typeof createChannelRepository>;
@@ -69,6 +71,7 @@ interface AgentRunRouteDeps {
   inboxMessagesRepo: InboxMessagesRepo;
   getSlack?: () => SlackBot | null;
   whatsapp?: WhatsAppBot;
+  whatsappRuntime?: WhatsAppRuntime;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -394,7 +397,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           return;
         }
 
-        const whatsapp = deps.whatsapp;
+        const whatsapp = deps.whatsappRuntime ?? deps.whatsapp;
         if (!whatsapp?.isConnected) {
           await writeEvent("error", badRequest("NOT_CONNECTED", "WhatsApp is not connected"));
           return;
@@ -406,11 +409,16 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           return;
         }
         const groupJid = group.jid;
+        const groupTarget = whatsappTargetFromDeliveryTarget(groupJid);
         const workspaceDir = await ensureGroupWorkspace(deps.config, groupJid);
 
         const delivery: Record<string, unknown> = { mode: parsed.data.deliveryMode, platform: "whatsapp" };
         if (parsed.data.deliveryMode === "target") {
-          await whatsapp.sendText(groupJid, parsed.data.message);
+          if (deps.whatsappRuntime) {
+            await deps.whatsappRuntime.sendText(groupTarget, parsed.data.message);
+          } else {
+            await deps.whatsapp?.sendText(groupJid, parsed.data.message);
+          }
           delivery.target = groupJid;
         }
 
@@ -448,13 +456,21 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           toolConfig,
         );
         if (parsed.data.deliveryMode === "target" && finalText) {
-          const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupJid);
-          await onFinalMessage(finalText);
+          if (deps.whatsappRuntime) {
+            const onFinalMessage = createWhatsAppMessageHandler(deps.whatsappRuntime, groupTarget);
+            await onFinalMessage(finalText);
+          } else {
+            await deps.whatsapp?.sendText(groupJid, finalText);
+          }
         }
         if (parsed.data.deliveryMode === "target") {
           for (const filePath of result.pendingUploads) {
             const ext = filePath.split(".").pop() ?? "";
-            await whatsapp.sendFile(groupJid, filePath, extensionToMime(ext), basename(filePath));
+            if (deps.whatsappRuntime) {
+              await deps.whatsappRuntime.sendFile(groupTarget, filePath, extensionToMime(ext), basename(filePath));
+            } else {
+              await deps.whatsapp?.sendFile(groupJid, filePath, extensionToMime(ext), basename(filePath));
+            }
           }
         }
 
