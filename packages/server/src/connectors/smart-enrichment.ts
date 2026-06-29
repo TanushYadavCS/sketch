@@ -91,7 +91,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v11";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v12";
 /**
  * `team` is intentionally absent: teams are never proposed by the LLM. A team
  * is a structural object (e.g. a Linear team) and is born only through
@@ -126,6 +126,7 @@ interface ExtractedMention {
   variations: string[];
   confidence?: number;
   parentProduct?: string;
+  matchesKnown?: string;
 }
 
 interface ExtractedRelationEndpoint {
@@ -307,14 +308,17 @@ export async function extractEntities(
     ? `\nProduct/disambiguation guidance:\n${orgContext.disambiguationGuidance}\n`
     : "";
 
-  const renderKnown = (e: {
-    name: string;
-    type: string;
-    description?: string;
-    mentionCount?: number;
-    recentlyActive?: boolean;
-  }) => {
-    const parts: string[] = [`- ${e.name} (${e.type})`];
+  const renderKnown = (
+    e: {
+      name: string;
+      type: string;
+      description?: string;
+      mentionCount?: number;
+      recentlyActive?: boolean;
+    },
+    index: number,
+  ) => {
+    const parts: string[] = [`- [K${index + 1}] ${e.name} (${e.type})`];
     if (e.description) parts.push(`: ${e.description}`);
     const tags: string[] = [];
     if (typeof e.mentionCount === "number" && e.mentionCount > 0) {
@@ -327,7 +331,7 @@ export async function extractEntities(
 
   const knownSection =
     knownEntities && knownEntities.length > 0
-      ? `\nKnown entities likely to appear in this file — match these to mentions instead of creating duplicates, and prefer them as relationship endpoints. Product entries here are the injected known-products list; map product mentions to those entries instead of inventing new product names:\n${knownEntities.map(renderKnown).join("\n")}\n`
+      ? `\nKnown entities likely to appear in this file — each has a handle like [K1]. Match these to mentions instead of creating duplicates, and prefer them as relationship endpoints. Product entries here are the injected known-products list; map product mentions to those entries instead of inventing new product names.\nWhen a mention is the SAME entity as one of these — even if the document words it differently (e.g. "OW x Canvasx Tourism Recovery Dashboard" is the same as a known "Tourism Dashboard") — set that mention's "matchesKnown" to the handle (e.g. "K1"). Only set it when you are confident it is the same entity AND the same type; when unsure, omit "matchesKnown" and emit the mention as new.\n${knownEntities.map(renderKnown).join("\n")}\n`
       : "";
 
   const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
@@ -348,12 +352,17 @@ export async function extractEntities(
   const featureSchemaInstruction = experimentalFlag
     ? '\nFor feature mentions, include "parentProduct" with the product the feature belongs to. Omit "parentProduct" for non-feature mentions.\n'
     : "";
+  const hasKnown = (knownEntities?.length ?? 0) > 0;
+  const knownExampleField = hasKnown ? ', "matchesKnown": "K1"' : "";
   const mentionExamples = experimentalFlag
-    ? `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    ? `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86${knownExampleField} },
     { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 },
     { "mention": "CRM Analytics", "type": "feature", "parentProduct": "Canvas CRM", "variations": ["Analytics tab"], "confidence": 0.91 }`
-    : `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    : `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86${knownExampleField} },
     { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }`;
+  const knownSchemaInstruction = hasKnown
+    ? '\nFor a mention that is the same entity as a Known entity above, include "matchesKnown" with that entity\'s handle (e.g. "K1"). Omit "matchesKnown" when the mention is new or you are unsure.\n'
+    : "";
   const relationshipTypesPrompt = `Valid relationship types:
 - "works_at": person -> company (the person is employed by the company)
 - "engaged_with": person -> company (the person is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
@@ -415,7 +424,7 @@ Type disambiguation:
 - Third-party data sources, market-data providers, and SaaS you merely integrate with or pull data from are type "tool", not "product"; e.g. a flight/hotel/market-data API or provider you consume is a tool.
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
-${featureSchemaInstruction}
+${featureSchemaInstruction}${knownSchemaInstruction}
 
 If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
 
@@ -460,13 +469,44 @@ ${truncatedContent}
     label: `extractEntities:${file.id}`,
     dumpDir,
   });
-  if (Array.isArray(parsed)) {
-    return { mentions: parsed, relations: [] };
+  const mentions = Array.isArray(parsed) ? parsed : Array.isArray(parsed.mentions) ? parsed.mentions : [];
+  const relations = Array.isArray(parsed) ? [] : Array.isArray(parsed.relations) ? parsed.relations : [];
+  resolveKnownMatches(mentions, knownEntities);
+  return { mentions, relations };
+}
+
+/**
+ * Apply each mention's `matchesKnown` handle (e.g. "K1") by rewriting the
+ * mention to the known entity's canonical name when their types agree. The
+ * original surface form is preserved in `variations` so downstream matching can
+ * still recognize the document spelling. Rewriting to the canonical name lets
+ * the existing exact-name path link to a confirmed entity OR dedupe onto the
+ * same pending-proposal queue row, with no new direct-link code path. Invalid,
+ * out-of-range, or type-mismatched handles are ignored. Mutates in place.
+ */
+function resolveKnownMatches(
+  mentions: ExtractedMention[],
+  knownEntities?: Array<{ name: string; type: string }>,
+): void {
+  if (!knownEntities || knownEntities.length === 0) return;
+  for (const mention of mentions) {
+    const handle = mention.matchesKnown;
+    if (typeof handle !== "string") continue;
+    const match = /^K(\d+)$/i.exec(handle.trim());
+    if (!match) continue;
+    const index = Number.parseInt(match[1], 10) - 1;
+    const known = knownEntities[index];
+    if (!known || !known.name) continue;
+    if (known.type !== mention.type) continue;
+    if (known.name === mention.mention) continue;
+    const original = mention.mention;
+    mention.mention = known.name;
+    const variations = Array.isArray(mention.variations) ? mention.variations : [];
+    if (original && !variations.some((v) => v.toLowerCase() === original.toLowerCase())) {
+      variations.push(original);
+    }
+    mention.variations = variations;
   }
-  return {
-    mentions: Array.isArray(parsed.mentions) ? parsed.mentions : [],
-    relations: Array.isArray(parsed.relations) ? parsed.relations : [],
-  };
 }
 
 /**
