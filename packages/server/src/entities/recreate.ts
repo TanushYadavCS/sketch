@@ -74,16 +74,26 @@ async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
   }
 }
 
+/**
+ * Reset preserves human-blessed entities: `declared` (added/declared via Your
+ * Org) and `human_confirmed` (approved from the review queue). Both encode an
+ * explicit operator decision that replay cannot reconstruct — approvals live in
+ * `entity_review_queue`, not in `indexed_file_facts`, so a deleted approved
+ * entity would never come back as approved. Only derived tiers (`structural`,
+ * `inferred`) are rebuilt from facts.
+ */
+const PRESERVED_RESET_TIERS = ["declared", "human_confirmed"];
+
 async function deleteRecreatableEntities(db: Kysely<DB>): Promise<number> {
   try {
     const before = await db
       .selectFrom("entities")
       .select(db.fn.countAll<number>().as("count"))
-      .where("provenance_tier", "!=", "declared")
+      .where("provenance_tier", "not in", PRESERVED_RESET_TIERS)
       .executeTakeFirst();
     const count = Number(before?.count ?? 0);
     if (count === 0) return 0;
-    await db.deleteFrom("entities").where("provenance_tier", "!=", "declared").execute();
+    await db.deleteFrom("entities").where("provenance_tier", "not in", PRESERVED_RESET_TIERS).execute();
     return count;
   } catch (err) {
     if (isMissingTableError(err)) return 0;

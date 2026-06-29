@@ -198,6 +198,35 @@ describe("resetDerivedEntityData", () => {
     expect(file.embedding_status).toBe("done");
   });
 
+  it("preserves human-blessed tiers (declared, human_confirmed) and deletes derived ones", async () => {
+    const now = new Date().toISOString();
+    const seedEntity = async (id: string, tier: string) => {
+      await db
+        .insertInto("entities")
+        .values({
+          id,
+          name: id,
+          source_type: "project",
+          status: "confirmed",
+          provenance_tier: tier,
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+    };
+    await seedEntity("declared-product", "declared");
+    await seedEntity("approved-project", "human_confirmed");
+    await seedEntity("structural-project", "structural");
+    await seedEntity("inferred-guess", "inferred");
+
+    const summary = await resetDerivedEntityData(db, createTestLogger());
+
+    expect(summary.deleted.entities).toBe(2);
+    const survivors = await db.selectFrom("entities").select("id").orderBy("id", "asc").execute();
+    expect(survivors.map((row) => row.id)).toEqual(["approved-project", "declared-product"]);
+  });
+
   it("rejects while a connector is marked syncing", async () => {
     await seedGraph();
     await db.updateTable("connector_configs").set({ sync_status: "syncing" }).where("id", "=", "connector-1").execute();
