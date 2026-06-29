@@ -5,8 +5,17 @@
  * code-owned, so "What it does" is read-only. Design ported from the
  * `feat/demo-mask-pii` agent detail + background config.
  */
-import { type AgentConfig, type AgentDetailResponse, type AgentOutput, api } from "@/lib/api";
-import { ArrowLeftIcon, CheckCircleIcon, PencilSimpleIcon } from "@phosphor-icons/react";
+import { type AgentConfig, type AgentDeliveryConfig, type AgentDetailResponse, type AgentOutput, api } from "@/lib/api";
+import {
+  ArrowLeftIcon,
+  CheckCircleIcon,
+  HashIcon,
+  PencilSimpleIcon,
+  SlackLogoIcon,
+  UserIcon,
+  UsersThreeIcon,
+  WhatsappLogoIcon,
+} from "@phosphor-icons/react";
 import {
   Sheet,
   SheetContent,
@@ -23,7 +32,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 type Tab = "latest" | "config";
-type EditField = "schedule" | "focus" | "volume" | null;
+type EditField = "schedule" | "focus" | "volume" | "delivery" | null;
 
 function detailKey(agentKey: string) {
   return ["agents", "detail", agentKey];
@@ -33,6 +42,14 @@ function formatTime(hour: number, minute: number): string {
   const period = hour < 12 ? "AM" : "PM";
   const h12 = hour % 12 === 0 ? 12 : hour % 12;
   return `${h12}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
+function deliverySummary(delivery: AgentDeliveryConfig | null): string {
+  if (!delivery) return "Web only";
+  if (delivery.platform === "slack" && delivery.targetType === "channel")
+    return `Slack ${delivery.label ?? delivery.targetId}`;
+  if (delivery.platform === "slack") return `Slack DM ${delivery.label ?? delivery.targetId}`;
+  return `WhatsApp ${delivery.label ?? delivery.targetId}`;
 }
 
 export function AgentDetail({ agentKey }: { agentKey: string }) {
@@ -279,6 +296,9 @@ function ConfigTab({
         <Row label="Volume" onEdit={() => onEdit("volume")}>
           <p className="text-[12.5px] text-foreground/85">Up to {agent.maxItemsPerSection} items per section</p>
         </Row>
+        <Row label="Deliver to" onEdit={() => onEdit("delivery")}>
+          <p className="text-[12.5px] text-foreground/85">{deliverySummary(agent.delivery)}</p>
+        </Row>
       </div>
 
       <div className="mb-3 mt-7 flex items-baseline justify-between border-b border-border/60 pb-2">
@@ -380,6 +400,7 @@ const EDIT_META: Record<Exclude<EditField, null>, { title: string; hint: string 
   schedule: { title: "Runs on", hint: "When the agent runs each day, in your timezone." },
   focus: { title: "Focus", hint: "Plain-language emphasis. Added as a hint — it never overrides what the agent does." },
   volume: { title: "Volume", hint: "How many items each section can hold." },
+  delivery: { title: "Deliver to", hint: "Where completed briefs are sent after generation finishes." },
 };
 
 function EditDrawer({
@@ -400,6 +421,7 @@ function EditDrawer({
   const [minute, setMinute] = useState(agent.scheduleMinute);
   const [focus, setFocus] = useState(agent.focus ?? "");
   const [volume, setVolume] = useState(agent.maxItemsPerSection);
+  const [delivery, setDelivery] = useState<AgentDeliveryConfig | null>(agent.delivery);
 
   useEffect(() => {
     if (field) {
@@ -407,8 +429,9 @@ function EditDrawer({
       setMinute(agent.scheduleMinute);
       setFocus(agent.focus ?? "");
       setVolume(agent.maxItemsPerSection);
+      setDelivery(agent.delivery);
     }
-  }, [field, agent.scheduleHour, agent.scheduleMinute, agent.focus, agent.maxItemsPerSection]);
+  }, [field, agent.scheduleHour, agent.scheduleMinute, agent.focus, agent.maxItemsPerSection, agent.delivery]);
 
   const saveMutation = useMutation({
     mutationFn: () => {
@@ -416,6 +439,7 @@ function EditDrawer({
         return api.agents.updateConfig(agentKey, { scheduleHour: hour, scheduleMinute: minute });
       if (field === "focus") return api.agents.updateConfig(agentKey, { focus: focus.trim() ? focus.trim() : null });
       if (field === "volume") return api.agents.updateConfig(agentKey, { maxItemsPerSection: volume });
+      if (field === "delivery") return api.agents.updateConfig(agentKey, { delivery });
       return Promise.resolve({ agent });
     },
     onSuccess: () => {
@@ -425,6 +449,8 @@ function EditDrawer({
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to save"),
   });
+  const saveDisabled =
+    saveMutation.isPending || (field === "delivery" && delivery !== null && delivery.targetId.trim().length === 0);
 
   return (
     <Sheet open={field !== null} onOpenChange={(open) => !open && onClose()}>
@@ -463,6 +489,8 @@ function EditDrawer({
               value={volume}
               onChange={setVolume}
             />
+          ) : field === "delivery" ? (
+            <DeliveryEditor value={delivery} onChange={setDelivery} />
           ) : null}
         </div>
 
@@ -477,7 +505,7 @@ function EditDrawer({
           <button
             type="button"
             onClick={() => saveMutation.mutate()}
-            disabled={saveMutation.isPending}
+            disabled={saveDisabled}
             className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-4 py-1.5 text-[12px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             <CheckCircleIcon size={13} weight="bold" aria-hidden />
@@ -517,6 +545,219 @@ function NumberField({
         className="w-20 rounded-lg border-[0.5px] border-border bg-background px-3 py-2 text-[13px] text-foreground focus:border-foreground/30 focus:outline-none"
       />
     </label>
+  );
+}
+
+function DeliveryEditor({
+  value,
+  onChange,
+}: {
+  value: AgentDeliveryConfig | null;
+  onChange: (value: AgentDeliveryConfig | null) => void;
+}) {
+  const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
+  const users = useQuery({ queryKey: ["users"], queryFn: () => api.users.list() });
+  const whatsappGroups = useQuery({ queryKey: ["whatsapp-groups"], queryFn: () => api.channels.listWhatsAppGroups() });
+  const session = useQuery({ queryKey: ["auth", "session"], queryFn: () => api.auth.session() });
+
+  const platform = value?.platform ?? "slack";
+  const targetType = value?.targetType ?? (platform === "slack" ? "channel" : "group");
+  const enabled = value !== null;
+
+  const setEnabled = (next: boolean) => {
+    if (!next) {
+      onChange(null);
+      return;
+    }
+    onChange({ enabled: true, platform: "slack", targetType: "channel", targetId: "", label: null });
+  };
+
+  const setPlatform = (next: "slack" | "whatsapp") => {
+    if (!enabled) return;
+    onChange({
+      enabled: true,
+      platform: next,
+      targetType: next === "slack" ? "channel" : "group",
+      targetId: "",
+      label: null,
+    });
+  };
+
+  const setTargetType = (next: "channel" | "dm" | "group") => {
+    if (!enabled) return;
+    onChange({ enabled: true, platform, targetType: next, targetId: "", label: null });
+  };
+
+  const selectTarget = (targetId: string, label: string) => {
+    if (!enabled) return;
+    onChange({ enabled: true, platform, targetType, targetId, label });
+  };
+
+  const channelOptions = (slackChannels.data?.channels ?? []).filter((channel) => channel.isMember);
+  const dmOptions = (users.data?.users ?? []).filter(
+    (user) => user.id === session.data?.userId && user.type !== "agent" && user.slack_user_id,
+  );
+  const groupOptions = whatsappGroups.data?.groups ?? [];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 rounded-lg border-[0.5px] border-border px-3 py-2.5">
+        <span className="text-[13px] font-medium text-foreground">Send completed briefs</span>
+        <Switch
+          checked={enabled}
+          onCheckedChange={setEnabled}
+          aria-label="Send completed briefs"
+          className="data-[state=checked]:bg-emerald-500"
+        />
+      </div>
+
+      {enabled ? (
+        <>
+          <SegmentedControl
+            label="Platform"
+            options={[
+              { value: "slack", label: "Slack", icon: <SlackLogoIcon size={14} aria-hidden /> },
+              { value: "whatsapp", label: "WhatsApp", icon: <WhatsappLogoIcon size={14} aria-hidden /> },
+            ]}
+            value={platform}
+            onChange={(next) => setPlatform(next as "slack" | "whatsapp")}
+          />
+
+          {platform === "slack" ? (
+            <SegmentedControl
+              label="Target"
+              options={[
+                { value: "channel", label: "Channel", icon: <HashIcon size={14} aria-hidden /> },
+                { value: "dm", label: "DM", icon: <UserIcon size={14} aria-hidden /> },
+              ]}
+              value={targetType}
+              onChange={(next) => setTargetType(next as "channel" | "dm")}
+            />
+          ) : null}
+
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
+              Destination
+            </span>
+            <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border-[0.5px] border-border p-1">
+              {platform === "slack" && targetType === "channel" ? (
+                <TargetList
+                  loading={slackChannels.isLoading}
+                  empty="No Slack channels available."
+                  selectedId={value?.targetId ?? ""}
+                  options={channelOptions.map((channel) => ({
+                    id: channel.id,
+                    label: `#${channel.name}`,
+                    icon: <HashIcon size={14} aria-hidden />,
+                  }))}
+                  onSelect={selectTarget}
+                />
+              ) : platform === "slack" ? (
+                <TargetList
+                  loading={users.isLoading}
+                  empty="No Slack DMs available."
+                  selectedId={value?.targetId ?? ""}
+                  options={dmOptions.map((user) => ({
+                    id: user.slack_user_id ?? "",
+                    label: user.email ? `${user.name} <${user.email}>` : user.name,
+                    icon: <UserIcon size={14} aria-hidden />,
+                  }))}
+                  onSelect={selectTarget}
+                />
+              ) : (
+                <TargetList
+                  loading={whatsappGroups.isLoading}
+                  empty="No WhatsApp groups available."
+                  selectedId={value?.targetId ?? ""}
+                  options={groupOptions.map((group) => ({
+                    id: group.jid,
+                    label: group.name,
+                    icon: <UsersThreeIcon size={14} aria-hidden />,
+                  }))}
+                  onSelect={selectTarget}
+                />
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
+          The brief will remain available on Home and will not be posted to a channel.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SegmentedControl({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: Array<{ value: string; label: string; icon: React.ReactNode }>;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div>
+      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">{label}</span>
+      <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1">
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "inline-flex items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors",
+              value === option.value
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {option.icon}
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TargetList({
+  loading,
+  empty,
+  selectedId,
+  options,
+  onSelect,
+}: {
+  loading: boolean;
+  empty: string;
+  selectedId: string;
+  options: Array<{ id: string; label: string; icon: React.ReactNode }>;
+  onSelect: (targetId: string, label: string) => void;
+}) {
+  if (loading) return <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading...</p>;
+  if (options.length === 0) return <p className="px-2 py-2 text-[12px] text-muted-foreground">{empty}</p>;
+  return (
+    <div className="flex flex-col">
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          onClick={() => onSelect(option.id, option.label)}
+          className={cn(
+            "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
+            selectedId === option.id ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+          )}
+        >
+          <span className="shrink-0">{option.icon}</span>
+          <span className="min-w-0 flex-1 truncate">{option.label}</span>
+          {selectedId === option.id ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
+        </button>
+      ))}
+    </div>
   );
 }
 

@@ -40,6 +40,17 @@ export interface AgentOutputItemInput {
   sortOrder: number;
 }
 
+export type AgentDeliveryPlatform = "slack" | "whatsapp";
+export type AgentDeliveryTargetType = "channel" | "dm" | "group";
+
+export interface AgentDeliveryConfig {
+  enabled: true;
+  platform: AgentDeliveryPlatform;
+  targetType: AgentDeliveryTargetType;
+  targetId: string;
+  label: string | null;
+}
+
 /**
  * Per-user reconfiguration of a prebuilt agent. `prefs` carries the additive,
  * structured preferences (section toggles + plain-language focus); agent behavior
@@ -48,6 +59,7 @@ export interface AgentOutputItemInput {
 export interface AgentUserPrefs {
   sections?: Record<string, boolean>;
   focus?: string | null;
+  delivery?: AgentDeliveryConfig | null;
 }
 
 export interface AgentUserConfig {

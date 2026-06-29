@@ -394,6 +394,12 @@ export class WhatsAppBot {
     return meta?.subject ?? "Unknown Group";
   }
 
+  async resolveJidToPhone(jid: string): Promise<string | null> {
+    if (jid.endsWith("@lid")) return this.resolveLidToPhone(jid);
+    if (jid.endsWith("@s.whatsapp.net")) return jidToPhoneNumber(jid);
+    return null;
+  }
+
   // --- Internal ---
 
   private async createSocket(): Promise<void> {
@@ -576,9 +582,7 @@ export class WhatsAppBot {
       cleanText = stripBotMention(cleanText, this.sock?.user?.name);
     }
 
-    const senderPhone = senderJid.endsWith("@lid")
-      ? await this.resolveLidToPhone(senderJid)
-      : jidToPhoneNumber(senderJid);
+    const senderPhone = await this.resolveJidToPhone(senderJid);
 
     if (this.handler) {
       const quotedMessage = extractQuotedMessage(contextInfo);
