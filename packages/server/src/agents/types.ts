@@ -1,9 +1,14 @@
 import type { Kysely } from "kysely";
 import type { Selectable } from "kysely";
-import type { AgentKnowledgeRefs, AgentOutputItemInput, AgentOutputItemRow } from "../db/repositories/agent-outputs";
+import type {
+  AgentKnowledgeRefs,
+  AgentOutputItemInput,
+  AgentStoredItemRow,
+  AgentStructuredPayload,
+} from "../db/repositories/agent-outputs";
 import type { DB, UsersTable } from "../db/schema";
 
-export type AgentStoredItem = AgentOutputItemRow & { knowledgeRefs: AgentKnowledgeRefs };
+export type AgentStoredItem = AgentStoredItemRow;
 
 export interface AgentSectionDef {
   key: string;
@@ -32,6 +37,7 @@ export interface AgentApiItem {
   actionLabel: string | null;
   actionPrompt: string | null;
   sourceUrl: string | null;
+  structuredPayload: AgentStructuredPayload | null;
   knowledgeRefs: AgentKnowledgeRefs;
   sortOrder: number;
 }
@@ -76,6 +82,18 @@ export interface AgentDefinition {
   enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]>;
   /** Optional per-definition runtime context appended to the agent run JSON. */
   buildRuntimeContext?(params: AgentRuntimeContextParams): Promise<Record<string, unknown>>;
+  /**
+   * Optional pass over the emitted items before enrichment/validation. Used by
+   * sections whose canonical content is deterministic (e.g. meetings, where the
+   * list comes from the calendar, not the model): reconcile the model's items
+   * against the server-built skeleton in `runtimeContext` so nothing is invented,
+   * dropped, or has its identity fields overwritten by the model.
+   */
+  reconcileItems?(params: {
+    db: Kysely<DB>;
+    items: AgentOutputItemInput[];
+    runtimeContext: Record<string, unknown>;
+  }): Promise<AgentOutputItemInput[]>;
   /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
   toApiItem(item: AgentStoredItem): AgentApiItem;
 }

@@ -45,6 +45,7 @@ export function HomePage() {
           brief={brief}
           running={running}
           enabledSections={briefQuery.data?.enabledSections}
+          calendarConnected={briefQuery.data?.calendarConnected}
           onOpenChat={(prompt) => {
             void navigate(chatPrefillTargetFromPrompt(prompt));
           }}

@@ -55,6 +55,7 @@ describe("Google Calendar connector", () => {
       sourcePath: "Google Calendar / Work",
       sourceCreatedAt: "2026-02-04T10:00:00.000Z",
       sourceUpdatedAt: "2026-02-02T10:00:00.000Z",
+      isAllDay: false,
       mimeType: "text/calendar",
       authorEmail: "owner@canvasx.ai",
       authorName: "Owner",
@@ -66,6 +67,27 @@ describe("Google Calendar connector", () => {
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },
     ]);
+  });
+
+  it("flags all-day events (date-only start) so the brief can tell them from a midnight-UTC meeting", () => {
+    const allDay = eventToSyncedItem(
+      calendarEvent("offsite-1", { start: { date: "2026-02-04" }, end: { date: "2026-02-05" } }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+    expect(allDay?.isAllDay).toBe(true);
+    expect(allDay?.sourceCreatedAt).toBe("2026-02-04T00:00:00.000Z");
+
+    const midnightTimed = eventToSyncedItem(
+      calendarEvent("midnight-1", {
+        start: { dateTime: "2026-02-04T00:00:00Z" },
+        end: { dateTime: "2026-02-04T00:30:00Z" },
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+    expect(midnightTimed?.isAllDay).toBe(false);
+    expect(midnightTimed?.sourceCreatedAt).toBe("2026-02-04T00:00:00.000Z");
   });
 
   it("extracts Calendly invitees and guests from the event description when Google attendees are missing", () => {
@@ -249,6 +271,35 @@ describe("Google Calendar connector", () => {
 
     expect(item?.accessEmails).toEqual(["owner@canvasx.ai"]);
     expect(item?.attendees).toEqual([{ name: "Owner", email: "owner@canvasx.ai" }]);
+  });
+
+  it("drops events the owner declined", () => {
+    const item = eventToSyncedItem(
+      calendarEvent("declined", {
+        attendees: [
+          { email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus: "declined" },
+          { email: "jane@example.com", displayName: "Jane Doe", responseStatus: "accepted" },
+        ],
+      }),
+      primaryCalendar,
+      "owner@canvasx.ai",
+    );
+
+    expect(item).toBeNull();
+  });
+
+  it("keeps events the owner has not declined", () => {
+    for (const responseStatus of ["accepted", "tentative", "needsAction"]) {
+      const item = eventToSyncedItem(
+        calendarEvent(`rsvp-${responseStatus}`, {
+          attendees: [{ email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus }],
+        }),
+        primaryCalendar,
+        "owner@canvasx.ai",
+      );
+
+      expect(item).not.toBeNull();
+    }
   });
 
   it("syncs readable calendars and stores per-calendar sync tokens", async () => {
@@ -498,6 +549,96 @@ describe("Google Calendar connector", () => {
       },
     ]);
     expect(cursor.calendars).toEqual({ primary: "sync-primary-new" });
+  });
+
+  it("removes a previously synced event the owner has now declined", async () => {
+    const connector = createGoogleCalendarConnector();
+    const removals: SourceItemRemovalRecord[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        return jsonResponse({
+          items: [
+            calendarEvent("declined", {
+              attendees: [{ email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus: "declined" }],
+            }),
+            calendarEvent("kept"),
+          ],
+          nextSyncToken: "sync-primary-new",
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: currentCursor({ primary: "sync-primary-old" }),
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["primary:kept"]);
+    expect(removals).toEqual([
+      {
+        providerFileId: providerFileIdForEvent("primary", "declined"),
+        reason: "google_calendar_event_declined",
+      },
+    ]);
+  });
+
+  it("keeps the recurring series when a single instance is declined", async () => {
+    const connector = createGoogleCalendarConnector();
+    const removals: SourceItemRemovalRecord[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        return jsonResponse({
+          items: [
+            calendarEvent("recur-declined", {
+              recurringEventId: "recur-declined-series",
+              attendees: [{ email: "owner@canvasx.ai", displayName: "Owner", self: true, responseStatus: "declined" }],
+            }),
+          ],
+          nextSyncToken: "sync-primary-new",
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        cursor: currentCursor({ primary: "sync-primary-old" }),
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onSourceItemRemoved: async (record) => {
+          removals.push(record);
+        },
+      }),
+    );
+
+    expect(removals).toEqual([]);
   });
 
   it("prunes unreadable calendars and drops their stale sync token", async () => {

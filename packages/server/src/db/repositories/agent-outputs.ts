@@ -21,6 +21,9 @@ export interface AgentMasthead {
   generatedFor?: string;
 }
 
+/** Section-specific structured data carried alongside the generic item shape. */
+export type AgentStructuredPayload = Record<string, unknown>;
+
 export interface AgentOutputItemInput {
   sectionKey: string;
   title: string;
@@ -32,6 +35,7 @@ export interface AgentOutputItemInput {
   actionLabel?: string | null;
   actionPrompt?: string | null;
   sourceUrl?: string | null;
+  structuredPayload?: AgentStructuredPayload | null;
   knowledgeRefs: AgentKnowledgeRefs;
   sortOrder: number;
 }
@@ -118,16 +122,22 @@ function toConfig(row: Selectable<DB["agent_user_configs"]> | undefined): AgentU
   };
 }
 
+export type AgentStoredItemRow = AgentOutputItemRow & {
+  knowledgeRefs: AgentKnowledgeRefs;
+  structuredPayload: AgentStructuredPayload | null;
+};
+
 export interface AgentOutputWithItems {
   output: AgentOutputRow;
   masthead: AgentMasthead | null;
-  items: Array<AgentOutputItemRow & { knowledgeRefs: AgentKnowledgeRefs }>;
+  items: AgentStoredItemRow[];
 }
 
-function withRefs(item: AgentOutputItemRow): AgentOutputItemRow & { knowledgeRefs: AgentKnowledgeRefs } {
+function withRefs(item: AgentOutputItemRow): AgentStoredItemRow {
   return {
     ...item,
     knowledgeRefs: parseJson<AgentKnowledgeRefs>(item.knowledge_refs_json) ?? { entityIds: [], fileIds: [] },
+    structuredPayload: parseJson<AgentStructuredPayload>(item.structured_payload_json),
   };
 }
 
@@ -368,6 +378,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
             action_prompt: item.actionPrompt ?? null,
             knowledge_refs_json: JSON.stringify(item.knowledgeRefs),
             source_url: item.sourceUrl ?? null,
+            structured_payload_json: item.structuredPayload ? JSON.stringify(item.structuredPayload) : null,
             sort_order: item.sortOrder,
             created_at: now,
           }));

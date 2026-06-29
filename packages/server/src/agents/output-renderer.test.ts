@@ -21,6 +21,7 @@ function item(overrides: Partial<AgentApiItem> = {}): AgentApiItem {
     actionPrompt: "Plan the follow-up.",
     sourceUrl: "https://linear.app/sketch-ai/issue/SKE-235/example",
     knowledgeRefs: { entityIds: ["entity-1"], fileIds: [] },
+    structuredPayload: null,
     sortOrder: 0,
     ...overrides,
   };

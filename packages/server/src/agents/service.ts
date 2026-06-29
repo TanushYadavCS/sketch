@@ -597,15 +597,6 @@ export class AgentRunService {
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
     const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
-    const writer = this.createWriter(def, {
-      outputId,
-      enabledSections: new Set(enabledSections),
-      expectedOutputDate: output.output_date,
-      expectedTimezone: output.timezone,
-      onSaved: () => {
-        saved = true;
-      },
-    });
 
     try {
       const now = new Date();
@@ -644,6 +635,16 @@ export class AgentRunService {
         previousDayOutput: this.formatOutputForContext(previousDay.output),
         ...definitionContext,
       };
+      const writer = this.createWriter(def, {
+        outputId,
+        enabledSections: new Set(enabledSections),
+        expectedOutputDate: output.output_date,
+        expectedTimezone: output.timezone,
+        runtimeContext,
+        onSaved: () => {
+          saved = true;
+        },
+      });
       const userMessage = buildSketchContext({
         messages: [],
         currentUserName: user.name,
@@ -724,6 +725,7 @@ export class AgentRunService {
       enabledSections: Set<string>;
       expectedOutputDate: string;
       expectedTimezone: string;
+      runtimeContext: Record<string, unknown>;
       onSaved: () => void;
     },
   ): AgentOutputWriter {
@@ -745,7 +747,10 @@ export class AgentRunService {
         const filtered = payload.items.filter(
           (item) => sectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
         );
-        const items = await def.enrichItems(this.deps.db, filtered);
+        const reconciled = def.reconcileItems
+          ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
+          : filtered;
+        const items = await def.enrichItems(this.deps.db, reconciled);
         await this.validateItemRefs(def, items);
         await this.repo.completeOutput({
           outputId: params.outputId,

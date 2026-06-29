@@ -75,6 +75,7 @@ describe("createAgentOutputDeliveryService", () => {
               actionPrompt: "Plan it.",
               sourceUrl: null,
               knowledgeRefs: { entityIds: ["entity-1"], fileIds: [] },
+              structuredPayload: null,
               sortOrder: 0,
             },
           ],
