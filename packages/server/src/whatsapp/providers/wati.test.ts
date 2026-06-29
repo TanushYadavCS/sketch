@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../../test-utils";
-import type { WhatsAppInboundMessage } from "../provider";
+import { type WhatsAppInboundMessage, whatsappDeliveryTargetFromTarget } from "../provider";
 import {
   createWatiWhatsAppProvider,
   normalizeWatiPhoneNumber,
@@ -44,7 +44,7 @@ function quotedMessage(): WhatsAppInboundMessage {
     senderName: "Alice",
     senderProviderId: "15551234567",
     senderPhoneE164: "+15551234567",
-    target: { kind: "dm", phoneE164: "+15551234567", providerConversationId: "conversation-1" },
+    target: { kind: "dm", phoneE164: "+15551234567" },
     text: "hello",
   };
 }
@@ -71,11 +71,13 @@ describe("Wati webhook parsing", () => {
         senderName: "Alice",
         senderProviderId: "8618719149214",
         senderPhoneE164: "+8618719149214",
-        target: { kind: "dm", phoneE164: "+8618719149214", providerConversationId: "conversation-1" },
+        target: { kind: "dm", phoneE164: "+8618719149214" },
         text: "hello",
         quotedMessage: { providerMessageId: "wamid.parent", participantJid: null, text: "" },
       },
     });
+    if (parsed.kind !== "message") throw new Error("expected message");
+    expect(whatsappDeliveryTargetFromTarget(parsed.message.target)).toBe("dm:+8618719149214");
     expect(parsed.kind === "message" ? parsed.message.rawProviderPayload : null).toEqual(documentedMessagePayload());
   });
 

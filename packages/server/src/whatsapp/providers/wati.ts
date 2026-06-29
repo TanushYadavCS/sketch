@@ -350,7 +350,7 @@ export function parseWatiWebhookEvent(
       senderName: optionalString(payload.senderName) ?? senderPhoneE164,
       senderProviderId: optionalString(payload.waId) ?? senderPhoneE164,
       senderPhoneE164,
-      target: { kind: "dm", phoneE164: senderPhoneE164, providerConversationId },
+      target: { kind: "dm", phoneE164: senderPhoneE164 },
       text,
       rawProviderPayload: payload,
       ...(mediaType ? { mediaType } : {}),
