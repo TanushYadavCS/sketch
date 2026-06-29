@@ -36,6 +36,7 @@ import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
+import { watiWebhookRoutes } from "./api/wati-webhook";
 import { webChatRoutes } from "./api/web-chat";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
@@ -77,11 +78,13 @@ import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
 import type { WhatsAppBot } from "./whatsapp/bot";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import type { WhatsAppRuntime } from "./whatsapp/runtime";
 
 interface AppDeps {
   whatsapp?: WhatsAppBot;
   whatsappRuntime?: WhatsAppRuntime;
+  watiWebhook?: WatiWhatsAppProvider;
   getSlack?: () => SlackBot | null;
   logger?: Logger;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
@@ -191,6 +194,10 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         return c.json({ error: "Invalid request" }, 401);
       }
     });
+  }
+
+  if (deps?.watiWebhook) {
+    app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, logger));
   }
 
   app.use(

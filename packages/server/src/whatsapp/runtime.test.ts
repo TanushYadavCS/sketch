@@ -163,5 +163,6 @@ describe("createWhatsAppRuntime", () => {
     expect(handler).toHaveBeenCalledTimes(2);
     expect(handler).toHaveBeenNthCalledWith(1, expect.objectContaining({ kind: "group", providerId: "baileys" }));
     expect(handler).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: "dm", providerId: "wati" }));
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "dm", providerId: "baileys" }));
   });
 });
