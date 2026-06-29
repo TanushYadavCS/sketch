@@ -231,11 +231,15 @@ describe("Wati outbound provider", () => {
     });
 
     const [url, init] = firstFetchCall(requestFetch);
-    expect(url.toString()).toContain("https://tenant.wati.io/api/v1/sendSessionMessage/15551234567");
-    expect(url.searchParams.get("messageText")).toBe("hello");
-    expect(url.searchParams.get("replyContextId")).toBe("wamid.inbound");
-    expect(url.searchParams.get("channelPhoneNumber")).toBe("17435002445");
-    expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
+    expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendSessionMessage/15551234567");
+    expect(init.headers).toEqual({
+      Authorization: "Bearer wati-token",
+      "Content-Type": "application/x-www-form-urlencoded",
+    });
+    expect(init.body).toBeInstanceOf(URLSearchParams);
+    expect((init.body as URLSearchParams).get("messageText")).toBe("hello");
+    expect((init.body as URLSearchParams).get("replyContextId")).toBe("wamid.inbound");
+    expect((init.body as URLSearchParams).get("channelPhoneNumber")).toBe("17435002445");
     expect(sent).toEqual({
       providerMessageId: "wamid.sent",
       providerConversationId: "conversation-2",

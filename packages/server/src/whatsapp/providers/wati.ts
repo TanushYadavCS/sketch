@@ -87,15 +87,16 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
   ): Promise<WhatsAppSendResult | null> => {
     const phone = targetPhoneDigits(target);
     const url = new URL(`${endpoint}/api/v1/sendSessionMessage/${encodeURIComponent(phone)}`);
-    url.searchParams.set("messageText", text);
+    const bodyParams = new URLSearchParams({ messageText: text });
 
     const replyContextId = options?.quotedMessage?.providerMessageId;
-    if (replyContextId) url.searchParams.set("replyContextId", replyContextId);
-    if (channelPhoneDigits) url.searchParams.set("channelPhoneNumber", channelPhoneDigits);
+    if (replyContextId) bodyParams.set("replyContextId", replyContextId);
+    if (channelPhoneDigits) bodyParams.set("channelPhoneNumber", channelPhoneDigits);
 
     const body = await fetchJson(requestFetch, url, {
       method: "POST",
-      headers: authorizationHeaders(config.accessToken),
+      headers: { ...authorizationHeaders(config.accessToken), "Content-Type": "application/x-www-form-urlencoded" },
+      body: bodyParams,
     });
 
     return sendResultFromWatiBody(body, target);
