@@ -138,6 +138,7 @@ export async function processSyncedItem({
         content_category: item.contentCategory ?? undefined,
         source_created_at: sourceCreatedAt,
         source_updated_at: sourceUpdatedAt,
+        ...(item.isAllDay !== undefined ? { is_all_day: item.isAllDay ? 1 : 0 } : {}),
         mime_type: item.mimeType ?? undefined,
         rollup_group_id: item.rollupGroupId ?? null,
       })
@@ -166,6 +167,7 @@ export async function processSyncedItem({
       contentHash: item.contentHash,
       sourceCreatedAt: item.sourceCreatedAt,
       sourceUpdatedAt: item.sourceUpdatedAt,
+      isAllDay: item.isAllDay,
       mimeType: item.mimeType,
       rollupGroupId: item.rollupGroupId ?? null,
     });

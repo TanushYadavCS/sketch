@@ -129,6 +129,7 @@ export interface IndexedFilesTable {
   is_archived: Generated<number>;
   source_created_at: string | null;
   source_updated_at: string | null;
+  is_all_day: Generated<number>;
   synced_at: string;
   indexed_at: Generated<string>;
   context_note: string | null;
@@ -553,6 +554,8 @@ export interface AgentOutputItemsTable {
   action_prompt: string | null;
   knowledge_refs_json: string;
   source_url: string | null;
+  /** Optional section-specific structured data (e.g. meetings: start time, attendees). */
+  structured_payload_json: string | null;
   sort_order: number;
   created_at: Generated<string>;
 }

@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import type { Kysely } from "kysely";
+import type { DB } from "../db/schema";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import type { AgentOutputApi, AgentRunService } from "./service";
 
@@ -24,6 +26,7 @@ function toBriefShape(output: AgentOutputApi | null) {
     generatedAt: output.generatedAt,
     masthead: output.masthead,
     sections: {
+      meetings: output.sections.meetings ?? [],
       todos: output.sections.todos ?? [],
       customer_updates: output.sections.customer_updates ?? [],
       active_projects: output.sections.active_projects ?? [],
@@ -31,20 +34,39 @@ function toBriefShape(output: AgentOutputApi | null) {
   };
 }
 
-export function dailyBriefRoutes(service: AgentRunService) {
+/**
+ * Whether the reader has connected their own calendar. Drives the meetings
+ * section empty state: a connect nudge when false, an "empty day" line when true.
+ */
+async function hasCalendarConnector(db: Kysely<DB>, userId: string): Promise<boolean> {
+  const row = await db
+    .selectFrom("connector_configs")
+    .select("id")
+    .where("connector_type", "=", "google_calendar")
+    .where("created_by", "=", userId)
+    .limit(1)
+    .executeTakeFirst();
+  return Boolean(row);
+}
+
+export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
   const routes = new Hono();
 
   routes.get("/", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const date = c.req.query("date") || undefined;
-    const result = await service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, userId, date);
+    const [result, calendarConnected] = await Promise.all([
+      service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, userId, date),
+      hasCalendarConnector(db, userId),
+    ]);
     return c.json({
       brief: toBriefShape(result.output),
       running: result.running,
       briefDate: result.outputDate,
       timezone: result.timezone,
       enabledSections: result.enabledSections,
+      calendarConnected,
     });
   });
 

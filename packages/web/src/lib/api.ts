@@ -961,9 +961,24 @@ export interface DailyBriefKnowledgeRefs {
   factIds?: string[];
 }
 
+export interface DailyBriefMeetingAttendee {
+  name: string;
+  entityId: string | null;
+  role: string | null;
+  note: string | null;
+  emphasis: boolean;
+}
+
+/** Structured payload carried by meetings-section items (start time, attendees). */
+export interface DailyBriefMeetingPayload {
+  startTime: string;
+  via: string | null;
+  attendees: DailyBriefMeetingAttendee[];
+}
+
 export interface DailyBriefItem {
   id: string;
-  sectionKey: "todos" | "customer_updates" | "active_projects";
+  sectionKey: "meetings" | "todos" | "customer_updates" | "active_projects";
   title: string;
   summary: string;
   priority: "high" | "medium" | "low";
@@ -973,6 +988,7 @@ export interface DailyBriefItem {
   actionLabel: string | null;
   actionPrompt: string | null;
   sourceUrl: string | null;
+  structuredPayload: DailyBriefMeetingPayload | null;
   knowledgeRefs: DailyBriefKnowledgeRefs;
   sortOrder: number;
 }
@@ -990,6 +1006,7 @@ export interface DailyBrief {
     generatedFor?: string;
   } | null;
   sections: {
+    meetings: DailyBriefItem[];
     todos: DailyBriefItem[];
     customer_updates: DailyBriefItem[];
     active_projects: DailyBriefItem[];
@@ -1003,6 +1020,8 @@ export interface DailyBriefResponse {
   timezone: string;
   /** Section keys currently enabled in the user's config. Disabled sections are hidden on Home. */
   enabledSections?: string[];
+  /** Whether the reader has connected a calendar — drives the meetings empty state. */
+  calendarConnected?: boolean;
 }
 
 export interface AgentSummary {

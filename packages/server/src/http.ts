@@ -353,7 +353,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
   if (deps?.agentRunService) {
-    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService));
+    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService, db));
     app.route("/api/agents", agentRoutes(deps.agentRunService));
   }
   app.route("/api/workspace", createWorkspaceApi({ config }));
