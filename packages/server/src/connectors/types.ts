@@ -227,6 +227,7 @@ export interface FeatureFactRaw {
   featureName: string;
   corroborationKey?: string;
   parentProductRef?: { source: string; sourceId: string };
+  parentProductName?: string;
   parentEntityId?: string;
   status: "proposed" | "building" | "shipped" | "deprecated";
   dueAt?: string;

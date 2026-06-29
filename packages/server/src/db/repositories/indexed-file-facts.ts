@@ -356,6 +356,9 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
         throw new Error(`feature ${key} must be a string`);
       }
     }
+    if (raw.parentProductName !== undefined && typeof raw.parentProductName !== "string") {
+      throw new Error("feature parentProductName must be a string");
+    }
   } else if (input.factType === "milestone") {
     if (
       !input.connectorConfigId?.trim() ||

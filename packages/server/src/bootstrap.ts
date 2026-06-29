@@ -88,11 +88,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
   configureMaterializeDefaults({
     llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
     llmTaskCorroborationThreshold: config.LLM_TASK_CORROBORATION_THRESHOLD,
+    featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
     birthGateTypes: config.EXPERIMENTAL_FLAG
       ? new Set<ProposeEntityType>(["project", "product", "team"])
       : new Set<ProposeEntityType>(),
     birthGateLiveTypes: config.EXPERIMENTAL_FLAG
-      ? new Set<ProposeEntityType>(["product"])
+      ? new Set<ProposeEntityType>(["product", "project"])
       : new Set<ProposeEntityType>(),
     structuralAutoBirthTypes: config.EXPERIMENTAL_FLAG
       ? new Set<ProposeEntityType>(["project"])

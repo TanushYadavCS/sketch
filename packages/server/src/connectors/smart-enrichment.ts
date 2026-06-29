@@ -41,15 +41,15 @@ import {
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
 } from "../entities/materialize";
-import { normalizeEntityMatchName } from "../entities/materialize-deps";
 import { reconcileFeatureSubEntity } from "../entities/materialize-feature";
-import type { EntityRow, MaterializeDeps } from "../entities/materialize-types";
+import type { MaterializeDeps } from "../entities/materialize-types";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
 import { isEmailProviderName, validateLearnedFact, validateLlmMention } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
 import type { EmbeddingProvider } from "./embeddings/types";
+import { isCodeShapedFeatureName } from "./feature-name-filter";
 import type { GeminiGenerator } from "./gemini-generate";
 import {
   type FactSelectionCache,
@@ -336,6 +336,9 @@ export async function extractEntities(
   const featureFocusLine = experimentalFlag
     ? '- **Features**: a feature is a named sub-capability, module, tab, or screen within a product (e.g., "CRM Analytics", "Push Notifications"). Emit it as type "feature" and set "parentProduct" to the product it belongs to. Never emit a feature as a product or project.\n'
     : "";
+  const featureNoiseLine = experimentalFlag
+    ? "- Do not emit class names, DTOs, code symbols, table names, or column names as features.\n"
+    : "";
   const featureSchemaInstruction = experimentalFlag
     ? '\nFor feature mentions, include "parentProduct" with the product the feature belongs to. Omit "parentProduct" for non-feature mentions.\n'
     : "";
@@ -371,6 +374,7 @@ Extract entities that a business team would want to track and reference across d
 ${toolFocusLine}${featureFocusLine}
 
 DO NOT extract:
+${featureNoiseLine}
 - Email addresses, phone numbers, URLs, or other system identifiers — these are stored separately. If a person is identifiable by name, use the name (e.g., "Sarah Chen"); never use an email address as the mention.
 - Generic technologies, frameworks, or libraries (Redis, Kafka, Node.js, React, PostgreSQL, Express, Vite)
 - Cloud infrastructure services (ECS, EKS, RDS, S3, Lambda, AWS Batch)
@@ -1065,17 +1069,23 @@ async function reconcileLlmExtractionFacts(
         continue;
       }
       if (mention.type === "feature") {
-        materializeDeps ??= await buildMaterializeDeps(db, { experimentalFlag: deps.experimentalFlag });
-        const parent = resolveFeatureParentProduct(materializeDeps, mention.parentProduct);
-        if (!parent) {
+        if (isCodeShapedFeatureName(mention.mention)) {
           deps.logger.info(
-            { fileId: file.id, displayName: mention.mention, parentProduct: mention.parentProduct ?? null },
-            "Dropped LLM feature mention without a unique parent product",
+            { fileId: file.id, displayName: mention.mention, reason: "feature_name_code_shaped" },
+            "Dropped code-shaped LLM feature mention",
           );
           continue;
         }
-        const featureId = buildLlmFeatureId(file.id, mention.mention, parent.id);
-        const corroborationKey = buildLlmFeatureCorroborationKey(mention.mention, parent.id);
+        const parentProductName = mention.parentProduct?.trim() ?? "";
+        if (!parentProductName) {
+          deps.logger.info(
+            { fileId: file.id, displayName: mention.mention },
+            "Dropped LLM feature mention without a parent product name",
+          );
+          continue;
+        }
+        const featureId = buildLlmFeatureId(file.id, mention.mention, parentProductName);
+        const corroborationKey = buildLlmFeatureCorroborationKey(mention.mention, parentProductName);
         await deps.ensureFresh?.();
         const result = await upsertFeatureFact(db, {
           experimentalFlag: deps.experimentalFlag,
@@ -1086,9 +1096,9 @@ async function reconcileLlmExtractionFacts(
           source: "llm_extraction",
           featureId,
           featureName: mention.mention,
-          parentEntityId: parent.id,
+          parentProductName,
           status: "proposed",
-          evidence: { fileIds: [file.id], entityIds: [parent.id] },
+          evidence: { fileIds: [file.id], entityIds: [] },
           corroborationKey,
           promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
           model: "gemini",
@@ -1203,29 +1213,15 @@ function isFeatureMention(mention: ExtractedMention): boolean {
   return mention.type.trim().toLowerCase() === "feature";
 }
 
-function resolveFeatureParentProduct(
-  deps: MaterializeDeps,
-  parentProduct: string | null | undefined,
-): EntityRow | null {
-  const normalized = normalizeEntityMatchName("product", parentProduct ?? "");
-  if (!normalized) return null;
-  const matches = [
-    ...deps.lookup.getByNormalizedName(normalized),
-    ...(deps.lookup.getByAlias?.(normalized) ?? []),
-  ].filter((entity) => entity.source_type === "product");
-  const unique = new Map(matches.map((entity) => [entity.id, entity]));
-  return unique.size === 1 ? [...unique.values()][0] : null;
-}
-
-function buildLlmFeatureId(indexedFileId: string, featureName: string, parentEntityId: string): string {
+function buildLlmFeatureId(indexedFileId: string, featureName: string, parentProductName: string): string {
   return `llm-feature:${indexedFileId}:${createHash("sha256")
-    .update([normalizeName(featureName), parentEntityId].join("\x1f"))
+    .update([normalizeName(featureName), normalizeName(parentProductName)].join("\x1f"))
     .digest("hex")}`;
 }
 
-function buildLlmFeatureCorroborationKey(featureName: string, parentEntityId: string): string {
+function buildLlmFeatureCorroborationKey(featureName: string, parentProductName: string): string {
   return createHash("sha256")
-    .update([normalizeName(featureName), parentEntityId].join("\x1f"))
+    .update([normalizeName(featureName), normalizeName(parentProductName)].join("\x1f"))
     .digest("hex");
 }
 

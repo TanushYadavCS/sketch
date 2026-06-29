@@ -200,6 +200,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           skipReset: true,
           lockAlreadyHeld: true,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           experimentalFlag: config.EXPERIMENTAL_FLAG,
           onProgress: (progress) => {
@@ -375,6 +376,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           lockAlreadyHeld,
           experimentalFlag: config.EXPERIMENTAL_FLAG,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           geminiMaxRpm: config.GEMINI_MAX_RPM,
           geminiMaxRetries: config.GEMINI_MAX_RETRIES,
@@ -583,6 +585,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           skipReset: true,
           lockAlreadyHeld: true,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
+          featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           experimentalFlag: config.EXPERIMENTAL_FLAG,
           materializeFactTypes: factTypes.length > 0 ? factTypes : undefined,
