@@ -1510,9 +1510,10 @@ export const api = {
         publicKeyId: string | null;
       }>("/api/connectors/credential-source");
     },
-    canvasSuggestion(appId: string, accountId?: string | null) {
+    canvasSuggestion(appId: string, accountId?: string | null, source?: string | null) {
       const params = new URLSearchParams({ appId });
       if (accountId) params.set("accountId", accountId);
+      if (source) params.set("source", source);
       return request<{ suggestion: { connectorType: string; appId: string; accountId?: string } | null }>(
         `/api/connectors/canvas/suggestions?${params.toString()}`,
       );

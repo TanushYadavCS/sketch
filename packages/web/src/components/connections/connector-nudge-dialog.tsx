@@ -33,7 +33,9 @@ export function ConnectorNudgeDialog({
     () => (suggestion ? getIntegration(suggestion.connectorType as IntegrationType) : undefined),
     [suggestion],
   );
-  const suggestionKey = suggestion ? `${suggestion.connectorType}:${suggestion.appId}` : null;
+  const suggestionKey = suggestion
+    ? `${suggestion.connectorType}:${suggestion.appId}:${suggestion.accountId ?? ""}`
+    : null;
 
   useEffect(() => {
     if (!suggestionKey) return;
@@ -55,10 +57,10 @@ export function ConnectorNudgeDialog({
             <div className="flex items-start gap-3 pr-8">
               <IntegrationIcon color={definition.color} name={definition.name} type={definition.type} size="md" />
               <div className="min-w-0">
-                <DialogTitle>Sync {definition.name} into Files?</DialogTitle>
+                <DialogTitle>Add {definition.name} to the org brain?</DialogTitle>
                 <DialogDescription className="mt-1">
-                  Use the {suggestion.appName ?? definition.name} account you just connected to index{" "}
-                  {connectorItemCopy(definition)} for search and chat.
+                  Index the {suggestion.appName ?? definition.name} account you just connected so Sketch can search{" "}
+                  {connectorItemCopy(definition)} in Files and use it in chat.
                 </DialogDescription>
               </div>
             </div>
@@ -69,9 +71,9 @@ export function ConnectorNudgeDialog({
               <DatabaseIcon size={16} className="text-muted-foreground" />
             </div>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Personal connector</p>
+              <p className="text-sm font-medium">Personal Files connector</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                Only your account is connected. You can manage sync scope from Files.
+                Only your account is connected. You can choose what syncs from Files.
               </p>
             </div>
           </div>
@@ -80,7 +82,7 @@ export function ConnectorNudgeDialog({
             <Button variant="outline" onClick={close}>
               Not now
             </Button>
-            <Button onClick={() => setConnecting(true)}>Connect connector</Button>
+            <Button onClick={() => setConnecting(true)}>Add to org brain</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

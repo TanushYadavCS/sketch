@@ -202,7 +202,45 @@ describe("ConnectionsPage direct connect", () => {
 
     server.use(
       http.get("/api/connectors/canvas/suggestions", ({ request }) => {
-        expect(new URL(request.url).searchParams.get("appId")).toBe("google-gmail-oauth");
+        const params = new URL(request.url).searchParams;
+        expect(params.get("appId")).toBe("google-gmail-oauth");
+        expect(params.get("accountId")).toBe("secrets:user-1:gmail:google-gmail-oauth");
+        expect(params.get("source")).toBe("canvas_user_secrets");
+        return HttpResponse.json({
+          suggestion: {
+            connectorType: "gmail",
+            appId: "google-gmail-oauth",
+            accountId: "secrets:user-1:gmail:google-gmail-oauth",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ConnectionsPage />);
+
+    expect(await screen.findByText("Gmail is connected")).toBeInTheDocument();
+    expect(await screen.findByText("Add Gmail to the org brain?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add to org brain" })).toBeInTheDocument();
+  });
+
+  it("does not nudge users for matching legacy Pipedream connections", async () => {
+    const suggestions = vi.fn();
+    setupCommonHandlers([
+      {
+        id: "apn_gmail",
+        providerId: "provider-1",
+        source: "pipedream",
+        appId: "google-gmail-oauth",
+        appName: "Gmail",
+        status: "active",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    window.history.replaceState({}, "", "/integrations?verify_connected=google-gmail-oauth");
+
+    server.use(
+      http.get("/api/connectors/canvas/suggestions", () => {
+        suggestions();
         return HttpResponse.json({
           suggestion: {
             connectorType: "gmail",
@@ -215,8 +253,8 @@ describe("ConnectionsPage direct connect", () => {
     renderWithProviders(<ConnectionsPage />);
 
     expect(await screen.findByText("Gmail is connected")).toBeInTheDocument();
-    expect(await screen.findByText("Sync Gmail into Files?")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect connector" })).toBeInTheDocument();
+    expect(screen.queryByText("Add Gmail to the org brain?")).not.toBeInTheDocument();
+    expect(suggestions).not.toHaveBeenCalled();
   });
 
   it("keeps polling callback verification until the provider returns the connection", async () => {
