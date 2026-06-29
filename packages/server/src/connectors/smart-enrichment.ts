@@ -45,10 +45,16 @@ import { reconcileFeatureSubEntity } from "../entities/materialize-feature";
 import type { MaterializeDeps } from "../entities/materialize-types";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
-import { isEmailProviderName, validateLearnedFact, validateLlmMention } from "../entities/validators";
+import {
+  isDomainOrUrlOrEmailName,
+  isEmailProviderName,
+  validateLearnedFact,
+  validateLlmMention,
+} from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
 import type { EmbeddingProvider } from "./embeddings/types";
+import { isGenericEngagementName } from "./engagement-name-filter";
 import { isCodeShapedFeatureName } from "./feature-name-filter";
 import type { GeminiGenerator } from "./gemini-generate";
 import {
@@ -85,7 +91,7 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v10";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v11";
 /**
  * `team` is intentionally absent: teams are never proposed by the LLM. A team
  * is a structural object (e.g. a Linear team) and is born only through
@@ -334,7 +340,7 @@ export async function extractEntities(
     ? "- **Tools**: third-party SaaS apps/platforms the org uses (e.g., Slack, Notion, Zoom, Figma, GitHub)\n"
     : "";
   const featureFocusLine = experimentalFlag
-    ? '- **Features**: a feature is a named sub-capability, module, tab, or screen within a product (e.g., "CRM Analytics", "Push Notifications"). Emit it as type "feature" and set "parentProduct" to the product it belongs to. Never emit a feature as a product or project.\n'
+    ? '- **Features**: a feature is a named sub-capability, module, tab, or screen within a product (e.g., "CRM Analytics", "Push Notifications"). Emit it as type "feature" and set "parentProduct" to the product it belongs to. A feature\'s parentProduct must be a product or project name, never a domain, URL, or email. Never emit a feature as a product or project.\n'
     : "";
   const featureNoiseLine = experimentalFlag
     ? "- Do not emit class names, DTOs, code symbols, table names, or column names as features.\n"
@@ -391,6 +397,7 @@ ${featureNoiseLine}
 - Pull requests, commits, or branches — "PR #192", commit SHAs, branch names. These are code artifacts, not engagements.
 - A single feature, tab, screen, or module of a product as a project — "Files", "Workflows", "Analytics", "Push Notifications", "Outlook Integration". These are parts of a product, not umbrella engagements with their own scope.
 - Generic feature descriptions or internal component names as products (e.g. "responder functionality", "conversational model", "X service", "X module", "X pipeline"). Products must be a branded, proper-noun name your org or a client publicly markets — not the internal name of a component you are building.
+- Capability areas, risk/compliance domains, and meeting-agenda headings are NOT projects — e.g. "Cloud", "Data & AI", "AML", "Fraud", "Risk", "Compliance", "Vendor Strategy", "Stakeholder Alignment", "RFP follow-ups".
 - Meeting section titles, status notes, activity descriptions, metrics, generic verbs, or generic technical nouns
 - Task fragments or implementation notes with no stable named project/product parent, such as "Vedant's Project Progress", "67 SQL queries on the new database", "limitation note", "UI development", "backend work", or "new database"
 
@@ -553,6 +560,13 @@ export async function handleCandidates(
     };
     if (!allowedTypes.has(mention.type as ProposeEntityType)) continue;
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+    if ((mention.type === "project" || mention.type === "product") && isGenericEngagementName(mention.mention)) {
+      logger.info(
+        { fileId, displayName: mention.mention, reason: "generic_engagement_name" },
+        "Dropped generic engagement-name mention",
+      );
+      continue;
+    }
 
     // Check if candidate already exists (case-insensitive name match)
     const existing = await db
@@ -1060,6 +1074,13 @@ async function reconcileLlmExtractionFacts(
         continue;
       }
       if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
+      if ((mention.type === "project" || mention.type === "product") && isGenericEngagementName(mention.mention)) {
+        deps.logger.info(
+          { fileId: file.id, displayName: mention.mention, reason: "generic_engagement_name" },
+          "Dropped generic engagement-name mention",
+        );
+        continue;
+      }
       const validation = validateLlmMention({
         displayName: mention.mention,
         entityType: mention.type,
@@ -1089,6 +1110,13 @@ async function reconcileLlmExtractionFacts(
           deps.logger.info(
             { fileId: file.id, displayName: mention.mention },
             "Dropped LLM feature mention without a parent product name",
+          );
+          continue;
+        }
+        if (isDomainOrUrlOrEmailName(parentProductName)) {
+          deps.logger.info(
+            { fileId: file.id, displayName: mention.mention, reason: "feature_parent_is_domain" },
+            "Dropped LLM feature mention with domain parent",
           );
           continue;
         }

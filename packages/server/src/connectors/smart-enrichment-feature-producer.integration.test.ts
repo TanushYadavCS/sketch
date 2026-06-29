@@ -12,7 +12,7 @@ import { smartEnrichFile } from "./smart-enrichment";
 
 const USER_ID = "feature-producer-user";
 const CONNECTOR_ID = "feature-producer-connector";
-const PROMPT_VERSION = "llm-extraction-v9";
+const PROMPT_VERSION = "llm-extraction-v11";
 let db: Kysely<DB>;
 
 type Mention = {
