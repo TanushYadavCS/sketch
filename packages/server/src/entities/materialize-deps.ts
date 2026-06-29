@@ -7,7 +7,7 @@ import { createEntitySuppressionRepository } from "../db/repositories/entity-sup
 import type { DB } from "../db/schema";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
 import { normalizeEntityMatchName } from "./match-normalize";
-import { parseAliasesString, readPersonEmailFromMetadata } from "./materialize-json";
+import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
 import {
   type CandidatePoolEntry,
@@ -173,6 +173,31 @@ async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promi
   return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
 }
 
+async function findLlmExtractedThirdPartyMention(
+  db: Kysely<DB>,
+  name: string,
+): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_name", "raw"])
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .execute();
+  for (const row of rows) {
+    const raw = readJsonObject(row.raw);
+    const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
+    if (rawType !== "company" && rawType !== "tool") continue;
+    const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+    if (!mention) continue;
+    if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
+      return { type: rawType, name: mention };
+    }
+  }
+  return null;
+}
+
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
@@ -333,6 +358,7 @@ export async function buildMaterializeDeps(
     },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
+    findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
   };
 
   const fileToConnector = new Map<string, string>();

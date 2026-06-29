@@ -1552,4 +1552,71 @@ describe("proposeEntity", () => {
     expect(queue.candidate_entity_id).toBe(ohoud.id);
     expect(queue.candidate_reason).toBe("token-set");
   });
+
+  it("30. suppresses a product proposal matching an existing company entity", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertEntity({
+      name: "STR Global",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        domainsRepo: materializeDeps.domainsRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+      },
+      {
+        name: "STR Global",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:str-global",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
+    const queue = await db.selectFrom("entity_review_queue").selectAll().execute();
+    expect(queue).toHaveLength(0);
+  });
+
+  it("31. suppresses trailing API product names without suppressing the base product name", async () => {
+    const materializeDeps = await buildMaterializeDeps(db);
+    const deps = {
+      entityRepo: materializeDeps.entityRepo,
+      reviewRepo: materializeDeps.reviewRepo,
+      domainsRepo: materializeDeps.domainsRepo,
+      lookup: materializeDeps.lookup,
+      readEmail: materializeDeps.readEmail,
+    };
+
+    const apiResult = await proposeEntity(deps, {
+      name: "Aviation Edge API",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:aviation-edge-api",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+    const baseResult = await proposeEntity(deps, {
+      name: "Aviation Edge",
+      entityType: "product",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "product:aviation-edge",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(apiResult).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
+    expect(baseResult.kind).toBe("created");
+  });
 });

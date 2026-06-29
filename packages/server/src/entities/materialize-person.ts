@@ -49,6 +49,7 @@ export async function materializePersonSeed(
     },
   );
   if (result.kind === "queued") return { kind: "queued", reviewId: result.reviewId };
+  if (result.kind === "suppressed") return { kind: "skipped", reason: result.reason };
   const entity = result.entity as unknown as EntityRow;
   deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
   registerEntity(deps.index, entity);
@@ -226,6 +227,7 @@ export async function materializePersonFact(
         }
         return { kind: "queued", reviewId: result.reviewId };
       }
+      if (result.kind === "suppressed") return { kind: "skipped", reason: result.reason };
       entity = result.entity as unknown as EntityRow;
       resultKind = result.kind === "created" ? "entity_created" : "entity_linked";
       registerEntity(deps.index, entity);

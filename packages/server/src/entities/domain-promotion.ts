@@ -239,6 +239,10 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
       logger.info({ domain, proposedName, reviewId: proposal.reviewId }, "Domain candidate queued for review");
       continue;
     }
+    if (proposal.kind === "suppressed") {
+      logger.info({ domain, proposedName, reason: proposal.reason }, "Domain candidate proposal suppressed");
+      continue;
+    }
 
     await finalizeDomainPromotion(db, {
       candidateId: candidate.id,

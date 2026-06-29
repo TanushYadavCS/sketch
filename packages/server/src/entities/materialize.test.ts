@@ -443,6 +443,35 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(rels).toHaveLength(0);
   });
 
+  it("suppresses a builds product endpoint when a corporate domain matches the product name", async () => {
+    await seedFiles(db, 1);
+    await db
+      .insertInto("entity_domains")
+      .values({
+        id: "domain-ratevendor",
+        entity_id: null,
+        domain: "ratevendor.test",
+        kind: "corporate",
+        is_primary: 1,
+        confidence: 1,
+        source: "manual",
+      })
+      .execute();
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "builds",
+      source: { name: "Acme Hospitality", type: "company" },
+      target: { name: "Rate Vendor", type: "product" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.relationshipsWritten).toBe(0);
+    expect(await countEntitiesBySourceType(db, "company")).toBe(1);
+    expect(await countEntitiesBySourceType(db, "product")).toBe(0);
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
+  });
+
   it("materializes contact point facts onto the referenced person", async () => {
     const [fileId] = await seedFiles(db, 1);
     const entityRepo = createEntityRepository(db);
