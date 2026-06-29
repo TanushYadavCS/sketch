@@ -37,6 +37,7 @@ export interface SupersedeSubEntityInput {
   metadata?: Record<string, unknown> | null;
   sourceFactId?: string | null;
   effectiveAt: string;
+  closeOnly?: boolean;
 }
 
 export interface ListCurrentByKindOptions {
@@ -204,6 +205,20 @@ async function supersedeInTransaction(
       .where("normalized_name", "=", normalized)
       .orderBy("valid_from", "asc")
       .execute();
+    if (input.closeOnly) {
+      const current = rows.find((row) => row.valid_to === null);
+      if (!current) return { subEntityId: "", created: false, superseded: false };
+      const closeValues = hasDomainStatus
+        ? { valid_to: effectiveAt, updated_at: now }
+        : { valid_to: effectiveAt, status: "superseded", updated_at: now };
+      const result = await trx
+        .updateTable("sub_entities")
+        .set(closeValues)
+        .where("id", "=", current.id)
+        .where("valid_to", "is", null)
+        .executeTakeFirst();
+      return { subEntityId: current.id, created: false, superseded: Number(result.numUpdatedRows ?? 0) > 0 };
+    }
     const existingAtTime = rows.find((row) => row.valid_from === effectiveAt && row.value_signature === incomingSig);
     if (existingAtTime) {
       await refreshSupersededRow(trx, existingAtTime.id, input, now);

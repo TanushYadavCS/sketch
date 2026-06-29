@@ -68,9 +68,12 @@ export function validateLlmMention(input: {
   fileContent: string;
   resolutionContext?: string | null;
   source: "llm_extraction" | "connector_extracted";
+  experimentalFlag?: boolean;
 }): LlmMentionValidationResult {
   if (input.source !== "llm_extraction") return { ok: true };
-  if (input.entityType?.trim().toLowerCase() === "feature") return { ok: false, reason: "type_removed" };
+  if (!input.experimentalFlag && input.entityType?.trim().toLowerCase() === "feature") {
+    return { ok: false, reason: "type_removed" };
+  }
 
   const content = normalizePresenceText(input.fileContent);
   const names = [input.displayName, ...(input.aliases ?? [])]

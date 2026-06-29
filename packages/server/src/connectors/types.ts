@@ -238,11 +238,15 @@ export interface CommitmentSeed {
 export interface FeatureFactRaw {
   featureId: string;
   featureName: string;
+  corroborationKey?: string;
   parentProductRef?: { source: string; sourceId: string };
   parentEntityId?: string;
   status: "proposed" | "building" | "shipped" | "deprecated";
   dueAt?: string;
   evidence: { fileIds: string[]; entityIds: string[] };
+  promptVersion?: string;
+  model?: string;
+  confidence?: number;
 }
 
 export interface MilestoneFactRaw {
