@@ -132,6 +132,7 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
 
     expect(await screen.findByText("Setting up Files access...")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue with connected account" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Canvas/)).not.toBeInTheDocument();
 
     await waitFor(() =>
       expect(importedBodies).toEqual([
@@ -241,8 +242,12 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Connect in Canvas" }));
+    expect(await screen.findByRole("button", { name: "Connect account" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect in Canvas" })).not.toBeInTheDocument();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled());
+    await user.click(screen.getByRole("button", { name: "Connect account" }));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Set up Files access" })).not.toBeInTheDocument());
   });
 });

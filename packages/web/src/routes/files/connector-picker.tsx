@@ -5,11 +5,20 @@
  */
 import { ConnectIntegrationDialog } from "@/components/connect-integration-dialog";
 import { IntegrationIcon } from "@/components/connect-integration-dialog";
+import {
+  isNativeCanvasAppConnection,
+  isOwnedOrPersonalAppConnection,
+} from "@/components/connections/connection-status";
 import { ConnectorLogo } from "@/components/connector-logos";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
+import {
+  type IntegrationConnection,
+  PERSONAL_CANVAS_CONNECTOR_MAPPINGS,
+  personalCanvasConnectorTypeFromAppId,
+} from "@sketch/shared";
 
 // These are single org-wide credential rows. Per-user connectors are handled in
 // Browse all with one account row per visible user-owned connector.
@@ -66,6 +75,29 @@ function connectorAdoptionSummary(connectedMemberCount: number, teamMemberCount:
   const denominator = Math.max(teamMemberCount, connectedMemberCount);
   const memberLabel = denominator === 1 ? "member" : "members";
   return `${connectedMemberCount.toLocaleString()} of ${denominator.toLocaleString()} ${memberLabel} connected`;
+}
+
+const PERSONAL_CANVAS_CONNECTOR_TYPES = new Set<IntegrationType>(
+  PERSONAL_CANVAS_CONNECTOR_MAPPINGS.map((mapping) => mapping.connectorType as IntegrationType),
+);
+
+function canResolveNativeCanvasConnection(definition: IntegrationDefinition | null): boolean {
+  return !!definition && definition.perUserAuth && PERSONAL_CANVAS_CONNECTOR_TYPES.has(definition.type);
+}
+
+function nativeCanvasConnectionForIntegration(
+  definition: IntegrationDefinition,
+  connections: IntegrationConnection[],
+): IntegrationConnection | null {
+  return (
+    connections.find(
+      (connection) =>
+        connection.status === "active" &&
+        isNativeCanvasAppConnection(connection) &&
+        isOwnedOrPersonalAppConnection(connection) &&
+        personalCanvasConnectorTypeFromAppId(connection.appId) === definition.type,
+    ) ?? null
+  );
 }
 import {
   ArrowSquareOutIcon,
@@ -159,6 +191,26 @@ export function ConnectorPicker({
   };
 
   const effectiveConnectingIntegration = forcedConnectIntegration ?? connectingIntegration;
+  const shouldResolveNativeCanvasConnection = canResolveNativeCanvasConnection(effectiveConnectingIntegration);
+  const integrationProvidersQuery = useQuery({
+    queryKey: ["mcp-servers"],
+    queryFn: () => api.mcpServers.list(),
+    enabled: shouldResolveNativeCanvasConnection,
+  });
+  const canvasProvider = integrationProvidersQuery.data?.find((server) => server.type === "canvas") ?? null;
+  const canvasConnectionsQuery = useQuery({
+    queryKey: ["connections", canvasProvider?.id],
+    queryFn: () => api.mcpServers.listConnections(canvasProvider?.id ?? ""),
+    enabled: shouldResolveNativeCanvasConnection && !!canvasProvider,
+  });
+  const nativeCanvasConnection =
+    effectiveConnectingIntegration && canvasConnectionsQuery.data
+      ? nativeCanvasConnectionForIntegration(effectiveConnectingIntegration, canvasConnectionsQuery.data)
+      : null;
+  const canvasConnectionLookupPending =
+    shouldResolveNativeCanvasConnection &&
+    (integrationProvidersQuery.isLoading || (!!canvasProvider && canvasConnectionsQuery.isLoading));
+
   const handleConnectDialogClose = (open: boolean) => {
     if (!open) {
       if (forcedConnectIntegration && onForcedConnectDone) {
@@ -264,6 +316,10 @@ export function ConnectorPicker({
         open={!!effectiveConnectingIntegration}
         onOpenChange={handleConnectDialogClose}
         onConnected={handleConnected}
+        preferCanvasCredentialSource={!!nativeCanvasConnection}
+        canvasConnectionReady={!!nativeCanvasConnection}
+        canvasAccountId={nativeCanvasConnection?.id ?? null}
+        canvasConnectionLookupPending={canvasConnectionLookupPending}
       />
     </>
   );

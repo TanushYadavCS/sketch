@@ -127,6 +127,14 @@ export const handlers = [
     return HttpResponse.json({ suggestion: null });
   }),
 
+  http.get("/api/mcp-servers", () => {
+    return HttpResponse.json({ servers: [] });
+  }),
+
+  http.get("/api/mcp-servers/:providerId/connections", () => {
+    return HttpResponse.json({ connections: [] });
+  }),
+
   http.get("/api/users", () => {
     return HttpResponse.json({
       users: [

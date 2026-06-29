@@ -81,6 +81,7 @@ interface ConnectIntegrationDialogProps {
   preferCanvasCredentialSource?: boolean;
   canvasConnectionReady?: boolean;
   canvasAccountId?: string | null;
+  canvasConnectionLookupPending?: boolean;
 }
 
 export function ConnectIntegrationDialog({
@@ -91,6 +92,7 @@ export function ConnectIntegrationDialog({
   preferCanvasCredentialSource = false,
   canvasConnectionReady = false,
   canvasAccountId = null,
+  canvasConnectionLookupPending = false,
 }: ConnectIntegrationDialogProps) {
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
@@ -147,10 +149,13 @@ export function ConnectIntegrationDialog({
     enabled: open,
   });
   const isCanvasMode = credentialSource.data?.mode === "canvas" && canvasSupported;
-  const useCanvasCredentialFlow = canvasSupported && (isCanvasMode || preferCanvasCredentialSource);
+  const useCanvasCredentialFlow =
+    canvasSupported && (isCanvasMode || preferCanvasCredentialSource || canvasConnectionLookupPending);
   const canvasCredentialImportConfigured = credentialSource.data?.canvasCredentialImportConfigured !== false;
   const canvasConnectionCanImport = canvasConnectionReady || canvasPopupOpened;
   const shouldAutoImportCanvasCredential = canvasConnectionReady && useCanvasCredentialFlow;
+  const waitingForCanvasConnectionLookup =
+    useCanvasCredentialFlow && canvasConnectionLookupPending && !canvasConnectionReady && !canvasPopupOpened;
 
   useEffect(() => {
     if (!open) setAutoCanvasImportStarted(false);
@@ -195,7 +200,7 @@ export function ConnectIntegrationDialog({
     queryKey: [isZoho ? "zoho-oauth-status" : isMicrosoft ? "microsoft-oauth-status" : "google-oauth-status"],
     queryFn: () =>
       isZoho ? api.zohoOAuth.status() : isMicrosoft ? api.microsoftOAuth.status() : api.googleOAuth.status(),
-    enabled: open && isOAuthRedirect && !useCanvasCredentialFlow,
+    enabled: open && isOAuthRedirect && !useCanvasCredentialFlow && !canvasConnectionLookupPending,
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
@@ -730,7 +735,7 @@ export function ConnectIntegrationDialog({
                 Add {integration.name} to the org brain
               </DialogTitle>
               <DialogDescription>
-                Sketch is using the account you already connected in Canvas to set up the Files connector.
+                Sketch is using the account you already connected to set up Files access.
               </DialogDescription>
             </DialogHeader>
 
@@ -773,52 +778,62 @@ export function ConnectIntegrationDialog({
                 Connect {integration.name}
               </DialogTitle>
               <DialogDescription>
-                {canvasConnectionReady
-                  ? "Use the account you connected in Canvas, then choose what to sync."
-                  : "Connect in Canvas, then continue here to choose sync scope."}
+                {waitingForCanvasConnectionLookup
+                  ? "Checking for an account you already connected."
+                  : canvasConnectionReady
+                    ? "Sketch will use the account you already connected, then let you choose what to sync."
+                    : "Connect your account, then choose what Sketch should sync."}
               </DialogDescription>
             </DialogHeader>
 
             <div className="flex flex-col gap-3 py-4">
-              {!canvasConnectionReady && (
-                <Button
-                  size="lg"
-                  className="w-full"
-                  onClick={() => canvasConnectMutation.mutate()}
-                  disabled={isPending || credentialSource.data?.canvasConfigured === false}
-                >
-                  {canvasConnectMutation.isPending ? (
-                    <>
-                      <SpinnerGapIcon size={14} className="animate-spin" />
-                      Opening Canvas...
-                    </>
-                  ) : (
-                    "Connect in Canvas"
+              {waitingForCanvasConnectionLookup ? (
+                <div className="flex items-center justify-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
+                  <SpinnerGapIcon size={16} className="animate-spin" />
+                  Checking connected accounts...
+                </div>
+              ) : (
+                <>
+                  {!canvasConnectionReady && (
+                    <Button
+                      size="lg"
+                      className="w-full"
+                      onClick={() => canvasConnectMutation.mutate()}
+                      disabled={isPending || credentialSource.data?.canvasConfigured === false}
+                    >
+                      {canvasConnectMutation.isPending ? (
+                        <>
+                          <SpinnerGapIcon size={14} className="animate-spin" />
+                          Opening account connection...
+                        </>
+                      ) : (
+                        "Connect account"
+                      )}
+                    </Button>
                   )}
-                </Button>
+                  {canvasConnectionCanImport && (
+                    <Button
+                      variant={canvasConnectionReady ? "default" : "outline"}
+                      className="w-full"
+                      onClick={() => canvasImportMutation.mutate()}
+                      disabled={
+                        isPending ||
+                        credentialSource.data?.canvasConfigured === false ||
+                        !canvasCredentialImportConfigured
+                      }
+                    >
+                      {canvasImportMutation.isPending ? (
+                        <>
+                          <SpinnerGapIcon size={14} className="animate-spin" />
+                          Setting up...
+                        </>
+                      ) : (
+                        "Set up Files access"
+                      )}
+                    </Button>
+                  )}
+                </>
               )}
-              <Button
-                variant={canvasConnectionReady ? "default" : "outline"}
-                className="w-full"
-                onClick={() => canvasImportMutation.mutate()}
-                disabled={
-                  isPending ||
-                  !canvasConnectionCanImport ||
-                  credentialSource.data?.canvasConfigured === false ||
-                  !canvasCredentialImportConfigured
-                }
-              >
-                {canvasImportMutation.isPending ? (
-                  <>
-                    <SpinnerGapIcon size={14} className="animate-spin" />
-                    Importing...
-                  </>
-                ) : canvasConnectionReady ? (
-                  "Continue with connected account"
-                ) : (
-                  "Continue"
-                )}
-              </Button>
               {credentialSource.data?.canvasConfigured === false && (
                 <p className="text-center text-xs text-muted-foreground">
                   Canvas integration provider is not configured.
