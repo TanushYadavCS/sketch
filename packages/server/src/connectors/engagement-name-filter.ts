@@ -18,6 +18,8 @@ export const GENERIC_ENGAGEMENT_NAME_DENYLIST = new Set(
     "priority rfps follow-ups",
     "dashboard",
     "new dashboard",
+    "prd",
+    "brd",
   ].map(normalizeName),
 );
 
