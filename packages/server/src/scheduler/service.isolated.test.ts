@@ -81,7 +81,11 @@ function buildMockSlack() {
 
 function buildMockWhatsApp(connected = true) {
   return {
-    sendText: vi.fn().mockResolvedValue({ key: { id: "wa-message-1" }, messageTimestamp: 1717480800 }),
+    sendText: vi.fn().mockResolvedValue({
+      providerMessageId: "wa-message-1",
+      providerConversationId: "5511999999999@s.whatsapp.net",
+      providerTimestamp: "2024-06-04T10:00:00.000Z",
+    }),
     get isConnected() {
       return connected;
     },
@@ -858,7 +862,11 @@ describe("executeTask() delivery routing", () => {
     await lastExecuteAutomationParams?.sendMessage?.("WhatsApp message");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
-      "5511999999999@s.whatsapp.net",
+      {
+        kind: "dm",
+        phoneE164: "+5511999999999",
+        providerConversationId: "5511999999999@s.whatsapp.net",
+      },
       "WhatsApp message",
     );
 
@@ -903,7 +911,7 @@ describe("executeTask() delivery routing", () => {
     await lastExecuteAutomationParams?.sendMessage?.("Group workflow result");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
-      "987654321@g.us",
+      { kind: "group", groupId: "987654321@g.us" },
       "Group workflow result",
     );
 

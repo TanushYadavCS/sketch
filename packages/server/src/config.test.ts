@@ -29,9 +29,23 @@ describe("configSchema", () => {
         expect(result.data.SQLITE_PATH).toBe("./data/sketch.db");
         expect(result.data.SLACK_CHANNEL_HISTORY_LIMIT).toBe(5);
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
+        expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
+        expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("baileys");
         expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
+      }
+    });
+
+    it("parses WhatsApp provider configuration", () => {
+      const result = configSchema.safeParse({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WHATSAPP_GROUP_PROVIDER: "none",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_DM_PROVIDER).toBe("wati");
+        expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("none");
       }
     });
 
