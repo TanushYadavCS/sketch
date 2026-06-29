@@ -365,7 +365,7 @@ describe("file-scope-context", () => {
     ]);
   });
 
-  it("excludes one-off pending proposals and non-project/product proposal types", async () => {
+  it("excludes below-threshold pending proposals and non-project/product proposal types", async () => {
     await seedEntity(db, { id: "ent-anchor-noise", name: "Anchor Co", sourceType: "company" });
     await seedFile(db, "file-anchor-noise");
     await seedMention(db, { entityId: "ent-anchor-noise", fileId: "file-anchor-noise" });

@@ -1501,3 +1501,68 @@ describe("smartEnrichFile — LLM leak gates", () => {
     expect(names).toContain("Proton Labs");
   });
 });
+
+describe("extractEntities — known-entity resolution (matchesKnown)", () => {
+  function knownResolutionGenerator(mentions: unknown[]): GeminiGenerator {
+    return {
+      generate: async () => "",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) =>
+        (opts?.label?.startsWith("extractEntities") ? { mentions, relations: [] } : {}) as T,
+    } as GeminiGenerator;
+  }
+
+  const file = {
+    id: "f-known",
+    fileName: "ow-tourism.txt",
+    content: "OW x Canvasx Tourism Recovery Dashboard kickoff.",
+    contentCategory: "document",
+    source: "google_drive",
+    sourcePath: "/",
+    contentHash: null,
+    connectorConfigId: "conn-known",
+    sourceCreatedAt: null,
+    sourceUpdatedAt: null,
+  };
+
+  it("rewrites a matched mention to the known canonical name and keeps the original in variations", async () => {
+    const generator = knownResolutionGenerator([
+      {
+        mention: "OW x Canvasx Tourism Recovery Dashboard",
+        type: "project",
+        variations: ["Recovery Dashboard"],
+        confidence: 0.9,
+        matchesKnown: "K1",
+      },
+    ]);
+
+    const result = await extractEntities(generator, file, null, [{ name: "Tourism Dashboard", type: "project" }]);
+
+    expect(result.mentions).toHaveLength(1);
+    expect(result.mentions[0].mention).toBe("Tourism Dashboard");
+    expect(result.mentions[0].variations).toContain("OW x Canvasx Tourism Recovery Dashboard");
+    expect(result.mentions[0].variations).toContain("Recovery Dashboard");
+  });
+
+  it("ignores a matchesKnown handle whose type disagrees with the mention type", async () => {
+    const generator = knownResolutionGenerator([
+      { mention: "Tarek Aziz", type: "person", variations: [], confidence: 0.95, matchesKnown: "K1" },
+    ]);
+
+    const result = await extractEntities(generator, file, null, [{ name: "Tourism Dashboard", type: "project" }]);
+
+    expect(result.mentions[0].mention).toBe("Tarek Aziz");
+    expect(result.mentions[0].variations).toEqual([]);
+  });
+
+  it("ignores out-of-range and unparseable handles without rewriting or throwing", async () => {
+    const generator = knownResolutionGenerator([
+      { mention: "Maaden Mining Dashboard", type: "project", variations: [], confidence: 0.9, matchesKnown: "K99" },
+      { mention: "Other Initiative", type: "project", variations: [], confidence: 0.9, matchesKnown: "banana" },
+    ]);
+
+    const result = await extractEntities(generator, file, null, [{ name: "Tourism Dashboard", type: "project" }]);
+
+    expect(result.mentions[0].mention).toBe("Maaden Mining Dashboard");
+    expect(result.mentions[1].mention).toBe("Other Initiative");
+  });
+});
