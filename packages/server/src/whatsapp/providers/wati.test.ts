@@ -218,7 +218,7 @@ describe("Wati outbound provider", () => {
       );
     });
     const provider = createWatiWhatsAppProvider({
-      apiEndpoint: "https://tenant.wati.io/",
+      apiEndpoint: "https://live-mt-server.wati.io/tenant-1/",
       accessToken: "wati-token",
       webhookToken: "webhook-token",
       channelPhoneNumber: "+17435002445",
@@ -231,7 +231,7 @@ describe("Wati outbound provider", () => {
     });
 
     const [url, init] = firstFetchCall(requestFetch);
-    expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendSessionMessage/15551234567");
+    expect(url.toString()).toBe("https://live-mt-server.wati.io/tenant-1/api/v1/sendSessionMessage/15551234567");
     expect(init.headers).toEqual({
       Authorization: "Bearer wati-token",
       "Content-Type": "application/x-www-form-urlencoded",
@@ -292,7 +292,7 @@ describe("Wati outbound provider", () => {
   it("sends files through the v3 Wati file endpoint with channel-qualified targets", async () => {
     const requestFetch = vi.fn(async () => new Response(JSON.stringify({ message: { id: "sent-file" } })));
     const provider = createWatiWhatsAppProvider({
-      apiEndpoint: "https://tenant.wati.io",
+      apiEndpoint: "https://live-mt-server.wati.io/tenant-1",
       accessToken: "wati-token",
       webhookToken: "webhook-token",
       channelPhoneNumber: "17435002445",
@@ -316,7 +316,7 @@ describe("Wati outbound provider", () => {
     }
 
     const [url, init] = firstFetchCall(requestFetch);
-    expect(url.toString()).toBe("https://tenant.wati.io/api/ext/v3/conversations/messages/file");
+    expect(url.toString()).toBe("https://live-mt-server.wati.io/api/ext/v3/conversations/messages/file");
     expect(init.method).toBe("POST");
     expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
     expect(init.body).toBeInstanceOf(FormData);

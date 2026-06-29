@@ -76,6 +76,7 @@ type WatiParsedWebhookEvent =
 
 export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhatsAppProvider {
   const endpoint = normalizeApiEndpoint(config.apiEndpoint);
+  const v3Endpoint = normalizeApiEndpoint(new URL(endpoint).origin);
   const requestFetch = config.fetch ?? fetch;
   const channelPhoneDigits = phoneDigits(config.channelPhoneNumber ?? null);
   const handlers = new Set<WhatsAppMessageHandler>();
@@ -120,7 +121,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
 
     form.set("target", `${channelPhoneDigits}:${phone}`);
 
-    await fetchJson(requestFetch, new URL(`${endpoint}/api/ext/v3/conversations/messages/file`), {
+    await fetchJson(requestFetch, new URL(`${v3Endpoint}/api/ext/v3/conversations/messages/file`), {
       method: "POST",
       headers: authorizationHeaders(config.accessToken),
       body: form,
@@ -145,7 +146,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
 
     let response: Response | null = null;
     for (const [index, fileMessageId] of fileMessageIds.entries()) {
-      const url = new URL(`${endpoint}/api/ext/v3/conversations/messages/file/${encodeURIComponent(fileMessageId)}`);
+      const url = new URL(`${v3Endpoint}/api/ext/v3/conversations/messages/file/${encodeURIComponent(fileMessageId)}`);
       const attempt = await requestFetch(url, {
         headers: authorizationHeaders(config.accessToken),
       });
