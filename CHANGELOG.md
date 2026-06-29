@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.37.0] -- 2026-06-29
+
+- Daily Brief: add the prebuilt-agent engine, Home experience, recency context, today's-meetings section, structured brief payloads, detail drawer sections, and configurable delivery targets.
+- Google Calendar: add the connector with OAuth scope selection, provider file scope, attendee/entity extraction, managed attendee filtering, and all-day-event handling for brief generation.
+- Project knowledge graph: add first-class project seeding from Linear and ClickUp, project list/detail APIs and UI, project bindings, member overrides, scope grouping, and merge/unmerge workflows.
+- Agent and automation UX: add the automation builder, web chat overhaul, integration connection links, manual Daily Brief output delivery, and Slack/WhatsApp delivery validation.
+- Runtime reliability: cap concurrent agent runs, use DB-backed model settings for Agent SDK defaults, preserve embedding-provider settings, reduce sync materialization memory use, and keep scheduled-task migrations SQLite-safe.
+- Connectors and admin setup: add self-service Microsoft admin consent for Teams/Outlook connectors and embedding-provider selection with OpenRouter backfill handling.
+
 ## [0.36.0] -- 2026-06-13
 
 - Zoho CRM: make the connector generally available by removing the experimental flag from the OAuth routes, connector APIs, and Files connector picker.
