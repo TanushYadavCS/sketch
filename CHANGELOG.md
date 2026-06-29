@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.37.1] -- 2026-06-29
+
+- Managed tenant rollout: batch timestamp normalization updates in migration 105 so large `indexed_files` tables do not keep tenant startup blocked by one `UPDATE` per file.
+
 ## [0.37.0] -- 2026-06-29
 
 - Daily Brief: add the prebuilt-agent engine, Home experience, recency context, today's-meetings section, structured brief payloads, detail drawer sections, and configurable delivery targets.

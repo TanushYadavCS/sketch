@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 
 type IndexedFilesTimestampDb = {
   indexed_files: {
@@ -8,6 +8,10 @@ type IndexedFilesTimestampDb = {
   };
 };
 
+type TimestampColumn = "source_created_at" | "source_updated_at";
+type NormalizedTimestampRow = IndexedFilesTimestampDb["indexed_files"];
+
+const UPDATE_BATCH_SIZE = 500;
 const NAIVE_TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?$/;
 
 function normalizeExistingTimestamp(value: string | null): string | null {
@@ -18,6 +22,11 @@ function normalizeExistingTimestamp(value: string | null): string | null {
   return Number.isNaN(parsed) ? value : new Date(parsed).toISOString();
 }
 
+function timestampCase(column: TimestampColumn, rows: NormalizedTimestampRow[]) {
+  const whens = rows.map((row) => sql`when ${sql.ref("id")} = ${row.id} then ${row[column]}`);
+  return sql<string | null>`case ${sql.join(whens, sql` `)} else ${sql.ref(column)} end`;
+}
+
 export async function up(db: Kysely<unknown>): Promise<void> {
   const typedDb = db as Kysely<IndexedFilesTimestampDb>;
   const rows = await typedDb
@@ -25,18 +34,31 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .select(["id", "source_created_at", "source_updated_at"])
     .execute();
 
-  for (const row of rows) {
-    const sourceCreatedAt = normalizeExistingTimestamp(row.source_created_at);
-    const sourceUpdatedAt = normalizeExistingTimestamp(row.source_updated_at);
-    if (sourceCreatedAt === row.source_created_at && sourceUpdatedAt === row.source_updated_at) continue;
+  const changedRows = rows.flatMap((row) => {
+    const normalized = {
+      id: row.id,
+      source_created_at: normalizeExistingTimestamp(row.source_created_at),
+      source_updated_at: normalizeExistingTimestamp(row.source_updated_at),
+    };
+    return normalized.source_created_at === row.source_created_at &&
+      normalized.source_updated_at === row.source_updated_at
+      ? []
+      : [normalized];
+  });
 
+  for (let i = 0; i < changedRows.length; i += UPDATE_BATCH_SIZE) {
+    const batch = changedRows.slice(i, i + UPDATE_BATCH_SIZE);
     await typedDb
       .updateTable("indexed_files")
       .set({
-        source_created_at: sourceCreatedAt,
-        source_updated_at: sourceUpdatedAt,
+        source_created_at: timestampCase("source_created_at", batch),
+        source_updated_at: timestampCase("source_updated_at", batch),
       })
-      .where("id", "=", row.id)
+      .where(
+        "id",
+        "in",
+        batch.map((row) => row.id),
+      )
       .execute();
   }
 }
