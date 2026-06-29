@@ -1,4 +1,7 @@
-import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
+import {
+  isNativeCanvasAppConnection,
+  isOwnedOrPersonalAppConnection,
+} from "@/components/connections/connection-status";
 import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
@@ -31,7 +34,7 @@ import {
 } from "@/lib/chat-target";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
-import type { IntegrationApp } from "@sketch/shared";
+import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -999,11 +1002,16 @@ export function ChatPage() {
     [],
   );
 
-  const maybeShowConnectorNudge = useCallback(async (app: Pick<IntegrationApp, "id" | "name" | "connectionId">) => {
+  const maybeShowConnectorNudge = useCallback(async (connection: IntegrationConnection) => {
+    if (!isNativeCanvasAppConnection(connection)) return;
     try {
-      const result = await api.integrations.canvasSuggestion(app.id, app.connectionId);
+      const result = await api.integrations.canvasSuggestion(connection.appId, connection.id, connection.source);
       if (result.suggestion) {
-        setConnectorNudge({ ...result.suggestion, appName: app.name });
+        setConnectorNudge({
+          ...result.suggestion,
+          appName: connection.appName,
+          icon: connection.icon ?? connection.app?.imgSrc,
+        });
       }
     } catch {
       return;
@@ -1031,10 +1039,10 @@ export function ChatPage() {
   );
 
   const handleIntegrationConnected = useCallback(
-    (app?: IntegrationApp) => {
+    (_app?: IntegrationApp, connection?: IntegrationConnection) => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
       queryClient.invalidateQueries({ queryKey: ["workspace", "summary"] });
-      if (app) void maybeShowConnectorNudge(app);
+      if (connection) void maybeShowConnectorNudge(connection);
     },
     [maybeShowConnectorNudge, queryClient],
   );

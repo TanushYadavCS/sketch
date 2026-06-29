@@ -1,6 +1,6 @@
-import { ConnectIntegrationDialog, IntegrationIcon } from "@/components/connect-integration-dialog";
+import { ConnectIntegrationDialog } from "@/components/connect-integration-dialog";
 import { type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
-import { DatabaseIcon } from "@phosphor-icons/react";
+import { FolderOpenIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import {
   Dialog,
@@ -11,12 +11,14 @@ import {
   DialogTitle,
 } from "@sketch/ui/components/dialog";
 import { useEffect, useMemo, useState } from "react";
+import { AppIcon } from "./app-icon";
 
 export interface ConnectorNudgeSuggestion {
   connectorType: string;
   appId: string;
   accountId?: string;
   appName?: string;
+  icon?: string;
 }
 
 export function ConnectorNudgeDialog({
@@ -55,7 +57,12 @@ export function ConnectorNudgeDialog({
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <div className="flex items-start gap-3 pr-8">
-              <IntegrationIcon color={definition.color} name={definition.name} type={definition.type} size="md" />
+              <AppIcon
+                name={suggestion.appName ?? definition.name}
+                icon={suggestion.icon}
+                className="size-9 rounded-lg text-xs"
+                imageClassName="size-7"
+              />
               <div className="min-w-0">
                 <DialogTitle>Add {definition.name} to the org brain?</DialogTitle>
                 <DialogDescription className="mt-1">
@@ -67,13 +74,13 @@ export function ConnectorNudgeDialog({
           </DialogHeader>
 
           <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/30 p-3">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-background">
-              <DatabaseIcon size={16} className="text-muted-foreground" />
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-background">
+              <FolderOpenIcon size={16} className="text-muted-foreground" />
             </div>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Personal Files connector</p>
+              <p className="text-sm font-medium">Searchable in Files</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                Only your account is connected. You can choose what syncs from Files.
+                Sketch will index your personal account. You can choose the sync scope when there is one.
               </p>
             </div>
           </div>

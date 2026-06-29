@@ -120,6 +120,7 @@ export function ConnectIntegrationDialog({
   const [notionScanDone, setNotionScanDone] = useState(false);
   const [managedConnectorId, setManagedConnectorId] = useState<string | null>(null);
   const [canvasPopupOpened, setCanvasPopupOpened] = useState(false);
+  const [autoCanvasImportStarted, setAutoCanvasImportStarted] = useState(false);
   const [genericBrowseData, setGenericBrowseData] = useState<BrowseResult | null>(null);
   const [selectedGenericIds, setSelectedGenericIds] = useState<Set<string>>(new Set());
 
@@ -149,6 +150,11 @@ export function ConnectIntegrationDialog({
   const useCanvasCredentialFlow = canvasSupported && (isCanvasMode || preferCanvasCredentialSource);
   const canvasCredentialImportConfigured = credentialSource.data?.canvasCredentialImportConfigured !== false;
   const canvasConnectionCanImport = canvasConnectionReady || canvasPopupOpened;
+  const shouldAutoImportCanvasCredential = canvasConnectionReady && useCanvasCredentialFlow;
+
+  useEffect(() => {
+    if (!open) setAutoCanvasImportStarted(false);
+  }, [open]);
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -512,6 +518,40 @@ export function ConnectIntegrationDialog({
     },
   });
 
+  useEffect(() => {
+    if (!open || !shouldAutoImportCanvasCredential || autoCanvasImportStarted || canvasImportMutation.isPending) return;
+    if (!credentialSource.isSuccess) return;
+    if (
+      !canvasConnectionCanImport ||
+      credentialSource.data?.canvasConfigured === false ||
+      !canvasCredentialImportConfigured
+    ) {
+      return;
+    }
+
+    setAutoCanvasImportStarted(true);
+    canvasImportMutation.mutate();
+  }, [
+    open,
+    shouldAutoImportCanvasCredential,
+    autoCanvasImportStarted,
+    canvasImportMutation,
+    credentialSource.isSuccess,
+    credentialSource.data?.canvasConfigured,
+    canvasConnectionCanImport,
+    canvasCredentialImportConfigured,
+  ]);
+
+  const autoCanvasImportErrorMessage = credentialSource.isError
+    ? "Sketch could not check the Canvas credential setup."
+    : credentialSource.data?.canvasConfigured === false
+      ? "Canvas integration provider is not configured."
+      : !canvasCredentialImportConfigured
+        ? "Canvas credential import is not configured for this workspace."
+        : canvasImportMutation.isError
+          ? "Sketch could not import the connected Canvas account."
+          : null;
+
   const handleFieldChange = (key: string, value: string) => {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
   };
@@ -680,6 +720,49 @@ export function ConnectIntegrationDialog({
                   "Save & Continue"
                 )}
               </Button>
+            </DialogFooter>
+          </>
+        ) : step === "credentials" && useCanvasCredentialFlow && shouldAutoImportCanvasCredential ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Add {integration.name} to the org brain
+              </DialogTitle>
+              <DialogDescription>
+                Sketch is using the account you already connected in Canvas to set up the Files connector.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="flex flex-col items-center gap-3 py-8 text-center">
+              {autoCanvasImportErrorMessage ? (
+                <>
+                  <p className="text-sm font-medium">Could not add {integration.name}</p>
+                  <p className="max-w-sm text-sm text-muted-foreground">{autoCanvasImportErrorMessage}</p>
+                </>
+              ) : (
+                <>
+                  <SpinnerGapIcon size={22} className="animate-spin text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">Setting up Files access...</p>
+                </>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={resetAndClose}>
+                Close
+              </Button>
+              {(credentialSource.isError || canvasImportMutation.isError) && (
+                <Button
+                  onClick={() => {
+                    canvasImportMutation.reset();
+                    setAutoCanvasImportStarted(false);
+                    if (credentialSource.isError) void credentialSource.refetch();
+                  }}
+                >
+                  Try again
+                </Button>
+              )}
             </DialogFooter>
           </>
         ) : step === "credentials" && useCanvasCredentialFlow ? (

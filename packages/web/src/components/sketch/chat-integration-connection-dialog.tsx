@@ -1,4 +1,7 @@
-import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
+import {
+  isNativeCanvasAppConnection,
+  isOwnedOrPersonalAppConnection,
+} from "@/components/connections/connection-status";
 import { api } from "@/lib/api";
 import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { useEffect, useRef } from "react";
@@ -32,7 +35,7 @@ export function ChatIntegrationConnectionFrame({
   popupWindow: Window | null;
   onOpenChange: (open: boolean) => void;
   onStatusChange: (requestId: string, status: ChatThreadIntegrationConnectionStatus) => void;
-  onConnected: (app?: IntegrationApp) => void;
+  onConnected: (app?: IntegrationApp, connection?: IntegrationConnection) => void;
 }) {
   const requestRef = useRef(0);
   const connectedRef = useRef(false);
@@ -76,17 +79,20 @@ export function ChatIntegrationConnectionFrame({
 
     const verifyConnected = async (app: IntegrationApp): Promise<IntegrationConnection | null> => {
       const connections = await api.mcpServers.listConnections(providerId);
-      return connections.find((item) => item.appId === app.id && isOwnedOrPersonalAppConnection(item)) ?? null;
+      const matchingConnections = connections.filter(
+        (item) => item.appId === app.id && isOwnedOrPersonalAppConnection(item),
+      );
+      return matchingConnections.find(isNativeCanvasAppConnection) ?? matchingConnections[0] ?? null;
     };
 
-    const complete = (app: IntegrationApp) => {
+    const complete = (app: IntegrationApp, verifiedConnection: IntegrationConnection) => {
       if (cancelled || requestRef.current !== requestId || connectedRef.current) return;
       connectedRef.current = true;
       activeAppRef.current = app;
       if (intervalId !== null) window.clearInterval(intervalId);
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       updateStatus("connected");
-      onConnected(app);
+      onConnected(app, verifiedConnection);
       toast.success(`${app.name} connected`);
       closeConnection();
     };
@@ -106,7 +112,7 @@ export function ChatIntegrationConnectionFrame({
         try {
           const verifiedConnection = await verifyConnected(app);
           if (verifiedConnection) {
-            complete({ ...app, connectionId: verifiedConnection.id });
+            complete({ ...app, connectionId: verifiedConnection.id }, verifiedConnection);
             return;
           }
           if (popup?.closed) {
@@ -163,7 +169,7 @@ export function ChatIntegrationConnectionFrame({
       const current = activeAppRef.current ?? fallbackApp(connection);
       void verifyConnected(current)
         .then((verifiedConnection) => {
-          if (verifiedConnection) complete({ ...current, connectionId: verifiedConnection.id });
+          if (verifiedConnection) complete({ ...current, connectionId: verifiedConnection.id }, verifiedConnection);
         })
         .catch(() => undefined);
     };

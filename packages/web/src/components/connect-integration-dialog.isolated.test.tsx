@@ -90,8 +90,7 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
     expect(screen.getByRole("button", { name: "Reconfigure OAuth" })).toBeInTheDocument();
   });
 
-  it("imports a connector from an already-connected Canvas app without OAuth setup", async () => {
-    const user = userEvent.setup();
+  it("imports a connector from an already-connected Canvas app without another click", async () => {
     const importedBodies: unknown[] = [];
     const onConnected = vi.fn();
     const integration = INTEGRATIONS.find((item) => item.type === "gmail");
@@ -131,7 +130,8 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Continue with connected account" }));
+    expect(await screen.findByText("Setting up Files access...")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue with connected account" })).not.toBeInTheDocument();
 
     await waitFor(() =>
       expect(importedBodies).toEqual([
@@ -142,7 +142,7 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
     expect(screen.queryByText("Configure Gmail")).not.toBeInTheDocument();
   });
 
-  it("imports a Canvas flat-scope connector and saves the selected scope", async () => {
+  it("imports a Canvas flat-scope connector and goes straight to scope selection", async () => {
     const user = userEvent.setup();
     const scopeBodies: unknown[] = [];
     const onConnected = vi.fn();
@@ -202,8 +202,8 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Continue with connected account" }));
     expect(await screen.findByRole("heading", { name: "Select calendars" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue with connected account" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Connect 1 calendars" }));
 

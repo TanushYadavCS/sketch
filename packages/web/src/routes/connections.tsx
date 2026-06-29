@@ -383,7 +383,11 @@ export function ConnectionsPage() {
     try {
       const result = await api.integrations.canvasSuggestion(connection.appId, connection.id, connection.source);
       if (result.suggestion) {
-        setConnectorNudge({ ...result.suggestion, appName: connection.appName });
+        setConnectorNudge({
+          ...result.suggestion,
+          appName: connection.appName,
+          icon: connection.icon ?? connection.app?.imgSrc,
+        });
       }
     } catch {
       return;

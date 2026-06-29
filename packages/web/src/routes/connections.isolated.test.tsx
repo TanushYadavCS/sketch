@@ -1,6 +1,7 @@
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
 import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -185,6 +186,8 @@ describe("ConnectionsPage direct connect", () => {
   });
 
   it("nudges users to connect a matching personal connector after Canvas connection verification", async () => {
+    const user = userEvent.setup();
+    const importedBodies: unknown[] = [];
     setupCommonHandlers([
       {
         id: "secrets:user-1:gmail:google-gmail-oauth",
@@ -195,6 +198,7 @@ describe("ConnectionsPage direct connect", () => {
         status: "active",
         accessLevel: "personal",
         isOwnedByViewer: true,
+        icon: "https://img.test/gmail.png",
         createdAt: "2026-01-01T00:00:00Z",
       },
     ]);
@@ -214,13 +218,42 @@ describe("ConnectionsPage direct connect", () => {
           },
         });
       }),
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "local",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+      http.post("/api/connectors/canvas/import", async ({ request }) => {
+        importedBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: {
+            id: "gmail-connector",
+            connectorType: "gmail",
+            syncStatus: "pending",
+            alreadyConnected: false,
+          },
+        });
+      }),
     );
 
     renderWithProviders(<ConnectionsPage />);
 
     expect(await screen.findByText("Gmail is connected")).toBeInTheDocument();
     expect(await screen.findByText("Add Gmail to the org brain?")).toBeInTheDocument();
+    expect(document.querySelector('img[src="https://img.test/gmail.png"]')).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add to org brain" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add to org brain" }));
+
+    await waitFor(() =>
+      expect(importedBodies).toEqual([
+        { connectorType: "gmail", accountId: "secrets:user-1:gmail:google-gmail-oauth" },
+      ]),
+    );
+    expect(screen.queryByRole("button", { name: "Continue with connected account" })).not.toBeInTheDocument();
   });
 
   it("does not nudge users for matching legacy Pipedream connections", async () => {
