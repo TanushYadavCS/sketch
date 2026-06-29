@@ -295,6 +295,7 @@ async function seedEntity(db: Kysely<DB>, input: { id: string; name: string; typ
       metadata: null,
       source_ref_id: null,
       status: "confirmed",
+      provenance_tier: input.type === "product" ? "declared" : "inferred",
       hotness: 0,
       created_at: now,
       updated_at: now,
