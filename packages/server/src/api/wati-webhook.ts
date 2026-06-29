@@ -25,7 +25,7 @@ export function watiWebhookRoutes(
 
     const results = await provider.handleWebhook(payload);
     const acceptedMessages = results.filter((result) => result.kind === "message").length;
-    return c.json({ ok: true, acceptedMessages }, 202);
+    return c.json({ ok: true, acceptedMessages }, 200);
   });
 
   return routes;

@@ -62,6 +62,8 @@ export interface WatiDeliveryStatusEvent {
   providerConversationId: string | null;
   eventType: string | null;
   status: string | null;
+  failureCode: string | null;
+  failureDetail: string | null;
   providerTimestamp: string | null;
   rawProviderPayload: unknown;
 }
@@ -103,10 +105,19 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
     const phone = targetPhoneDigits(target);
     const form = new FormData();
     const fileBytes = await readFile(filePath);
-    const targetId = channelPhoneDigits ? `${channelPhoneDigits}:${phone}` : phone;
 
-    form.set("target", targetId);
     form.set("file", new Blob([new Uint8Array(fileBytes)], { type: mimeType }), fileName);
+
+    if (!channelPhoneDigits) {
+      await fetchJson(requestFetch, new URL(`${endpoint}/api/v1/sendSessionFile/${encodeURIComponent(phone)}`), {
+        method: "POST",
+        headers: authorizationHeaders(config.accessToken),
+        body: form,
+      });
+      return;
+    }
+
+    form.set("target", `${channelPhoneDigits}:${phone}`);
 
     await fetchJson(requestFetch, new URL(`${endpoint}/api/ext/v3/conversations/messages/file`), {
       method: "POST",
@@ -122,8 +133,8 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
   ): Promise<Attachment[]> => {
     if (!message.mediaType) return [];
 
-    const fileMessageId = fileMessageIdForDownload(message);
-    if (!fileMessageId) {
+    const fileMessageIds = fileMessageIdsForDownload(message);
+    if (!fileMessageIds.length) {
       config.logger.warn(
         { providerMessageId: message.providerMessageId, mediaType: message.mediaType },
         "Wati media message has no downloadable id",
@@ -131,14 +142,30 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       return [];
     }
 
-    const url = new URL(`${endpoint}/api/ext/v3/conversations/messages/file/${encodeURIComponent(fileMessageId)}`);
-    const response = await requestFetch(url, {
-      headers: authorizationHeaders(config.accessToken),
-    });
+    let response: Response | null = null;
+    for (const [index, fileMessageId] of fileMessageIds.entries()) {
+      const url = new URL(`${endpoint}/api/ext/v3/conversations/messages/file/${encodeURIComponent(fileMessageId)}`);
+      const attempt = await requestFetch(url, {
+        headers: authorizationHeaders(config.accessToken),
+      });
 
-    if (!response.ok) {
+      const isLastAttempt = index === fileMessageIds.length - 1;
+      if (attempt.ok || isLastAttempt || !shouldTryNextMediaDownloadId(attempt.status)) {
+        response = attempt;
+        break;
+      }
+
+      await attempt.arrayBuffer().catch(() => undefined);
+    }
+
+    if (!response?.ok) {
       config.logger.warn(
-        { status: response.status, providerMessageId: message.providerMessageId, mediaType: message.mediaType },
+        {
+          status: response?.status ?? null,
+          attempts: fileMessageIds.length,
+          providerMessageId: message.providerMessageId,
+          mediaType: message.mediaType,
+        },
         "Failed to download Wati media",
       );
       return [];
@@ -291,6 +318,9 @@ export function parseWatiWebhookEvent(
 
   const senderPhoneE164 = normalizeWatiPhoneNumber(payload.waId);
   const providerMessageId = optionalString(payload.whatsappMessageId) ?? optionalString(payload.id);
+  if (!senderPhoneE164 && hasWatiUsernameOnlyIdentity(payload)) {
+    return { kind: "ignored", reason: "unsupported_sender_identity" };
+  }
   if (!senderPhoneE164 || !providerMessageId) {
     return {
       kind: "unrecognized",
@@ -356,6 +386,8 @@ export function parseWatiDeliveryStatusEvent(
       providerConversationId: optionalString(payload.conversationId) ?? optionalString(payload.conversation_id),
       eventType,
       status,
+      failureCode: optionalString(payload.failedCode) ?? optionalString(payload.failed_code),
+      failureDetail: optionalString(payload.failedDetail) ?? optionalString(payload.failed_detail),
       providerTimestamp:
         parseWatiTimestamp(payload.timestamp) ??
         parseWatiTimestamp(payload.created) ??
@@ -428,9 +460,27 @@ function sendResultFromWatiBody(body: unknown, target: WhatsAppTarget): WhatsApp
   };
 }
 
-function fileMessageIdForDownload(message: WhatsAppDmInboundMessage): string | null {
+function fileMessageIdsForDownload(message: WhatsAppDmInboundMessage): string[] {
   const raw = isRecord(message.rawProviderPayload) ? message.rawProviderPayload : null;
-  return optionalString(raw?.id) ?? message.providerMessageId;
+  return uniqueStrings([optionalString(raw?.id), optionalString(raw?.whatsappMessageId), message.providerMessageId]);
+}
+
+function shouldTryNextMediaDownloadId(status: number): boolean {
+  return status === 400 || status === 403 || status === 404;
+}
+
+function uniqueStrings(values: Array<string | null>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function hasWatiUsernameOnlyIdentity(payload: Record<string, unknown>): boolean {
+  return Boolean(
+    optionalString(payload.bsuid) ??
+      optionalString(payload.senderBsuid) ??
+      optionalString(payload.senderBSUID) ??
+      optionalString(payload.whatsappUsername) ??
+      optionalString(payload.whatsappUserName),
+  );
 }
 
 function fileNameFromHeaders(headers: Headers): string | null {

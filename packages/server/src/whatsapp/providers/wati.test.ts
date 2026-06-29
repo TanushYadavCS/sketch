@@ -139,7 +139,32 @@ describe("Wati webhook parsing", () => {
         providerConversationId: "conversation-1",
         eventType: "messageStatus",
         status: "READ",
+        failureCode: null,
+        failureDetail: null,
         providerTimestamp: "2025-11-27T10:14:13.000Z",
+      },
+    });
+  });
+
+  it("keeps Wati delivery failure metadata without logging message content", () => {
+    const parsed = parseWatiDeliveryStatusEvent({
+      eventType: "templateMessageFailed",
+      whatsappMessageId: "wamid.failed",
+      conversationId: "conversation-1",
+      statusString: "Failed",
+      failedCode: "131026",
+      failedDetail: "Message undeliverable",
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "delivery_status",
+      event: {
+        providerMessageId: "wamid.failed",
+        providerConversationId: "conversation-1",
+        eventType: "templateMessageFailed",
+        status: "Failed",
+        failureCode: "131026",
+        failureDetail: "Message undeliverable",
       },
     });
   });
@@ -156,6 +181,13 @@ describe("Wati webhook parsing", () => {
       reason: "unsupported_event_type",
       eventType: "ticketAssigned",
       messageType: null,
+    });
+  });
+
+  it("ignores BSUID-only inbound events until Sketch supports username identities", () => {
+    expect(parseWatiWebhookEvent(documentedMessagePayload({ waId: null, bsuid: "bsuid-1" }))).toEqual({
+      kind: "ignored",
+      reason: "unsupported_sender_identity",
     });
   });
 
@@ -218,6 +250,39 @@ describe("Wati outbound provider", () => {
         },
       },
     });
+  });
+
+  it("sends files through the v1 session file endpoint when no channel is configured", async () => {
+    const requestFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: "success" })));
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "wati-send-file-v1-"));
+    const filePath = join(tmpDir, "note.txt");
+    await writeFile(filePath, "file body");
+
+    try {
+      await provider.dmProvider.sendFile?.(
+        { kind: "dm", phoneE164: "+15551234567" },
+        filePath,
+        "text/plain",
+        "note.txt",
+      );
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+
+    const [url, init] = firstFetchCall(requestFetch);
+    expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendSessionFile/15551234567");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
+    expect(init.body).toBeInstanceOf(FormData);
+    expect((init.body as FormData).get("target")).toBeNull();
   });
 
   it("sends files through the v3 Wati file endpoint with channel-qualified targets", async () => {
@@ -289,6 +354,48 @@ describe("Wati outbound provider", () => {
       expect(await readFile(attachments?.[0]?.localPath ?? "", "utf8")).toBe("image-bytes");
       const [url] = firstFetchCall(requestFetch);
       expect(url.pathname).toBe("/api/ext/v3/conversations/messages/file/wati-internal-id");
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries Wati media download with the WhatsApp message id after an internal id miss", async () => {
+    const requestFetch = vi.fn(async (url: URL) => {
+      if (url.pathname.endsWith("/wati-internal-id")) {
+        return new Response("missing", { status: 404 });
+      }
+
+      return new Response("image-bytes", {
+        headers: {
+          "content-type": "image/png",
+          "content-disposition": 'attachment; filename="photo.png"',
+        },
+      });
+    });
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    const parsed = parseWatiWebhookEvent(
+      documentedMessagePayload({ id: "wati-internal-id", whatsappMessageId: "wamid.media", type: "image" }),
+    );
+    if (parsed.kind !== "message") throw new Error("expected message");
+    const workspaceDir = await mkdtemp(join(tmpdir(), "wati-download-fallback-"));
+
+    try {
+      const attachments = await provider.dmProvider.downloadMedia?.(parsed.message, workspaceDir, {
+        maxFileBytes: 1024,
+      });
+
+      expect(attachments).toEqual([expect.objectContaining({ originalName: "photo.png" })]);
+      expect(requestFetch).toHaveBeenCalledTimes(2);
+      expect(requestFetch.mock.calls.map(([url]) => (url as URL).pathname)).toEqual([
+        "/api/ext/v3/conversations/messages/file/wati-internal-id",
+        "/api/ext/v3/conversations/messages/file/wamid.media",
+      ]);
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }

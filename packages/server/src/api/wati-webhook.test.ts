@@ -23,7 +23,21 @@ function createTestApp(
 }
 
 describe("watiWebhookRoutes", () => {
-  it("accepts bearer-token authenticated webhook payloads", async () => {
+  it("accepts query-token authenticated webhook payloads for Wati setups without custom headers", async () => {
+    const { app, handleWebhook } = createTestApp();
+
+    const res = await app.request("/whatsapp/wati/events?token=secret-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventType: "message" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, acceptedMessages: 1 });
+    expect(handleWebhook).toHaveBeenCalledWith({ eventType: "message" });
+  });
+
+  it("accepts bearer-token authenticated webhook payloads when headers are available", async () => {
     const { app, handleWebhook } = createTestApp();
 
     const res = await app.request("/whatsapp/wati/events", {
@@ -35,21 +49,7 @@ describe("watiWebhookRoutes", () => {
       body: JSON.stringify({ eventType: "message" }),
     });
 
-    expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ ok: true, acceptedMessages: 1 });
-    expect(handleWebhook).toHaveBeenCalledWith({ eventType: "message" });
-  });
-
-  it("accepts query-token authenticated webhook payloads for Wati setups without custom headers", async () => {
-    const { app, handleWebhook } = createTestApp();
-
-    const res = await app.request("/whatsapp/wati/events?token=secret-token", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ eventType: "message" }),
-    });
-
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
     expect(handleWebhook).toHaveBeenCalledOnce();
   });
 
