@@ -77,7 +77,7 @@ ${input.content.slice(0, 24000)}
 </content>`;
 
   const parsed = await input.generator.generateJSON<{ tasks: unknown[] }>(prompt, {
-    maxTokens: 2048,
+    maxTokens: 8192,
     label: "extractLlmTask",
     dumpDir: input.dumpDir,
   });
