@@ -14,6 +14,10 @@ export const EMBEDDING_DIMENSIONS = 3072;
  */
 export let sqliteVecAvailable = false;
 
+export function isSqliteVecAvailable(): boolean {
+  return sqliteVecAvailable;
+}
+
 export async function createDatabase(config: Config): Promise<Kysely<DB>> {
   if (config.DB_TYPE === "postgres") {
     const { Pool } = await import("pg");
@@ -42,8 +46,15 @@ export async function createDatabase(config: Config): Promise<Kysely<DB>> {
     // Create vec0 virtual tables. These live outside Kysely migrations because
     // they require the sqlite-vec extension to be loaded first. Drop and recreate
     // if dimensions changed.
-    for (const table of ["chunk_embeddings", "file_embeddings"] as const) {
-      const pk = table === "chunk_embeddings" ? "chunk_id" : "indexed_file_id";
+    const PK_BY_TABLE = {
+      chunk_embeddings: "chunk_id",
+      file_embeddings: "indexed_file_id",
+      entity_name_embeddings: "entity_id",
+      entity_review_queue_embeddings: "review_id",
+    } as const;
+
+    for (const table of Object.keys(PK_BY_TABLE) as Array<keyof typeof PK_BY_TABLE>) {
+      const pk = PK_BY_TABLE[table];
       const existingDef = sqlite.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as
         | { sql: string }
         | undefined;

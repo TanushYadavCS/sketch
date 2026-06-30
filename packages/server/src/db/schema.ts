@@ -193,6 +193,16 @@ export interface FileEmbeddingsTable {
   embedding: string;
 }
 
+export interface EntityNameEmbeddingsTable {
+  entity_id: string;
+  embedding: string;
+}
+
+export interface EntityReviewQueueEmbeddingsTable {
+  review_id: string;
+  embedding: string;
+}
+
 export interface DocumentChunksTable {
   id: string;
   indexed_file_id: string;
@@ -1033,6 +1043,8 @@ export interface DB {
   document_timeframes: DocumentTimeframesTable;
   chunk_embeddings: ChunkEmbeddingsTable;
   file_embeddings: FileEmbeddingsTable;
+  entity_name_embeddings: EntityNameEmbeddingsTable;
+  entity_review_queue_embeddings: EntityReviewQueueEmbeddingsTable;
   user_provider_identities: UserProviderIdentitiesTable;
   file_access: FileAccessTable;
   file_share_emails: FileShareEmailsTable;
