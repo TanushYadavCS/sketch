@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as dbIndex from "../../db/index";
 import { EMBEDDING_DIMENSIONS } from "../../db/index";
 import type { DB } from "../../db/schema";
-import { reconcileMissingNameEmbeddings } from "./trunk-name-embeddings";
+import { reconcileMissingNameEmbeddings, retrieveNameDedupCandidates } from "./trunk-name-embeddings";
 import type { EmbeddingProvider } from "./types";
 
 function vector(value: number): number[] {
@@ -14,12 +14,12 @@ function vector(value: number): number[] {
   return embedding;
 }
 
-function makeProvider(): EmbeddingProvider & { embedTexts: ReturnType<typeof vi.fn> } {
+function makeProvider(embeddings?: number[][]): EmbeddingProvider & { embedTexts: ReturnType<typeof vi.fn> } {
   return {
     name: "test",
     dimensions: EMBEDDING_DIMENSIONS,
     supportsImages: false,
-    embedTexts: vi.fn(async (texts: string[]) => texts.map((_text, index) => vector(index + 1))),
+    embedTexts: vi.fn(async (texts: string[]) => embeddings ?? texts.map((_text, index) => vector(index + 1))),
   };
 }
 
@@ -79,6 +79,18 @@ async function insertReview(
     INSERT INTO entity_review_queue (id, proposed_name, entity_type, status)
     VALUES (${row.id}, ${row.name}, ${row.type}, ${row.status ?? "pending"})
   `.execute(db);
+}
+
+async function insertEntityEmbedding(db: Kysely<DB>, id: string, embedding: number[]): Promise<void> {
+  await sql`INSERT INTO entity_name_embeddings (entity_id, embedding) VALUES (${id}, ${JSON.stringify(embedding)})`.execute(
+    db,
+  );
+}
+
+async function insertReviewEmbedding(db: Kysely<DB>, id: string, embedding: number[]): Promise<void> {
+  await sql`INSERT INTO entity_review_queue_embeddings (review_id, embedding) VALUES (${id}, ${JSON.stringify(
+    embedding,
+  )})`.execute(db);
 }
 
 async function entityEmbeddingIds(db: Kysely<DB>): Promise<string[]> {
@@ -153,5 +165,61 @@ describe("trunk name embedding reconcile", () => {
 
     expect(provider.embedTexts).not.toHaveBeenCalled();
     expect(await entityEmbeddingIds(db)).toEqual([]);
+  });
+
+  it("retrieves type-correct candidates above the similarity threshold", async () => {
+    await insertEntity(db, { id: "entity-project", name: "Project Atlas", type: "project" });
+    await insertEntity(db, { id: "entity-product", name: "Product Atlas", type: "product" });
+    await insertReview(db, { id: "review-project", name: "Review Atlas", type: "project" });
+    await insertReview(db, { id: "review-far", name: "Far Atlas", type: "project" });
+    await insertEntityEmbedding(db, "entity-project", vector(0.95));
+    await insertEntityEmbedding(db, "entity-product", vector(0.96));
+    await insertReviewEmbedding(db, "review-project", vector(0.9));
+    await insertReviewEmbedding(db, "review-far", vector(0.1));
+    const provider = makeProvider([vector(1)]);
+
+    const candidates = await retrieveNameDedupCandidates(db, provider, [{ name: "Atlas Project", type: "project" }], {
+      topK: 10,
+    });
+
+    expect(provider.embedTexts).toHaveBeenCalledOnce();
+    expect(provider.embedTexts).toHaveBeenCalledWith(["Atlas Project"]);
+    expect(candidates).toEqual([
+      { name: "Project Atlas", type: "project", entityId: "entity-project" },
+      { name: "Review Atlas", type: "project", reviewId: "review-project" },
+    ]);
+  });
+
+  it("overfetches so wrong-type and orphan nearest rows do not hide usable candidates", async () => {
+    for (let index = 0; index < 3; index++) {
+      await insertEntity(db, { id: `wrong-${index}`, name: `Wrong ${index}`, type: "product" });
+      await insertEntityEmbedding(db, `wrong-${index}`, vector(1));
+      await insertEntityEmbedding(db, `orphan-${index}`, vector(1));
+    }
+    for (let index = 0; index < 3; index++) {
+      await insertEntity(db, { id: `usable-${index}`, name: `Usable ${index}`, type: "project" });
+      await insertEntityEmbedding(db, `usable-${index}`, vector(0.95 - index * 0.01));
+    }
+    const provider = makeProvider([vector(1)]);
+
+    const candidates = await retrieveNameDedupCandidates(db, provider, [{ name: "Usable Project", type: "project" }], {
+      topK: 3,
+    });
+
+    expect(candidates.map((candidate) => candidate.name).sort()).toEqual(["Usable 0", "Usable 1", "Usable 2"]);
+  });
+
+  it("fails open when retrieval has no provider or the provider throws", async () => {
+    await insertEntity(db, { id: "entity-project", name: "Project Atlas", type: "project" });
+    await insertEntityEmbedding(db, "entity-project", vector(1));
+    const throwingProvider = makeProvider();
+    throwingProvider.embedTexts.mockRejectedValueOnce(new Error("embedding unavailable"));
+
+    await expect(retrieveNameDedupCandidates(db, null, [{ name: "Atlas Project", type: "project" }])).resolves.toEqual(
+      [],
+    );
+    await expect(
+      retrieveNameDedupCandidates(db, throwingProvider, [{ name: "Atlas Project", type: "project" }]),
+    ).resolves.toEqual([]);
   });
 });

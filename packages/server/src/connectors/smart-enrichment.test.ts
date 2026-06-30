@@ -20,6 +20,8 @@ import {
   extractEntities,
   handleCandidates,
   hasDistinctiveOverlap,
+  mergeKnownEntities,
+  projectProductMentionNames,
   smartEnrichFile,
 } from "./smart-enrichment";
 
@@ -1586,6 +1588,37 @@ describe("dedup adjudication", () => {
     } catch {}
   });
 
+  it("builds unique project/product retrieval queries and merges retrieved known entities without replacing existing", () => {
+    expect(
+      projectProductMentionNames([
+        { mention: "Tourism Dashboard", type: "project" },
+        { mention: "tourism dashboard", type: "project" },
+        { mention: "Insight OS", type: "product" },
+        { mention: "Maaden", type: "company" },
+      ]),
+    ).toEqual([
+      { name: "Tourism Dashboard", type: "project" },
+      { name: "Insight OS", type: "product" },
+    ]);
+
+    const merged = mergeKnownEntities(
+      [
+        { name: "Tourism Dashboard", type: "project", entityId: "existing" },
+        { name: "Maaden", type: "company", entityId: "company" },
+      ],
+      [
+        { name: "tourism dashboard", type: "project", reviewId: "retrieved-duplicate" },
+        { name: "Maaden Sites", type: "project", reviewId: "retrieved-new" },
+      ],
+    );
+
+    expect(merged).toEqual([
+      { name: "Tourism Dashboard", type: "project", entityId: "existing" },
+      { name: "Maaden", type: "company", entityId: "company" },
+      { name: "Maaden Sites", type: "project", reviewId: "retrieved-new" },
+    ]);
+  });
+
   it("canonicalizes a dedup hit across mentions, relation endpoints, and feature parents", async () => {
     const fileId = randomUUID();
     const canonical = "[OW x Canvasx] Tourism Recovery Dashboard";
@@ -1693,6 +1726,36 @@ describe("dedup adjudication", () => {
     expect(rewrites.size).toBe(0);
     expect(mentions[0].mention).toBe("War Dashboard");
     expect((mentions[0] as { matchesKnown?: string }).matchesKnown).toBeUndefined();
+  });
+
+  it("rejects a retrieved Maaden Sites candidate for a Maaden Dashboard mention even when the LLM picks it", async () => {
+    expect(hasDistinctiveOverlap("Maaden Dashboard", "Maaden Sites", ["Maaden"])).toBe(false);
+    const mentions = [{ mention: "Maaden Dashboard", type: "project", variations: [], confidence: 0.94 }];
+    const generator = {
+      generate: async () => "",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("dedupAdjudicate:")) {
+          return [{ mention: "M1", matchesKnown: "K1" }] as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    const rewrites = await adjudicateKnownMatches(
+      generator,
+      mentions,
+      [{ name: "Maaden Sites", type: "project", reviewId: "retrieved-maaden-sites" }],
+      { fileId: "f-maaden-overmerge", logger: createTestLogger(), anchorNames: ["Maaden"] },
+    );
+
+    expect(rewrites.size).toBe(0);
+    expect(mentions[0]).toEqual({
+      mention: "Maaden Dashboard",
+      type: "project",
+      variations: [],
+      confidence: 0.94,
+      matchesKnown: undefined,
+    });
   });
 
   it("clears stale matchesKnown and fails open when the dedup generator throws", async () => {
