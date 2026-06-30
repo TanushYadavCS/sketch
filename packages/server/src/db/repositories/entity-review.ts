@@ -8,6 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
+import { deleteNameEmbedding } from "../../connectors/embeddings/trunk-name-embeddings";
 import { normalizeName } from "../../connectors/name-normalize";
 import { isPg } from "../dialect";
 import type { DB, EntityAliasRejectionsTable, EntityReviewEvidenceTable, EntityReviewQueueTable } from "../schema";
@@ -281,6 +282,9 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           })
           .where("id", "=", existing.id)
           .execute();
+        if (existing.proposed_name !== input.proposedName) {
+          await deleteNameEmbedding(db, "review", existing.id);
+        }
       }
 
       const refreshed = await db

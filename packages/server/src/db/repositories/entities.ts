@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
+import { deleteNameEmbedding } from "../../connectors/embeddings/trunk-name-embeddings";
 import { normalizeName } from "../../connectors/name-normalize";
 import { normalizeEntityMatchName } from "../../entities/match-normalize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
@@ -562,11 +563,17 @@ export function createEntityRepository(db: Kysely<DB>) {
       }>,
     ) {
       const entityId = await resolveLiveEntityId(db, id);
+      const existing = updates.name
+        ? await db.selectFrom("entities").select("name").where("id", "=", entityId).executeTakeFirst()
+        : undefined;
       await db
         .updateTable("entities")
         .set({ ...updates, updated_at: new Date().toISOString() })
         .where("id", "=", entityId)
         .execute();
+      if (existing && updates.name && existing.name !== updates.name) {
+        await deleteNameEmbedding(db, "entity", entityId);
+      }
     },
 
     /**
@@ -1211,6 +1218,9 @@ export function createEntityRepository(db: Kysely<DB>) {
         }
 
         await db.updateTable("entities").set(updates).where("id", "=", existing.id).execute();
+        if (existing.name !== data.name) {
+          await deleteNameEmbedding(db, "entity", existing.id);
+        }
 
         await db
           .updateTable("entity_source_refs")
