@@ -27,6 +27,7 @@ import {
 import { buildCredentialHint } from "../connectors/fireflies";
 import { ensureValidToken, listFolderContents, listMyDriveFolders, listSharedDrives } from "../connectors/google-drive";
 import { browseNotionRootPages, getBrowseStatus, startNotionBrowse } from "../connectors/notion";
+import { buildOtterCredentialHint } from "../connectors/otter";
 import { VALID_CONNECTOR_TYPES, getConnector } from "../connectors/registry";
 import {
   browseFiles,
@@ -207,6 +208,13 @@ const createConnectorSchema = z.object({
   scopeConfig: z.record(z.string(), z.unknown()).optional(),
 });
 
+const rotateCredentialsSchema = z
+  .object({
+    api_key: z.string().trim().min(1).optional(),
+    credentials: z.record(z.string(), z.unknown()).optional(),
+  })
+  .refine((value) => value.api_key || value.credentials, "Credentials are required");
+
 const searchSchema = z.object({
   query: z.string().min(1, "Search query is required"),
   source: z.string().optional(),
@@ -307,6 +315,18 @@ export function connectorRoutes(
 
   function configEnabled(config: { connector_type: string; sync_status?: string }): boolean {
     return configVisible(config) && config.sync_status !== "disabled";
+  }
+
+  function credentialHintForConnector(connectorType: ConnectorType, credentials: ConnectorCredentials): string | null {
+    if (connectorType === "otter") return buildOtterCredentialHint(credentials);
+    return credentials.type === "api_key" && credentials.api_key ? buildCredentialHint(credentials.api_key) : null;
+  }
+
+  function validationLogError(err: unknown) {
+    if (err instanceof Error) {
+      return { name: err.name, message: err.message };
+    }
+    return { message: String(err) };
   }
 
   async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
@@ -425,15 +445,17 @@ export function connectorRoutes(
       await connectorMeta.validateCredentials(credentials);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Invalid credentials";
-      logger.warn({ err, connectorType: parsed.data.connectorType }, "Credential validation failed");
+      logger.warn(
+        { error: validationLogError(err), connectorType: parsed.data.connectorType },
+        "Credential validation failed",
+      );
       return c.json(
         { error: { code: "INVALID_CREDENTIALS", message: `Credential validation failed: ${message}` } },
         400,
       );
     }
 
-    const credentialHint =
-      credentials.type === "api_key" && credentials.api_key ? buildCredentialHint(credentials.api_key) : null;
+    const credentialHint = credentialHintForConnector(connectorType, credentials);
 
     const config = await connectorRepo.createConfig({
       connectorType,
@@ -1663,7 +1685,7 @@ export function connectorRoutes(
   });
 
   /**
-   * Rotate the API key for an existing connector. Per-user rows are owner-only;
+   * Rotate local credentials for an existing connector. Per-user rows are owner-only;
    * org-wide rows are admin-managed.
    */
   routes.post("/:id/rotate-key", async (c) => {
@@ -1676,7 +1698,7 @@ export function connectorRoutes(
     const denied = denyUnless(c, permissions.canUpdateCredentials);
     if (denied) return denied;
 
-    const parsed = z.object({ api_key: z.string().min(1) }).safeParse(await c.req.json());
+    const parsed = rotateCredentialsSchema.safeParse(await c.req.json());
     if (!parsed.success) {
       return c.json(
         { error: { code: "VALIDATION_ERROR", message: parsed.error.issues[0]?.message ?? "Invalid request" } },
@@ -1684,17 +1706,24 @@ export function connectorRoutes(
       );
     }
 
-    const credentials: ApiKeyCredentials = { type: "api_key", api_key: parsed.data.api_key };
+    const credentials = {
+      type: config.auth_type,
+      ...(parsed.data.credentials ?? { api_key: parsed.data.api_key }),
+    } as ConnectorCredentials;
     try {
       await getConnector(config.connector_type as ConnectorType).validateCredentials(credentials);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Invalid key";
+      const message = err instanceof Error ? err.message : "Invalid credentials";
+      logger.warn(
+        { error: validationLogError(err), connectorType: config.connector_type },
+        "Credential rotation validation failed",
+      );
       return c.json({ error: { code: "INVALID_CREDENTIALS", message } }, 400);
     }
 
     await connectorRepo.updateConfig(config.id, {
       credentials: JSON.stringify(credentials),
-      credentialHint: buildCredentialHint(parsed.data.api_key),
+      credentialHint: credentialHintForConnector(config.connector_type as ConnectorType, credentials),
       syncStatus: "active",
       errorMessage: null,
     });

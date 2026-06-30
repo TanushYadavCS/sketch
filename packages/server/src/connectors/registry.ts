@@ -19,6 +19,7 @@ import { createGoogleCalendarConnector } from "./google-calendar";
 import { createGoogleDriveConnector } from "./google-drive";
 import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
+import { createOtterConnector } from "./otter";
 import { createOutlookConnector } from "./outlook";
 import { createTeamsConnector } from "./teams";
 import { createZohoCrmConnector } from "./zoho-crm";
@@ -33,6 +34,7 @@ export const connectorFactories: Record<ConnectorType, () => Connector> = {
   notion: createNotionConnector,
   linear: createLinearConnector,
   fireflies: createFirefliesConnector,
+  otter: createOtterConnector,
   zoho_crm: createZohoCrmConnector,
 };
 

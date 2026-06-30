@@ -18,6 +18,7 @@ export type IntegrationType =
   | "notion"
   | "linear"
   | "fireflies"
+  | "otter"
   | "zoho_crm";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
@@ -422,6 +423,41 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Go to Fireflies Settings → Integrations → Fireflies API",
       "Generate an API key",
       "Paste the key below",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "otter",
+    name: "Otter",
+    description: "Meeting transcripts from Otter",
+    category: "Meetings",
+    color: "#1264FF",
+    authType: "api_key",
+    authFields: [
+      {
+        key: "email",
+        label: "Otter email",
+        type: "text",
+        placeholder: "you@example.com",
+        helpText: "Use the email address on the Otter account that can access the transcripts.",
+      },
+      {
+        key: "password",
+        label: "Otter password",
+        type: "password",
+        placeholder: "Otter password",
+        helpText: "If this account uses Google or SSO sign-in, create or reset an Otter password in Otter first.",
+      },
+    ],
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://help.otter.ai/hc/en-us/articles/360047845154-Change-or-reset-your-password",
+    connectSteps: [
+      "Enter the Otter email and password for the account that owns or can access the transcripts",
+      "If the account uses Google or SSO sign-in, create or reset an Otter password first",
+      "Sketch validates the Otter session and syncs recent owned and shared transcripts",
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: false,

@@ -312,6 +312,7 @@ const SOURCE_LABELS: Record<string, { label: string; noun: string }> = {
   notion: { label: "Notion", noun: "pages" },
   linear: { label: "Linear", noun: "issues" },
   fireflies: { label: "Fireflies", noun: "meeting transcripts" },
+  otter: { label: "Otter", noun: "meeting transcripts" },
   conversation: { label: "Conversations", noun: "messages" },
   local: { label: "Workspace Files", noun: "files" },
 };

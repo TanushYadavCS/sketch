@@ -566,7 +566,7 @@ export type KindRule = { sources?: string[]; fileTypes?: string[] };
  * sweeps in tasks under `kind: "doc"` — so we discriminate on file_type too.
  */
 export const KIND_TO_RULES: Record<string, KindRule[]> = {
-  meeting: [{ sources: ["fireflies"] }],
+  meeting: [{ sources: ["fireflies", "otter"] }],
   doc: [
     { sources: ["google_drive"], fileTypes: ["document", "presentation"] },
     { sources: ["notion"], fileTypes: ["page"] },
