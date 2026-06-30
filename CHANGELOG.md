@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.38.1] -- 2026-06-30
+
+- Fix(Wati): acknowledge authenticated Wati webhooks immediately after JSON parsing, then process the provider event asynchronously so inbound callbacks do not wait on the agent pipeline.
+
 ## [0.38.0] -- 2026-06-30
 
 - WhatsApp providers: add the provider-neutral runtime that routes DMs and groups independently while keeping WhatsApp responses final-answer-only.
