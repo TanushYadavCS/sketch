@@ -56,6 +56,7 @@ import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
+import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 
 export interface ServerHandle {
@@ -231,12 +232,22 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 8. WhatsApp
   const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
   const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, logger);
+  const watiWhatsApp =
+    config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
+      ? createWatiWhatsAppProvider({
+          apiEndpoint: config.WATI_API_ENDPOINT ?? "",
+          accessToken: config.WATI_ACCESS_TOKEN ?? "",
+          webhookToken: config.WATI_WEBHOOK_TOKEN ?? "",
+          channelPhoneNumber: config.WATI_CHANNEL_PHONE_NUMBER,
+          logger,
+        })
+      : null;
   const whatsappRuntime = createWhatsAppRuntime({
     dmProviderId: config.WHATSAPP_DM_PROVIDER,
     groupProviderId: config.WHATSAPP_GROUP_PROVIDER,
-    dmProviders: [baileysWhatsApp.dmProvider],
+    dmProviders: [baileysWhatsApp.dmProvider, ...(watiWhatsApp ? [watiWhatsApp.dmProvider] : [])],
     groupProviders: [baileysWhatsApp.groupProvider],
-    inboundProviders: [baileysWhatsApp.inboundProvider],
+    inboundProviders: [baileysWhatsApp.inboundProvider, ...(watiWhatsApp ? [watiWhatsApp.inboundProvider] : [])],
     logger,
   });
 
@@ -431,6 +442,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const app = createApp(db, config, {
     whatsapp,
     whatsappRuntime,
+    watiWebhook: watiWhatsApp ?? undefined,
     getSlack: () => slack,
     scheduler,
     runAgent: trackedRunAgent,
