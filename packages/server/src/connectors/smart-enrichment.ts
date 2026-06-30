@@ -15,6 +15,7 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { upsertFeatureFact } from "../db/repositories/features";
 import {
   type UpsertIndexedFileFactInput,
@@ -43,6 +44,7 @@ import {
 } from "../entities/materialize";
 import { reconcileFeatureSubEntity } from "../entities/materialize-feature";
 import type { MaterializeDeps } from "../entities/materialize-types";
+import { tokenizeName } from "../entities/name-tokenize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
 import {
@@ -56,6 +58,7 @@ import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { isGenericEngagementName } from "./engagement-name-filter";
 import { isCodeShapedFeatureName } from "./feature-name-filter";
+import type { KnownEntityForPrompt } from "./file-scope-context";
 import type { GeminiGenerator } from "./gemini-generate";
 import {
   type FactSelectionCache,
@@ -91,7 +94,31 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
  */
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
-const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v12";
+const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v13";
+const DEDUP_PROMPT_VERSION = "dedup-adjudication-v1";
+const GENERIC_DEDUP_TOKENS = new Set([
+  "a",
+  "ai",
+  "an",
+  "and",
+  "app",
+  "by",
+  "dashboard",
+  "data",
+  "for",
+  "in",
+  "new",
+  "of",
+  "on",
+  "platform",
+  "project",
+  "system",
+  "the",
+  "to",
+  "tool",
+  "view",
+  "with",
+]);
 /**
  * `team` is intentionally absent: teams are never proposed by the LLM. A team
  * is a structural object (e.g. a Linear team) and is born only through
@@ -170,13 +197,7 @@ interface SmartEnrichmentDeps {
   embeddingProvider: EmbeddingProvider | null;
   orgContext?: ExtractionOrgContext | null;
   /** Known product/team entities to include in extraction prompt for better matching. */
-  knownEntities?: Array<{
-    name: string;
-    type: string;
-    description?: string;
-    mentionCount?: number;
-    recentlyActive?: boolean;
-  }>;
+  knownEntities?: KnownEntityForPrompt[];
   /**
    * Pre-built markdown block listing meeting attendees with resolved company
    * affiliations and action-item-owner flags. Prepended to the extraction
@@ -278,6 +299,18 @@ async function withFreshFileWriteLock<T>(
   });
 }
 
+function renderKnown(e: KnownEntityForPrompt, index: number): string {
+  const parts: string[] = [`- [K${index + 1}] ${e.name} (${e.type})`];
+  if (e.description) parts.push(`: ${e.description}`);
+  const tags: string[] = [];
+  if (typeof e.mentionCount === "number" && e.mentionCount > 0) {
+    tags.push(`${e.mentionCount} recent files`);
+  }
+  if (e.recentlyActive) tags.push("active in last 2 weeks");
+  if (tags.length > 0) parts.push(` · ${tags.join(" · ")}`);
+  return parts.join("");
+}
+
 // ── Entity Extraction ────────────────────────────────────────────────────
 
 /**
@@ -287,13 +320,7 @@ export async function extractEntities(
   generator: GeminiGenerator,
   file: FileContext,
   orgContext?: ExtractionOrgContext | null,
-  knownEntities?: Array<{
-    name: string;
-    type: string;
-    description?: string;
-    mentionCount?: number;
-    recentlyActive?: boolean;
-  }>,
+  knownEntities?: KnownEntityForPrompt[],
   participantBlock?: string,
   dumpDir?: string,
   experimentalFlag = false,
@@ -308,30 +335,9 @@ export async function extractEntities(
     ? `\nProduct/disambiguation guidance:\n${orgContext.disambiguationGuidance}\n`
     : "";
 
-  const renderKnown = (
-    e: {
-      name: string;
-      type: string;
-      description?: string;
-      mentionCount?: number;
-      recentlyActive?: boolean;
-    },
-    index: number,
-  ) => {
-    const parts: string[] = [`- [K${index + 1}] ${e.name} (${e.type})`];
-    if (e.description) parts.push(`: ${e.description}`);
-    const tags: string[] = [];
-    if (typeof e.mentionCount === "number" && e.mentionCount > 0) {
-      tags.push(`${e.mentionCount} recent files`);
-    }
-    if (e.recentlyActive) tags.push("active in last 2 weeks");
-    if (tags.length > 0) parts.push(` · ${tags.join(" · ")}`);
-    return parts.join("");
-  };
-
   const knownSection =
     knownEntities && knownEntities.length > 0
-      ? `\nKnown entities likely to appear in this file — each has a handle like [K1]. Match these to mentions instead of creating duplicates, and prefer them as relationship endpoints. Product entries here are the injected known-products list; map product mentions to those entries instead of inventing new product names.\nWhen a mention is the SAME entity as one of these — even if the document words it differently (e.g. "OW x Canvasx Tourism Recovery Dashboard" is the same as a known "Tourism Dashboard") — set that mention's "matchesKnown" to the handle (e.g. "K1"). Only set it when you are confident it is the same entity AND the same type; when unsure, omit "matchesKnown" and emit the mention as new.\n${knownEntities.map(renderKnown).join("\n")}\n`
+      ? `\nKnown entities likely to appear in this file — each has a handle like [K1]. Match these to mentions instead of creating duplicates, and prefer them as relationship endpoints. Product entries here are the injected known-products list; map product mentions to those entries instead of inventing new product names.\n${knownEntities.map(renderKnown).join("\n")}\n`
       : "";
 
   const participantSection = participantBlock && participantBlock.length > 0 ? participantBlock : "";
@@ -352,17 +358,12 @@ export async function extractEntities(
   const featureSchemaInstruction = experimentalFlag
     ? '\nFor feature mentions, include "parentProduct" with the product the feature belongs to. Omit "parentProduct" for non-feature mentions.\n'
     : "";
-  const hasKnown = (knownEntities?.length ?? 0) > 0;
-  const knownExampleField = hasKnown ? ', "matchesKnown": "K1"' : "";
   const mentionExamples = experimentalFlag
-    ? `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86${knownExampleField} },
+    ? `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
     { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 },
     { "mention": "CRM Analytics", "type": "feature", "parentProduct": "Canvas CRM", "variations": ["Analytics tab"], "confidence": 0.91 }`
-    : `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86${knownExampleField} },
+    : `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
     { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }`;
-  const knownSchemaInstruction = hasKnown
-    ? '\nFor a mention that is the same entity as a Known entity above, include "matchesKnown" with that entity\'s handle (e.g. "K1"). Omit "matchesKnown" when the mention is new or you are unsure.\n'
-    : "";
   const relationshipTypesPrompt = `Valid relationship types:
 - "works_at": person -> company (the person is employed by the company)
 - "engaged_with": person -> company (the person is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
@@ -424,7 +425,7 @@ Type disambiguation:
 - Third-party data sources, market-data providers, and SaaS you merely integrate with or pull data from are type "tool", not "product"; e.g. a flight/hotel/market-data API or provider you consume is a tool.
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
-${featureSchemaInstruction}${knownSchemaInstruction}
+${featureSchemaInstruction}
 
 If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
 
@@ -471,8 +472,156 @@ ${truncatedContent}
   });
   const mentions = Array.isArray(parsed) ? parsed : Array.isArray(parsed.mentions) ? parsed.mentions : [];
   const relations = Array.isArray(parsed) ? [] : Array.isArray(parsed.relations) ? parsed.relations : [];
-  resolveKnownMatches(mentions, knownEntities);
   return { mentions, relations };
+}
+
+interface AdjudicateKnownMatchesOptions {
+  fileId: string;
+  debugDumpDir?: string;
+  logger?: Logger;
+  rejectedKnownMatchPairs?: Set<string>;
+  anchorNames?: string[];
+}
+
+type DedupAdjudicationRow = {
+  mention?: unknown;
+  matchesKnown?: unknown;
+};
+
+function isProjectOrProductMention(mention: ExtractedMention): boolean {
+  const type = mention.type.trim().toLowerCase();
+  return type === "project" || type === "product";
+}
+
+function normalizeDedupRejectionKey(entityId: string, mentionName: string): string {
+  return `${entityId}:${normalizeName(mentionName)}`;
+}
+
+function derivedAnchorNames(knownEntities: KnownEntityForPrompt[]): string[] {
+  return knownEntities
+    .filter((entity) => {
+      const type = entity.type.trim().toLowerCase();
+      return type === "company" || type === "person";
+    })
+    .map((entity) => entity.name);
+}
+
+export function hasDistinctiveOverlap(mentionName: string, candidateName: string, anchorNames: string[]): boolean {
+  const anchorTokens = new Set(anchorNames.flatMap(tokenizeName));
+  const candidateTokens = new Set(tokenizeName(candidateName));
+  for (const token of tokenizeName(mentionName)) {
+    if (token.length < 2) continue;
+    if (!candidateTokens.has(token)) continue;
+    if (GENERIC_DEDUP_TOKENS.has(token)) continue;
+    if (anchorTokens.has(token)) continue;
+    return true;
+  }
+  return false;
+}
+
+function buildDedupPrompt(input: {
+  mentionLines: string;
+  knownLines: string;
+}): string {
+  return `Prompt version: ${DEDUP_PROMPT_VERSION}
+
+NEVER merge related-but-distinct entities, same-client sibling projects, parent/child initiatives, or entities that merely share generic words.
+You are adjudicating entity deduplication. Only mark a match when the extracted mention is the SAME real-world project or product as one known candidate.
+
+Worked examples:
+- "Tourism dashboard" and "[OW x Canvasx] Tourism Recovery Dashboard" are the same when the document clearly uses the short form for that dashboard.
+- "Maaden Dashboard" and "Maaden Sites" are NOT the same. They are related but distinct.
+- "War Dashboard" and a tourism recovery dashboard are NOT the same. Sharing "dashboard" is not enough.
+
+Extracted mentions:
+${input.mentionLines}
+
+Known candidates:
+${input.knownLines}
+
+For each extracted mention handle, return exactly one object. Use the candidate handle only when it is the same real-world entity and the same type; otherwise use null.
+Return only JSON in this shape:
+[
+  { "mention": "M1", "matchesKnown": "K2" },
+  { "mention": "M2", "matchesKnown": null }
+]`;
+}
+
+function safeErrorName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
+}
+
+export async function adjudicateKnownMatches(
+  generator: GeminiGenerator | null | undefined,
+  mentions: ExtractedMention[],
+  knownEntities: KnownEntityForPrompt[] | undefined,
+  opts: AdjudicateKnownMatchesOptions,
+): Promise<Map<string, string>> {
+  for (const mention of mentions) {
+    mention.matchesKnown = undefined;
+  }
+
+  if (!generator || !knownEntities || knownEntities.length === 0) return new Map();
+  const dedupMentions = mentions.filter(isProjectOrProductMention);
+  if (dedupMentions.length === 0) return new Map();
+
+  const mentionByHandle = new Map(dedupMentions.map((mention, index) => [`M${index + 1}`, mention]));
+  const knownByHandle = new Map(knownEntities.map((entity, index) => [`K${index + 1}`, entity]));
+  const mentionLines = dedupMentions
+    .map((mention, index) => `- [M${index + 1}] ${mention.mention} (${mention.type})`)
+    .join("\n");
+  const knownLines = knownEntities.map(renderKnown).join("\n");
+  const anchorNames = opts.anchorNames ?? derivedAnchorNames(knownEntities);
+
+  try {
+    const rows = await generator.generateJSON<unknown>(buildDedupPrompt({ mentionLines, knownLines }), {
+      maxTokens: 1024,
+      label: `dedupAdjudicate:${opts.fileId}`,
+      dumpDir: opts.debugDumpDir,
+    });
+    if (!Array.isArray(rows)) throw new Error("dedup adjudication response was not an array");
+
+    const accepted = new Map<ExtractedMention, { handle: string; canonical: string }>();
+    const seenMentions = new Set<string>();
+    for (const row of rows as DedupAdjudicationRow[]) {
+      if (!row || typeof row !== "object") continue;
+      if (typeof row.mention !== "string") continue;
+      if (seenMentions.has(row.mention)) continue;
+      const mention = mentionByHandle.get(row.mention);
+      if (!mention) continue;
+      seenMentions.add(row.mention);
+      if (row.matchesKnown === null || row.matchesKnown === undefined) continue;
+      if (typeof row.matchesKnown !== "string") continue;
+      if (row.matchesKnown.trim().toLowerCase() === "none") continue;
+      const known = knownByHandle.get(row.matchesKnown);
+      if (!known) continue;
+      if (known.type !== mention.type) continue;
+      const knownEntityId = known.entityId ?? known.id;
+      if (
+        knownEntityId &&
+        opts.rejectedKnownMatchPairs?.has(normalizeDedupRejectionKey(knownEntityId, mention.mention))
+      ) {
+        continue;
+      }
+      if (!hasDistinctiveOverlap(mention.mention, known.name, anchorNames)) continue;
+      accepted.set(mention, { handle: row.matchesKnown, canonical: known.name });
+    }
+
+    const rewriteMap = new Map<string, string>();
+    for (const [mention, match] of accepted) {
+      mention.matchesKnown = match.handle;
+      if (mention.mention !== match.canonical) {
+        rewriteMap.set(rewriteMapKey(mention.type, mention.mention), match.canonical);
+      }
+    }
+    return rewriteMap;
+  } catch (err) {
+    opts.logger?.warn(
+      { fileId: opts.fileId, stage: "dedupAdjudicate", errorName: safeErrorName(err) },
+      "smartEnrichFile: dedup adjudication failed open",
+    );
+    return new Map();
+  }
 }
 
 /**
@@ -506,6 +655,42 @@ function resolveKnownMatches(
       variations.push(original);
     }
     mention.variations = variations;
+  }
+}
+
+async function listRejectedKnownMatchPairs(
+  db: Kysely<DB>,
+  knownEntities: KnownEntityForPrompt[] | undefined,
+): Promise<Set<string>> {
+  const entityIds = [
+    ...new Set(
+      (knownEntities ?? [])
+        .map((entity) => entity.entityId ?? entity.id)
+        .filter((entityId): entityId is string => typeof entityId === "string" && entityId.length > 0),
+    ),
+  ];
+  if (entityIds.length === 0) return new Set();
+  return createEntityReviewRepo(db).listRejectedNamesForEntities(entityIds);
+}
+
+function rewriteMapKey(type: string, name: string): string {
+  return `${type}:${name}`;
+}
+
+function applyCanonicalRewriteMap(extraction: EntityExtractionResult, rewriteMap: Map<string, string>): void {
+  if (rewriteMap.size === 0) return;
+  for (const relation of extraction.relations) {
+    const sourceName = rewriteMap.get(rewriteMapKey(relation.source.type, relation.source.name));
+    if (sourceName) relation.source.name = sourceName;
+    const targetName = rewriteMap.get(rewriteMapKey(relation.target.type, relation.target.name));
+    if (targetName) relation.target.name = targetName;
+  }
+  for (const mention of extraction.mentions) {
+    if (!isFeatureMention(mention) || !mention.parentProduct) continue;
+    const parentProduct =
+      rewriteMap.get(rewriteMapKey("product", mention.parentProduct)) ??
+      rewriteMap.get(rewriteMapKey("project", mention.parentProduct));
+    if (parentProduct) mention.parentProduct = parentProduct;
   }
 }
 
@@ -919,6 +1104,18 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     },
     "smartEnrichFile: stage done",
   );
+
+  if (deps.experimentalFlag) {
+    const rejectedKnownMatchPairs = await listRejectedKnownMatchPairs(db, deps.knownEntities);
+    const canonicalRewriteMap = await adjudicateKnownMatches(generator, extraction.mentions, deps.knownEntities, {
+      fileId: file.id,
+      debugDumpDir: deps.debugDumpDir,
+      logger,
+      rejectedKnownMatchPairs,
+    });
+    resolveKnownMatches(extraction.mentions, deps.knownEntities);
+    applyCanonicalRewriteMap(extraction, canonicalRewriteMap);
+  }
 
   await deps.ensureFresh?.();
   const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction, validExtractionTypes);

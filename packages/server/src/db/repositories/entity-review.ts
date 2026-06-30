@@ -404,6 +404,17 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       return db.selectFrom("entity_alias_rejections").selectAll().where("entity_id", "=", entityId).execute();
     },
 
+    async listRejectedNamesForEntities(entityIds: string[]): Promise<Set<string>> {
+      const ids = [...new Set(entityIds.filter((entityId) => entityId.length > 0))];
+      if (ids.length === 0) return new Set();
+      const rows = await db
+        .selectFrom("entity_alias_rejections")
+        .select(["entity_id", "normalized_rejected_name"])
+        .where("entity_id", "in", ids)
+        .execute();
+      return new Set(rows.map((row) => `${row.entity_id}:${row.normalized_rejected_name}`));
+    },
+
     async isRejected(entityId: string, normalizedRejectedName: string): Promise<boolean> {
       const row = await db
         .selectFrom("entity_alias_rejections")
