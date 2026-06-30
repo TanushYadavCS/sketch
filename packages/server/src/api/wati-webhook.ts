@@ -23,9 +23,15 @@ export function watiWebhookRoutes(
       return c.json({ error: { code: "INVALID_JSON", message: "Invalid JSON body" } }, 400);
     }
 
-    const results = await provider.handleWebhook(payload);
-    const acceptedMessages = results.filter((result) => result.kind === "message").length;
-    return c.json({ ok: true, acceptedMessages }, 200);
+    setImmediate(() => {
+      void Promise.resolve()
+        .then(() => provider.handleWebhook(payload))
+        .catch((err) => {
+          logger.error({ err }, "Wati webhook processing failed");
+        });
+    });
+
+    return c.json({ ok: true }, 200);
   });
 
   return routes;
