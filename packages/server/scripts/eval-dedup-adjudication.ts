@@ -122,7 +122,7 @@ function mentionSummaries(
     .filter((m) => m.type === "project" || m.type === "product")
     .map((m) => ({
       original: m.mention,
-      finalName: rewrites.get(m.mention) ?? m.mention,
+      finalName: rewrites.get(`${m.type}:${m.mention}`) ?? m.mention,
       matchesKnown: m.matchesKnown,
     }));
 }

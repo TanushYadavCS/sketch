@@ -8,9 +8,15 @@ import type { DB } from "../../db/schema";
 import { reconcileMissingNameEmbeddings, retrieveNameDedupCandidates } from "./trunk-name-embeddings";
 import type { EmbeddingProvider } from "./types";
 
-function vector(value: number): number[] {
+/**
+ * Unit vector whose cosine similarity to the base query vector (vector(1) =
+ * [1, 0, ...]) equals `cosine`. The dedup vec0 tables use distance_metric=cosine,
+ * so a stored vector(c) retrieved against a vector(1) query scores similarity c.
+ */
+function vector(cosine: number): number[] {
   const embedding = new Array(EMBEDDING_DIMENSIONS).fill(0);
-  embedding[0] = value;
+  embedding[0] = cosine;
+  embedding[1] = Math.sqrt(Math.max(0, 1 - cosine * cosine));
   return embedding;
 }
 
@@ -19,7 +25,7 @@ function makeProvider(embeddings?: number[][]): EmbeddingProvider & { embedTexts
     name: "test",
     dimensions: EMBEDDING_DIMENSIONS,
     supportsImages: false,
-    embedTexts: vi.fn(async (texts: string[]) => embeddings ?? texts.map((_text, index) => vector(index + 1))),
+    embedTexts: vi.fn(async (texts: string[]) => embeddings ?? texts.map(() => vector(1))),
   };
 }
 
@@ -47,13 +53,13 @@ async function createDb(): Promise<Kysely<DB>> {
   await sql`
     CREATE VIRTUAL TABLE entity_name_embeddings USING vec0(
       entity_id TEXT PRIMARY KEY,
-      embedding float[${sql.lit(EMBEDDING_DIMENSIONS)}]
+      embedding float[${sql.lit(EMBEDDING_DIMENSIONS)}] distance_metric=cosine
     )
   `.execute(db);
   await sql`
     CREATE VIRTUAL TABLE entity_review_queue_embeddings USING vec0(
       review_id TEXT PRIMARY KEY,
-      embedding float[${sql.lit(EMBEDDING_DIMENSIONS)}]
+      embedding float[${sql.lit(EMBEDDING_DIMENSIONS)}] distance_metric=cosine
     )
   `.execute(db);
   return db;
