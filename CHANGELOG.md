@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.38.0] -- 2026-06-30
+
+- WhatsApp providers: add the provider-neutral runtime that routes DMs and groups independently while keeping WhatsApp responses final-answer-only.
+- Wati DMs: add a self-hosted Wati provider for WhatsApp one-to-one conversations with authenticated webhooks, inbound parsing, delivery/status callbacks, quoted replies, media send/fetch, and template capability representation.
+- Coexistence: keep Baileys as the default provider and group-chat transport, while allowing `WHATSAPP_DM_PROVIDER=wati` to route DMs through Wati and ignore duplicate Baileys DM events.
+- Docs/config: document Wati environment variables and the live-tested Wati webhook setup using one webhook row with supported v2 events.
+
 ## [0.37.1] -- 2026-06-29
 
 - Managed tenant rollout: batch timestamp normalization updates in migration 105 so large `indexed_files` tables do not keep tenant startup blocked by one `UPDATE` per file.
