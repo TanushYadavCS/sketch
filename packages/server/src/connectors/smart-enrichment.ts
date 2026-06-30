@@ -1625,6 +1625,15 @@ function buildRelationFactInput(input: {
   ) {
     return null;
   }
+  if (isDomainOrUrlOrEmailName(sourceName) || isDomainOrUrlOrEmailName(targetName)) {
+    return null;
+  }
+  if (
+    ((sourceType === "project" || sourceType === "product") && isGenericEngagementName(sourceName)) ||
+    ((targetType === "project" || targetType === "product") && isGenericEngagementName(targetName))
+  ) {
+    return null;
+  }
   const sourceConfidence = findMentionConfidence(input.mentions, input.relation.source);
   const targetConfidence = findMentionConfidence(input.mentions, input.relation.target);
   if (!isHighConfidenceEndpoint(sourceConfidence) || !isHighConfidenceEndpoint(targetConfidence)) return null;
