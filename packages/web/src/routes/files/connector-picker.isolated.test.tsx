@@ -217,6 +217,33 @@ describe("ConnectorPicker connector capabilities", () => {
     expect(screen.queryByText(/Canvas/)).not.toBeInTheDocument();
   });
 
+  it("surfaces unfinished Google Calendar setup instead of looking connected", async () => {
+    const user = userEvent.setup();
+    setupStatus();
+    const onManage = renderPicker([
+      connector({
+        id: "calendar-connector",
+        connectorType: "google_calendar",
+        authType: "oauth",
+        scopeConfig: { calendarIds: [] },
+        syncStatus: "paused",
+        fileCount: 0,
+        createdBy: "admin-1",
+        canManage: true,
+        canBrowseScope: true,
+        canChangeScope: true,
+      }),
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+
+    expect(screen.getByText("Setup needed: choose calendars.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Finish setup" }));
+
+    await waitFor(() => expect(onManage).toHaveBeenCalledTimes(1));
+    expect(onManage.mock.calls[0]?.[1].id).toBe("calendar-connector");
+  });
+
   it("renders View and Connect mine for an admin seeing another user's per-user connector", async () => {
     const user = userEvent.setup();
     setupStatus();

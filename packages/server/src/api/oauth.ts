@@ -50,6 +50,29 @@ const oauthClientConfigSchema = z.object({
   clientSecret: z.string().min(1, "clientSecret is required"),
 });
 
+export function normalizeGoogleOAuthClientId(value: string): string {
+  const trimmed = value.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      return new URL(trimmed).hostname;
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+const googleOAuthClientConfigSchema = z.object({
+  clientId: z.preprocess(
+    (value) => (typeof value === "string" ? normalizeGoogleOAuthClientId(value) : value),
+    z
+      .string()
+      .min(1, "clientId is required")
+      .regex(/^[a-zA-Z0-9-]+\.apps\.googleusercontent\.com$/, "clientId must be a Google OAuth client ID"),
+  ),
+  clientSecret: z.string().min(1, "clientSecret is required"),
+});
+
 const microsoftOAuthClientConfigSchema = oauthClientConfigSchema.extend({
   tenant: z.preprocess(
     (value) => (typeof value === "string" ? value : ""),
@@ -284,6 +307,14 @@ export function oauthRoutes(
         412,
       );
     }
+    const googleClientId = normalizeGoogleOAuthClientId(config.google_oauth_client_id);
+
+    const existingConnector = await connectors.findByTypeAndOwner(connectorType, userId);
+    if (existingConnector) {
+      return c.redirect(
+        `/files?oauth=error&reason=already_connected&connector=${connectorType}&connectorId=${existingConnector.id}`,
+      );
+    }
 
     cleanupExpiredStates();
 
@@ -296,12 +327,13 @@ export function oauthRoutes(
     const redirectUri = `${origin}/api/oauth/google/callback`;
 
     const params = new URLSearchParams({
-      client_id: config.google_oauth_client_id,
+      client_id: googleClientId,
       redirect_uri: redirectUri,
       response_type: "code",
       scope: googleScopesFor(connectorType),
       access_type: "offline",
-      prompt: "consent",
+      prompt: "consent select_account",
+      include_granted_scopes: "true",
       state,
     });
 
@@ -353,6 +385,7 @@ export function oauthRoutes(
     if (!config?.google_oauth_client_id || !config?.google_oauth_client_secret) {
       return c.redirect("/files?oauth=error&reason=not_configured");
     }
+    const googleClientId = normalizeGoogleOAuthClientId(config.google_oauth_client_id);
 
     // Per-user uniqueness: one Google connection per user and connector. If one exists,
     // bounce the user back with a "rotate via the manage UI" affordance instead
@@ -373,7 +406,7 @@ export function oauthRoutes(
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           code,
-          client_id: config.google_oauth_client_id,
+          client_id: googleClientId,
           client_secret: config.google_oauth_client_secret,
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
@@ -428,7 +461,7 @@ export function oauthRoutes(
         access_token: tokenData.access_token,
         refresh_token: tokenData.refresh_token,
         expires_at: expiresAt,
-        client_id: config.google_oauth_client_id,
+        client_id: googleClientId,
         client_secret: config.google_oauth_client_secret,
       };
 
@@ -463,9 +496,12 @@ export function oauthRoutes(
   /** GET /google/status — check if Google OAuth is configured. */
   routes.get("/google/status", async (c) => {
     const config = await settings.get();
+    const googleClientId = config?.google_oauth_client_id
+      ? normalizeGoogleOAuthClientId(config.google_oauth_client_id)
+      : null;
     return c.json({
       configured: !!(config?.google_oauth_client_id && config?.google_oauth_client_secret),
-      clientId: config?.google_oauth_client_id ?? null,
+      clientId: googleClientId,
       baseUrl: baseUrl ?? null,
     });
   });
@@ -1031,7 +1067,7 @@ export function oauthRoutes(
     if (denied) return denied;
 
     const body = await c.req.json().catch(() => ({}));
-    const parsed = oauthClientConfigSchema.safeParse(body);
+    const parsed = googleOAuthClientConfigSchema.safeParse(body);
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);

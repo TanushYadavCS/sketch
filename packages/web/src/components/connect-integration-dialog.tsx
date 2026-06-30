@@ -82,6 +82,7 @@ interface ConnectIntegrationDialogProps {
   canvasConnectionReady?: boolean;
   canvasAccountId?: string | null;
   canvasConnectionLookupPending?: boolean;
+  onCanvasConnectionStarted?: () => void;
 }
 
 export function ConnectIntegrationDialog({
@@ -93,6 +94,7 @@ export function ConnectIntegrationDialog({
   canvasConnectionReady = false,
   canvasAccountId = null,
   canvasConnectionLookupPending = false,
+  onCanvasConnectionStarted,
 }: ConnectIntegrationDialogProps) {
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
@@ -104,6 +106,7 @@ export function ConnectIntegrationDialog({
   const [step, setStep] = useState<
     "credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "generic-scope" | "oauth-config"
   >("credentials");
+  const [manualOAuthConfigOpen, setManualOAuthConfigOpen] = useState(false);
   const [sharedDrives, setSharedDrives] = useState<SharedDrive[]>([]);
   const [selectedDriveIds, setSelectedDriveIds] = useState<Set<string>>(new Set());
   const [rootFolders, setRootFolders] = useState<SharedDrive[]>([]);
@@ -152,10 +155,11 @@ export function ConnectIntegrationDialog({
   const useCanvasCredentialFlow =
     canvasSupported && (isCanvasMode || preferCanvasCredentialSource || canvasConnectionLookupPending);
   const canvasCredentialImportConfigured = credentialSource.data?.canvasCredentialImportConfigured !== false;
-  const canvasConnectionCanImport = canvasConnectionReady || canvasPopupOpened;
+  const canvasConnectionCanImport = canvasConnectionReady;
   const shouldAutoImportCanvasCredential = canvasConnectionReady && useCanvasCredentialFlow;
   const waitingForCanvasConnectionLookup =
     useCanvasCredentialFlow && canvasConnectionLookupPending && !canvasConnectionReady && !canvasPopupOpened;
+  const waitingForCanvasConnectionCompletion = useCanvasCredentialFlow && canvasPopupOpened && !canvasConnectionReady;
 
   useEffect(() => {
     if (!open) setAutoCanvasImportStarted(false);
@@ -216,14 +220,41 @@ export function ConnectIntegrationDialog({
   useEffect(() => {
     if (open && useCanvasCredentialFlow) {
       setStep("credentials");
+      setManualOAuthConfigOpen(false);
       return;
     }
     if (open && isOAuthRedirect) {
       if (oauthStatus.isSuccess) {
+        if (manualOAuthConfigOpen) {
+          setStep("oauth-config");
+          return;
+        }
         setStep(needsClientSetup && !isOAuthConfigured ? "oauth-config" : "credentials");
       }
     }
-  }, [open, useCanvasCredentialFlow, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured, needsClientSetup]);
+  }, [
+    open,
+    useCanvasCredentialFlow,
+    isOAuthRedirect,
+    oauthStatus.isSuccess,
+    isOAuthConfigured,
+    needsClientSetup,
+    manualOAuthConfigOpen,
+  ]);
+
+  useEffect(() => {
+    if (!open || step !== "oauth-config" || !oauthStatus.isSuccess || !isOAuthConfigured) return;
+    setFieldValues((prev) => {
+      const next = { ...prev };
+      const tenant =
+        oauthStatus.data && "tenant" in oauthStatus.data && typeof oauthStatus.data.tenant === "string"
+          ? oauthStatus.data.tenant
+          : null;
+      if (!next.client_id && oauthStatus.data?.clientId) next.client_id = oauthStatus.data.clientId;
+      if (!next.tenant && isMicrosoft && tenant) next.tenant = tenant;
+      return next;
+    });
+  }, [open, step, oauthStatus.isSuccess, oauthStatus.data, isMicrosoft, isOAuthConfigured]);
 
   /** Save provider OAuth client_id + client_secret. */
   const configureOAuthMutation = useMutation({
@@ -243,6 +274,7 @@ export function ConnectIntegrationDialog({
     onSuccess: () => {
       toast.success(`${oauthProviderName} OAuth configured.`);
       oauthStatus.refetch();
+      setManualOAuthConfigOpen(false);
       setStep("credentials");
     },
     onError: (error: Error) => {
@@ -436,6 +468,7 @@ export function ConnectIntegrationDialog({
     setNotionScanDone(false);
     setManagedConnectorId(null);
     setCanvasPopupOpened(false);
+    setManualOAuthConfigOpen(false);
     setGenericBrowseData(null);
     setSelectedGenericIds(new Set());
     onOpenChange(false);
@@ -453,9 +486,10 @@ export function ConnectIntegrationDialog({
         throw new Error("Popup blocked. Allow popups for this site, then try again.");
       }
       setCanvasPopupOpened(true);
+      onCanvasConnectionStarted?.();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to start Canvas connection.");
+      toast.error(error.message || "Failed to start account connection.");
     },
   });
 
@@ -519,7 +553,7 @@ export function ConnectIntegrationDialog({
       onConnected();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to import Canvas credential.");
+      toast.error(error.message || "Failed to set up the connected account.");
     },
   });
 
@@ -548,13 +582,13 @@ export function ConnectIntegrationDialog({
   ]);
 
   const autoCanvasImportErrorMessage = credentialSource.isError
-    ? "Sketch could not check the Canvas credential setup."
+    ? "Sketch could not check the connected-account setup."
     : credentialSource.data?.canvasConfigured === false
-      ? "Canvas integration provider is not configured."
+      ? "The connected-account provider is not configured."
       : !canvasCredentialImportConfigured
-        ? "Canvas credential import is not configured for this workspace."
+        ? "Connected-account import is not configured for this workspace."
         : canvasImportMutation.isError
-          ? "Sketch could not import the connected Canvas account."
+          ? "Sketch could not set up the connected account."
           : null;
 
   const handleFieldChange = (key: string, value: string) => {
@@ -732,11 +766,9 @@ export function ConnectIntegrationDialog({
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2.5">
                 <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
-                Add {integration.name} to the org brain
+                Add {integration.name} to Sketch
               </DialogTitle>
-              <DialogDescription>
-                Sketch is using the account you already connected to set up Files access.
-              </DialogDescription>
+              <DialogDescription>Sketch is using the account you already connected.</DialogDescription>
             </DialogHeader>
 
             <div className="flex flex-col items-center gap-3 py-8 text-center">
@@ -748,7 +780,7 @@ export function ConnectIntegrationDialog({
               ) : (
                 <>
                   <SpinnerGapIcon size={22} className="animate-spin text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground">Setting up Files access...</p>
+                  <p className="text-sm text-muted-foreground">Setting up Sketch sync...</p>
                 </>
               )}
             </div>
@@ -780,17 +812,21 @@ export function ConnectIntegrationDialog({
               <DialogDescription>
                 {waitingForCanvasConnectionLookup
                   ? "Checking for an account you already connected."
-                  : canvasConnectionReady
-                    ? "Sketch will use the account you already connected, then let you choose what to sync."
-                    : "Connect your account, then choose what Sketch should sync."}
+                  : waitingForCanvasConnectionCompletion
+                    ? "Finish signing in in the popup. Sketch will continue automatically."
+                    : canvasConnectionReady
+                      ? "Sketch will use the account you already connected, then let you choose what to sync."
+                      : "Connect your account, then choose what Sketch should sync."}
               </DialogDescription>
             </DialogHeader>
 
             <div className="flex flex-col gap-3 py-4">
-              {waitingForCanvasConnectionLookup ? (
+              {waitingForCanvasConnectionLookup || waitingForCanvasConnectionCompletion ? (
                 <div className="flex items-center justify-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
                   <SpinnerGapIcon size={16} className="animate-spin" />
-                  Checking connected accounts...
+                  {waitingForCanvasConnectionCompletion
+                    ? "Waiting for sign-in to finish..."
+                    : "Checking connected accounts..."}
                 </div>
               ) : (
                 <>
@@ -828,7 +864,7 @@ export function ConnectIntegrationDialog({
                           Setting up...
                         </>
                       ) : (
-                        "Set up Files access"
+                        "Set up Sketch sync"
                       )}
                     </Button>
                   )}
@@ -836,12 +872,12 @@ export function ConnectIntegrationDialog({
               )}
               {credentialSource.data?.canvasConfigured === false && (
                 <p className="text-center text-xs text-muted-foreground">
-                  Canvas integration provider is not configured.
+                  The connected-account provider is not configured.
                 </p>
               )}
               {!canvasCredentialImportConfigured && credentialSource.data?.canvasConfigured !== false && (
                 <p className="text-center text-xs text-muted-foreground">
-                  Canvas credential import is not configured for this workspace.
+                  Connected-account import is not configured for this workspace.
                 </p>
               )}
             </div>
@@ -948,7 +984,10 @@ export function ConnectIntegrationDialog({
               <div className="flex justify-end">
                 <button
                   type="button"
-                  onClick={() => setStep("oauth-config")}
+                  onClick={() => {
+                    setManualOAuthConfigOpen(true);
+                    setStep("oauth-config");
+                  }}
                   className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Reconfigure OAuth
@@ -984,7 +1023,10 @@ export function ConnectIntegrationDialog({
               <div className="flex justify-end">
                 <button
                   type="button"
-                  onClick={() => setStep("oauth-config")}
+                  onClick={() => {
+                    setManualOAuthConfigOpen(true);
+                    setStep("oauth-config");
+                  }}
                   className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Reconfigure OAuth

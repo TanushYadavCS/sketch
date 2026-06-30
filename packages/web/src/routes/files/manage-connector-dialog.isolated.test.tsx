@@ -222,8 +222,9 @@ describe("ManageConnectorDialog connector capabilities", () => {
       />,
     );
 
+    expect(await screen.findByText("No calendars selected yet")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "Team" }));
-    await user.click(screen.getByRole("button", { name: /Save & re-sync/i }));
+    await user.click(screen.getByRole("button", { name: /Start syncing/i }));
 
     await waitFor(() => {
       expect(patchedBody).toEqual({ scopeConfig: { calendarIds: ["team"] } });

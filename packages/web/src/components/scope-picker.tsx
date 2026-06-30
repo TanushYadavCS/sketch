@@ -451,6 +451,9 @@ export function GenericScopeEditor({
       </div>
     );
   }
+  const storedScope = browseData.scopeConfig ?? scopeConfig;
+  const hasNoSavedSelection =
+    !!scopeConfigKey && Object.prototype.hasOwnProperty.call(storedScope, scopeConfigKey) && initIds.size === 0;
 
   return (
     <div className="space-y-4">
@@ -467,6 +470,14 @@ export function GenericScopeEditor({
           {isCached ? "Refresh" : ""}
         </button>
       </div>
+      {hasNoSavedSelection && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+          <p className="text-xs font-medium text-foreground">No {noun} selected yet</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            Choose at least one item to start syncing this connector.
+          </p>
+        </div>
+      )}
       <GenericScopePicker
         data={browseData}
         selectedIds={effectiveIds}
@@ -487,7 +498,7 @@ export function GenericScopeEditor({
               Saving...
             </>
           ) : (
-            `Save & re-sync (${effectiveIds.size} ${noun})`
+            `${hasNoSavedSelection ? "Start syncing" : "Save & re-sync"} (${effectiveIds.size} ${noun})`
           )}
         </Button>
       )}

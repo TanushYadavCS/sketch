@@ -25,6 +25,7 @@ const ADMIN_EMAIL = "admin@test.com";
 const MEMBER_EMAIL = "member@test.com";
 const OTHER_MEMBER_EMAIL = "other@test.com";
 const PASSWORD = "testpassword123";
+const GOOGLE_CLIENT_ID = "123456789-test.apps.googleusercontent.com";
 
 async function seedUsers(db: Kysely<DB>) {
   const settings = createSettingsRepository(db);
@@ -1051,7 +1052,7 @@ describe("Connectors API — authorization", () => {
       const res = await app.request("/api/oauth/google/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+        body: JSON.stringify({ clientId: GOOGLE_CLIENT_ID, clientSecret: "csec" }),
       });
       expect(res.status).toBe(403);
     });
@@ -1060,9 +1061,33 @@ describe("Connectors API — authorization", () => {
       const res = await app.request("/api/oauth/google/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: adminCookie },
-        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+        body: JSON.stringify({ clientId: GOOGLE_CLIENT_ID, clientSecret: "csec" }),
       });
       expect(res.status).toBe(200);
+    });
+
+    it("normalizes a pasted Google client ID URL", async () => {
+      const res = await app.request("/api/oauth/google/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ clientId: `http://${GOOGLE_CLIENT_ID}/`, clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(200);
+
+      const status = await app.request("/api/oauth/google/status", { headers: { Cookie: adminCookie } });
+      const body = await status.json();
+      expect(body.clientId).toBe(GOOGLE_CLIENT_ID);
+    });
+
+    it("rejects a redirect URI pasted as the Google client ID", async () => {
+      const res = await app.request("/api/oauth/google/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ clientId: "http://localhost:5001/api/oauth/google/callback", clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.code).toBe("VALIDATION_ERROR");
     });
   });
 
@@ -1118,19 +1143,53 @@ describe("Connectors API — authorization", () => {
 
     it("after admin configures client → 302 redirect to Google", async () => {
       const settings = createSettingsRepository(db);
-      await settings.update({ googleOauthClientId: "cid", googleOauthClientSecret: "csec" });
+      await settings.update({ googleOauthClientId: GOOGLE_CLIENT_ID, googleOauthClientSecret: "csec" });
 
       const res = await app.request("/api/oauth/google/authorize", {
         headers: { Cookie: memberCookie },
         redirect: "manual",
       });
       expect(res.status).toBe(302);
-      expect(res.headers.get("location")).toContain("accounts.google.com");
+      const location = res.headers.get("location") ?? "";
+      expect(location).toContain("accounts.google.com");
+      expect(new URL(location).searchParams.get("prompt")).toBe("consent select_account");
+      expect(new URL(location).searchParams.get("include_granted_scopes")).toBe("true");
+    });
+
+    it("normalizes legacy stored Google client ID URLs before redirecting", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ googleOauthClientId: `http://${GOOGLE_CLIENT_ID}/`, googleOauthClientSecret: "csec" });
+
+      const res = await app.request("/api/oauth/google/authorize", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = res.headers.get("location") ?? "";
+      expect(new URL(location).searchParams.get("client_id")).toBe(GOOGLE_CLIENT_ID);
+    });
+
+    it("redirects back to manage an existing connector before sending the user to Google", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ googleOauthClientId: GOOGLE_CLIENT_ID, googleOauthClientSecret: "csec" });
+      const existing = await insertConfig(db, { connectorType: "google_calendar", createdBy: memberId });
+
+      const res = await app.request("/api/oauth/google/authorize?connector=google_calendar", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = res.headers.get("location") ?? "";
+      expect(location).toBe(
+        `/files?oauth=error&reason=already_connected&connector=google_calendar&connectorId=${existing.id}`,
+      );
     });
 
     it("Gmail OAuth uses the same Google client config with Gmail scope", async () => {
       const settings = createSettingsRepository(db);
-      await settings.update({ googleOauthClientId: "cid", googleOauthClientSecret: "csec" });
+      await settings.update({ googleOauthClientId: GOOGLE_CLIENT_ID, googleOauthClientSecret: "csec" });
 
       const res = await app.request("/api/oauth/google/authorize?connector=gmail", {
         headers: { Cookie: memberCookie },
