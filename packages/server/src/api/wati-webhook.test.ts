@@ -33,8 +33,8 @@ describe("watiWebhookRoutes", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, acceptedMessages: 1 });
-    expect(handleWebhook).toHaveBeenCalledWith({ eventType: "message" });
+    expect(await res.json()).toEqual({ ok: true });
+    await vi.waitFor(() => expect(handleWebhook).toHaveBeenCalledWith({ eventType: "message" }));
   });
 
   it("accepts bearer-token authenticated webhook payloads when headers are available", async () => {
@@ -50,7 +50,28 @@ describe("watiWebhookRoutes", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(handleWebhook).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(handleWebhook).toHaveBeenCalledOnce());
+  });
+
+  it("acknowledges valid webhook payloads before provider processing finishes", async () => {
+    const handleWebhook = vi.fn(() => new Promise<never>(() => undefined));
+    const { app } = createTestApp(handleWebhook);
+
+    const request = app.request("/whatsapp/wati/events?token=secret-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventType: "message" }),
+    });
+
+    const res = await Promise.race([
+      request,
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+
+    expect(res).not.toBe("timeout");
+    expect((res as Response).status).toBe(200);
+    expect(await (res as Response).json()).toEqual({ ok: true });
+    await vi.waitFor(() => expect(handleWebhook).toHaveBeenCalledOnce());
   });
 
   it("rejects missing or incorrect webhook tokens before processing the body", async () => {
