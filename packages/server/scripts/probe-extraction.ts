@@ -2,10 +2,10 @@
  * Read-only LLM extraction probe.
  *
  * Runs the live `extractEntities` prompt against real indexed files using the
- * configured Gemini key, and prints raw mentions + relations. Writes NOTHING:
- * no DB mutations, no materialization, no dumps — so it never pollutes the
- * entity graph. Used to score the extraction prompt's DO-NOT / disambiguation
- * rules against natural data.
+ * configured Gemini key, and prints pre-adjudication raw mentions + relations.
+ * Writes NOTHING: no DB mutations, no materialization, no dumps — so it never
+ * pollutes the entity graph. Used to score the extraction prompt's DO-NOT /
+ * disambiguation rules against natural data.
  *
  *   tsx scripts/probe-extraction.ts <fileId> [<fileId> ...]
  */
@@ -15,8 +15,8 @@ import { buildFileScopedKnownEntities } from "../src/connectors/file-scope-conte
 import { createGeminiGenerator } from "../src/connectors/gemini-generate";
 import { buildParticipantBlock } from "../src/connectors/participant-block";
 import { extractEntities } from "../src/connectors/smart-enrichment";
-import type { DB } from "../src/db/schema";
 import { parseOrgContext } from "../src/db/repositories/settings";
+import type { DB } from "../src/db/schema";
 
 const DB_PATH = "/Users/hkalra/projects/claude/sketch/data/sketch.db";
 const EXPERIMENTAL = true;
@@ -119,7 +119,9 @@ async function main() {
     }
     console.log("\nRELATIONS:");
     for (const r of result.relations) {
-      console.log(`  ${r.source.name} (${r.source.type}) --${r.type}--> ${r.target.name} (${r.target.type})  (conf ${r.confidence})`);
+      console.log(
+        `  ${r.source.name} (${r.source.type}) --${r.type}--> ${r.target.name} (${r.target.type})  (conf ${r.confidence})`,
+      );
     }
   }
 

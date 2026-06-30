@@ -361,6 +361,7 @@ export async function loadBaselineKnownEntities(
   const entities = [...baseEntities, ...projectEntities];
   return entities.map((entity) => ({
     id: entity.id,
+    entityId: entity.id,
     name: entity.name,
     type: entity.source_type,
     aliases: parseStringArray(entity.aliases),

@@ -453,7 +453,11 @@ describe("file-scope-context", () => {
     const tourismEntries = known.filter((entry) => entry.name === "Tourism Dashboard" && entry.type === "project");
     expect(tourismEntries).toHaveLength(1);
     expect(tourismEntries[0]).toMatchObject({ name: "Tourism Dashboard", type: "project", description: "confirmed" });
-    expect(known).toContainEqual({ name: "Maaden Dashboard", type: "project" });
+    expect(known.find((entry) => entry.name === "Maaden Dashboard")).toMatchObject({
+      name: "Maaden Dashboard",
+      type: "project",
+      reviewId: "pending-maaden",
+    });
   });
 
   it("caps per-anchor initiatives and teams while preserving baseline", async () => {
@@ -555,9 +559,10 @@ describe("file-scope-context", () => {
       { baselineRelevanceCap: 0 },
     );
 
-    expect(known).toContainEqual({
+    expect(known.find((entry) => entry.name === "Sketch")).toMatchObject({
       name: "Sketch",
       type: "product",
+      entityId: "baseline-sketch",
       description: undefined,
       mentionCount: undefined,
       recentlyActive: undefined,
@@ -632,9 +637,10 @@ describe("file-scope-context", () => {
     );
 
     expect(companyOnly).toEqual([]);
-    expect(personAnchored).toContainEqual({
+    expect(personAnchored.find((entry) => entry.name === "Internal Atlas")).toMatchObject({
       name: "Internal Atlas",
       type: "project",
+      entityId: "project-alice",
       mentionCount: 1,
       recentlyActive: true,
     });
