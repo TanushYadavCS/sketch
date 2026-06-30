@@ -1268,6 +1268,71 @@ describe("extractEntities prompt — v6 entity type removal", () => {
       .executeTakeFirst();
     expect(relationship).toBeUndefined();
   });
+
+  it("drops relations whose endpoint is a generic engagement name or a domain/url", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, {
+      content: "Sarah Chen contributes to the Dashboard and to oliverwyman.com.",
+      contentHash: "hash-generic-endpoint",
+    });
+    const generator = {
+      generate: async () => "Sarah Chen contributes to the Dashboard.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [{ mention: "Sarah Chen", type: "person", variations: ["Sarah"], confidence: 0.95 }],
+            relations: [
+              {
+                type: "contributes_to",
+                source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
+                target: { name: "Dashboard", type: "project", variations: [] },
+                confidence: 0.95,
+                context: "Sarah Chen contributes to the Dashboard.",
+              },
+              {
+                type: "contributes_to",
+                source: { name: "Sarah Chen", type: "person", variations: ["Sarah"] },
+                target: { name: "oliverwyman.com", type: "project", variations: [] },
+                confidence: 0.95,
+                context: "Sarah Chen contributes to oliverwyman.com.",
+              },
+            ],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content: "Sarah Chen contributes to the Dashboard and to oliverwyman.com.",
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-generic-endpoint",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const relationFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select("raw")
+      .where("fact_type", "=", "llm_relation")
+      .execute();
+    expect(relationFacts).toHaveLength(0);
+    const noiseRows = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("entity_type", "=", "project")
+      .where((eb) => eb.fn("lower", ["proposed_name"]), "in", ["dashboard", "oliverwyman.com"])
+      .execute();
+    expect(noiseRows).toHaveLength(0);
+  });
 });
 
 describe("extractEntities prompt — v7 quality rules", () => {
