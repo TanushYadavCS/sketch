@@ -122,9 +122,9 @@ describe("Wati webhook parsing", () => {
       parseWatiWebhookEvent(documentedMessagePayload({ channelPhoneNumber: null }), {
         channelPhoneNumber: "+15551234567",
       }),
-    ).toEqual({
-      kind: "ignored",
-      reason: "channel_mismatch",
+    ).toMatchObject({
+      kind: "message",
+      message: { providerMessageId: "wamid.inbound" },
     });
   });
 
@@ -472,6 +472,45 @@ describe("Wati outbound provider", () => {
 
       await provider.handleWebhook([payload, payload]);
 
+      expect(handler).not.toHaveBeenCalled();
+      const rows = await db.selectFrom("whatsapp_provider_events").selectAll().execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        provider: "wati",
+        provider_message_id: "local-1",
+        event_family: "read",
+        status: "Read",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("records status callbacks that omit channel when a Wati channel is configured", async () => {
+    const db = await createTestDb();
+    try {
+      const providerEvents = createWhatsAppProviderEventRepository(db);
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        channelPhoneNumber: "+17435002445",
+        logger: createTestLogger(),
+        providerEvents,
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+      const handler = vi.fn();
+      provider.inboundProvider.onMessage(handler);
+
+      const results = await provider.handleWebhook({
+        eventType: "sentMessageREAD_v2",
+        statusString: "Read",
+        localMessageId: "local-1",
+        whatsappMessageId: "wamid.status",
+        timestamp: "1764238453",
+      });
+
+      expect(results).toEqual([expect.objectContaining({ kind: "delivery_status" })]);
       expect(handler).not.toHaveBeenCalled();
       const rows = await db.selectFrom("whatsapp_provider_events").selectAll().execute();
       expect(rows).toHaveLength(1);

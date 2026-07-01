@@ -380,7 +380,7 @@ export function parseWatiWebhookEvent(
   const configuredChannel = phoneDigits(options.channelPhoneNumber ?? null);
   const eventChannel = phoneDigits(optionalString(payload.channelPhoneNumber));
 
-  if (configuredChannel && eventChannel !== configuredChannel) {
+  if (configuredChannel && eventChannel && eventChannel !== configuredChannel) {
     return { kind: "ignored", reason: "channel_mismatch" };
   }
 
