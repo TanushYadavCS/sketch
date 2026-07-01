@@ -564,6 +564,81 @@ describe("whatsapp/adapter", () => {
       expect(deps.runAgent).toHaveBeenCalledOnce();
     });
 
+    it("claims all matching legacy Wati DM conversations before capturing", async () => {
+      const legacyWatiConversation = {
+        id: 42,
+        platform: "whatsapp",
+        kind: "dm",
+        provider_conversation_id: "wati-conversation-1",
+        display_name: "Alice",
+        last_seen_message_id: null,
+        created_at: "2025-01-01",
+        updated_at: "2025-01-01",
+      };
+      const legacyJidConversation = {
+        ...legacyWatiConversation,
+        id: 43,
+        provider_conversation_id: "1234567890@s.whatsapp.net",
+      };
+      const canonicalConversation = {
+        ...legacyWatiConversation,
+        id: 99,
+        provider_conversation_id: "dm:+1234567890",
+      };
+      const deps = makeDeps();
+      const claimedLegacyIds = new Set<number>();
+      vi.mocked(deps.repos.conversations.find).mockImplementation(async (ref) => {
+        if (ref.providerConversationId === "wati-conversation-1" && !claimedLegacyIds.has(42)) {
+          return legacyWatiConversation;
+        }
+        if (ref.providerConversationId === "1234567890@s.whatsapp.net" && !claimedLegacyIds.has(43)) {
+          return legacyJidConversation;
+        }
+        return undefined;
+      });
+      vi.mocked(deps.repos.conversations.claimProviderConversationId).mockImplementation(async (id) => {
+        claimedLegacyIds.add(id);
+        return canonicalConversation;
+      });
+      vi.mocked(deps.repos.conversations.getOrCreate).mockResolvedValue(canonicalConversation);
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.legacy-all",
+        providerConversationId: "wati-conversation-1",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp: "2026-07-01T00:00:00.000Z",
+        senderName: "Alice",
+        senderProviderId: "1234567890@s.whatsapp.net",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      });
+      await flush();
+
+      expect(deps.repos.conversations.claimProviderConversationId).toHaveBeenCalledTimes(2);
+      expect(deps.repos.conversations.claimProviderConversationId).toHaveBeenNthCalledWith(
+        1,
+        42,
+        { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+1234567890" },
+        "Alice",
+      );
+      expect(deps.repos.conversations.claimProviderConversationId).toHaveBeenNthCalledWith(
+        2,
+        43,
+        { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+1234567890" },
+        "Alice",
+      );
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: 99, providerMessageId: "wamid.legacy-all" }),
+      );
+      expect(deps.runAgent).toHaveBeenCalledOnce();
+    });
+
     it("starts and stops composing indicator", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();

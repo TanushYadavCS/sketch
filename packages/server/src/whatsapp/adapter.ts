@@ -189,6 +189,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   const getOrCreateConversationForMessage = async (message: WhatsAppInboundMessage, displayName?: string | null) => {
     const ref = conversationRefForMessage(message);
     if (message.kind === "dm") {
+      let canonicalConversation: Awaited<ReturnType<ConversationRepository["getOrCreate"]>> | undefined;
       for (const legacyId of legacyDmConversationIds(message)) {
         const legacyConversation = await repos.conversations.find({
           platform: ref.platform,
@@ -196,9 +197,14 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           providerConversationId: legacyId,
         });
         if (legacyConversation) {
-          return repos.conversations.claimProviderConversationId(legacyConversation.id, ref, displayName);
+          canonicalConversation = await repos.conversations.claimProviderConversationId(
+            legacyConversation.id,
+            ref,
+            displayName,
+          );
         }
       }
+      if (canonicalConversation) return canonicalConversation;
     }
     return repos.conversations.getOrCreate(ref, displayName);
   };
