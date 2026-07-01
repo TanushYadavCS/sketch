@@ -1,5 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import type { createWhatsAppProviderEventRepository } from "../../db/repositories/whatsapp-provider-events";
+import type {
+  ProviderTemplateSummary,
+  createWhatsAppTemplateMappingRepository,
+} from "../../db/repositories/whatsapp-template-mappings";
 import type { Attachment } from "../../files";
 import { mimeToExtension } from "../../files";
 import type { Logger } from "../../logger";
@@ -14,6 +19,7 @@ import {
   type WhatsAppTarget,
   canonicalDmConversationId,
 } from "../provider";
+import type { WhatsAppTemplateParamValue, WhatsAppTemplateRequest } from "../templates";
 
 export const WHATSAPP_WATI_PROVIDER_ID = "wati";
 
@@ -33,6 +39,7 @@ const WATI_CAPABILITIES: WhatsAppCapabilities = {
 
 const MEDIA_MESSAGE_TYPES = new Set(["image", "document", "voice", "audio", "video", "sticker", "media_placeholder"]);
 const UNSUPPORTED_INBOUND_MESSAGE_TYPES = new Set(["reaction"]);
+const INBOUND_EVENT_TYPES = new Set(["message", "messagereceived", "message_received"]);
 
 export interface WatiWhatsAppConfig {
   apiEndpoint: string;
@@ -40,6 +47,8 @@ export interface WatiWhatsAppConfig {
   webhookToken: string;
   channelPhoneNumber?: string | null;
   logger: Logger;
+  providerEvents?: ReturnType<typeof createWhatsAppProviderEventRepository>;
+  templateMappings?: ReturnType<typeof createWhatsAppTemplateMappingRepository>;
   fetch?: typeof fetch;
 }
 
@@ -48,6 +57,7 @@ export interface WatiWhatsAppProvider {
   inboundProvider: WhatsAppInboundProvider;
   webhookToken: string;
   handleWebhook(payload: unknown): Promise<WatiWebhookHandleResult[]>;
+  listTemplates(): Promise<ProviderTemplateSummary[]>;
 }
 
 export type WatiWebhookHandleResult =
@@ -126,6 +136,65 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       headers: authorizationHeaders(config.accessToken),
       body: form,
     });
+  };
+
+  const sendTemplate = async (
+    target: WhatsAppTarget,
+    template: WhatsAppTemplateRequest,
+  ): Promise<WhatsAppSendResult | null> => {
+    if (!config.templateMappings) throw new Error("WhatsApp template mappings are not configured");
+    const mapping = await config.templateMappings.findApprovedMapping(
+      WHATSAPP_WATI_PROVIDER_ID,
+      template.key,
+      template.language,
+    );
+    if (!mapping) {
+      throw new Error(`No approved WhatsApp template mapping configured for ${template.key}`);
+    }
+
+    const phone = targetPhoneDigits(target);
+    const url = new URL(`${endpoint}/api/v1/sendTemplateMessages`);
+    const customParams = providerTemplateParameters(mapping.parameterMap, template.params);
+    const body = {
+      template_name: mapping.provider_template_name,
+      broadcast_name: buildBroadcastName(template.key),
+      receivers: [
+        {
+          whatsappNumber: phone,
+          customParams,
+        },
+      ],
+    };
+
+    const responseBody = await fetchJson(requestFetch, url, {
+      method: "POST",
+      headers: { ...authorizationHeaders(config.accessToken), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    return sendResultFromWatiTemplateBody(responseBody, target);
+  };
+
+  const listTemplates = async (): Promise<ProviderTemplateSummary[]> => {
+    const templates: ProviderTemplateSummary[] = [];
+    const pageSize = 100;
+
+    for (let pageNumber = 1; pageNumber <= 20; pageNumber += 1) {
+      const url = new URL(`${v3Endpoint}/api/ext/v3/messageTemplates`);
+      url.searchParams.set("page_number", String(pageNumber));
+      url.searchParams.set("page_size", String(pageSize));
+      if (channelPhoneDigits) url.searchParams.set("channel", channelPhoneDigits);
+
+      const body = await fetchJson(requestFetch, url, {
+        method: "GET",
+        headers: authorizationHeaders(config.accessToken),
+      });
+      const pageTemplates = parseWatiTemplateList(body);
+      templates.push(...pageTemplates);
+      if (pageTemplates.length < pageSize) break;
+    }
+
+    return templates;
   };
 
   const downloadMedia = async (
@@ -219,6 +288,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
         return Boolean(endpoint && config.accessToken);
       },
       sendText,
+      sendTemplate,
       sendFile,
       downloadMedia: (message, workspaceDir, params) =>
         message.kind === "dm" ? downloadMedia(message, workspaceDir, params) : Promise.resolve([]),
@@ -230,6 +300,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       },
     },
     webhookToken: config.webhookToken,
+    listTemplates,
     async handleWebhook(payload) {
       const events = Array.isArray(payload) ? payload : [payload];
       const results: WatiWebhookHandleResult[] = [];
@@ -249,12 +320,26 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
         }
 
         if (parsed.kind === "delivery_status") {
+          const recorded = config.providerEvents
+            ? await config.providerEvents.upsertDeliveryStatus({
+                provider: parsed.event.providerId,
+                providerMessageId: parsed.event.providerMessageId,
+                providerConversationId: parsed.event.providerConversationId,
+                eventType: parsed.event.eventType,
+                status: parsed.event.status,
+                failureCode: parsed.event.failureCode,
+                failureDetail: parsed.event.failureDetail,
+                providerTimestamp: parsed.event.providerTimestamp,
+                rawProviderPayload: parsed.event.rawProviderPayload,
+              })
+            : null;
           config.logger.debug(
             {
               providerMessageId: parsed.event.providerMessageId,
               providerConversationId: parsed.event.providerConversationId,
               eventType: parsed.event.eventType,
               status: parsed.event.status,
+              inserted: recorded?.inserted ?? null,
             },
             "Parsed Wati delivery/status webhook event",
           );
@@ -290,13 +375,14 @@ export function parseWatiWebhookEvent(
   const eventType = optionalString(payload.eventType);
   const messageType = optionalString(payload.type);
   const owner = optionalBoolean(payload.owner);
+  const normalizedEventType = normalizeEventType(eventType);
 
   if (owner === true) {
     const delivery = parseWatiDeliveryStatusEvent(payload);
     return delivery ?? { kind: "ignored", reason: "owner_event" };
   }
 
-  if (eventType && eventType !== "message") {
+  if (eventType && !INBOUND_EVENT_TYPES.has(normalizedEventType)) {
     const delivery = parseWatiDeliveryStatusEvent(payload);
     return (
       delivery ?? {
@@ -373,6 +459,8 @@ export function parseWatiDeliveryStatusEvent(
     optionalString(payload.status_string) ??
     optionalString(payload.event);
   const providerMessageId =
+    optionalString(payload.localMessageId) ??
+    optionalString(payload.local_message_id) ??
     optionalString(payload.whatsappMessageId) ??
     optionalString(payload.messageId) ??
     optionalString(payload.message_id) ??
@@ -397,6 +485,26 @@ export function parseWatiDeliveryStatusEvent(
       rawProviderPayload: payload,
     },
   };
+}
+
+function providerTemplateParameters(
+  parameterMap: Record<string, string> | null,
+  params: Record<string, WhatsAppTemplateParamValue>,
+): Array<{ name: string; value: string }> {
+  const entries = parameterMap ? Object.entries(parameterMap) : Object.keys(params).map((key) => [key, key]);
+  return entries.map(([providerName, logicalName]) => ({
+    name: providerName,
+    value: stringifyTemplateParam(params[logicalName]),
+  }));
+}
+
+function stringifyTemplateParam(value: WhatsAppTemplateParamValue): string {
+  if (value == null) return "";
+  return String(value);
+}
+
+function buildBroadcastName(key: string): string {
+  return `sketch_${key.replace(/[^a-zA-Z0-9]+/gu, "_").slice(0, 48)}_${Date.now()}`;
 }
 
 export function normalizeWatiPhoneNumber(value: unknown): string | null {
@@ -462,6 +570,86 @@ function sendResultFromWatiBody(body: unknown, target: WhatsAppTarget): WhatsApp
   };
 }
 
+function sendResultFromWatiTemplateBody(body: unknown, target: WhatsAppTarget): WhatsAppSendResult | null {
+  const record = isRecord(body) ? body : {};
+  const receivers = Array.isArray(record.receivers) ? record.receivers : [];
+  const firstReceiver = isRecord(receivers[0]) ? receivers[0] : {};
+  const fallbackConversationId =
+    target.kind === "dm"
+      ? (target.providerConversationId ?? canonicalDmConversationId(target.phoneE164))
+      : target.groupId;
+
+  return {
+    providerMessageId:
+      optionalString(firstReceiver.localMessageId) ??
+      optionalString(firstReceiver.local_message_id) ??
+      optionalString(firstReceiver.whatsappMessageId) ??
+      optionalString(firstReceiver.id) ??
+      optionalString(record.localMessageId) ??
+      optionalString(record.whatsappMessageId),
+    providerConversationId:
+      optionalString(firstReceiver.conversationId) ??
+      optionalString(firstReceiver.conversation_id) ??
+      optionalString(record.conversationId) ??
+      optionalString(record.conversation_id) ??
+      fallbackConversationId,
+    providerTimestamp:
+      parseWatiTimestamp(firstReceiver.time) ??
+      parseWatiTimestamp(firstReceiver.timestamp) ??
+      parseWatiTimestamp(record.created),
+    rawProviderPayload: body,
+  };
+}
+
+function parseWatiTemplateList(body: unknown): ProviderTemplateSummary[] {
+  const candidates = templateArrayCandidates(body);
+  const templates: ProviderTemplateSummary[] = [];
+
+  for (const item of candidates) {
+    if (!isRecord(item)) continue;
+    const providerTemplateName =
+      optionalString(item.elementName) ??
+      optionalString(item.templateName) ??
+      optionalString(item.template_name) ??
+      optionalString(item.name);
+    if (!providerTemplateName) continue;
+    templates.push({
+      providerTemplateName,
+      language: templateLanguage(item),
+      status: optionalString(item.status),
+      category: optionalString(item.category),
+      rawProviderPayload: item,
+    });
+  }
+
+  return templates;
+}
+
+function templateArrayCandidates(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body;
+  if (!isRecord(body)) return [];
+  for (const key of ["messageTemplates", "templates", "data", "items", "result", "results", "rows"]) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function templateLanguage(item: Record<string, unknown>): string {
+  const language = item.language;
+  if (typeof language === "string" && language.trim()) return language.trim();
+  if (isRecord(language)) {
+    return (
+      optionalString(language.code) ??
+      optionalString(language.value) ??
+      optionalString(language.name) ??
+      optionalString(language.text) ??
+      "en_US"
+    );
+  }
+  return optionalString(item.languageCode) ?? optionalString(item.language_code) ?? "en_US";
+}
+
 function fileMessageIdsForDownload(message: WhatsAppDmInboundMessage): string[] {
   const raw = isRecord(message.rawProviderPayload) ? message.rawProviderPayload : null;
   return uniqueStrings([optionalString(raw?.id), optionalString(raw?.whatsappMessageId), message.providerMessageId]);
@@ -514,6 +702,15 @@ function parseWatiTimestamp(value: unknown): string | null {
   const millis = Date.parse(input);
   if (!Number.isFinite(millis)) return null;
   return new Date(millis).toISOString();
+}
+
+function normalizeEventType(value: string | null): string {
+  return (
+    value
+      ?.trim()
+      .replace(/[^a-zA-Z0-9]+/gu, "_")
+      .toLowerCase() ?? ""
+  );
 }
 
 function textFromInteractiveReply(payload: Record<string, unknown>): string | null {

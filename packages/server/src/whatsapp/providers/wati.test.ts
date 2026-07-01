@@ -2,8 +2,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createWhatsAppProviderEventRepository } from "../../db/repositories/whatsapp-provider-events";
+import { createWhatsAppTemplateMappingRepository } from "../../db/repositories/whatsapp-template-mappings";
 import { createTestLogger } from "../../test-utils";
+import { createTestDb } from "../../test-utils";
 import { type WhatsAppInboundMessage, whatsappDeliveryTargetFromTarget } from "../provider";
+import { WHATSAPP_TEMPLATE_KEYS } from "../templates";
 import {
   createWatiWhatsAppProvider,
   normalizeWatiPhoneNumber,
@@ -144,6 +148,18 @@ describe("Wati webhook parsing", () => {
         failureCode: null,
         failureDetail: null,
         providerTimestamp: "2025-11-27T10:14:13.000Z",
+      },
+    });
+  });
+
+  it("treats documented messageReceived events as inbound user messages", () => {
+    const parsed = parseWatiWebhookEvent(documentedMessagePayload({ eventType: "messageReceived" }));
+
+    expect(parsed).toMatchObject({
+      kind: "message",
+      message: {
+        providerMessageId: "wamid.inbound",
+        senderPhoneE164: "+8618719149214",
       },
     });
   });
@@ -429,5 +445,138 @@ describe("Wati outbound provider", () => {
       { kind: "message", providerMessageId: "wamid.one", senderPhoneE164: "+8618719149214" },
       expect.objectContaining({ kind: "delivery_status" }),
     ]);
+  });
+
+  it("records duplicate Wati status callbacks once without invoking inbound handlers", async () => {
+    const db = await createTestDb();
+    try {
+      const providerEvents = createWhatsAppProviderEventRepository(db);
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        providerEvents,
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+      const handler = vi.fn();
+      provider.inboundProvider.onMessage(handler);
+
+      const payload = {
+        eventType: "sentMessageREAD_v2",
+        statusString: "Read",
+        localMessageId: "local-1",
+        whatsappMessageId: "wamid.status",
+        timestamp: "1764238453",
+      };
+
+      await provider.handleWebhook([payload, payload]);
+
+      expect(handler).not.toHaveBeenCalled();
+      const rows = await db.selectFrom("whatsapp_provider_events").selectAll().execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        provider: "wati",
+        provider_message_id: "local-1",
+        event_family: "read",
+        status: "Read",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("fails template sends clearly when no approved logical mapping exists", async () => {
+    const db = await createTestDb();
+    try {
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings: createWhatsAppTemplateMappingRepository(db),
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+
+      await expect(
+        provider.dmProvider.sendTemplate?.(
+          { kind: "dm", phoneE164: "+15551234567" },
+          {
+            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+            fallbackText: "magic link",
+          },
+        ),
+      ).rejects.toThrow("No approved WhatsApp template mapping configured for whatsapp.magic_link");
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("sends logical template mappings through the Wati template endpoint", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+        parameterMap: {
+          name: "recipientName",
+          bot: "botName",
+          link: "magicLinkUrl",
+        },
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            result: true,
+            receivers: [{ localMessageId: "local-template-1", whatsappNumber: "15551234567" }],
+          }),
+        );
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      const sent = await provider.dmProvider.sendTemplate?.(
+        { kind: "dm", phoneE164: "+15551234567" },
+        {
+          key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+          params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+          fallbackText: "magic link",
+        },
+      );
+
+      const [url, init] = firstFetchCall(requestFetch);
+      expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendTemplateMessages");
+      expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "Content-Type": "application/json" });
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        template_name: "sketch_magic_link",
+        receivers: [
+          {
+            whatsappNumber: "15551234567",
+            customParams: [
+              { name: "name", value: "Alice" },
+              { name: "bot", value: "Sketch" },
+              { name: "link", value: "https://sketch.test/magic" },
+            ],
+          },
+        ],
+      });
+      expect(sent).toMatchObject({
+        providerMessageId: "local-template-1",
+        providerConversationId: "dm:+15551234567",
+      });
+    } finally {
+      await db.destroy();
+    }
   });
 });

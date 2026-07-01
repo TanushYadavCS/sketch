@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 110;
+const EXPECTED_MIGRATION_COUNT = 111;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -143,6 +143,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -458,6 +459,16 @@ describe("runMigrations on Postgres — full sequence", () => {
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
       `.execute(db);
       expect(result.rows).toHaveLength(0);
+    }
+  });
+
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
     }
   });
 

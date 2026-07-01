@@ -148,6 +148,35 @@ Self-hosted installs can route one-to-one WhatsApp DMs through Wati while keepin
 
 Wati allows multiple events on one webhook row, and live testing rejected a second row with the same callback URL. Prefer the v2 status events to avoid duplicate callbacks from the legacy delivery/read event family. Query-token auth is supported because Wati webhook setup may not allow custom Authorization headers; `Authorization: Bearer <token>` and `x-wati-webhook-token` are also accepted when headers are available.
 
+##### Wati template mappings
+
+Wati and other official WhatsApp providers require approved message templates for proactive DMs, such as magic links, onboarding introductions, scheduled updates, workflow output, and direct teammate messages. Reactive replies inside an active WhatsApp conversation still use normal session text messages.
+
+Sketch stores provider-specific mappings from logical product keys to Wati template names. Configure these after Wati is connected:
+
+1. Create and approve templates in Wati for the logical keys you use: `whatsapp.magic_link`, `whatsapp.introduction`, and `whatsapp.proactive_update`.
+2. Call `GET /api/channels/whatsapp/templates/provider` as an admin to list templates visible through Wati.
+3. Upsert each mapping with `PUT /api/channels/whatsapp/templates/mappings`.
+
+Example:
+
+```json
+{
+  "provider": "wati",
+  "logicalKey": "whatsapp.magic_link",
+  "providerTemplateName": "sketch_magic_link",
+  "language": "en_US",
+  "status": "approved",
+  "parameterMap": {
+    "name": "recipientName",
+    "bot": "botName",
+    "link": "magicLinkUrl"
+  }
+}
+```
+
+`parameterMap` maps Wati template parameter names to Sketch's logical parameter names. Proactive WhatsApp DMs fail clearly when an approved mapping is missing; Sketch will not send arbitrary agent text as an unstructured template payload.
+
 ## Troubleshooting
 
 **Port already in use** — Change `PORT` in `.env`.

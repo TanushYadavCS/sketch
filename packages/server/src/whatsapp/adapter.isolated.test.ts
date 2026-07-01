@@ -103,6 +103,11 @@ function createMockWhatsApp(connected = true) {
         );
         return [attachment];
       }),
+      sendTemplate: vi.fn(async (target: WhatsAppTarget) => ({
+        providerMessageId: "sent-template-1",
+        providerConversationId: targetId(target),
+        providerTimestamp: null,
+      })),
       getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Test Group", desc: "A test group" }),
       getGroupName: vi.fn().mockResolvedValue("Test Group"),
       resolveJidToPhone: vi.fn().mockResolvedValue(null),
@@ -449,6 +454,57 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userMessage).toContain("hello");
       expect(agentCall.platform).toBe("whatsapp");
       expect(agentCall.userName).toBe("Alice");
+    });
+
+    it("does not persist or run duplicate Wati DM retries", async () => {
+      const deps = makeDeps();
+      const insertMessage = vi.mocked(deps.repos.conversations.insertMessage);
+      const originalInsert = insertMessage.getMockImplementation();
+      if (!originalInsert) throw new Error("expected insertMessage mock");
+      const persistedUserMessages = new Map<string, unknown>();
+      let persistedUserMessageCount = 0;
+      insertMessage.mockImplementation(async (data) => {
+        const dedupeKey = [
+          data.conversationId,
+          data.providerMessageId,
+          data.senderJid ?? "",
+          data.isBot ? "bot" : "user",
+        ].join(":");
+        if (!data.isBot && persistedUserMessages.has(dedupeKey)) {
+          return { row: persistedUserMessages.get(dedupeKey) as never, inserted: false };
+        }
+
+        const result = await originalInsert(data);
+        if (!data.isBot) {
+          persistedUserMessages.set(dedupeKey, result.row);
+          persistedUserMessageCount += 1;
+        }
+        return result;
+      });
+
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const message = {
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.retry",
+        providerConversationId: "wati-conversation-1",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp: "2026-07-01T00:00:00.000Z",
+        senderName: "Alice",
+        senderProviderId: "1234567890",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      };
+
+      await handler(message);
+      await handler(message);
+      await flush();
+
+      expect(persistedUserMessageCount).toBe(1);
+      expect(deps.runAgent).toHaveBeenCalledOnce();
     });
 
     it("starts and stops composing indicator", async () => {

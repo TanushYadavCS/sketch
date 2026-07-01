@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 110;
+const EXPECTED_MIGRATION_COUNT = 111;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -166,6 +166,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -474,6 +475,17 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM sqlite_master WHERE type='table' AND name='agent_output_deliveries'
     `.execute(db);
     expect(result.rows).toHaveLength(1);
+  });
+
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    await runMigrations(db, { quiet: true });
+
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
   });
 
   it("running migrations twice is idempotent (only applies each migration once)", async () => {

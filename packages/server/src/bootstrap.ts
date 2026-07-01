@@ -33,6 +33,8 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
+import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
+import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 import type { DB } from "./db/schema";
 import { configureMaterializeDefaults } from "./entities/materialize";
 import { createApp } from "./http";
@@ -54,10 +56,11 @@ import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
-import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
+import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 export interface ServerHandle {
   config: Config;
@@ -126,6 +129,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const conversationsRepo = createConversationRepository(db);
+  const whatsappProviderEventsRepo = createWhatsAppProviderEventRepository(db);
+  const whatsappTemplateMappingsRepo = createWhatsAppTemplateMappingRepository(db);
   const automationRunsRepo = createAutomationRunsRepository(db);
   const stepContentRepo = createAutomationStepContentRepository(db);
   const staleCount = await automationRunsRepo.markRunningAsFailed("Interrupted by server restart");
@@ -240,6 +245,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
           webhookToken: config.WATI_WEBHOOK_TOKEN ?? "",
           channelPhoneNumber: config.WATI_CHANNEL_PHONE_NUMBER,
           logger,
+          providerEvents: whatsappProviderEventsRepo,
+          templateMappings: whatsappTemplateMappingsRepo,
         })
       : null;
   const whatsappRuntime = createWhatsAppRuntime({
@@ -255,10 +262,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
     userId,
     platform,
     message,
+    template,
   }: {
     userId: string;
     platform: string;
     message: string;
+    template?: WhatsAppTemplateRequest;
   }) => {
     const recipient = await users.findById(userId);
 
@@ -280,12 +289,35 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
     if (platform === "whatsapp") {
       if (!recipient?.whatsapp_number) throw new Error("No WhatsApp number for recipient");
-      const channelId = phoneE164ToWhatsAppJid(recipient.whatsapp_number);
-      const sent = await whatsappRuntime.sendText(
-        { kind: "dm", phoneE164: recipient.whatsapp_number, providerConversationId: channelId },
-        message,
-      );
-      return { channelId: sent?.providerConversationId ?? channelId, messageRef: sent?.providerMessageId ?? "" };
+      if (config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID && !template) {
+        throw new Error("Wati WhatsApp DMs require an approved template for proactive delivery");
+      }
+
+      const target = { kind: "dm" as const, phoneE164: recipient.whatsapp_number };
+      const channelId = whatsappDeliveryTargetFromTarget(target);
+      const sent = template
+        ? await whatsappRuntime.sendTemplate(target, { ...template, fallbackText: template.fallbackText ?? message })
+        : await whatsappRuntime.sendText(target, message);
+
+      if (sent?.providerMessageId) {
+        const settingsRow = await settingsRepo.get();
+        const conversation = await conversationsRepo.getOrCreate(
+          { platform: "whatsapp", kind: "dm", providerConversationId: channelId },
+          recipient.name,
+        );
+        await conversationsRepo.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: sent.providerMessageId,
+          senderJid: "bot",
+          senderName: settingsRow?.bot_name ?? "Sketch",
+          isBot: true,
+          addressedToSketch: false,
+          text: message,
+          providerTimestamp: sent.providerTimestamp,
+        });
+      }
+
+      return { channelId, messageRef: sent?.providerMessageId ?? "" };
     }
 
     throw new Error(`Unsupported platform: ${platform}`);

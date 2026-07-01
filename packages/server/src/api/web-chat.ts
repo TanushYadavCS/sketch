@@ -47,6 +47,7 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { ScheduledTask } from "../scheduler/types";
 import { transcribeAudioFile } from "../transcription/service";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -70,7 +71,12 @@ interface WebChatRouteDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
   getSlack?: () => SlackDmResolver | null;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;

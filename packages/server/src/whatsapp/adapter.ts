@@ -45,6 +45,7 @@ import {
   whatsappDeliveryTargetFromTarget,
 } from "./provider";
 import type { WhatsAppRuntime } from "./runtime";
+import type { WhatsAppTemplateRequest } from "./templates";
 import { phoneToTimezone } from "./timezone";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
@@ -85,7 +86,12 @@ export interface WhatsAppAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
-  sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
@@ -136,7 +142,7 @@ function conversationRefForMessage(message: WhatsAppInboundMessage): {
   providerConversationId: string;
 } {
   if (message.kind === "dm") {
-    return { platform: "whatsapp", kind: "dm", providerConversationId: message.providerConversationId };
+    return { platform: "whatsapp", kind: "dm", providerConversationId: message.canonicalConversationId };
   }
   return { platform: "whatsapp", kind: "group", providerConversationId: message.target.groupId };
 }
