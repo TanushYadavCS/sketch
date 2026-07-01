@@ -377,6 +377,12 @@ export function parseWatiWebhookEvent(
   const messageType = optionalString(payload.type);
   const owner = optionalBoolean(payload.owner);
   const normalizedEventType = normalizeEventType(eventType);
+  const configuredChannel = phoneDigits(options.channelPhoneNumber ?? null);
+  const eventChannel = phoneDigits(optionalString(payload.channelPhoneNumber));
+
+  if (configuredChannel && eventChannel !== configuredChannel) {
+    return { kind: "ignored", reason: "channel_mismatch" };
+  }
 
   if (owner === true) {
     const delivery = parseWatiDeliveryStatusEvent(payload);
@@ -397,12 +403,6 @@ export function parseWatiWebhookEvent(
 
   if (messageType && UNSUPPORTED_INBOUND_MESSAGE_TYPES.has(messageType)) {
     return { kind: "ignored", reason: "unsupported_message_type" };
-  }
-
-  const configuredChannel = phoneDigits(options.channelPhoneNumber ?? null);
-  const eventChannel = phoneDigits(optionalString(payload.channelPhoneNumber));
-  if (configuredChannel && eventChannel !== configuredChannel) {
-    return { kind: "ignored", reason: "channel_mismatch" };
   }
 
   const senderPhoneE164 = normalizeWatiPhoneNumber(payload.waId);

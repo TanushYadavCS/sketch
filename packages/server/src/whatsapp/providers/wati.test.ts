@@ -486,6 +486,39 @@ describe("Wati outbound provider", () => {
     }
   });
 
+  it("ignores status callbacks from other configured Wati channels", async () => {
+    const db = await createTestDb();
+    try {
+      const providerEvents = createWhatsAppProviderEventRepository(db);
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        channelPhoneNumber: "+17435002445",
+        logger: createTestLogger(),
+        providerEvents,
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+      const handler = vi.fn();
+      provider.inboundProvider.onMessage(handler);
+
+      const results = await provider.handleWebhook({
+        eventType: "sentMessageREAD_v2",
+        statusString: "Read",
+        localMessageId: "local-1",
+        whatsappMessageId: "wamid.status",
+        timestamp: "1764238453",
+        channelPhoneNumber: "+15551234567",
+      });
+
+      expect(results).toEqual([{ kind: "ignored", reason: "channel_mismatch" }]);
+      expect(handler).not.toHaveBeenCalled();
+      await expect(db.selectFrom("whatsapp_provider_events").selectAll().execute()).resolves.toEqual([]);
+    } finally {
+      await db.destroy();
+    }
+  });
+
   it("fails template sends clearly when no approved logical mapping exists", async () => {
     const db = await createTestDb();
     try {
