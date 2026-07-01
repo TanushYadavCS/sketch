@@ -12,6 +12,7 @@ import { ManageConnectorDialog } from "./manage-connector-dialog";
 const fireflies = getIntegration("fireflies") ?? null;
 const gmail = getIntegration("gmail") ?? null;
 const googleCalendar = getIntegration("google_calendar") ?? null;
+const otter = getIntegration("otter") ?? null;
 
 function connector(overrides: Partial<ConnectorConfig> = {}): ConnectorConfig {
   return {
@@ -228,6 +229,38 @@ describe("ManageConnectorDialog connector capabilities", () => {
 
     await waitFor(() => {
       expect(patchedBody).toEqual({ scopeConfig: { calendarIds: ["team"] } });
+    });
+  });
+
+  it("updates Otter email/password credentials without disconnecting", async () => {
+    const user = userEvent.setup();
+    let rotateBody: unknown;
+    server.use(
+      http.post("/api/connectors/:id/rotate-key", async ({ request }) => {
+        rotateBody = await request.json();
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+
+    renderWithProviders(
+      <ManageConnectorDialog
+        definition={otter}
+        connector={connector({ id: "otter-conn", connectorType: "otter", authType: "api_key" })}
+        open
+        onOpenChange={() => {}}
+        onDisconnected={() => {}}
+        onReconnect={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /Update credentials/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Otter email"), "person@example.com");
+    await user.type(within(dialog).getByLabelText("Otter password"), "new-password");
+    await user.click(within(dialog).getByRole("button", { name: "Update credentials" }));
+
+    await waitFor(() => {
+      expect(rotateBody).toEqual({ credentials: { email: "person@example.com", password: "new-password" } });
     });
   });
 });

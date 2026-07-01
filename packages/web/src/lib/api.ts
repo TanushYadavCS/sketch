@@ -1611,6 +1611,12 @@ export const api = {
         body: JSON.stringify({ api_key: apiKey }),
       });
     },
+    rotateCredentials(id: string, credentials: Record<string, unknown>) {
+      return request<{ ok: boolean }>(`/api/connectors/${id}/rotate-key`, {
+        method: "POST",
+        body: JSON.stringify({ credentials }),
+      });
+    },
     progress() {
       return request<{
         active: Array<{

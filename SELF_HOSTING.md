@@ -134,6 +134,20 @@ The selected provider and credentials are stored in the database and applied to 
 2. Scan the QR code with WhatsApp on your phone (Linked Devices)
 3. Add team members on the Team page — only listed numbers can message the bot
 
+#### Wati DMs with Baileys groups
+
+Self-hosted installs can route one-to-one WhatsApp DMs through Wati while keeping Baileys for WhatsApp groups.
+
+1. Set `WHATSAPP_DM_PROVIDER=wati` in `.env`.
+2. Set `WATI_API_ENDPOINT` to the tenant-qualified Wati API endpoint, for example `https://live-mt-server.wati.io/<tenant-id>`.
+3. Set `WATI_ACCESS_TOKEN` from the Wati API page.
+4. Set `WATI_WEBHOOK_TOKEN` to a strong shared secret.
+5. If the Wati account has multiple connected numbers, set `WATI_CHANNEL_PHONE_NUMBER` to the Wati channel number.
+6. In Wati, create one enabled webhook row for `${BASE_URL}/whatsapp/wati/events?token=<WATI_WEBHOOK_TOKEN>`.
+7. Select only the supported Sketch DM events on that row: `Message Received`, `Session Message Sent v2`, `Sent Message is DELIVERED v2`, `Sent Message is READ v2`, and `Session message FAILED`.
+
+Wati allows multiple events on one webhook row, and live testing rejected a second row with the same callback URL. Prefer the v2 status events to avoid duplicate callbacks from the legacy delivery/read event family. Query-token auth is supported because Wati webhook setup may not allow custom Authorization headers; `Authorization: Bearer <token>` and `x-wati-webhook-token` are also accepted when headers are available.
+
 ## Troubleshooting
 
 **Port already in use** — Change `PORT` in `.env`.
