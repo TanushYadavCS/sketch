@@ -261,16 +261,23 @@ export function oauthRoutes(
    * Derives the current user from the session, then redirects to Google's OAuth consent screen.
    */
   routes.get("/google/authorize", async (c) => {
-    // Resolve user from session JWT
     const config = await settings.get();
-    const token = getCookie(c, SESSION_COOKIE);
-    const payload = token && config?.jwt_secret ? await verifyJwt(token, config.jwt_secret) : null;
-    if (!payload?.sub) {
+    const authenticatedSub = c.get("sub");
+    let userSub = typeof authenticatedSub === "string" && authenticatedSub.length > 0 ? authenticatedSub : null;
+
+    // Isolated route tests may mount oauthRoutes without the auth middleware.
+    if (!userSub) {
+      const token = getCookie(c, SESSION_COOKIE);
+      const payload = token && config?.jwt_secret ? await verifyJwt(token, config.jwt_secret) : null;
+      userSub = payload?.sub ?? null;
+    }
+
+    if (!userSub) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } }, 401);
     }
-    let user = await users.findById(payload.sub);
-    if (!user && payload.sub.includes("@")) {
-      user = await users.findByEmail(payload.sub);
+    let user = await users.findById(userSub);
+    if (!user && userSub.includes("@")) {
+      user = await users.findByEmail(userSub);
     }
     if (!user) {
       return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
