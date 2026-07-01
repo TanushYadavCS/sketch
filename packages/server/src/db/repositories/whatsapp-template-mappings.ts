@@ -122,29 +122,17 @@ export function createWhatsAppTemplateMappingRepository(db: Kysely<DB>) {
       logicalKey: string,
       language?: string | null,
     ): Promise<(WhatsAppTemplateMappingRow & { parameterMap: Record<string, string> | null }) | null> {
-      const requestedLanguage = language ? normalizeLanguage(language) : null;
-      let query = db
+      const requestedLanguage = normalizeLanguage(language);
+      const exact = await db
         .selectFrom("whatsapp_template_mappings")
         .selectAll()
         .where("provider", "=", provider)
         .where("logical_key", "=", logicalKey)
-        .where("status", "=", "approved");
-      if (requestedLanguage) query = query.where("language", "=", requestedLanguage);
-
-      const exact = await query.orderBy("updated_at", "desc").executeTakeFirst();
-      if (exact) return toMapping(exact);
-      if (requestedLanguage) return null;
-
-      const fallback = await db
-        .selectFrom("whatsapp_template_mappings")
-        .selectAll()
-        .where("provider", "=", provider)
-        .where("logical_key", "=", logicalKey)
-        .where("language", "=", DEFAULT_WHATSAPP_TEMPLATE_LANGUAGE)
+        .where("language", "=", requestedLanguage)
         .where("status", "=", "approved")
         .orderBy("updated_at", "desc")
         .executeTakeFirst();
-      return fallback ? toMapping(fallback) : null;
+      return exact ? toMapping(exact) : null;
     },
 
     async listMappings(provider?: string): Promise<WhatsAppTemplateMappingRow[]> {

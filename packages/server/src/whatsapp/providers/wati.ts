@@ -158,6 +158,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
     const body = {
       template_name: mapping.provider_template_name,
       broadcast_name: buildBroadcastName(template.key),
+      ...(channelPhoneDigits ? { channelNumber: channelPhoneDigits } : {}),
       receivers: [
         {
           whatsappNumber: phone,

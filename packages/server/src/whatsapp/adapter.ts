@@ -42,6 +42,7 @@ import {
   type WhatsAppInboundMessage,
   type WhatsAppSendResult,
   type WhatsAppTarget,
+  phoneE164ToWhatsAppJid,
   whatsappDeliveryTargetFromTarget,
 } from "./provider";
 import type { WhatsAppRuntime } from "./runtime";
@@ -151,6 +152,21 @@ function senderJidForMessage(message: WhatsAppInboundMessage): string {
   return message.senderProviderId ?? message.providerConversationId;
 }
 
+function legacyDmConversationIds(message: WhatsAppInboundMessage): string[] {
+  if (message.kind !== "dm") return [];
+  const phoneDigits = message.senderPhoneE164.replace(/\D/gu, "");
+  return [
+    message.providerConversationId,
+    message.senderProviderId,
+    phoneE164ToWhatsAppJid(message.senderPhoneE164),
+    phoneDigits,
+    `wati:${message.senderPhoneE164}`,
+  ].filter(
+    (value, index, values): value is string =>
+      Boolean(value) && value !== message.canonicalConversationId && values.indexOf(value) === index,
+  );
+}
+
 export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAdapterDeps): void {
   const {
     db,
@@ -169,6 +185,23 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
+
+  const getOrCreateConversationForMessage = async (message: WhatsAppInboundMessage, displayName?: string | null) => {
+    const ref = conversationRefForMessage(message);
+    if (message.kind === "dm") {
+      for (const legacyId of legacyDmConversationIds(message)) {
+        const legacyConversation = await repos.conversations.find({
+          platform: ref.platform,
+          kind: ref.kind,
+          providerConversationId: legacyId,
+        });
+        if (legacyConversation) {
+          return repos.conversations.claimProviderConversationId(legacyConversation.id, ref, displayName);
+        }
+      }
+    }
+    return repos.conversations.getOrCreate(ref, displayName);
+  };
 
   const updateReaction = async (message: WhatsAppInboundMessage, emoji: string | null) => {
     if (!whatsapp.isConnected) return;
@@ -224,8 +257,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     senderUserId?: string | null;
     addressedToSketch: boolean;
   }) => {
-    const conversation = await repos.conversations.getOrCreate(
-      conversationRefForMessage(params.message),
+    const conversation = await getOrCreateConversationForMessage(
+      params.message,
       params.message.kind === "group" ? params.message.target.groupId : params.senderName,
     );
 
@@ -360,7 +393,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             ? await repos.users.findById(settingsRowEarly.whatsapp_fallback_agent_id)
             : null;
         const dmWorkspaceKeyEarly = fallbackAgentEarly ? `agent-${fallbackAgentEarly.id}/${user.id}` : user.id;
-        const dmConversation = await repos.conversations.getOrCreate(conversationRefForMessage(message), user.name);
+        const dmConversation = await getOrCreateConversationForMessage(message, user.name);
         if (command === "new_session") {
           await deleteSessionId(db, dmWorkspaceKeyEarly);
           await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
@@ -612,7 +645,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const groupWorkspaceKey = boundAgent
         ? `agent-${boundAgent.id}/whatsappgroup-${groupJid}`
         : `wa-group-${groupJid}`;
-      const groupConversation = await repos.conversations.getOrCreate(conversationRefForMessage(message));
+      const groupConversation = await getOrCreateConversationForMessage(message);
       if (command === "new_session") {
         await deleteSessionId(db, groupWorkspaceKey);
         await repos.conversations.advanceWatermarkToCurrentMax(groupConversation.id);
@@ -628,7 +661,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const groupMeta = await whatsapp.getGroupMetadata(groupJid);
       const groupName = groupMeta?.subject ?? "Unknown Group";
       const groupDescription = groupMeta?.desc ?? undefined;
-      await repos.conversations.getOrCreate(conversationRefForMessage(message), groupName);
+      await getOrCreateConversationForMessage(message, groupName);
 
       if (isWhatsAppProgressControlMessage(message.text, command)) {
         return;

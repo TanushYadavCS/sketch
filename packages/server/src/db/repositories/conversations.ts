@@ -193,6 +193,46 @@ export function createConversationRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
+    async claimProviderConversationId(
+      id: number,
+      ref: ConversationRef,
+      displayName?: string | null,
+    ): Promise<ConversationRow> {
+      const now = new Date().toISOString();
+      const existing = await db
+        .selectFrom("conversations")
+        .selectAll()
+        .where("platform", "=", ref.platform)
+        .where("kind", "=", ref.kind)
+        .where("provider_conversation_id", "=", ref.providerConversationId)
+        .executeTakeFirst();
+      if (existing) return existing;
+
+      try {
+        await db
+          .updateTable("conversations")
+          .set({
+            provider_conversation_id: ref.providerConversationId,
+            ...(displayName !== undefined ? { display_name: displayName } : {}),
+            updated_at: now,
+          })
+          .where("id", "=", id)
+          .execute();
+      } catch {
+        const row = await db
+          .selectFrom("conversations")
+          .selectAll()
+          .where("platform", "=", ref.platform)
+          .where("kind", "=", ref.kind)
+          .where("provider_conversation_id", "=", ref.providerConversationId)
+          .executeTakeFirst();
+        if (row) return row;
+        throw new Error("Failed to claim conversation provider id");
+      }
+
+      return db.selectFrom("conversations").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    },
+
     async findMessageByProviderMessageId(
       conversationId: number,
       providerMessageId: string,

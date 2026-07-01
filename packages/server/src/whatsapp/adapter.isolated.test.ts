@@ -271,7 +271,8 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
         updateWatermark: vi.fn().mockResolvedValue(conversationRow),
         advanceWatermarkToCurrentMax: vi.fn().mockResolvedValue(conversationRow),
         getMaxMessageId: vi.fn().mockResolvedValue(null),
-        find: vi.fn().mockResolvedValue(conversationRow),
+        find: vi.fn().mockResolvedValue(undefined),
+        claimProviderConversationId: vi.fn().mockResolvedValue(conversationRow),
       } as unknown as WhatsAppAdapterDeps["repos"]["conversations"],
     },
     queue: new QueueManager(),
@@ -504,6 +505,62 @@ describe("whatsapp/adapter", () => {
       await flush();
 
       expect(persistedUserMessageCount).toBe(1);
+      expect(deps.runAgent).toHaveBeenCalledOnce();
+    });
+
+    it("claims legacy Wati DM conversations before capturing canonical inbound messages", async () => {
+      const legacyConversation = {
+        id: 42,
+        platform: "whatsapp",
+        kind: "dm",
+        provider_conversation_id: "wati-conversation-1",
+        display_name: "Alice",
+        last_seen_message_id: null,
+        created_at: "2025-01-01",
+        updated_at: "2025-01-01",
+      };
+      const canonicalConversation = {
+        ...legacyConversation,
+        provider_conversation_id: "dm:+1234567890",
+      };
+      const deps = makeDeps();
+      let legacyClaimed = false;
+      vi.mocked(deps.repos.conversations.find).mockImplementation(async (ref) => {
+        if (!legacyClaimed && ref.providerConversationId === "wati-conversation-1") return legacyConversation;
+        return undefined;
+      });
+      vi.mocked(deps.repos.conversations.claimProviderConversationId).mockImplementation(async () => {
+        legacyClaimed = true;
+        return canonicalConversation;
+      });
+      vi.mocked(deps.repos.conversations.getOrCreate).mockResolvedValue(canonicalConversation);
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.legacy",
+        providerConversationId: "wati-conversation-1",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp: "2026-07-01T00:00:00.000Z",
+        senderName: "Alice",
+        senderProviderId: "1234567890",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      });
+      await flush();
+
+      expect(deps.repos.conversations.claimProviderConversationId).toHaveBeenCalledWith(
+        42,
+        { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+1234567890" },
+        "Alice",
+      );
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: 42, providerMessageId: "wamid.legacy" }),
+      );
       expect(deps.runAgent).toHaveBeenCalledOnce();
     });
 
