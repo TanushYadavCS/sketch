@@ -445,7 +445,7 @@ describe("file-scope-context", () => {
     ]);
 
     const known = await buildFileScopedKnownEntities(
-      { db, experimentalFlag: true, loadAdjacencyForAnchor, loadPendingProposalsForAnchor },
+      { db, loadAdjacencyForAnchor, loadPendingProposalsForAnchor },
       "file-pending-build",
       [{ name: "Tourism Dashboard", type: "project", description: "confirmed" }],
     );
@@ -628,15 +628,8 @@ describe("file-scope-context", () => {
     await seedMention(db, { entityId: "person-ambiguous-a", fileId: ambiguousEvidenceFile });
     await seedMention(db, { entityId: "project-ambiguous", fileId: ambiguousEvidenceFile });
 
-    const companyOnly = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
-    const personAnchored = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: true },
-      promptFile,
-      [],
-      "",
-    );
+    const personAnchored = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
 
-    expect(companyOnly).toEqual([]);
     expect(personAnchored.find((entry) => entry.name === "Internal Atlas")).toMatchObject({
       name: "Internal Atlas",
       type: "project",
@@ -680,7 +673,7 @@ describe("file-scope-context", () => {
       return adjacencyForAnchor(deps, anchorId);
     });
     const known = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: true, loadAdjacencyForAnchor },
+      { db, now: () => now, loadAdjacencyForAnchor },
       promptFile,
       [],
       "",
@@ -692,11 +685,11 @@ describe("file-scope-context", () => {
     expect(known.map((entry) => entry.name).some((name) => name.startsWith("Hub Project"))).toBe(false);
   });
 
-  it("keeps company-only ranking unchanged with flag off and bounds project baseline expansion with flag on", async () => {
+  it("keeps anchored ranking and bounds project baseline expansion", async () => {
     const now = Date.UTC(2026, 4, 26);
     const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
-    const promptFile = "file-flag-off-parity";
-    const coMentionFile = "file-flag-off-parity-evidence";
+    const promptFile = "file-ranking-parity";
+    const coMentionFile = "file-ranking-parity-evidence";
     await seedFile(db, promptFile, recentDate);
     await seedFile(db, coMentionFile, recentDate);
     await seedEntity(db, { id: "ent-parity-company", name: "Parity Co", sourceType: "company", hotness: 10 });
@@ -716,14 +709,8 @@ describe("file-scope-context", () => {
       { id: "baseline-cold", name: "Cold Product", type: "product", hotness: 1 },
       { id: "ent-parity-product", name: "Parity Product", type: "product", hotness: 10 },
     ];
-    const legacyFlagOmitted = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, baseline, "");
-    const explicitFlagOff = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: false },
-      promptFile,
-      baseline,
-      "",
-    );
-    expect(explicitFlagOff).toEqual(legacyFlagOmitted);
+    const anchoredKnown = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, baseline, "");
+    expect(anchoredKnown.map((entry) => entry.name)).toContain("Parity Product");
 
     for (let i = 0; i < 80; i++) {
       await seedEntity(db, {
@@ -733,16 +720,14 @@ describe("file-scope-context", () => {
         hotness: i,
       });
     }
-    const baselineFlagOff = await loadBaselineKnownEntities(db, { experimentalFlag: false });
-    const baselineFlagOn = await loadBaselineKnownEntities(db, { experimentalFlag: true });
-    expect(baselineFlagOff.map((entry) => entry.type)).not.toContain("project");
-    expect(baselineFlagOn.map((entry) => entry.name)).toContain("Bounded Project 79");
+    const baselineKnown = await loadBaselineKnownEntities(db);
+    expect(baselineKnown.map((entry) => entry.name)).toContain("Bounded Project 79");
 
     const content = Array.from({ length: 80 }, (_, i) => `Bounded Project ${i}`).join("\n");
     const known = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: true },
+      { db, now: () => now },
       "file-baseline-bound",
-      baselineFlagOn,
+      baselineKnown,
       content,
     );
     expect(known.filter((entry) => entry.type === "project").length).toBeLessThanOrEqual(

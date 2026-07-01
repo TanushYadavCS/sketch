@@ -75,7 +75,7 @@ describe("detectSprintCycle", () => {
 });
 
 describe("resolveListCycle", () => {
-  it("keeps legacy sprint detection for flag-off and computed-default states", () => {
+  it("uses heuristic sprint detection only when no valid hierarchy mapping is stored", () => {
     expect(
       resolveListCycle({
         list: sprintList,
@@ -83,9 +83,8 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { space: "project", list: "ignore" },
-        experimentalFlag: false,
       }),
-    ).toMatchObject({ externalRef: sprintList.id, scopeRef: { source: "clickup", sourceId: sprintsEnabledSpace.id } });
+    ).toBeNull();
 
     for (const storedMapping of [undefined, {}, { nope: "project" }, { list: "bogus" }]) {
       expect(
@@ -95,7 +94,6 @@ describe("resolveListCycle", () => {
           workspaceName: "Workspace",
           workspaceId: "workspace",
           storedMapping,
-          experimentalFlag: true,
         }),
       ).toMatchObject({ externalRef: sprintList.id });
     }
@@ -109,7 +107,6 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { space: "project", list: "project" },
-        experimentalFlag: true,
       }),
     ).toBeNull();
 
@@ -120,7 +117,6 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { space: "project", list: "sprint" },
-        experimentalFlag: true,
       }),
     ).toMatchObject({
       externalRef: sprintList.id,
@@ -138,7 +134,6 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { space: "project", list: "sprint" },
-        experimentalFlag: true,
       }),
     ).toBeNull();
 
@@ -149,7 +144,6 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { workspace: "team", space: "ignore", list: "sprint" },
-        experimentalFlag: true,
         logger: { warn: vi.fn() },
       }),
     ).toBeNull();
@@ -162,7 +156,6 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { space: "project", folder: "ignore", list: "sprint" },
-        experimentalFlag: true,
       }),
     ).toMatchObject({ scopeRef: { source: "clickup", sourceId: sprintsEnabledSpace.id } });
 
@@ -174,7 +167,6 @@ describe("resolveListCycle", () => {
         workspaceName: "Workspace",
         workspaceId: "workspace",
         storedMapping: { folder: "project", list: "sprint" },
-        experimentalFlag: true,
       }),
     ).toMatchObject({ scopeRef: { source: "clickup", sourceId: "folder-design" } });
   });

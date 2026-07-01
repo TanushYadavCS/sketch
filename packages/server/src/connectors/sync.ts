@@ -132,7 +132,6 @@ export async function runConnectorSync(
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
-      | "EXPERIMENTAL_FLAG"
     >
   >,
 ): Promise<SyncResult> {
@@ -251,7 +250,6 @@ export async function runConnectorSync(
       logger: syncLogger,
       ownerEmail,
       resolveNameToEmail,
-      experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -329,7 +327,6 @@ export async function runConnectorSync(
           item,
           indexedFileId: itemResult.indexedFileId,
           emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
-          experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
           contentChanged: itemResult.kind !== "unchanged",
           generator: llmTaskGenerator,
         });
@@ -392,7 +389,6 @@ export async function runConnectorSync(
       source: connectorType,
       syncRunId,
       connectorConfigId: config.id,
-      experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
       runCycleReconcile: syncReconciled,
     });
 
@@ -512,7 +508,6 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
-      | "EXPERIMENTAL_FLAG"
       | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
@@ -669,7 +664,6 @@ export async function runScheduledEnrichment(db: Kysely<DB>, logger: Logger, dep
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: deps?.appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: deps?.appConfig?.GEMINI_MAX_RETRIES,
-      experimentalFlag: deps?.appConfig?.EXPERIMENTAL_FLAG,
       downloadImage: deps?.downloadImage,
       maxFilesPerRun: SCHEDULED_ENRICHMENT_MAX_FILES_PER_RUN,
       timeBudgetMs: SCHEDULED_ENRICHMENT_TIME_BUDGET_MS,

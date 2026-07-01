@@ -12,7 +12,6 @@ async function countActiveLlmFilesForName(
   db: Kysely<DB>,
   normalized: string,
   mentionType: MentionType,
-  experimentalFlag: boolean,
 ): Promise<number> {
   const rows = await db
     .selectFrom("indexed_file_facts")
@@ -25,7 +24,7 @@ async function countActiveLlmFilesForName(
   for (const row of rows) {
     if (!row.indexed_file_id || !row.subject_name) continue;
     const raw = readJsonObject(row.raw);
-    const rowType = normalizeMentionType(coerceMentionType(row.subject_name, String(raw.type ?? ""), experimentalFlag));
+    const rowType = normalizeMentionType(coerceMentionType(row.subject_name, String(raw.type ?? "")));
     if (rowType !== mentionType) continue;
     if (normalizeEntityMatchName(mentionType, row.subject_name) !== normalized) continue;
     seen.add(row.indexed_file_id);
@@ -41,9 +40,7 @@ export async function materializeLlmExtractedFact(
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
   const raw = readJsonObject(fact.raw);
-  const mentionType = normalizeMentionType(
-    coerceMentionType(fact.subject_name, String(raw.type ?? ""), deps.experimentalFlag),
-  );
+  const mentionType = normalizeMentionType(coerceMentionType(fact.subject_name, String(raw.type ?? "")));
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }
@@ -54,7 +51,7 @@ export async function materializeLlmExtractedFact(
   if (!normalized) {
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
-  const fileCount = await countActiveLlmFilesForName(deps.db, normalized, mentionType, deps.experimentalFlag);
+  const fileCount = await countActiveLlmFilesForName(deps.db, normalized, mentionType);
   if (fileCount < deps.llmPromotionThreshold) {
     return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
   }

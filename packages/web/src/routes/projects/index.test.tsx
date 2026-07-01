@@ -4,7 +4,7 @@ import { renderWithProviders } from "@/test/utils";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { ProjectsPage } from "./index";
 
 function projectsReturn(projects: unknown[]) {
@@ -34,12 +34,19 @@ function StackProbe() {
 }
 
 describe("ProjectsPage", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("/api/products", () => HttpResponse.json({ products: [] })),
+      http.get("/api/entities", () => HttpResponse.json({ entities: [], total: 0 })),
+    );
+  });
+
   it("groups projects by whether they have data sources", async () => {
     projectsReturn([DERIVED_WIRED, DEFINED_BARE]);
     renderWithProviders(<ProjectsPage />);
 
-    expect(await screen.findByText("Needs sources")).toBeInTheDocument();
-    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(await screen.findByText("Projects · needs sources")).toBeInTheDocument();
+    expect(screen.getByText("Projects · active")).toBeInTheDocument();
     expect(screen.getByText("Helios")).toBeInTheDocument();
     expect(screen.getByText("Atlas Rollout")).toBeInTheDocument();
     expect(screen.getByText("2 sources · 1 sub-project")).toBeInTheDocument();
@@ -67,17 +74,13 @@ describe("ProjectsPage", () => {
     expect(await screen.findByText(/No projects yet/i)).toBeInTheDocument();
   });
 
-  it("renders the Your Org surface with a product tier chip when experimental", async () => {
+  it("renders the Your Org surface with a product tier chip", async () => {
     server.use(
-      http.get("/api/setup/status", () =>
-        HttpResponse.json({ completed: true, botName: "Sketch", experimentalFlag: true }),
-      ),
       http.get("/api/products", () =>
         HttpResponse.json({
           products: [{ id: "prod-1", name: "Canvas Copilot", aliases: [], hotness: 3, provenance_tier: "declared" }],
         }),
       ),
-      http.get("/api/entities", () => HttpResponse.json({ entities: [], total: 0 })),
     );
     projectsReturn([DERIVED_WIRED]);
     renderWithProviders(<ProjectsPage />);

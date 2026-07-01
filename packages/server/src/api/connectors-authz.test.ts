@@ -857,14 +857,14 @@ describe("Connectors API — authorization", () => {
   });
 
   describe("OAuth /api/oauth/zoho — admin-only flow", () => {
-    it("is available without EXPERIMENTAL_FLAG", async () => {
+    it("is available", async () => {
       const res = await app.request("/api/oauth/zoho/status", {
         headers: { Cookie: adminCookie },
       });
       expect(res.status).toBe(200);
     });
 
-    it("shows existing Zoho configs and files without EXPERIMENTAL_FLAG", async () => {
+    it("shows existing Zoho configs and files", async () => {
       const cfg = await insertConfig(db, { connectorType: "zoho_crm", createdBy: adminId });
       await createConnectorRepository(db).upsertFile({
         source: "zoho_crm",

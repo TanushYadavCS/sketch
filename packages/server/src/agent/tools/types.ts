@@ -115,7 +115,6 @@ export interface SketchMcpDeps {
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
   agentOutputWriter?: AgentOutputWriter;
-  experimentalFlag?: boolean;
   originOrgContextEnabled?: boolean;
   publicMcp?: {
     userEmails?: string[];

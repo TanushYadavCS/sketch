@@ -126,7 +126,7 @@ describe("declared products API", () => {
     db = await createTestDb();
     const admin = await seedAdmin(db);
     adminId = admin.id;
-    app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
+    app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
     cookie = await login(app);
   });
 

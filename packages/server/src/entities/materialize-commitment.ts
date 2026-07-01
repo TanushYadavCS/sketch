@@ -8,7 +8,6 @@ export async function materializeCommitment(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
 ): Promise<MaterializeResult> {
-  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
   const commitment = readCommitment(raw);
   if (!commitment) return { kind: "skipped", reason: "invalid_commitment" };

@@ -986,7 +986,7 @@ describe("MCP Servers API", () => {
   // --- PATCH /api/mcp-servers/:id/connections/:connectionId/access ---
 
   describe("PATCH /api/mcp-servers/:id/connections/:connectionId/access", () => {
-    it("is mounted when experimental features are disabled", async () => {
+    it("is mounted", async () => {
       await seedAdmin(db);
       const repo = createMcpServerRepository(db);
       const server = await repo.create({
@@ -1011,7 +1011,7 @@ describe("MCP Servers API", () => {
       const { createProvider } = await import("../integrations/factory");
       vi.mocked(createProvider).mockReturnValue(mockProvider);
 
-      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: false }));
+      const app = createApp(db, createTestConfig({}));
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
@@ -1057,7 +1057,7 @@ describe("MCP Servers API", () => {
       const { createProvider } = await import("../integrations/factory");
       vi.mocked(createProvider).mockReturnValue(mockProvider);
 
-      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }));
+      const app = createApp(db, createTestConfig({}));
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(
@@ -1109,7 +1109,7 @@ describe("MCP Servers API", () => {
       const { createProvider } = await import("../integrations/factory");
       vi.mocked(createProvider).mockReturnValue(mockProvider);
 
-      const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }));
+      const app = createApp(db, createTestConfig({}));
       const memberCookie = await getMemberCookie(db);
 
       const res = await app.request(`/api/mcp-servers/${server.id}/connections/pd-1/access`, {

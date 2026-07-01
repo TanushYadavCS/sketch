@@ -429,9 +429,7 @@ function ScopeEditorDispatch({
   scopeEntries: [string, unknown][];
   onBrowsingChange?: (browsing: boolean) => void;
 }) {
-  const { data: setupStatus } = useQuery({ queryKey: ["setup", "status"], queryFn: () => api.setup.status() });
-  const experimentalEnabled = setupStatus?.experimentalFlag === true;
-  const showHierarchy = experimentalEnabled && Array.isArray(hierarchyLevels) && hierarchyLevels.length > 0;
+  const showHierarchy = Array.isArray(hierarchyLevels) && hierarchyLevels.length > 0;
 
   if (connectorType === "gmail") {
     return <EmailScopeEditor connectorId={connectorId} scopeConfig={scopeConfig} />;

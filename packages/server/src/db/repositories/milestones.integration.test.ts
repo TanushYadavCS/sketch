@@ -27,7 +27,6 @@ describe("milestone sub-entity supersession postgres", () => {
     await seedFile(db, "milestone-file-slip-2", "2026-06-15T09:00:00.000Z");
 
     await upsertMilestoneFact(db, {
-      experimentalFlag: true,
       indexedFileId: "milestone-file-slip-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -40,10 +39,9 @@ describe("milestone sub-entity supersession postgres", () => {
       observedAt: "2026-06-01T09:00:00.000Z",
       evidence: { fileIds: ["milestone-file-slip-1"], entityIds: [project.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     await upsertMilestoneFact(db, {
-      experimentalFlag: true,
       indexedFileId: "milestone-file-slip-2",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -56,7 +54,7 @@ describe("milestone sub-entity supersession postgres", () => {
       observedAt: "2026-06-15T09:00:00.000Z",
       evidence: { fileIds: ["milestone-file-slip-2"], entityIds: [project.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const rows = await milestoneRows(db, project.id, "public beta");
     expect(rows).toHaveLength(2);
@@ -270,7 +268,6 @@ async function emitMilestone(
   input: { fileId: string; status: "planned" | "hit" | "missed"; dueAt: string; observedAt: string },
 ): Promise<void> {
   await upsertMilestoneFact(db, {
-    experimentalFlag: true,
     indexedFileId: input.fileId,
     connectorConfigId: CONNECTOR_ID,
     createdByUserId: USER_ID,
@@ -283,7 +280,7 @@ async function emitMilestone(
     observedAt: input.observedAt,
     evidence: { fileIds: [input.fileId], entityIds: [projectId] },
   });
-  await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+  await materializeUnmaterializedFacts(db, createTestLogger(), {});
 }
 
 async function milestoneRows(db: Kysely<DB>, parentEntityId: string, normalizedName: string) {

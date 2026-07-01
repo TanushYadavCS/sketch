@@ -3,7 +3,6 @@ import type { Kysely, Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
 import { upsertFeatureFact } from "../db/repositories/features";
-import { buildIndexedFileFactKey } from "../db/repositories/indexed-file-facts";
 import type { DB, IndexedFileFactsTable, SubEntitiesTable } from "../db/schema";
 import { buildMaterializeDeps, materializeFromFact } from "../entities/materialize";
 import { createTestLogger, createTestPgDb } from "../test-utils";
@@ -12,7 +11,6 @@ import { smartEnrichFile } from "./smart-enrichment";
 
 const USER_ID = "feature-producer-user";
 const CONNECTOR_ID = "feature-producer-connector";
-const PROMPT_VERSION = "llm-extraction-v11";
 let db: Kysely<DB>;
 
 type Mention = {
@@ -60,7 +58,7 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       },
     ]);
     for (const file of files) {
-      await smartEnrichFile(deps(generator, true), fileContext(file));
+      await smartEnrichFile(deps(generator), fileContext(file));
     }
 
     const feature = await currentFeatureRows(db, "crm analytics");
@@ -96,7 +94,7 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
     expect(new Set(raws.map((raw) => raw.corroborationKey)).size).toBe(1);
   }, 30000);
 
-  it("defers unresolved and ambiguous parents while keeping flag-off fact keys unchanged", async () => {
+  it("defers unresolved and ambiguous parents", async () => {
     const missingParentFile = {
       id: `feature-missing-parent-${randomUUID()}`,
       hash: "hash-feature-missing-parent",
@@ -114,7 +112,6 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
             confidence: 0.94,
           },
         ]),
-        true,
       ),
       fileContext(missingParentFile),
     );
@@ -146,75 +143,12 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
             confidence: 0.93,
           },
         ]),
-        true,
       ),
       fileContext(ambiguousFile),
     );
     featureFacts = await activeFeatureFacts(db);
     expect(featureFacts).toHaveLength(2);
     expect(await countFeatureSubEntities(db)).toBe(0);
-
-    const flagOffFile = {
-      id: `feature-flag-off-${randomUUID()}`,
-      hash: "hash-feature-flag-off",
-      content: "CRM Analytics is discussed as a product candidate.",
-    };
-    await seedFile(db, flagOffFile);
-    let capturedPrompt = "";
-    await smartEnrichFile(
-      deps(
-        generatorWithMentions(
-          [{ mention: "CRM Analytics", type: "product", variations: [], confidence: 0.95 }],
-          (prompt) => {
-            capturedPrompt = prompt;
-          },
-        ),
-        false,
-      ),
-      fileContext(flagOffFile),
-    );
-
-    expect(capturedPrompt).not.toContain('"feature"');
-    expect(capturedPrompt).not.toContain("parentProduct");
-    const fact = await db
-      .selectFrom("indexed_file_facts")
-      .selectAll()
-      .where("indexed_file_id", "=", flagOffFile.id)
-      .where("fact_type", "=", "llm_extracted")
-      .where("subject_name", "=", "CRM Analytics")
-      .executeTakeFirstOrThrow();
-    expect(fact.fact_key).toBe(
-      buildIndexedFileFactKey({
-        indexedFileId: flagOffFile.id,
-        connectorConfigId: CONNECTOR_ID,
-        createdByUserId: USER_ID,
-        contentHash: flagOffFile.hash,
-        source: "llm_extraction",
-        factType: "llm_extracted",
-        relation: "mentioned",
-        subjectName: "CRM Analytics",
-        subjectSource: "llm_extraction",
-        subjectSourceId: `${flagOffFile.id}:${flagOffFile.hash}:${PROMPT_VERSION}:CRM Analytics`,
-        contextSnippet: null,
-        raw: {
-          contentHash: flagOffFile.hash,
-          promptVersion: PROMPT_VERSION,
-          model: "gemini",
-          mention: "CRM Analytics",
-          type: "product",
-          variations: [],
-          confidence: 0.95,
-        },
-      }),
-    );
-    await expect(
-      db
-        .selectFrom("indexed_file_facts")
-        .selectAll()
-        .where("indexed_file_id", "=", flagOffFile.id)
-        .where("fact_type", "=", "feature")
-        .execute(),
-    ).resolves.toEqual([]);
   }, 30000);
 
   it("filters code-shaped feature names in the producer and materializer", async () => {
@@ -251,7 +185,6 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
             confidence: 0.92,
           },
         ]),
-        true,
       ),
       fileContext(file),
     );
@@ -263,7 +196,6 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
     await expect(currentFeatureRows(db, "questionrequestdto")).resolves.toHaveLength(0);
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: file.id,
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -281,10 +213,7 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       .where("subject_source_id", "=", "feature-stored-noise")
       .executeTakeFirstOrThrow();
     await expect(
-      materializeFromFact(
-        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
-        storedNoiseFact,
-      ),
+      materializeFromFact(await buildMaterializeDeps(db, { featureAutoMintThreshold: 1 }), storedNoiseFact),
     ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "noise_rejected" });
     await expect(currentFeatureRows(db, "answerresponsedto")).resolves.toHaveLength(0);
     await expect(currentFeatureRows(db, "paylater")).resolves.toEqual([
@@ -316,13 +245,13 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
         confidence: 0.94,
       },
     ]);
-    await smartEnrichFile(deps(featureGenerator, true), fileContext(firstFile));
+    await smartEnrichFile(deps(featureGenerator), fileContext(firstFile));
     expect(await activeFeatureFacts(db)).toHaveLength(1);
     let current = await currentFeatureRows(db, "usage dashboards");
     expect(current).toHaveLength(1);
     expect(current[0]).toMatchObject({ parent_entity_id: product.id, provenance: "corroborated_llm" });
 
-    await smartEnrichFile(deps(featureGenerator, true), fileContext(secondFile));
+    await smartEnrichFile(deps(featureGenerator), fileContext(secondFile));
     current = await currentFeatureRows(db, "usage dashboards");
     expect(current).toHaveLength(1);
     expect(current[0]).toMatchObject({ parent_entity_id: product.id, provenance: "corroborated_llm" });
@@ -334,7 +263,7 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       content: "Canvas CRM release notes cover cleanup work without that dashboard module.",
     };
     await updateFileContent(db, updatedSecondFile);
-    await smartEnrichFile(deps(generatorWithMentions([]), true), fileContext(updatedSecondFile));
+    await smartEnrichFile(deps(generatorWithMentions([])), fileContext(updatedSecondFile));
 
     const secondFact = await db
       .selectFrom("indexed_file_facts")
@@ -353,7 +282,7 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       content: "Canvas CRM release notes cover cleanup work without that dashboard module.",
     };
     await updateFileContent(db, updatedFirstFile);
-    await smartEnrichFile(deps(generatorWithMentions([]), true), fileContext(updatedFirstFile));
+    await smartEnrichFile(deps(generatorWithMentions([])), fileContext(updatedFirstFile));
 
     current = await currentFeatureRows(db, "usage dashboards");
     expect(current).toHaveLength(0);
@@ -364,13 +293,12 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
   }, 30000);
 });
 
-function deps(generator: GeminiGenerator, experimentalFlag: boolean) {
+function deps(generator: GeminiGenerator) {
   return {
     db,
     logger: createTestLogger(),
     generator,
     embeddingProvider: null,
-    experimentalFlag,
   };
 }
 

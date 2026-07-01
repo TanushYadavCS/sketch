@@ -211,9 +211,8 @@ const DAILY_BRIEF_INSTRUCTIONS = [
 const DURABLE_TASKS_INSTRUCTION =
   "- The runtime context may include openDurableTasks: tasks that already exist with the shown status. Render those as-is and only create todos for genuinely new work; do not duplicate an existing task.";
 
-function buildInstructions(opts?: { experimentalFlag?: boolean }): string {
-  if (opts?.experimentalFlag) return `${DAILY_BRIEF_INSTRUCTIONS}\n${DURABLE_TASKS_INSTRUCTION}`;
-  return DAILY_BRIEF_INSTRUCTIONS;
+function buildInstructions(): string {
+  return `${DAILY_BRIEF_INSTRUCTIONS}\n${DURABLE_TASKS_INSTRUCTION}`;
 }
 
 async function enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]> {
@@ -276,13 +275,7 @@ function dropCompletedTodos(output: FormattedPriorOutput | null): FormattedPrior
   };
 }
 
-/**
- * Experimental (EXPERIMENTAL_FLAG): surface the user's open durable tasks so the brief
- * renders existing work as-is instead of re-creating it, and strips completed todos from
- * the prior-brief context. No-op when the flag is off — keeps the runtime context stable.
- */
 async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>> {
-  if (!args.config.EXPERIMENTAL_FLAG) return {};
   const taskRepo = createTaskRepository(args.db);
   const userEmails = await args.users.getAllEmailsForUser(args.userId);
   const openDurableTasks = await taskRepo.loadOpenDurableTasksForBrief({
@@ -306,12 +299,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   };
 }
 
-/**
- * Experimental (EXPERIMENTAL_FLAG): promote each saved todo into a durable task so the
- * brief's to-dos persist and collate across runs. Failures are logged, never fatal.
- */
 async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
-  if (!args.config.EXPERIMENTAL_FLAG) return;
   const taskRepo = createTaskRepository(args.db);
   for (const item of args.items) {
     if (item.sectionKey !== "todos") continue;

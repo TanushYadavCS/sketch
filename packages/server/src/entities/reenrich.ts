@@ -71,14 +71,6 @@ export interface ReenrichDeps {
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
   /**
-   * Threads the experimental gate into the re-enrich extraction phase so the
-   * flag-gated extraction-time spine features (tool classification,
-   * person-anchored file scope) run on re-extracted files exactly as they do
-   * on the live sync path. Materialization-time gating (the birth gate) reads
-   * its own module-level config and is unaffected by this flag.
-   */
-  experimentalFlag?: boolean;
-  /**
    * Set when the caller already promoted a pending recreate lock (two-step
    * rebuild flow). Skips the internal beginRecreateLock/endRecreateLock so
    * we don't double-acquire; the caller's `finally` is responsible for
@@ -525,7 +517,6 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         geminiApiKey: settings?.gemini_api_key,
         geminiMaxRpm: deps.geminiMaxRpm,
         geminiMaxRetries: deps.geminiMaxRetries,
-        experimentalFlag: deps.experimentalFlag,
         runEnrichmentImpl: deps.runEnrichmentImpl,
         onProgress: deps.onProgress,
         shouldCancel: deps.shouldCancel,
@@ -549,7 +540,6 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         llmPromotionThreshold: deps.llmPromotionThreshold,
         featureAutoMintThreshold: deps.featureAutoMintThreshold,
         coMentionContributesToThreshold: deps.coMentionContributesToThreshold,
-        experimentalFlag: deps.experimentalFlag,
         materializeFactTypes: deps.materializeFactTypes ?? [...AI_EXTRACTION_FACT_TYPES],
         onProgress: deps.onProgress,
         shouldCancel: deps.shouldCancel,

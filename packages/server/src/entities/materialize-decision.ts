@@ -5,7 +5,6 @@ import { readJsonObject } from "./materialize-json";
 import type { IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
 export async function materializeDecision(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
-  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
   const decision = readDecision(raw);
   if (!decision) return { kind: "skipped", reason: "invalid_decision" };

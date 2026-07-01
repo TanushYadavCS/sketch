@@ -202,7 +202,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
-          experimentalFlag: config.EXPERIMENTAL_FLAG,
           onProgress: (progress) => {
             job.progress = progress;
           },
@@ -374,7 +373,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           missingFileIds: resolved.missingFileIds,
           runAfter,
           lockAlreadyHeld,
-          experimentalFlag: config.EXPERIMENTAL_FLAG,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
@@ -587,7 +585,6 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
-          experimentalFlag: config.EXPERIMENTAL_FLAG,
           materializeFactTypes: factTypes.length > 0 ? factTypes : undefined,
           onProgress: (progress) => {
             job.progress = progress;

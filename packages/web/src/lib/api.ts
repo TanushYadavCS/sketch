@@ -214,7 +214,6 @@ export interface SetupStatus {
   slackConnected: boolean;
   llmConnected: boolean;
   llmProvider: LlmProvider | null;
-  experimentalFlag?: boolean;
   managedUrl?: string;
 }
 

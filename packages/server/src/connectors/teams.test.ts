@@ -219,7 +219,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 60 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -291,7 +291,7 @@ describe("Teams connector", () => {
     const items = await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 60 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -309,7 +309,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 60 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -328,7 +328,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 60 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -349,7 +349,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 30 }),
+      scopeConfig: JSON.stringify({ initialDays: 60 }),
       createdBy: "owner",
     });
     mockTeamsGraph();
@@ -414,7 +414,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 30 }),
+      scopeConfig: JSON.stringify({ initialDays: 60 }),
       createdBy: "owner",
     });
     mockTeamsGraph();

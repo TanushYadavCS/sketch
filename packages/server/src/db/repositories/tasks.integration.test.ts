@@ -151,7 +151,6 @@ describe("createTaskRepository postgres", () => {
       corroborationKey: "send pricing deck|global",
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -200,7 +199,6 @@ describe("createTaskRepository postgres", () => {
       entityIds: ["pg-llm-project"],
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -313,7 +311,6 @@ async function seedPgLlmFact(input: {
   entityIds?: string[];
 }): Promise<void> {
   await upsertLlmTaskFact(input.db, {
-    experimentalFlag: true,
     indexedFileId: input.fileId,
     connectorConfigId: input.connectorConfigId,
     createdByUserId: input.ownerUserId,

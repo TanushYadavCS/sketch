@@ -454,7 +454,6 @@ export interface Connector {
      * Optional — connectors that don't need it leave it unset.
      */
     resolveNameToEmail?: NameResolver;
-    experimentalFlag?: boolean;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;

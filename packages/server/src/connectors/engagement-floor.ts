@@ -43,9 +43,9 @@ import {
 } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
-import { isEmailProviderName } from "../entities/validators";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { parseActionItemOwners } from "./participant-block";
 

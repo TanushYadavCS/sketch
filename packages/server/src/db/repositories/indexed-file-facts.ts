@@ -531,7 +531,6 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
 }
 
 export interface UpsertLlmTaskFactInput {
-  experimentalFlag?: boolean;
   indexedFileId: string;
   connectorConfigId: string;
   createdByUserId?: string | null;
@@ -557,7 +556,6 @@ export async function upsertLlmTaskFact(
     input.candidateId ?? buildLlmTaskCandidateId(input.indexedFileId, input.candidate.title),
     "candidateId",
   );
-  if (!input.experimentalFlag) return { emitted: false };
 
   const raw: LlmTaskFactRaw = {
     candidateId,

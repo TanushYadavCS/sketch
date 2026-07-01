@@ -1,7 +1,7 @@
 /**
  * PR-2a coverage for the connector hierarchy mapping: the PATCH /:id/scope merge
  * (a partial scope update must preserve sibling keys it does not touch) and the
- * flag-gated exposure of a connector's declared `hierarchyLevels` on the GET routes.
+ * exposure of a connector's declared `hierarchyLevels` on the GET routes.
  */
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -90,10 +90,10 @@ describe("Connectors API — hierarchy mapping scope", () => {
     expect(stored.hierarchyMapping).toEqual({ space: "team", folder: "project" });
   });
 
-  it("exposes hierarchyLevels on GET only when EXPERIMENTAL_FLAG is on", async () => {
+  it("exposes hierarchyLevels on GET", async () => {
     const adminId = await seedAdmin(db);
 
-    const onApp = createApp(db, { ...createTestConfig(), EXPERIMENTAL_FLAG: true }, { logger });
+    const onApp = createApp(db, { ...createTestConfig() }, { logger });
     const onCookie = await login(onApp);
     const id = await insertClickUp(db, adminId);
     const onRes = await onApp.request(`/api/connectors/${id}`, { headers: { Cookie: onCookie } });
@@ -105,11 +105,5 @@ describe("Connectors API — hierarchy mapping scope", () => {
       "folder",
       "list",
     ]);
-
-    const offApp = createApp(db, { ...createTestConfig(), EXPERIMENTAL_FLAG: false }, { logger });
-    const offCookie = await login(offApp);
-    const offRes = await offApp.request(`/api/connectors/${id}`, { headers: { Cookie: offCookie } });
-    const offBody = await offRes.json();
-    expect(offBody.connector.hierarchyLevels).toBeUndefined();
   });
 });

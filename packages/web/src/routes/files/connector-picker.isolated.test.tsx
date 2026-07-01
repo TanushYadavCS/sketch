@@ -30,7 +30,6 @@ function setupStatus() {
         slackConnected: true,
         llmConnected: true,
         llmProvider: "anthropic",
-        experimentalFlag: false,
       }),
     ),
   );

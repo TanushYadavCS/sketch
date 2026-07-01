@@ -560,7 +560,7 @@ export class AgentRunService {
         currentUserId: user.id,
         userRepo: this.deps.users,
         maxTurns: 35,
-        agentInstructions: def.buildInstructions({ experimentalFlag: this.deps.config.EXPERIMENTAL_FLAG }),
+        agentInstructions: def.buildInstructions(),
         agentAllowedTools: def.allowedTools,
         agentOutputWriter: writer,
       });

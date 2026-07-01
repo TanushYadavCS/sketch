@@ -1163,23 +1163,6 @@ describe("Setup endpoints", () => {
       const body = await res.json();
       expect(body.completed).toBe(true);
     });
-
-    it("exposes experimentalFlag (true)", async () => {
-      const flaggedConfig = createTestConfig({ EXPERIMENTAL_FLAG: true });
-      const app = createApp(db, flaggedConfig);
-      const res = await app.request("/api/setup/status");
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.experimentalFlag).toBe(true);
-    });
-
-    it("exposes experimentalFlag (false) by default", async () => {
-      const app = createApp(db, config);
-      const res = await app.request("/api/setup/status");
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.experimentalFlag).toBe(false);
-    });
   });
 
   describe("POST /api/setup/slack/verify", () => {

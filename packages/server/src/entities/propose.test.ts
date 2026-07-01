@@ -1745,21 +1745,21 @@ describe("proposeEntity", () => {
     expect(retrieveEmbeddingCandidates).not.toHaveBeenCalled();
   });
 
-  it("34. materialize deps leave embedding lookup off without provider or experimental flag", async () => {
+  it("34. materialize deps leave embedding lookup off without provider and enable it with a provider", async () => {
     const provider = makeEmbeddingProvider();
-    const withoutProvider = await buildMaterializeDeps(db, { experimentalFlag: true });
-    const flagOff = await buildMaterializeDeps(db, { experimentalFlag: false, embeddingProvider: provider });
+    const withoutProvider = await buildMaterializeDeps(db, {});
+    const withProvider = await buildMaterializeDeps(db, { embeddingProvider: provider });
 
     expect(withoutProvider.lookup.retrieveEmbeddingCandidates).toBeUndefined();
-    expect(flagOff.lookup.retrieveEmbeddingCandidates).toBeUndefined();
+    expect(withProvider.lookup.retrieveEmbeddingCandidates).toEqual(expect.any(Function));
 
     const result = await proposeEntity(
       {
-        entityRepo: flagOff.entityRepo,
-        reviewRepo: flagOff.reviewRepo,
-        lookup: flagOff.lookup,
-        readEmail: flagOff.readEmail,
-        onEntityResolved: flagOff.onEntityResolved,
+        entityRepo: withoutProvider.entityRepo,
+        reviewRepo: withoutProvider.reviewRepo,
+        lookup: withoutProvider.lookup,
+        readEmail: withoutProvider.readEmail,
+        onEntityResolved: withoutProvider.onEntityResolved,
       },
       {
         name: "No Provider Person",

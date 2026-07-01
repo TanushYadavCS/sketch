@@ -71,7 +71,7 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         ]
       : []),
     ...createSearchTools(deps),
-    ...(deps.experimentalFlag ? [createListTasksTool(deps)] : []),
+    createListTasksTool(deps),
   ];
 
   return createSdkMcpServer({ name: "sketch", tools });

@@ -43,7 +43,6 @@ describe("document-derived llm_task extraction", () => {
     const generator = fakeGenerator(generateJSON);
 
     const result = await emitDocumentDerivedFacts(db, baseContext(), {
-      experimentalFlag: true,
       contentChanged: true,
       generator,
     });
@@ -52,7 +51,7 @@ describe("document-derived llm_task extraction", () => {
     expect(generateJSONCalls).toEqual([
       {
         prompt: expect.stringContaining("Source date: 2025-04-25"),
-        opts: { maxTokens: 2048, label: "extractLlmTask", dumpDir: undefined },
+        opts: { maxTokens: 8192, label: "extractLlmTask", dumpDir: undefined },
       },
     ]);
     expect(await activeLlmTaskFacts(db)).toHaveLength(1);
@@ -65,7 +64,6 @@ describe("document-derived llm_task extraction", () => {
     });
 
     const result = await emitDocumentDerivedFacts(db, baseContext(), {
-      experimentalFlag: true,
       contentChanged: true,
       generator,
       logger,
@@ -81,7 +79,6 @@ describe("document-derived llm_task extraction", () => {
 
   it("skips gracefully when no generator is available", async () => {
     const result = await emitDocumentDerivedFacts(db, baseContext(), {
-      experimentalFlag: true,
       contentChanged: true,
     });
 
@@ -100,7 +97,7 @@ describe("document-derived llm_task extraction", () => {
       const result = await emitDocumentDerivedFacts(
         db,
         { ...baseContext(), fileType },
-        { experimentalFlag: true, contentChanged: true, generator },
+        { contentChanged: true, generator },
       );
 
       expect(result.changed).toBe(false);
@@ -116,7 +113,7 @@ describe("document-derived llm_task extraction", () => {
       const result = await emitDocumentDerivedFacts(
         db,
         { ...baseContext(), fileType },
-        { experimentalFlag: true, contentChanged: true, generator },
+        { contentChanged: true, generator },
       );
 
       expect(result.changed).toBe(true);
