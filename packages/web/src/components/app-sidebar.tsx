@@ -58,14 +58,11 @@ interface NavItem {
   href: string;
   disabled?: boolean;
   adminOnly?: boolean;
-  memberVisibleWhenExperimental?: boolean;
-  /** Render only when `setupStatus.experimentalFlag === true`. */
-  experimentalOnly?: boolean;
   /** Optional render-prop for a trailing element (e.g. a count badge). */
   trailing?: React.ReactNode;
   /**
-   * When experimental, relabel to "Your org" and show a pending-review count
-   * badge scoped to the org-taxonomy spine.
+   * Relabel to "Your org" and show a pending-review count badge scoped to the
+   * org-taxonomy spine.
    */
   yourOrgBadge?: boolean;
 }
@@ -126,18 +123,15 @@ export function AppSidebar({
     queryFn: () => api.setup.status(),
   });
 
-  const experimentalEnabled = setupStatus?.experimentalFlag === true;
   const { data: yourOrgReview } = useQuery({
     queryKey: ["entity-review", "band-count", "spine"],
     queryFn: () => api.entityReview.list({ limit: 0, types: ["product", "project", "team"] }),
-    enabled: experimentalEnabled && role === "admin",
+    enabled: role === "admin",
     refetchInterval: 30000,
   });
   const yourOrgCount = yourOrgReview?.total ?? 0;
   const primaryNav = allPrimaryNav.filter((item) => {
-    if (item.adminOnly && role !== "admin" && !(item.memberVisibleWhenExperimental && experimentalEnabled))
-      return false;
-    if (item.experimentalOnly && !experimentalEnabled) return false;
+    if (item.adminOnly && role !== "admin") return false;
     return true;
   });
   const roleLabel = formatRole(role);
@@ -177,7 +171,7 @@ export function AppSidebar({
           <SidebarGroupContent>
             <SidebarMenu>
               {primaryNav.map((item) => {
-                const yourOrg = item.yourOrgBadge && experimentalEnabled;
+                const yourOrg = item.yourOrgBadge === true;
                 const label = yourOrg ? "Your org" : item.label;
                 return (
                   <SidebarMenuItem key={item.href}>

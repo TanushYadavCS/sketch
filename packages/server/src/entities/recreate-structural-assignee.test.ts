@@ -22,7 +22,6 @@ type MaterializeDefaultsSnapshot = Pick<
   | "birthGateLiveTypes"
   | "structuralAutoBirthTypes"
   | "birthGateDryRun"
-  | "experimentalFlag"
 >;
 
 async function snapshotMaterializeDefaults(db: Kysely<DB>): Promise<MaterializeDefaultsSnapshot> {
@@ -35,7 +34,6 @@ async function snapshotMaterializeDefaults(db: Kysely<DB>): Promise<MaterializeD
     birthGateLiveTypes: new Set(deps.birthGateLiveTypes),
     structuralAutoBirthTypes: new Set(deps.structuralAutoBirthTypes),
     birthGateDryRun: deps.birthGateDryRun,
-    experimentalFlag: deps.experimentalFlag,
   };
 }
 
@@ -183,16 +181,14 @@ async function seedCoMentionFacts(db: Kysely<DB>, fileIds: string[]): Promise<vo
   }
 }
 
-async function runRecreate(db: Kysely<DB>, experimentalFlag: boolean): Promise<void> {
+async function runRecreate(db: Kysely<DB>): Promise<void> {
   configureMaterializeDefaults({
     structuralAutoBirthTypes: new Set<ProposeEntityType>(["project"]),
-    experimentalFlag: true,
   });
   await recreateEntityGraph({
     db,
     logger: createTestLogger(),
     triggeredByUserId: USER_ID,
-    experimentalFlag,
     skipEnrichment: true,
     coMentionContributesToThreshold: 2,
   });
@@ -225,7 +221,7 @@ describe("recreateEntityGraph structural assignee rebuild", () => {
   it("mints a structural_assignee contributes_to edge during reconstruct", async () => {
     await seedStructuralFacts(db);
 
-    await runRecreate(db, true);
+    await runRecreate(db);
 
     const relationships = await contributesToRows(db);
     expect(relationships).toHaveLength(1);
@@ -236,20 +232,11 @@ describe("recreateEntityGraph structural assignee rebuild", () => {
     });
   });
 
-  it("does not mint structural_assignee edges when experimentalFlag is false", async () => {
-    await seedStructuralFacts(db);
-
-    await runRecreate(db, false);
-
-    const relationships = await contributesToRows(db);
-    expect(relationships.filter((row) => row.source === "structural_assignee")).toHaveLength(0);
-  });
-
   it("keeps structural_assignee precedence over recreate co-mention sweep", async () => {
     await seedStructuralFacts(db);
     await seedCoMentionFacts(db, ["co-mention-1", "co-mention-2"]);
 
-    await runRecreate(db, true);
+    await runRecreate(db);
 
     const relationships = await contributesToRows(db);
     expect(relationships.map((row) => row.source)).toEqual(["structural_assignee"]);

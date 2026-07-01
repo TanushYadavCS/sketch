@@ -34,7 +34,6 @@ export interface DocumentFactContext {
 }
 
 export interface EmitDocumentDerivedFactsOptions {
-  experimentalFlag?: boolean;
   contentChanged?: boolean;
   generator?: GeminiGenerator;
   dumpDir?: string;
@@ -64,12 +63,12 @@ export function sortDocumentParentRefs(parentRefs: DocumentFactParentRef[]): Doc
 export async function emitDocumentDerivedFacts(
   db: Kysely<DB>,
   ctx: DocumentFactContext,
-  { experimentalFlag = false, contentChanged = false, generator, dumpDir, logger }: EmitDocumentDerivedFactsOptions,
+  { contentChanged = false, generator, dumpDir, logger }: EmitDocumentDerivedFactsOptions,
 ): Promise<EmitDocumentDerivedFactsResult> {
   const emittedFactKeys = new Set<string>();
   const factRepo = createIndexedFileFactRepository(db);
 
-  if (!(experimentalFlag && ctx.contentCategory === "document" && ctx.content)) {
+  if (!(ctx.contentCategory === "document" && ctx.content)) {
     return { emittedFactKeys, tombstonedFactIds: [], changed: false };
   }
 
@@ -120,7 +119,6 @@ export async function emitDocumentDerivedFacts(
 
   for (const candidate of candidates) {
     const result = await upsertLlmTaskFact(db, {
-      experimentalFlag,
       indexedFileId: ctx.indexedFileId,
       connectorConfigId,
       createdByUserId: ctx.createdByUserId,

@@ -94,7 +94,6 @@ async function collectClickUpSync(
     scopeConfig: hierarchyMapping ? { hierarchyMapping } : {},
     cursor: null,
     logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
-    experimentalFlag: true,
     onEntitySeed: async (seed) => {
       seeds.push(seed);
     },
@@ -208,7 +207,6 @@ describe("ClickUp hierarchy mapping", () => {
       },
       item: items[0] as SyncedItem,
       indexedFileId: "indexed-task",
-      experimentalFlag: true,
     });
 
     expect(emittedFacts).toEqual(
@@ -232,6 +230,30 @@ describe("ClickUp hierarchy mapping", () => {
     );
     expect(emittedFacts).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ subjectSourceId: "folder-delivery" })]),
+    );
+  });
+
+  it("uses stored hierarchy mapping without emitting legacy flat seeds", async () => {
+    const { seeds } = await collectClickUpSync(
+      {
+        team: { id: "workspace-mapped", name: "Mapped Workspace", members: [] },
+        spaces: [{ id: "space-mapped", name: "Mapped Space" }],
+        foldersBySpace: { "space-mapped": [] },
+        listsByFolder: {},
+        folderlessListsBySpace: { "space-mapped": [{ id: "list-mapped", name: "Mapped List" }] },
+        tasksByList: { "list-mapped": [] },
+      },
+      { workspace: "team", space: "project", list: "ignore" },
+    );
+
+    expect(seeds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceType: "team", sourceId: "workspace-mapped", name: "Mapped Workspace" }),
+        expect.objectContaining({ sourceType: "project", sourceId: "space-mapped", name: "Mapped Space" }),
+      ]),
+    );
+    expect(seeds.map((seed) => seed.sourceType)).not.toEqual(
+      expect.arrayContaining(["clickup_workspace", "clickup_space"]),
     );
   });
 

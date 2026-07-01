@@ -1341,9 +1341,9 @@ describe("slack/adapter", () => {
   });
 
   describe("Assistant-pane DM shimmer", () => {
-    it("calls setAssistantStatus and skips eyes/✅ reactions for DMs with a threadTs when EXPERIMENTAL_FLAG is on", async () => {
+    it("calls setAssistantStatus and skips eyes/✅ reactions for DMs with a threadTs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 
@@ -1364,7 +1364,6 @@ describe("slack/adapter", () => {
             DATA_DIR: "/tmp/test-data",
             PORT: 0,
             LOG_LEVEL: "error",
-            EXPERIMENTAL_FLAG: true,
           }),
           runAgent: vi.fn().mockImplementation(async (params) => {
             await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
@@ -1385,7 +1384,7 @@ describe("slack/adapter", () => {
 
     it("honors the selected tool-progress mode for Assistant shimmer text", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
           return makeAgentResult();
@@ -1403,7 +1402,7 @@ describe("slack/adapter", () => {
 
     it("streams reasoning text into the shimmer when reasoningText is on", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "intermediate_text", text: "thinking about it" });
           return makeAgentResult();
@@ -1421,7 +1420,7 @@ describe("slack/adapter", () => {
 
     it("collapses repeated tool calls into an (xN) multiplier in the shimmer", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
@@ -1440,7 +1439,7 @@ describe("slack/adapter", () => {
 
     it("passes threadTs to runAgent for assistant-pane DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 
@@ -1454,7 +1453,7 @@ describe("slack/adapter", () => {
 
     it("posts the final reply inside the assistant thread", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 
@@ -1468,7 +1467,7 @@ describe("slack/adapter", () => {
 
     it("posts _No response_ as a thread reply for assistant-pane DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi
           .fn()
           .mockResolvedValue(makeAgentResult({ messageSent: false, trace: { progressEvents: [], finalText: null } })),
@@ -1485,7 +1484,7 @@ describe("slack/adapter", () => {
 
     it("posts the error message as a thread reply for assistant-pane DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockRejectedValue(new Error("boom")),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -1500,7 +1499,7 @@ describe("slack/adapter", () => {
 
     it("uploads pending files inside the assistant thread", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockResolvedValue(makeAgentResult({ pendingUploads: ["/tmp/out.pdf"] })),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -1514,7 +1513,7 @@ describe("slack/adapter", () => {
 
     it("does not pass threadTs to runAgent for top-level (no-thread) Messages-tab DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 

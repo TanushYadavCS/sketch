@@ -1222,7 +1222,7 @@ describe("Entity drawer routes", () => {
   let memberCookie: string;
   let memberEmail: string;
 
-  const flaggedConfig = createTestConfig({ EXPERIMENTAL_FLAG: true });
+  const config = createTestConfig({});
 
   beforeEach(async () => {
     if (isRecreateActive()) endRecreateLock();
@@ -1231,7 +1231,7 @@ describe("Entity drawer routes", () => {
     adminId = admin.id;
     const member = await seedMember(db);
     memberEmail = member.email;
-    app = createApp(db, flaggedConfig, { logger });
+    app = createApp(db, config, { logger });
     adminCookie = await login(app);
     memberCookie = await loginAs(app, memberEmail);
   });
@@ -1767,8 +1767,8 @@ describe("Entity drawer routes", () => {
     expect(body.totalCount).toBe(2);
   });
 
-  it("GET /api/entities/:id/relations works without EXPERIMENTAL_FLAG (Files is GA)", async () => {
-    const offConfig = createTestConfig({ EXPERIMENTAL_FLAG: false });
+  it("GET /api/entities/:id/relations works", async () => {
+    const offConfig = createTestConfig({});
     const offApp = createApp(db, offConfig, { logger });
     await seedEntity("e1", "Sarah", "person");
     const offCookie = await login(offApp);

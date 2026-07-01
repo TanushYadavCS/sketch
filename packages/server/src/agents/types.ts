@@ -128,10 +128,8 @@ export interface AgentDefinition {
    * Fully static instruction string. Per-user values (enabled sections, item cap,
    * focus) are NOT interpolated here; they flow through the runtime context in the
    * user message so this string stays byte-identical across users for prompt-cache reuse.
-   * `opts.experimentalFlag` may add gated guidance; when the flag is off the string
-   * stays static and cache-shared.
    */
-  buildInstructions(opts?: { experimentalFlag?: boolean }): string;
+  buildInstructions(): string;
   /** Derive display refs, source URLs, and canonical action labels from indexed data. */
   enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]>;
   /** Optional per-definition runtime context appended to the agent run JSON. */
@@ -152,8 +150,7 @@ export interface AgentDefinition {
   toApiItem(item: AgentStoredItem): AgentApiItem;
   /**
    * Optional: add or override runtime-context fields before serialization. Returns a
-   * partial object merged over the engine-built context. Used for experimental,
-   * definition-specific data (e.g. open durable tasks for the daily brief).
+   * partial object merged over the engine-built context.
    */
   augmentRuntimeContext?(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>>;
   /** Optional: side effects to run after an output is persisted (e.g. task promotion). */

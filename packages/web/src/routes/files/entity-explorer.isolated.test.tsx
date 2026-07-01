@@ -6,7 +6,7 @@
  * - count-probe short-circuits when no pending rows exist (no list query)
  * - pending review rows render as "ghost rows" at the top of the entities
  *   table; a divider separates them from confirmed entities
- * - Files is GA: the count probe fires regardless of EXPERIMENTAL_FLAG
+ * - the count probe always fires (no ghost rows when the queue is empty)
  * - clicking a ghost row opens the drawer in review mode (two-column
  *   reconcile view with the proposed entity + ReviewActions)
  * - "Confirm" inside the drawer resolves the row and shrinks the ghost set
@@ -46,8 +46,8 @@ const baseStatus = {
   llmProvider: "anthropic" as const,
 };
 
-function statusResponse(experimentalFlag: boolean) {
-  return HttpResponse.json({ ...baseStatus, experimentalFlag });
+function statusResponse() {
+  return HttpResponse.json({ ...baseStatus });
 }
 
 function entityListResponse(entities: Array<Partial<Record<string, unknown>>>) {
@@ -101,10 +101,10 @@ function rowFactory(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe("EntityExplorer ECR-03B inline review", () => {
-  it("Files GA: count probe fires regardless of EXPERIMENTAL_FLAG (no ghost rows when empty)", async () => {
+  it("count probe fires and renders no ghost rows when the queue is empty", async () => {
     let probeCalls = 0;
     server.use(
-      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
       http.get("/api/entity-review", () => {
         probeCalls++;
@@ -122,7 +122,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
   it("count=0: probe fires, list query does NOT, no ghost rows rendered", async () => {
     let listCalls = 0;
     server.use(
-      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
       http.get("/api/entity-review", ({ request }) => {
         const url = new URL(request.url);
@@ -140,7 +140,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
 
   it("renders ghost rows above the entities divider when there are pending proposals", async () => {
     server.use(
-      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
       http.get("/api/entity-review", ({ request }) => {
         const url = new URL(request.url);
@@ -169,7 +169,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
   it("clicking a ghost row opens the drawer in review mode with proposed + candidate columns", async () => {
     const user = userEvent.setup();
     server.use(
-      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
       http.get("/api/entities/ent-1", () =>
         HttpResponse.json({
@@ -241,7 +241,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
     const user = userEvent.setup();
     let listFetches = 0;
     server.use(
-      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", () => entityListResponse([{ id: "ent-1", name: "Simran S" }])),
       http.get("/api/entities/ent-1", () =>
         HttpResponse.json({
@@ -299,7 +299,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
   it("shows picked entity identity when choosing a different candidate", async () => {
     const user = userEvent.setup();
     server.use(
-      http.get("/api/setup/status", () => statusResponse(true)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get("search")) {
@@ -394,7 +394,7 @@ describe("EntityExplorer ECR-03B inline review", () => {
 describe("EntityExplorer rebuild dialog", () => {
   function setupBaseHandlers() {
     server.use(
-      http.get("/api/setup/status", () => statusResponse(false)),
+      http.get("/api/setup/status", () => statusResponse()),
       http.get("/api/entities", () => entityListResponse([])),
     );
   }

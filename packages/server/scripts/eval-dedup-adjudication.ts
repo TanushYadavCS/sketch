@@ -34,7 +34,6 @@ import { runMigrations } from "../src/db/migrate";
 import type { DB } from "../src/db/schema";
 
 const DB_PATH = "/Users/hkalra/projects/claude/sketch/data/sketch.db";
-const EXPERIMENTAL = true;
 const TOURISM = "OW Tourism Recovery Dashboard";
 const MAADEN_DASHBOARD = "Maaden Dashboard";
 const MAADEN_SITES = "Maaden Sites";

@@ -5,7 +5,6 @@ import { readJsonObject } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
 export async function materializeLlmTask(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
-  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readLlmTask(readJsonObject(fact.raw));
   if (!raw) return { kind: "skipped", reason: "invalid_llm_task" };
 

@@ -1,6 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildMaterializeDeps, materializeFromFact, materializeUnmaterializedFacts } from "../../entities/materialize";
+import { materializeUnmaterializedFacts } from "../../entities/materialize";
 import { createTestDb, createTestLogger } from "../../test-utils";
 import type { DB } from "../schema";
 import { listOpenCommitments, markCommitmentDone, upsertCommitmentFact } from "./commitments";
@@ -29,21 +29,6 @@ describe("commitment sub-entities", () => {
     await seedProject(db, { id: TEST_ACCOUNT_ENTITY_ID, name: "Test Account" });
 
     await upsertCommitmentFact(db, {
-      experimentalFlag: false,
-      connectorConfigId: CONNECTOR_ID,
-      createdByUserId: USER_ID,
-      lastSeenSyncRunId: "sync-off",
-      source: "linear",
-      commitmentId: "flag-off",
-      parentRef: { source: "linear", sourceId: `${project.id}-source` },
-      title: "Flag-off commitment",
-      evidence: { fileIds: ["commitment-file-1"], entityIds: [project.id] },
-    });
-    expect(await countRows(db, "indexed_file_facts", "commitment")).toBe(0);
-    expect(await countRows(db, "sub_entities", "commitment")).toBe(0);
-
-    await upsertCommitmentFact(db, {
-      experimentalFlag: true,
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
       lastSeenSyncRunId: "sync-1",
@@ -55,16 +40,7 @@ describe("commitment sub-entities", () => {
       dueAt: "2026-07-01T00:00:00.000Z",
       evidence: { fileIds: ["commitment-file-1"], entityIds: [project.id, TEST_ACCOUNT_ENTITY_ID] },
     });
-    const fact = await db
-      .selectFrom("indexed_file_facts")
-      .selectAll()
-      .where("subject_source_id", "=", "commitment-1")
-      .executeTakeFirstOrThrow();
-    const offResult = await materializeFromFact(await buildMaterializeDeps(db, { experimentalFlag: false }), fact);
-    expect(offResult).toEqual({ kind: "skipped", reason: "experimental_off" });
-    expect(await countRows(db, "sub_entities", "commitment")).toBe(0);
-
-    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {});
     expect(summary).toMatchObject({
       factsRead: 1,
       entitiesCreated: 0,
@@ -90,6 +66,11 @@ describe("commitment sub-entities", () => {
       created_by_user_id: USER_ID,
     });
     expect(row?.valid_to).toBeNull();
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .select("id")
+      .where("subject_source_id", "=", "commitment-1")
+      .executeTakeFirstOrThrow();
     const rawAfterMaterialize = JSON.parse(
       (await db.selectFrom("indexed_file_facts").select("raw").where("id", "=", fact.id).executeTakeFirstOrThrow())
         .raw ?? "{}",
@@ -105,7 +86,6 @@ describe("commitment sub-entities", () => {
     expect(row).toMatchObject({ status: "done", status_authority: "local" });
 
     await upsertCommitmentFact(db, {
-      experimentalFlag: true,
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
       lastSeenSyncRunId: "sync-2",
@@ -121,7 +101,7 @@ describe("commitment sub-entities", () => {
       { kind: "connector", connectorConfigId: CONNECTOR_ID, syncRunId: "sync-2" },
       null,
     );
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     row = await currentCommitmentRow(db, "Send the follow-up");
     expect(row).toMatchObject({ status: "done", status_authority: "local", valid_to: null });
     const rawAfterDone = JSON.parse(
@@ -136,7 +116,6 @@ describe("commitment sub-entities", () => {
     expect(rawAfterDone.status).toBe("open");
 
     await upsertCommitmentFact(db, {
-      experimentalFlag: true,
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
       lastSeenSyncRunId: "sync-3",
@@ -147,9 +126,8 @@ describe("commitment sub-entities", () => {
       status: "open",
       evidence: { fileIds: ["commitment-file-1"], entityIds: [project.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     await upsertCommitmentFact(db, {
-      experimentalFlag: true,
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
       lastSeenSyncRunId: "sync-4",
@@ -160,7 +138,7 @@ describe("commitment sub-entities", () => {
       status: "dropped",
       evidence: { fileIds: ["commitment-file-1"], entityIds: [project.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     expect(await currentCommitmentRow(db, "Update the rollout note")).toMatchObject({
       status: "dropped",
       status_authority: "external",
@@ -178,7 +156,7 @@ describe("commitment sub-entities", () => {
     await seedCommitmentFact(db, "commitment-global-1", null, "Send Update");
     await seedCommitmentFact(db, "commitment-global-2", null, "send update");
 
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const rows = await db
       .selectFrom("sub_entities")
@@ -206,7 +184,7 @@ describe("commitment sub-entities", () => {
     const project = await seedProject(db, { id: "commitment-project", name: "Commitment Project" });
     await seedCommitmentFact(db, "commitment-1", project.id, "Send the follow-up");
 
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const subEntities = await createSubEntityRepository(db).listOpenSubEntities({
       parentEntityId: project.id,
@@ -309,7 +287,6 @@ async function seedCommitmentFact(
   title: string,
 ): Promise<void> {
   await upsertCommitmentFact(db, {
-    experimentalFlag: true,
     indexedFileId: "commitment-file-1",
     connectorConfigId: CONNECTOR_ID,
     createdByUserId: USER_ID,

@@ -17,6 +17,6 @@ export function entityRoutes(db: Kysely<DB>, deps: EntityRoutesDeps) {
   routes.route("/", createEntityMergeRoutes(db));
   routes.route("/", createEntityBindingRoutes(db));
   routes.route("/", createEntityProfileRoutes(db, deps));
-  if (deps.config.EXPERIMENTAL_FLAG) routes.route("/", createTaskRoutes(db));
+  routes.route("/", createTaskRoutes(db));
   return routes;
 }

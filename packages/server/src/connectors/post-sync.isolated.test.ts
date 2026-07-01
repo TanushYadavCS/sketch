@@ -63,7 +63,6 @@ describe("runPostSyncGraphPipeline", () => {
       });
 
       expect(materializeUnmaterializedFacts).toHaveBeenCalledTimes(1);
-      expect(reconcileStructuralAssigneeContributesTo).not.toHaveBeenCalled();
       expect(sweepCoMentionContributesTo).toHaveBeenCalledTimes(1);
       expect(sweepCoMentionContributesTo).toHaveBeenCalledWith(db, expect.anything(), {
         scope: { kind: "files", indexedFileIds: ["file-1", "file-2"] },
@@ -74,7 +73,7 @@ describe("runPostSyncGraphPipeline", () => {
     }
   });
 
-  it("runs the structural assignee producer for affected files before the co-mention sweep when experimental", async () => {
+  it("runs the structural assignee producer for affected files before the co-mention sweep", async () => {
     const { sweepCoMentionContributesTo } = await import("../entities/co-mention-sweep");
     const db = await createTestDb();
     const logger = createTestLogger();
@@ -84,7 +83,6 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: ["file-1", "file-2"],
-        experimentalFlag: true,
         coMentionContributesToThreshold: 4,
       });
 
@@ -137,7 +135,6 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: [],
-        experimentalFlag: true,
       });
 
       expect(reconcileStructuralAssigneeContributesTo).toHaveBeenCalledTimes(1);
@@ -205,7 +202,6 @@ describe("runPostSyncGraphPipeline", () => {
         affectedIndexedFileIds: [],
         connectorConfigId: "connector-a",
         syncRunId: "sync-new",
-        experimentalFlag: true,
         runCycleReconcile: false,
       });
       await expect(loadCycle(db, cycle.cycleId)).resolves.toMatchObject({ state: "active", deleted_at: null });
@@ -217,7 +213,6 @@ describe("runPostSyncGraphPipeline", () => {
         affectedIndexedFileIds: [],
         connectorConfigId: "connector-a",
         syncRunId: "sync-new",
-        experimentalFlag: true,
         runCycleReconcile: true,
       });
       await expect(loadCycle(db, cycle.cycleId)).resolves.toMatchObject({
@@ -225,36 +220,6 @@ describe("runPostSyncGraphPipeline", () => {
         deleted_at: expect.any(String),
       });
       await expect(openMemberships(db, cycle.cycleId)).resolves.toBe(0);
-    } finally {
-      await db.destroy();
-    }
-  });
-
-  it("does not close pre-existing cycles when the experimental flag is off", async () => {
-    const db = await createTestDb();
-    const logger = createTestLogger();
-
-    try {
-      await seedConnector(db, "connector-a");
-      const cycle = await upsertWorkCycle(db, {
-        connectorConfigId: "connector-a",
-        source: "clickup",
-        externalRef: "sprint-flag-off",
-        name: "Sprint Flag Off",
-        lastSeenSyncRunId: "sync-old",
-      });
-
-      await runPostSyncGraphPipeline({
-        db,
-        syncLogger: logger,
-        affectedIndexedFileIds: [],
-        connectorConfigId: "connector-a",
-        syncRunId: "sync-new",
-        experimentalFlag: false,
-        runCycleReconcile: true,
-      });
-
-      await expect(loadCycle(db, cycle.cycleId)).resolves.toMatchObject({ state: "active", deleted_at: null });
     } finally {
       await db.destroy();
     }
@@ -288,7 +253,6 @@ describe("runPostSyncGraphPipeline", () => {
         affectedIndexedFileIds: [],
         connectorConfigId: "connector-a",
         syncRunId: "sync-new",
-        experimentalFlag: true,
         runCycleReconcile: true,
       });
 

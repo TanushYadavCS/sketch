@@ -7,7 +7,6 @@ import { type SubEntityRow, createSubEntityRepository } from "./sub-entities";
 export type MilestoneStatus = "planned" | "hit" | "missed";
 
 export interface UpsertMilestoneFactInput {
-  experimentalFlag?: boolean;
   indexedFileId?: string | null;
   connectorConfigId: string;
   createdByUserId?: string | null;
@@ -32,7 +31,6 @@ export async function upsertMilestoneFact(
   const connectorConfigId = requireNonEmpty(input.connectorConfigId, "connectorConfigId");
   const source = requireNonEmpty(input.source, "source");
   const milestoneId = requireNonEmpty(input.milestoneId, "milestoneId");
-  if (!input.experimentalFlag) return { emitted: false };
 
   await createIndexedFileFactRepository(db).upsertFact({
     indexedFileId: input.indexedFileId ?? null,
@@ -52,11 +50,7 @@ export async function upsertMilestoneFact(
   return { emitted: true };
 }
 
-export async function listCurrentMilestones(
-  db: Kysely<DB>,
-  opts: { experimentalFlag?: boolean; parentEntityId: string },
-): Promise<SubEntityRow[]> {
-  if (!opts.experimentalFlag) return [];
+export async function listCurrentMilestones(db: Kysely<DB>, opts: { parentEntityId: string }): Promise<SubEntityRow[]> {
   return createSubEntityRepository(db).listCurrentByKind({
     parentEntityId: opts.parentEntityId,
     kind: "milestone",

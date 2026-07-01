@@ -65,7 +65,6 @@ export interface MaterializeDeps {
   birthGateLiveTypes: Set<ProposeEntityType>;
   structuralAutoBirthTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
-  experimentalFlag: boolean;
   embeddingProvider: EmbeddingProvider | null;
 }
 
@@ -99,7 +98,6 @@ export interface ReplaySourceFactsOptions {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
-  experimentalFlag?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
 }
 
@@ -117,7 +115,6 @@ export interface MaterializeUnmaterializedOptions {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
-  experimentalFlag?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
   factTypes?: IndexedFileFactType[];
   /**

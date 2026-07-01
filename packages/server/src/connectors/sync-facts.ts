@@ -25,7 +25,6 @@ interface EmitFactsForSyncedItemParams {
   item: SyncedItem;
   indexedFileId: string;
   emitCorrespondentFacts?: boolean;
-  experimentalFlag?: boolean;
   contentChanged?: boolean;
   generator?: GeminiGenerator;
 }
@@ -39,7 +38,6 @@ export async function emitFactsForSyncedItem({
   item,
   indexedFileId,
   emitCorrespondentFacts = false,
-  experimentalFlag = false,
   contentChanged = false,
   generator,
 }: EmitFactsForSyncedItemParams): Promise<void> {
@@ -204,7 +202,7 @@ export async function emitFactsForSyncedItem({
     }
   }
 
-  if (experimentalFlag && item.task) {
+  if (item.task) {
     await factRepo.upsertFact({
       ...factContext,
       indexedFileId,
@@ -223,7 +221,6 @@ export async function emitFactsForSyncedItem({
   if (item.commitments && item.commitments.length > 0 && db) {
     for (const commitment of item.commitments) {
       await upsertCommitmentFact(db, {
-        experimentalFlag,
         indexedFileId,
         connectorConfigId: factContext.connectorConfigId,
         createdByUserId: factContext.createdByUserId,
@@ -244,7 +241,6 @@ export async function emitFactsForSyncedItem({
 
   if (item.decisions && db) {
     await upsertDecisionFactsForFile(db, {
-      experimentalFlag,
       indexedFileId,
       connectorConfigId: factContext.connectorConfigId,
       createdByUserId: factContext.createdByUserId,
@@ -275,7 +271,7 @@ export async function emitFactsForSyncedItem({
           item.parentEntities?.map((parent) => ({ source: parent.source, sourceId: parent.sourceId })) ?? [],
         ),
       },
-      { experimentalFlag, contentChanged, generator },
+      { contentChanged, generator },
     );
   }
 

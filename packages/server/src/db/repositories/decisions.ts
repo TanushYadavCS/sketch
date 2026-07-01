@@ -13,7 +13,6 @@ export interface DecisionFactRaw extends DecisionSeed {
 }
 
 export interface UpsertDecisionFactInput {
-  experimentalFlag?: boolean;
   indexedFileId: string;
   connectorConfigId: string;
   createdByUserId?: string | null;
@@ -34,7 +33,6 @@ export interface UpsertDecisionFactInput {
 }
 
 export interface UpsertDecisionFactsForFileInput {
-  experimentalFlag?: boolean;
   indexedFileId: string;
   connectorConfigId: string;
   createdByUserId?: string | null;
@@ -69,7 +67,6 @@ export async function upsertDecisionFact(
     input.decisionId ?? buildDecisionId(input.indexedFileId, input.topic, input.statement),
     "decisionId",
   );
-  if (!input.experimentalFlag) return { emitted: false };
 
   const raw: DecisionFactRaw = {
     decisionId,
@@ -109,11 +106,9 @@ export async function upsertDecisionFactsForFile(
   requireNonEmpty(input.connectorConfigId, "connectorConfigId");
   requireNonEmpty(input.source, "source");
   const emittedKeys = new Set<string>();
-  if (!input.experimentalFlag) return { emitted: false, factKeys: emittedKeys };
 
   for (const decision of input.decisions) {
     const result = await upsertDecisionFact(db, {
-      experimentalFlag: input.experimentalFlag,
       indexedFileId: input.indexedFileId,
       connectorConfigId: input.connectorConfigId,
       createdByUserId: input.createdByUserId,
@@ -149,9 +144,8 @@ export function buildDecisionId(indexedFileId: string, topic: string, statement:
 
 export async function listCurrentDecisions(
   db: Kysely<DB>,
-  opts: { experimentalFlag?: boolean; parentEntityId: string },
+  opts: { parentEntityId: string },
 ): Promise<CurrentDecision[]> {
-  if (!opts.experimentalFlag) return [];
   const rows = await createSubEntityRepository(db).listCurrentByKind({
     parentEntityId: opts.parentEntityId,
     kind: "decision",
@@ -161,9 +155,8 @@ export async function listCurrentDecisions(
 
 export async function getDecisionsAsOf(
   db: Kysely<DB>,
-  opts: { experimentalFlag?: boolean; parentEntityId: string; at: string },
+  opts: { parentEntityId: string; at: string },
 ): Promise<CurrentDecision[]> {
-  if (!opts.experimentalFlag) return [];
   const rows = await createSubEntityRepository(db).getSubEntitiesAsOf({
     parentEntityId: opts.parentEntityId,
     kind: "decision",

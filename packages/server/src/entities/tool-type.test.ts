@@ -160,11 +160,16 @@ describe("tool entity type", () => {
     await db.destroy();
   });
 
+  it("coerces denylisted names to tool without a flag", () => {
+    expect(coerceMentionType("Slack", "product")).toBe("tool");
+    expect(coerceMentionType("Internal Portal", "product")).toBe("product");
+  });
+
   it("classifies and materializes Slack mentions as tool while dropping tool relation endpoints", async () => {
     await seedFile(db, "file-tool-classify", "Slack and Acme Corp were discussed.");
     await seedFile(db, "file-tool-classify-2", "Slack and Acme Corp were discussed again.");
 
-    expect(coerceMentionType("Slack", "product", true)).toBe("tool");
+    expect(coerceMentionType("Slack", "product")).toBe("tool");
     expect(normalizeMentionType("tool")).toBe("tool");
 
     for (const fileId of ["file-tool-classify", "file-tool-classify-2"]) {
@@ -174,7 +179,6 @@ describe("tool entity type", () => {
           logger: createTestLogger(),
           generator: fakeGenerator(),
           embeddingProvider: null,
-          experimentalFlag: true,
         },
         {
           id: fileId,
@@ -241,7 +245,6 @@ describe("tool entity type", () => {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
       birthGateDryRun: false,
-      experimentalFlag: true,
     });
 
     expect(await db.selectFrom("entity_relationships").select("id").execute()).toHaveLength(0);

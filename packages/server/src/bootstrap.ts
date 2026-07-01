@@ -103,17 +103,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
     llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
     llmTaskCorroborationThreshold: config.LLM_TASK_CORROBORATION_THRESHOLD,
     featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
-    birthGateTypes: config.EXPERIMENTAL_FLAG
-      ? new Set<ProposeEntityType>(["project", "product", "team"])
-      : new Set<ProposeEntityType>(),
-    birthGateLiveTypes: config.EXPERIMENTAL_FLAG
-      ? new Set<ProposeEntityType>(["product", "project"])
-      : new Set<ProposeEntityType>(),
-    structuralAutoBirthTypes: config.EXPERIMENTAL_FLAG
-      ? new Set<ProposeEntityType>(["project"])
-      : new Set<ProposeEntityType>(),
+    birthGateTypes: new Set<ProposeEntityType>(["project", "product", "team"]),
+    birthGateLiveTypes: new Set<ProposeEntityType>(["product", "project"]),
+    structuralAutoBirthTypes: new Set<ProposeEntityType>(["project"]),
     birthGateDryRun: config.BIRTH_GATE_DRY_RUN,
-    experimentalFlag: config.EXPERIMENTAL_FLAG,
   });
 
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.
@@ -210,7 +203,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
-      experimentalFlag: params.experimentalFlag ?? config.EXPERIMENTAL_FLAG,
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

@@ -330,7 +330,6 @@ export function buildSystemContext(params: {
   indexedSources?: Array<{ source: string; fileCount: number }>;
   agentInstructions?: string | null;
   visionAnalysisEnabled?: boolean;
-  experimentalFlag?: boolean;
 }): string {
   const sections: string[] = [];
 
@@ -499,11 +498,7 @@ export function buildSystemContext(params: {
       "- **SearchEntities** — find projects, people, teams, companies, and products across connected sources. " +
         "Pass multiple name variations to maximize matches. Returns entity IDs.",
       "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
-      ...(params.experimentalFlag
-        ? [
-            "- **ListTasks** — list current tracker-owned tasks by project entity or assignee entity, including status, source, priority, and due date.",
-          ]
-        : []),
+      "- **ListTasks** — list current tracker-owned tasks by project entity or assignee entity, including status, source, priority, and due date.",
       "",
       'Recency questions ("latest", "most recent", "last X"):',
       '- Always pass `sortBy: "recency"`. Default `limit` becomes 3 (small disambiguation set).',

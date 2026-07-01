@@ -21,13 +21,43 @@ describe("feature sub-entities postgres", () => {
     db = undefined;
   });
 
+  it("materializes feature facts with default materialization dependencies", async () => {
+    db = await createTestPgDb();
+    await seedBase(db);
+    const product = await seedEntity(db, {
+      id: "feature-default-product",
+      name: "Feature Default Product",
+      type: "product",
+    });
+
+    await upsertFeatureFact(db, {
+      indexedFileId: "feature-file-1",
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: USER_ID,
+      source: "linear",
+      featureId: "feature-default-materialize",
+      featureName: "Default Feature",
+      parentEntityId: product.id,
+      status: "building",
+      evidence: { fileIds: ["feature-file-1"], entityIds: [product.id] },
+    });
+    const fact = await featureFact(db, "feature-default-materialize");
+
+    await expect(materializeFromFact(await buildMaterializeDeps(db, {}), fact)).resolves.toEqual({
+      kind: "feature_materialized",
+    });
+    await expect(featureRow(db, "default feature")).resolves.toMatchObject({
+      parent_entity_id: product.id,
+      valid_to: null,
+    });
+  }, 30000);
+
   it("materializes features under an existing product by product ref and product entity id", async () => {
     db = await createTestPgDb();
     await seedBase(db);
     const product = await seedEntity(db, { id: "feature-product-ref", name: "Feature Product", type: "product" });
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -41,7 +71,6 @@ describe("feature sub-entities postgres", () => {
       evidence: { fileIds: ["feature-file-1"], entityIds: [product.id] },
     });
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -55,7 +84,7 @@ describe("feature sub-entities postgres", () => {
     });
 
     const beforeProducts = await countEntitiesByType(db, "product");
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     await expect(featureRow(db, "inline comments")).resolves.toMatchObject({
       kind: "feature",
@@ -96,7 +125,6 @@ describe("feature sub-entities postgres", () => {
     });
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -108,12 +136,11 @@ describe("feature sub-entities postgres", () => {
       status: "building",
       evidence: { fileIds: ["feature-file-1"], entityIds: [product.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     const row = await featureRow(db, "usage dashboards");
     await expect(createSubEntityRepository(db).markSubEntityStatus(row.id, "shipped")).resolves.toBe(true);
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -125,7 +152,7 @@ describe("feature sub-entities postgres", () => {
       status: "deprecated",
       evidence: { fileIds: ["feature-file-1"], entityIds: [product.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     await expect(featureRow(db, "usage dashboards")).resolves.toMatchObject({
       status: "shipped",
@@ -134,14 +161,17 @@ describe("feature sub-entities postgres", () => {
     });
   }, 30000);
 
-  it("materializes LLM features by parent name under products or projects and stays disabled when the flag is off", async () => {
+  it("materializes LLM features by parent name under products or projects", async () => {
     db = await createTestPgDb();
     await seedBase(db);
     const project = await seedEntity(db, { id: "feature-project-parent", name: "Feature Project", type: "project" });
-    const product = await seedEntity(db, { id: "feature-product-off", name: "Feature Product Off", type: "product" });
+    const product = await seedEntity(db, {
+      id: "feature-product-default",
+      name: "Feature Product Default",
+      type: "product",
+    });
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -162,10 +192,7 @@ describe("feature sub-entities postgres", () => {
     expect(raw.parentProductName).toBe("Feature Project");
     expect(raw.parentEntityId).toBeUndefined();
     await expect(
-      materializeFromFact(
-        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
-        projectFact,
-      ),
+      materializeFromFact(await buildMaterializeDeps(db, { featureAutoMintThreshold: 1 }), projectFact),
     ).resolves.toEqual({ kind: "feature_materialized" });
     await expect(featureRow(db, "project by name feature")).resolves.toMatchObject({
       parent_entity_id: project.id,
@@ -175,40 +202,41 @@ describe("feature sub-entities postgres", () => {
 
     await expect(
       upsertFeatureFact(db, {
-        experimentalFlag: false,
         indexedFileId: "feature-file-1",
         connectorConfigId: CONNECTOR_ID,
         createdByUserId: USER_ID,
         source: "linear",
-        featureId: "feature-emit-off",
-        featureName: "Flag-off feature",
+        featureId: "feature-emit-default",
+        featureName: "Default emitted feature",
         parentEntityId: product.id,
         status: "building",
         evidence: { fileIds: ["feature-file-1"], entityIds: [product.id] },
       }),
-    ).resolves.toEqual({ emitted: false });
+    ).resolves.toEqual({ emitted: true, factKey: expect.any(String) });
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
       source: "linear",
-      featureId: "feature-materialize-off",
-      featureName: "Materialize-off feature",
+      featureId: "feature-materialize-default",
+      featureName: "Default materialized feature",
       parentEntityId: product.id,
       status: "building",
       evidence: { fileIds: ["feature-file-1"], entityIds: [product.id] },
     });
-    const flagOffFact = await db
+    const directFact = await db
       .selectFrom("indexed_file_facts")
       .selectAll()
-      .where("subject_source_id", "=", "feature-materialize-off")
+      .where("subject_source_id", "=", "feature-materialize-default")
       .executeTakeFirstOrThrow();
-    await expect(
-      materializeFromFact(await buildMaterializeDeps(db, { experimentalFlag: false }), flagOffFact),
-    ).resolves.toEqual({ kind: "skipped", reason: "experimental_off" });
-    await expect(countFeatureRows(db)).resolves.toBe(1);
+    await expect(materializeFromFact(await buildMaterializeDeps(db, {}), directFact)).resolves.toEqual({
+      kind: "feature_materialized",
+    });
+    await expect(featureRow(db, "default materialized feature")).resolves.toMatchObject({
+      parent_entity_id: product.id,
+      valid_to: null,
+    });
   }, 30000);
 
   it("defers LLM features until parent approval and rejects inferred or ambiguous parents", async () => {
@@ -216,7 +244,6 @@ describe("feature sub-entities postgres", () => {
     await seedBase(db);
 
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -230,10 +257,7 @@ describe("feature sub-entities postgres", () => {
     });
     const deferredFact = await featureFact(db, "feature-defer-product");
     await expect(
-      materializeFromFact(
-        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
-        deferredFact,
-      ),
+      materializeFromFact(await buildMaterializeDeps(db, { featureAutoMintThreshold: 1 }), deferredFact),
     ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "feature_parent_absent" });
     await expect(countFeatureRows(db)).resolves.toBe(0);
     await expect(db.selectFrom("entity_mentions").selectAll().execute()).resolves.toEqual([]);
@@ -251,7 +275,6 @@ describe("feature sub-entities postgres", () => {
       provenanceTier: "human_confirmed",
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       featureAutoMintThreshold: 1,
       factTypes: ["feature"],
     });
@@ -268,7 +291,6 @@ describe("feature sub-entities postgres", () => {
       provenanceTier: "structural",
     });
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -281,7 +303,6 @@ describe("feature sub-entities postgres", () => {
       evidence: { fileIds: ["feature-file-1"], entityIds: [] },
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       featureAutoMintThreshold: 1,
       factTypes: ["feature"],
     });
@@ -298,7 +319,6 @@ describe("feature sub-entities postgres", () => {
       provenanceTier: "inferred",
     });
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -312,7 +332,7 @@ describe("feature sub-entities postgres", () => {
     });
     await expect(
       materializeFromFact(
-        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        await buildMaterializeDeps(db, { featureAutoMintThreshold: 1 }),
         await featureFact(db, "feature-inferred-product"),
       ),
     ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "feature_parent_absent" });
@@ -333,7 +353,6 @@ describe("feature sub-entities postgres", () => {
       provenanceTier: "structural",
     });
     await upsertFeatureFact(db, {
-      experimentalFlag: true,
       indexedFileId: "feature-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -347,7 +366,7 @@ describe("feature sub-entities postgres", () => {
     });
     await expect(
       materializeFromFact(
-        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        await buildMaterializeDeps(db, { featureAutoMintThreshold: 1 }),
         await featureFact(db, "feature-ambiguous-parent"),
       ),
     ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "feature_parent_absent" });
@@ -363,7 +382,7 @@ describe("feature sub-entities postgres", () => {
     const person = await seedEntity(db, { id: "resolver-person", name: "Resolver Person", type: "person" });
     const product = await seedEntity(db, { id: "resolver-product", name: "Resolver Product", type: "product" });
     const team = await seedEntity(db, { id: "resolver-team", name: "Resolver Team", type: "team" });
-    const deps = await buildMaterializeDeps(db, { experimentalFlag: true });
+    const deps = await buildMaterializeDeps(db, {});
 
     expect(resolveParent(deps, resolverInput(project.id), ["project", "person"])?.id).toBe(project.id);
     expect(resolveParent(deps, resolverInput(person.id), ["project", "person"])?.id).toBe(person.id);

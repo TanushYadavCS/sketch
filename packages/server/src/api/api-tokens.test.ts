@@ -45,7 +45,7 @@ async function setupSession(email: string) {
 describe("API token routes", () => {
   it("creates and lists only the caller's own tokens", async () => {
     const { cookie } = await setupSession("alice@example.com");
-    const app = createApp(db, createTestConfig({ BASE_URL: "https://sketch.test", EXPERIMENTAL_FLAG: false }), {
+    const app = createApp(db, createTestConfig({ BASE_URL: "https://sketch.test" }), {
       logger: createTestLogger(),
     });
 
@@ -79,7 +79,7 @@ describe("API token routes", () => {
       tokenHash: hashApiToken(plaintext),
       prefix: getApiTokenDisplayPrefix(plaintext),
     });
-    const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
+    const app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
 
     const res = await app.request(`/api/api-tokens/${row.id}`, {
       method: "DELETE",

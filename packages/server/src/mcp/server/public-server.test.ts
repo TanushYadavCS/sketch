@@ -44,15 +44,15 @@ function mcpHeaders(token: string) {
 }
 
 describe("public MCP server", () => {
-  it("is available without EXPERIMENTAL_FLAG and advertises OAuth discovery", async () => {
-    const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: false }), { logger: createTestLogger() });
+  it("is available and advertises OAuth discovery", async () => {
+    const app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
     const res = await app.request("/mcp", { method: "POST" });
     expect(res.status).toBe(401);
     expect(res.headers.get("www-authenticate")).toContain("/.well-known/oauth-protected-resource");
   });
 
   it("rejects non-Sketch PAT bearer tokens", async () => {
-    const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
+    const app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
     const res = await app.request("/mcp", {
       method: "POST",
       headers: mcpHeaders("sk_live_wrong"),
@@ -63,7 +63,7 @@ describe("public MCP server", () => {
 
   it("lists the four public sketch tools for a valid PAT", async () => {
     const token = await createPat();
-    const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
+    const app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
 
     const res = await app.request("/mcp", {
       method: "POST",
@@ -83,7 +83,7 @@ describe("public MCP server", () => {
 
   it("rate limits by token even when the forwarded IP changes", async () => {
     const token = await createPat();
-    const app = createApp(db, createTestConfig({ EXPERIMENTAL_FLAG: true }), { logger: createTestLogger() });
+    const app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
     const statuses: number[] = [];
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
 

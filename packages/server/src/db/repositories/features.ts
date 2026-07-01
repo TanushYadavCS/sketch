@@ -6,7 +6,6 @@ import { buildIndexedFileFactKey, createIndexedFileFactRepository } from "./inde
 export type FeatureStatus = "proposed" | "building" | "shipped" | "deprecated";
 
 export interface UpsertFeatureFactInput {
-  experimentalFlag?: boolean;
   indexedFileId?: string | null;
   connectorConfigId: string;
   createdByUserId?: string | null;
@@ -35,7 +34,6 @@ export async function upsertFeatureFact(
   const connectorConfigId = requireNonEmpty(input.connectorConfigId, "connectorConfigId");
   const source = requireNonEmpty(input.source, "source");
   const featureId = requireNonEmpty(input.featureId, "featureId");
-  if (!input.experimentalFlag) return { emitted: false };
 
   const factInput = {
     indexedFileId: input.indexedFileId ?? null,

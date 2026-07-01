@@ -554,7 +554,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     } as GeminiGenerator;
 
     await smartEnrichFile(
-      { db, logger: createTestLogger(), generator, embeddingProvider: null, experimentalFlag: true },
+      { db, logger: createTestLogger(), generator, embeddingProvider: null },
       {
         id: fileId,
         fileName: `${fileId}.txt`,
@@ -1161,7 +1161,7 @@ describe("extractEntities prompt — v6 entity type removal", () => {
     }
   });
 
-  it("renders supported entity types without removed feature guidance", async () => {
+  it("renders supported entity types with feature guidance", async () => {
     let capturedPrompt = "";
     const generator = {
       generate: async () => "",
@@ -1191,10 +1191,9 @@ describe("extractEntities prompt — v6 entity type removal", () => {
     expect(capturedPrompt).toContain("Prefer extracting from the top down");
     expect(capturedPrompt).toContain('"engaged_with"');
     expect(capturedPrompt).toContain("without being employed by it");
-    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product"');
-    expect(capturedPrompt).not.toContain("Features");
-    expect(capturedPrompt).not.toContain('"feature"');
-    expect(capturedPrompt).not.toContain("feature -> project | product");
+    expect(capturedPrompt).toContain('Valid types: "person", "project", "company", "product", "tool", "feature"');
+    expect(capturedPrompt).toContain("Features");
+    expect(capturedPrompt).toContain('"feature"');
   });
 
   it("ignores feature mentions and feature endpoint relations emitted by the model", async () => {
@@ -1664,7 +1663,6 @@ describe("dedup adjudication", () => {
         logger: createTestLogger(),
         generator,
         embeddingProvider: null,
-        experimentalFlag: true,
         knownEntities: [{ name: canonical, type: "project" }],
       },
       smartFileContext(fileId, "hash-dedup-hit", { content }),

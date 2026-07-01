@@ -156,12 +156,10 @@ export function EntityExplorer() {
   const total = data?.total ?? 0;
   const tentativeCount = entities.filter((e) => e.status === "tentative").length;
 
-  // When the experimental Your Org surface is live it owns the org-taxonomy
-  // spine (product/project/team), so this band narrows to person/company to
-  // avoid a row appearing in two places. Flag off → unchanged (all types here).
-  const { data: setupStatus } = useQuery({ queryKey: ["setup", "status"], queryFn: () => api.setup.status() });
-  const reviewTypes = setupStatus?.experimentalFlag ? ["person", "company"] : undefined;
-  const reviewScope = reviewTypes?.join(",") ?? "all";
+  // The Your Org surface owns the org-taxonomy spine (product/project/team), so
+  // this band narrows to person/company to avoid a row appearing in two places.
+  const reviewTypes = ["person", "company"];
+  const reviewScope = reviewTypes.join(",");
 
   // ECR-03B inline review surface — two-stage fetch:
   // the cheap count probe gates the (heavier) list query.

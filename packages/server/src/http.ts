@@ -330,7 +330,6 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/setup",
     setupRoutes(settings, {
       managedUrl: config.MANAGED_URL,
-      experimentalFlag: config.EXPERIMENTAL_FLAG,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
@@ -457,10 +456,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/projects", createProjectRoutes(db));
-  if (config.EXPERIMENTAL_FLAG) {
-    app.route("/api/products", productRoutes(db));
-  }
-  app.route("/api/entity-review", entityReviewRoutes(db, { config, logger }));
+  app.route("/api/products", productRoutes(db));
+  app.route("/api/entity-review", entityReviewRoutes(db, { logger }));
   app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
   mountPublicMcpServer({
     app,

@@ -25,7 +25,6 @@ export async function materializeStructuralTask(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
 ): Promise<MaterializeResult> {
-  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
   const task = readTask(raw.task);
   const indexedFileId = typeof raw.indexedFileId === "string" ? raw.indexedFileId : fact.indexed_file_id;
@@ -52,32 +51,30 @@ export async function materializeStructuralTask(
     sourceTaskId: task.sourceTaskId,
   });
   await repo.upsertEvidence(result.taskId, "file", indexedFileId);
-  if (deps.experimentalFlag) {
-    const now = new Date().toISOString();
-    if (task.cycle?.isSprint) {
-      if (!fact.connector_config_id) throw new Error("Work cycle materialization requires connector_config_id");
-      const scopeEntityId = resolveCycleScope(deps, task.cycle.scopeRef)?.id ?? null;
-      const cycle = await upsertWorkCycle(deps.db, {
-        scopeEntityId,
-        connectorConfigId: fact.connector_config_id,
-        source: fact.source,
-        externalRef: task.cycle.externalRef,
-        name: task.cycle.name,
-        sequence: task.cycle.sequence ?? deriveSprintSequence(task.cycle.name),
-        startsAt: task.cycle.startsAt ?? null,
-        endsAt: task.cycle.endsAt ?? null,
-        state: "active",
-        lastSeenSyncRunId: fact.last_seen_sync_run_id,
-      });
-      await assignMembership(deps.db, {
-        taskId: result.taskId,
-        cycleId: cycle.cycleId,
-        sourceFactId: fact.id,
-        at: now,
-      });
-    } else {
-      await closeOpenMembershipForTask(deps.db, { taskId: result.taskId, at: now });
-    }
+  const now = new Date().toISOString();
+  if (task.cycle?.isSprint) {
+    if (!fact.connector_config_id) throw new Error("Work cycle materialization requires connector_config_id");
+    const scopeEntityId = resolveCycleScope(deps, task.cycle.scopeRef)?.id ?? null;
+    const cycle = await upsertWorkCycle(deps.db, {
+      scopeEntityId,
+      connectorConfigId: fact.connector_config_id,
+      source: fact.source,
+      externalRef: task.cycle.externalRef,
+      name: task.cycle.name,
+      sequence: task.cycle.sequence ?? deriveSprintSequence(task.cycle.name),
+      startsAt: task.cycle.startsAt ?? null,
+      endsAt: task.cycle.endsAt ?? null,
+      state: "active",
+      lastSeenSyncRunId: fact.last_seen_sync_run_id,
+    });
+    await assignMembership(deps.db, {
+      taskId: result.taskId,
+      cycleId: cycle.cycleId,
+      sourceFactId: fact.id,
+      at: now,
+    });
+  } else {
+    await closeOpenMembershipForTask(deps.db, { taskId: result.taskId, at: now });
   }
   return { kind: "task_materialized", taskId: result.taskId, created: result.created };
 }
