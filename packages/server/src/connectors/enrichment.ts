@@ -250,6 +250,7 @@ async function emitAndMaterializeDocumentFactsFromStoredFile(
   if (result.changed) {
     await materializeUnmaterializedFacts(deps.db, deps.logger, {
       experimentalFlag: deps.experimentalFlag,
+      embeddingProvider: deps.embeddingProvider,
       factTypes: ["llm_task"],
     });
   }
@@ -642,7 +643,10 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               );
               await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
-                await materializeUnmaterializedFacts(db, logger, { experimentalFlag: deps.experimentalFlag });
+                await materializeUnmaterializedFacts(db, logger, {
+                  experimentalFlag: deps.experimentalFlag,
+                  embeddingProvider: deps.embeddingProvider,
+                });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
             } catch (err) {
@@ -934,7 +938,10 @@ async function enrichTextDocument(
       );
       await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
-        await materializeUnmaterializedFacts(db, logger, { experimentalFlag: deps.experimentalFlag });
+        await materializeUnmaterializedFacts(db, logger, {
+          experimentalFlag: deps.experimentalFlag,
+          embeddingProvider,
+        });
       }
       await resetSummaryRetry(db, file.id, fileVersion);
       usedSmartEnrichment = true;

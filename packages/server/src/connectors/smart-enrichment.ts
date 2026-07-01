@@ -1515,7 +1515,10 @@ async function reconcileLlmExtractionFacts(
       .execute();
 
     await deps.ensureFresh?.();
-    await materializeUnmaterializedFacts(db, deps.logger, { experimentalFlag: deps.experimentalFlag });
+    await materializeUnmaterializedFacts(db, deps.logger, {
+      experimentalFlag: deps.experimentalFlag,
+      embeddingProvider: deps.embeddingProvider,
+    });
     return writtenFactKeys;
   } catch (err) {
     if (isStaleEnrichmentError(err)) {

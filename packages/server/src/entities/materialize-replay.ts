@@ -182,6 +182,7 @@ export async function replaySourceFacts(
     structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
     birthGateDryRun: opts.birthGateDryRun,
     experimentalFlag: opts.experimentalFlag,
+    embeddingProvider: opts.embeddingProvider,
   });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
@@ -256,6 +257,7 @@ async function materializeUnmaterializedFactsInner(
     structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
     birthGateDryRun: opts.birthGateDryRun,
     experimentalFlag: opts.experimentalFlag,
+    embeddingProvider: opts.embeddingProvider,
   });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   let factsQuery = db
