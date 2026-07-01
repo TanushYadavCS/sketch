@@ -579,19 +579,25 @@ function sendResultFromWatiTemplateBody(body: unknown, target: WhatsAppTarget): 
       ? record.receivers
       : [];
   const firstReceiver = isRecord(deliveryRows[0]) ? deliveryRows[0] : {};
+  const failureReason = watiTemplateSendFailure(record, firstReceiver);
+  if (failureReason) throw new Error(failureReason);
   const fallbackConversationId =
     target.kind === "dm"
       ? (target.providerConversationId ?? canonicalDmConversationId(target.phoneE164))
       : target.groupId;
+  const providerMessageId =
+    optionalString(firstReceiver.localMessageId) ??
+    optionalString(firstReceiver.local_message_id) ??
+    optionalString(firstReceiver.whatsappMessageId) ??
+    optionalString(firstReceiver.id) ??
+    optionalString(record.localMessageId) ??
+    optionalString(record.whatsappMessageId);
+  if (!providerMessageId) {
+    throw new Error("Wati template send failed: missing provider message id");
+  }
 
   return {
-    providerMessageId:
-      optionalString(firstReceiver.localMessageId) ??
-      optionalString(firstReceiver.local_message_id) ??
-      optionalString(firstReceiver.whatsappMessageId) ??
-      optionalString(firstReceiver.id) ??
-      optionalString(record.localMessageId) ??
-      optionalString(record.whatsappMessageId),
+    providerMessageId,
     providerConversationId:
       optionalString(firstReceiver.conversationId) ??
       optionalString(firstReceiver.conversation_id) ??
@@ -604,6 +610,36 @@ function sendResultFromWatiTemplateBody(body: unknown, target: WhatsAppTarget): 
       parseWatiTimestamp(record.created),
     rawProviderPayload: body,
   };
+}
+
+function watiTemplateSendFailure(
+  record: Record<string, unknown>,
+  firstReceiver: Record<string, unknown>,
+): string | null {
+  if (isExplicitFalse(record.result) || hasProviderErrors(record.error)) {
+    return "Wati template send failed: provider rejected request";
+  }
+  if (
+    optionalBoolean(firstReceiver.isValidWhatsAppNumber) === false ||
+    optionalBoolean(firstReceiver.is_valid_whatsapp_number) === false
+  ) {
+    return "Wati template send failed: invalid WhatsApp recipient";
+  }
+  if (hasProviderErrors(firstReceiver.errors) || hasProviderErrors(firstReceiver.error)) {
+    return "Wati template send failed: recipient rejected";
+  }
+  return null;
+}
+
+function isExplicitFalse(value: unknown): boolean {
+  return value === false || (typeof value === "string" && value.trim().toLowerCase() === "false");
+}
+
+function hasProviderErrors(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "string") return value.trim().length > 0;
+  return true;
 }
 
 function parseWatiTemplateList(body: unknown): ProviderTemplateSummary[] {

@@ -694,6 +694,97 @@ describe("Wati outbound provider", () => {
     }
   });
 
+  it("surfaces Wati template recipient failures returned with HTTP 200", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            result: true,
+            error: null,
+            recipients: [
+              {
+                isValidWhatsAppNumber: false,
+                errors: ["invalid recipient"],
+              },
+            ],
+          }),
+        );
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      await expect(
+        provider.dmProvider.sendTemplate?.(
+          { kind: "dm", phoneE164: "+15551234567" },
+          {
+            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+          },
+        ),
+      ).rejects.toThrow("Wati template send failed: invalid WhatsApp recipient");
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("does not mark Wati template sends successful without a provider message id", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            result: true,
+            error: null,
+            recipients: [{ isValidWhatsAppNumber: true, errors: [] }],
+          }),
+        );
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      await expect(
+        provider.dmProvider.sendTemplate?.(
+          { kind: "dm", phoneE164: "+15551234567" },
+          {
+            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+          },
+        ),
+      ).rejects.toThrow("Wati template send failed: missing provider message id");
+    } finally {
+      await db.destroy();
+    }
+  });
+
   it("defaults template mapping lookup to the default language", async () => {
     const db = await createTestDb();
     try {
