@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { EmbeddingProvider } from "../connectors/embeddings/types";
 import { normalizeName } from "../connectors/name-normalize";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -47,6 +48,15 @@ function readEmail(e: Entity): string | null {
   } catch {
     return null;
   }
+}
+
+function makeEmbeddingProvider(): EmbeddingProvider & { embedTexts: ReturnType<typeof vi.fn> } {
+  return {
+    name: "test",
+    dimensions: 2,
+    supportsImages: false,
+    embedTexts: vi.fn(async () => [[1, 0]]),
+  };
 }
 
 async function insertTestFile(db: Kysely<DB>, id: string): Promise<void> {
@@ -1618,5 +1628,151 @@ describe("proposeEntity", () => {
 
     expect(apiResult).toEqual({ kind: "suppressed", reason: "third_party_vendor_collision" });
     expect(baseResult.kind).toBe("created");
+  });
+
+  it("32. embedding fallback queues unresolved person proposals including skipFuzzy", async () => {
+    const entityRepo = createEntityRepository(db);
+    const husnu = await entityRepo.upsertEntity({
+      name: "Husnu Ozyegin",
+      sourceType: "person",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const oliver = await entityRepo.upsertEntity({
+      name: "Oliver Wyman",
+      sourceType: "person",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const retrieveEmbeddingCandidates = vi.fn(async (_entityType: string, name: string) => {
+      if (name === "HO") return [{ entity: husnu, score: 0.91, reason: "embedding" as const }];
+      if (name === "OW") return [{ entity: oliver, score: 0.92, reason: "embedding" as const }];
+      return [];
+    });
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        retrieveEmbeddingCandidates,
+      },
+      readEmail,
+    };
+
+    const normal = await proposeEntity(deps, {
+      name: "HO",
+      entityType: "person",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "person:ho",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+    const skipFuzzy = await proposeEntity(deps, {
+      name: "OW",
+      entityType: "person",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "person:ow",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      skipFuzzy: true,
+    });
+
+    expect(normal.kind).toBe("queued");
+    expect(skipFuzzy.kind).toBe("queued");
+    if (normal.kind !== "queued" || skipFuzzy.kind !== "queued") throw new Error("unreachable");
+    expect(normal.candidateEntityId).toBe(husnu.id);
+    expect(skipFuzzy.candidateEntityId).toBe(oliver.id);
+    expect(retrieveEmbeddingCandidates).toHaveBeenCalledTimes(2);
+    expect(retrieveEmbeddingCandidates.mock.calls.map((call) => call[0])).toEqual(["person", "person"]);
+
+    const queue = await db.selectFrom("entity_review_queue").selectAll().orderBy("proposed_name", "asc").execute();
+    expect(queue.map((row) => [row.proposed_name, row.candidate_entity_id, row.candidate_reason])).toEqual([
+      ["HO", husnu.id, "embedding"],
+      ["OW", oliver.id, "embedding"],
+    ]);
+    const persons = await fetchPersonEntities(db);
+    expect(persons.map((person) => person.name).sort()).toEqual(["Husnu Ozyegin", "Oliver Wyman"]);
+  });
+
+  it("33. deterministic email and project paths do not call embedding fallback", async () => {
+    const entityRepo = createEntityRepository(db);
+    const bob = await entityRepo.upsertPersonEntity({
+      name: "Bob Chen",
+      email: "bob@acme.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:bob",
+    });
+    const entities = await db.selectFrom("entities").selectAll().execute();
+    const retrieveEmbeddingCandidates = vi.fn(async () => []);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: {
+        ...makeLookup(() => entities),
+        retrieveEmbeddingCandidates,
+      },
+      readEmail,
+    };
+
+    const linked = await proposeEntity(deps, {
+      name: "Robert Chen",
+      email: "bob@acme.com",
+      entityType: "person",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "fireflies:bob",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+    const project = await proposeEntity(deps, {
+      name: "Project Phoenix",
+      entityType: "project",
+      subtype: "external",
+      source: "llm_extraction",
+      sourceId: "project:phoenix",
+      evidence: [],
+      triggeredByUserId: "user-1",
+    });
+
+    expect(linked.kind).toBe("linked");
+    if (linked.kind !== "linked") throw new Error("unreachable");
+    expect(linked.entity.id).toBe(bob.id);
+    expect(project.kind).toBe("created");
+    expect(retrieveEmbeddingCandidates).not.toHaveBeenCalled();
+  });
+
+  it("34. materialize deps leave embedding lookup off without provider or experimental flag", async () => {
+    const provider = makeEmbeddingProvider();
+    const withoutProvider = await buildMaterializeDeps(db, { experimentalFlag: true });
+    const flagOff = await buildMaterializeDeps(db, { experimentalFlag: false, embeddingProvider: provider });
+
+    expect(withoutProvider.lookup.retrieveEmbeddingCandidates).toBeUndefined();
+    expect(flagOff.lookup.retrieveEmbeddingCandidates).toBeUndefined();
+
+    const result = await proposeEntity(
+      {
+        entityRepo: flagOff.entityRepo,
+        reviewRepo: flagOff.reviewRepo,
+        lookup: flagOff.lookup,
+        readEmail: flagOff.readEmail,
+        onEntityResolved: flagOff.onEntityResolved,
+      },
+      {
+        name: "No Provider Person",
+        entityType: "person",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "person:no-provider",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("created");
+    expect(provider.embedTexts).not.toHaveBeenCalled();
   });
 });

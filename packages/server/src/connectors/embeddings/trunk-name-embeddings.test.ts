@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as dbIndex from "../../db/index";
 import { EMBEDDING_DIMENSIONS } from "../../db/index";
 import type { DB } from "../../db/schema";
-import { reconcileMissingNameEmbeddings, retrieveNameDedupCandidates } from "./trunk-name-embeddings";
+import {
+  reconcileMissingNameEmbeddings,
+  retrieveEntityNameCandidates,
+  retrieveNameDedupCandidates,
+} from "./trunk-name-embeddings";
 import type { EmbeddingProvider } from "./types";
 
 /**
@@ -127,14 +131,17 @@ describe("trunk name embedding reconcile", () => {
     await db.destroy();
   });
 
-  it("embeds only missing live project/product entities and pending project/product reviews", async () => {
+  it("embeds person and company entity rows but keeps review rows project/product only", async () => {
     await insertEntity(db, { id: "entity-project", name: "Project Atlas", type: "project" });
     await insertEntity(db, { id: "entity-product", name: "Product OS", type: "product" });
     await insertEntity(db, { id: "entity-person", name: "Sarah Chen", type: "person" });
+    await insertEntity(db, { id: "entity-company", name: "Sarah Chen Co", type: "company" });
     await insertEntity(db, { id: "entity-deleted", name: "Deleted Project", type: "project", deleted: true });
     await insertEntity(db, { id: "entity-existing", name: "Embedded Project", type: "project" });
     await insertReview(db, { id: "review-project", name: "Review Project", type: "project" });
     await insertReview(db, { id: "review-product", name: "Review Product", type: "product" });
+    await insertReview(db, { id: "review-person", name: "Review Person", type: "person" });
+    await insertReview(db, { id: "review-company", name: "Review Company", type: "company" });
     await insertReview(db, { id: "review-team", name: "Review Team", type: "team" });
     await insertReview(db, { id: "review-confirmed", name: "Confirmed Project", type: "project", status: "confirmed" });
     await insertReview(db, { id: "review-existing", name: "Embedded Review", type: "project" });
@@ -149,9 +156,22 @@ describe("trunk name embedding reconcile", () => {
     await reconcileMissingNameEmbeddings(db, provider);
 
     const embeddedNames = provider.embedTexts.mock.calls.flatMap((call) => call[0]).sort();
-    expect(embeddedNames).toEqual(["Product OS", "Project Atlas", "Review Product", "Review Project"].sort());
-    expect(await entityEmbeddingIds(db)).toEqual(["entity-existing", "entity-product", "entity-project"]);
+    expect(embeddedNames).toEqual(
+      ["Product OS", "Project Atlas", "Review Product", "Review Project", "Sarah Chen", "Sarah Chen Co"].sort(),
+    );
+    expect(await entityEmbeddingIds(db)).toEqual([
+      "entity-company",
+      "entity-existing",
+      "entity-person",
+      "entity-product",
+      "entity-project",
+    ]);
     expect(await reviewEmbeddingIds(db)).toEqual(["review-existing", "review-product", "review-project"]);
+
+    const candidates = await retrieveEntityNameCandidates(db, provider, { name: "Sarah Chen", type: "person" });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ entityId: "entity-person", name: "Sarah Chen", type: "person" });
+    expect(candidates[0].similarity).toBeCloseTo(1);
   });
 
   it("fails open when provider is absent", async () => {
