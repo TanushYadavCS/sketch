@@ -86,3 +86,35 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
     expect(screen.getByRole("button", { name: "Reconfigure OAuth" })).toBeInTheDocument();
   });
 });
+
+describe("ConnectIntegrationDialog manual credentials", () => {
+  it("trims text credentials without altering password credentials", async () => {
+    const user = userEvent.setup();
+    const integration = INTEGRATIONS.find((item) => item.type === "otter");
+    if (!integration) throw new Error("Otter integration is missing");
+
+    let connectBody: unknown;
+    server.use(
+      http.post("/api/connectors", async ({ request }) => {
+        connectBody = await request.json();
+        return HttpResponse.json({ config: { id: "otter-conn" } });
+      }),
+    );
+
+    renderWithProviders(
+      <ConnectIntegrationDialog integration={integration} open={true} onOpenChange={() => {}} onConnected={() => {}} />,
+    );
+
+    await user.type(await screen.findByLabelText("Otter email"), " person@example.com ");
+    await user.type(screen.getByLabelText("Otter password"), " new-password ");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => {
+      expect(connectBody).toEqual({
+        connectorType: "otter",
+        authType: "api_key",
+        credentials: { email: "person@example.com", password: " new-password " },
+      });
+    });
+  });
+});

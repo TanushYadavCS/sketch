@@ -13,7 +13,7 @@
 import { ConnectorLogo } from "@/components/connector-logos";
 import { ScopeCount, ScopeGroup, ScopeItem, ScopeList, ScopeSelectAll, ScopeSubItem } from "@/components/scope-picker";
 import { api } from "@/lib/api";
-import type { IntegrationDefinition } from "@/lib/integrations";
+import type { AuthField, IntegrationDefinition } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
   ArrowLeftIcon,
@@ -66,6 +66,10 @@ interface ConnectIntegrationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
+}
+
+function credentialFieldValue(field: AuthField, value: string | undefined) {
+  return field.type === "password" ? (value ?? "") : (value?.trim() ?? "");
 }
 
 export function ConnectIntegrationDialog({
@@ -319,7 +323,7 @@ export function ConnectIntegrationDialog({
   const buildCredentials = (): Record<string, unknown> => {
     const credentials: Record<string, unknown> = {};
     for (const field of integration?.authFields ?? []) {
-      credentials[field.key] = fieldValues[field.key]?.trim() ?? "";
+      credentials[field.key] = credentialFieldValue(field, fieldValues[field.key]);
     }
     return credentials;
   };
@@ -383,7 +387,8 @@ export function ConnectIntegrationDialog({
     window.open(api.microsoftOAuth.adminConsentUrl(integration.type), "_self");
   };
 
-  const allFieldsFilled = integration?.authFields.every((f) => (fieldValues[f.key] ?? "").trim().length > 0) ?? false;
+  const allFieldsFilled =
+    integration?.authFields.every((f) => credentialFieldValue(f, fieldValues[f.key]).length > 0) ?? false;
   const toggleNotionPage = (pageId: string) => {
     setSelectedNotionPageIds((prev) => {
       const next = new Set(prev);

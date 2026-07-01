@@ -254,12 +254,12 @@ describe("ManageConnectorDialog connector capabilities", () => {
 
     await user.click(await screen.findByRole("button", { name: /Update credentials/i }));
     const dialog = await screen.findByRole("dialog");
-    await user.type(within(dialog).getByLabelText("Otter email"), "person@example.com");
-    await user.type(within(dialog).getByLabelText("Otter password"), "new-password");
+    await user.type(within(dialog).getByLabelText("Otter email"), " person@example.com ");
+    await user.type(within(dialog).getByLabelText("Otter password"), " new-password ");
     await user.click(within(dialog).getByRole("button", { name: "Update credentials" }));
 
     await waitFor(() => {
-      expect(rotateBody).toEqual({ credentials: { email: "person@example.com", password: "new-password" } });
+      expect(rotateBody).toEqual({ credentials: { email: "person@example.com", password: " new-password " } });
     });
   });
 });

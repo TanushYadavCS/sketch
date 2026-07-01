@@ -11,7 +11,7 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
 import { GenericScopeEditor } from "@/components/scope-picker";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
-import type { IntegrationDefinition } from "@/lib/integrations";
+import type { AuthField, IntegrationDefinition } from "@/lib/integrations";
 import {
   ArrowsClockwiseIcon,
   CheckCircleIcon,
@@ -47,6 +47,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { FileDetailSheet } from "./file-detail-sheet";
+
+function credentialFieldValue(field: AuthField, value: string | undefined) {
+  return field.type === "password" ? (value ?? "") : (value?.trim() ?? "");
+}
 
 export function ManageConnectorDialog({
   definition,
@@ -339,13 +343,17 @@ function RotateCredentialsDialog({
   const queryClient = useQueryClient();
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
-  const allFieldsFilled = definition.authFields.every((field) => (fieldValues[field.key] ?? "").trim().length > 0);
+  const allFieldsFilled = definition.authFields.every(
+    (field) => credentialFieldValue(field, fieldValues[field.key]).length > 0,
+  );
 
   const mutation = useMutation({
     mutationFn: () =>
       api.integrations.rotateCredentials(
         connectorId,
-        Object.fromEntries(definition.authFields.map((field) => [field.key, fieldValues[field.key]?.trim() ?? ""])),
+        Object.fromEntries(
+          definition.authFields.map((field) => [field.key, credentialFieldValue(field, fieldValues[field.key])]),
+        ),
       ),
     onSuccess: () => {
       toast.success("Credentials updated.");
