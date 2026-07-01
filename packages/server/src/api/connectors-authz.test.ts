@@ -83,6 +83,7 @@ async function insertConfig(
       | "outlook"
       | "teams"
       | "fireflies"
+      | "otter"
       | "clickup"
       | "notion"
       | "linear"
@@ -381,6 +382,38 @@ describe("Connectors API — authorization", () => {
         body: JSON.stringify({ api_key: "new-key" }),
       });
       expect(res.status).toBe(200);
+    });
+
+    it("owner → 200 rotating Otter email/password credentials", async () => {
+      const cfg = await insertConfig(db, { connectorType: "otter", createdBy: memberId });
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = input instanceof URL ? input : new URL(String(input));
+        if (url.pathname.endsWith("/login")) {
+          return new Response(JSON.stringify({ userid: 123 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ email: "person@example.com" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const res = await app.request(`/api/connectors/${cfg.id}/rotate-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ credentials: { email: "person@example.com", password: "new-password" } }),
+      });
+
+      expect(res.status).toBe(200);
+      const updated = await createConnectorRepository(db).findConfigById(cfg.id);
+      expect(updated?.credential_hint).toBe("person@example.com");
+      expect(JSON.parse(updated?.credentials ?? "{}")).toMatchObject({
+        type: "api_key",
+        email: "person@example.com",
+        password: "new-password",
+      });
     });
   });
 

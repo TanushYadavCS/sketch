@@ -18,6 +18,7 @@ export type ConnectorType =
   | "notion"
   | "linear"
   | "fireflies"
+  | "otter"
   | "zoho_crm";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
