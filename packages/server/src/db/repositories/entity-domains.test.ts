@@ -121,6 +121,32 @@ describe("entity domains repository", () => {
     ]);
   });
 
+  it("isPersonalOrShared recognizes providers from the code constant even with no seed row", async () => {
+    db = await createTestDb();
+    const domainsRepo = createEntityDomainsRepository(db);
+    // Simulate a rebuild/purge that wiped the migration-064 personal seed.
+    await db.deleteFrom("entity_domains").execute();
+
+    expect(await domainsRepo.isPersonalOrShared("gmail.com")).toBe(true);
+    expect(await domainsRepo.isPersonalOrShared("ICLOUD.COM")).toBe(true);
+    expect(await domainsRepo.isPersonalOrShared("acme.com")).toBe(false);
+
+    // A poisoned corporate row must not flip a known provider back to false.
+    await db
+      .insertInto("entity_domains")
+      .values({
+        id: "d-poison",
+        entity_id: null,
+        domain: "gmail.com",
+        kind: "corporate",
+        is_primary: 0,
+        confidence: 0.9,
+        source: "observed",
+      })
+      .execute();
+    expect(await domainsRepo.isPersonalOrShared("gmail.com")).toBe(true);
+  });
+
   it("does not reassign manually or automatically owned domains to CRM Accounts", async () => {
     db = await createTestDb();
     await seedCompany("acme", "Acme Corp");
