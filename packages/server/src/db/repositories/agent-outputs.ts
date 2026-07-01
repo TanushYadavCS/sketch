@@ -42,11 +42,20 @@ export interface AgentOutputItemInput {
 
 export type AgentDeliveryPlatform = "slack" | "whatsapp";
 export type AgentDeliveryTargetType = "channel" | "dm" | "group";
+export type AgentSourcePlatform = "slack" | "whatsapp";
+export type AgentSourceTargetType = "channel" | "group";
 
 export interface AgentDeliveryConfig {
   enabled: true;
   platform: AgentDeliveryPlatform;
   targetType: AgentDeliveryTargetType;
+  targetId: string;
+  label: string | null;
+}
+
+export interface AgentSourceConfig {
+  platform: AgentSourcePlatform;
+  targetType: AgentSourceTargetType;
   targetId: string;
   label: string | null;
 }
@@ -60,6 +69,7 @@ export interface AgentUserPrefs {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
+  sources?: AgentSourceConfig[];
 }
 
 export interface AgentUserConfig {
@@ -131,6 +141,11 @@ export interface AgentOutputWithItems {
   output: AgentOutputRow;
   masthead: AgentMasthead | null;
   items: AgentStoredItemRow[];
+}
+
+export interface AgentOutputListResult {
+  outputs: AgentOutputWithItems[];
+  nextCursor: string | null;
 }
 
 function withRefs(item: AgentOutputItemRow): AgentStoredItemRow {
@@ -333,6 +348,71 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         output,
         masthead: parseJson<AgentMasthead>(output.masthead_json),
         items: items.map(withRefs),
+      };
+    },
+
+    async listCompletedForUser(
+      agentKey: string,
+      userId: string,
+      options: { limit?: number; cursor?: string | null } = {},
+    ): Promise<AgentOutputListResult> {
+      const limit = Math.max(1, Math.min(options.limit ?? 20, 50));
+      let query = db
+        .selectFrom("agent_outputs")
+        .selectAll()
+        .where("agent_key", "=", agentKey)
+        .where("user_id", "=", userId)
+        .where("status", "=", "completed");
+
+      if (options.cursor) {
+        const cursorRow = await db
+          .selectFrom("agent_outputs")
+          .selectAll()
+          .where("agent_key", "=", agentKey)
+          .where("user_id", "=", userId)
+          .where("id", "=", options.cursor)
+          .executeTakeFirst();
+        if (cursorRow?.generated_at) {
+          query = query.where((eb) =>
+            eb.or([
+              eb("generated_at", "<", cursorRow.generated_at),
+              eb.and([eb("generated_at", "=", cursorRow.generated_at), eb("id", "<", cursorRow.id)]),
+            ]),
+          );
+        }
+      }
+
+      const rows = await query
+        .orderBy("generated_at", "desc")
+        .orderBy("id", "desc")
+        .limit(limit + 1)
+        .execute();
+      const visibleRows = rows.slice(0, limit);
+      const ids = visibleRows.map((row) => row.id);
+      const itemRows =
+        ids.length === 0
+          ? []
+          : await db
+              .selectFrom("agent_output_items")
+              .selectAll()
+              .where("agent_output_id", "in", ids)
+              .orderBy("agent_output_id", "asc")
+              .orderBy("section_key", "asc")
+              .orderBy("sort_order", "asc")
+              .execute();
+      const itemsByOutput = new Map<string, AgentStoredItemRow[]>();
+      for (const item of itemRows) {
+        const items = itemsByOutput.get(item.agent_output_id) ?? [];
+        items.push(withRefs(item));
+        itemsByOutput.set(item.agent_output_id, items);
+      }
+      return {
+        outputs: visibleRows.map((output) => ({
+          output,
+          masthead: parseJson<AgentMasthead>(output.masthead_json),
+          items: itemsByOutput.get(output.id) ?? [],
+        })),
+        nextCursor: rows.length > limit ? (visibleRows[visibleRows.length - 1]?.id ?? null) : null,
       };
     },
 

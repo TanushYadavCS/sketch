@@ -1,11 +1,17 @@
 /**
- * The agent detail — read and tune one prebuilt agent. Two tabs: **Latest** (the
- * most recent output) and **Config** (the calm ledger — schedule · focus · volume,
- * each editable in a drawer, then per-section toggles). Behavior itself is
- * code-owned, so "What it does" is read-only. Design ported from the
- * `feat/demo-mask-pii` agent detail + background config.
+ * The agent detail lets users review generated output history and tune one
+ * code-owned prebuilt agent through schedule, sources, focus, volume, delivery,
+ * and per-section toggles.
  */
-import { type AgentConfig, type AgentDeliveryConfig, type AgentDetailResponse, type AgentOutput, api } from "@/lib/api";
+import {
+  type AgentConfig,
+  type AgentDeliveryConfig,
+  type AgentDetailResponse,
+  type AgentOutput,
+  type AgentOutputsResponse,
+  type AgentSourceConfig,
+  api,
+} from "@/lib/api";
 import {
   ArrowLeftIcon,
   CheckCircleIcon,
@@ -31,11 +37,15 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-type Tab = "latest" | "config";
-type EditField = "schedule" | "focus" | "volume" | "delivery" | null;
+type Tab = "outputs" | "config";
+type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | null;
 
 function detailKey(agentKey: string) {
   return ["agents", "detail", agentKey];
+}
+
+function outputsKey(agentKey: string) {
+  return ["agents", "outputs", agentKey];
 }
 
 function formatTime(hour: number, minute: number): string {
@@ -59,11 +69,18 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
     queryFn: () => api.agents.get(agentKey),
     refetchInterval: (query) => (query.state.data?.running ? 3000 : false),
   });
-  const [tab, setTab] = useState<Tab>("latest");
+  const outputsQuery = useQuery({
+    queryKey: outputsKey(agentKey),
+    queryFn: () => api.agents.outputs(agentKey, { limit: 50 }),
+    refetchInterval: () => (detailQuery.data?.running ? 3000 : false),
+  });
+  const [tab, setTab] = useState<Tab>("outputs");
   const [editing, setEditing] = useState<EditField>(null);
+  const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: detailKey(agentKey) });
+    void queryClient.invalidateQueries({ queryKey: outputsKey(agentKey) });
     void queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
   };
 
@@ -81,6 +98,11 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to start run"),
   });
 
+  const outputs = outputsQuery.data?.outputs ?? [];
+  useEffect(() => {
+    if (!selectedOutputId && outputs.length > 0) setSelectedOutputId(outputs[0].id);
+  }, [outputs, selectedOutputId]);
+
   const data = detailQuery.data;
   if (detailQuery.isLoading) {
     return <Shell>{null}</Shell>;
@@ -95,6 +117,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
 
   const { agent } = data;
   const running = data.running || runMutation.isPending;
+  const selectedOutput = outputs.find((output) => output.id === selectedOutputId) ?? outputs[0] ?? data.output;
 
   return (
     <Shell>
@@ -108,7 +131,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
             checked={agent.enabled}
             disabled={enabledMutation.isPending}
             onCheckedChange={(checked) => enabledMutation.mutate(checked)}
-            aria-label={`${agentKey} active`}
+            aria-label={`${agent.title} active`}
             className="data-[state=checked]:bg-emerald-500"
           />
           {agent.enabled ? "On" : "Off"}
@@ -116,8 +139,8 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
       </header>
 
       <div className="mt-6 flex items-center gap-1 border-b border-border/60">
-        <TabButton active={tab === "latest"} onClick={() => setTab("latest")}>
-          Latest
+        <TabButton active={tab === "outputs"} onClick={() => setTab("outputs")}>
+          Outputs
         </TabButton>
         <TabButton active={tab === "config"} onClick={() => setTab("config")}>
           Config
@@ -125,9 +148,14 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
       </div>
 
       <div className="pt-5">
-        {tab === "latest" ? (
-          <LatestTab
+        {tab === "outputs" ? (
+          <OutputsTab
             data={data}
+            outputsData={outputsQuery.data}
+            outputsLoading={outputsQuery.isLoading}
+            selectedOutput={selectedOutput}
+            selectedOutputId={selectedOutput?.id ?? null}
+            onSelectOutput={setSelectedOutputId}
             running={running}
             onRun={() => runMutation.mutate()}
             runPending={runMutation.isPending}
@@ -163,36 +191,72 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-// --- Latest tab -------------------------------------------------------------
-
-function LatestTab({
+function OutputsTab({
   data,
+  outputsData,
+  outputsLoading,
+  selectedOutput,
+  selectedOutputId,
+  onSelectOutput,
   running,
   onRun,
   runPending,
 }: {
   data: AgentDetailResponse;
+  outputsData: AgentOutputsResponse | undefined;
+  outputsLoading: boolean;
+  selectedOutput: AgentOutput | null;
+  selectedOutputId: string | null;
+  onSelectOutput: (id: string) => void;
   running: boolean;
   onRun: () => void;
   runPending: boolean;
 }) {
-  const output = data.output;
+  const outputs = outputsData?.outputs ?? [];
   const sectionTitles = Object.fromEntries(data.agent.sections.map((section) => [section.key, section.title]));
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
         <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-          {output ? `Generated ${formatDate(output.generatedAt ?? output.outputDate)}` : "No output yet"}
+          {selectedOutput
+            ? `Generated ${formatDate(selectedOutput.generatedAt ?? selectedOutput.outputDate)}`
+            : "No output yet"}
         </span>
         <RunButton running={running} pending={runPending} onRun={onRun} />
       </div>
 
-      {running && !output ? (
+      {running && !selectedOutput ? (
         <EmptyCard>Generating…</EmptyCard>
-      ) : !output ? (
+      ) : outputsLoading && outputs.length === 0 ? (
+        <EmptyCard>Loading…</EmptyCard>
+      ) : !selectedOutput ? (
         <EmptyCard>Nothing yet. Run it now or wait for its next scheduled run.</EmptyCard>
       ) : (
-        <OutputView output={output} sectionTitles={sectionTitles} />
+        <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="flex flex-col gap-1">
+            {outputs.map((output) => (
+              <button
+                key={output.id}
+                type="button"
+                onClick={() => onSelectOutput(output.id)}
+                className={cn(
+                  "rounded-lg px-3 py-2 text-left transition-colors",
+                  selectedOutputId === output.id
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground hover:bg-muted/50",
+                )}
+              >
+                <span className="block text-[12.5px] font-medium">
+                  {formatDate(output.generatedAt ?? output.outputDate)}
+                </span>
+                <span className="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-[0.08em]">
+                  {output.outputDate}
+                </span>
+              </button>
+            ))}
+          </div>
+          <OutputView output={selectedOutput} sectionTitles={sectionTitles} />
+        </div>
       )}
     </div>
   );
@@ -264,8 +328,6 @@ function EmptyCard({ children }: { children: React.ReactNode }) {
   );
 }
 
-// --- Config tab -------------------------------------------------------------
-
 function ConfigTab({
   agentKey,
   agent,
@@ -293,6 +355,15 @@ function ConfigTab({
             {agent.focus ? agent.focus : <span className="text-muted-foreground">None — add what to emphasize.</span>}
           </p>
         </Row>
+        {agent.sourceConfig ? (
+          <Row label="Sources" onEdit={() => onEdit("sources")}>
+            <p className="line-clamp-2 text-[12.5px] leading-relaxed text-foreground/85">
+              {agent.sources.length > 0
+                ? agent.sources.map((source) => source.label ?? source.targetId).join(", ")
+                : "No sources selected"}
+            </p>
+          </Row>
+        ) : null}
         <Row label="Volume" onEdit={() => onEdit("volume")}>
           <p className="text-[12.5px] text-foreground/85">Up to {agent.maxItemsPerSection} items per section</p>
         </Row>
@@ -394,13 +465,12 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
-// --- Edit drawer ------------------------------------------------------------
-
 const EDIT_META: Record<Exclude<EditField, null>, { title: string; hint: string }> = {
   schedule: { title: "Runs on", hint: "When the agent runs each day, in your timezone." },
   focus: { title: "Focus", hint: "Plain-language emphasis. Added as a hint — it never overrides what the agent does." },
+  sources: { title: "Sources", hint: "Shared conversations this agent summarizes." },
   volume: { title: "Volume", hint: "How many items each section can hold." },
-  delivery: { title: "Deliver to", hint: "Where completed briefs are sent after generation finishes." },
+  delivery: { title: "Deliver to", hint: "Where completed outputs are sent after generation finishes." },
 };
 
 function EditDrawer({
@@ -420,6 +490,7 @@ function EditDrawer({
   const [hour, setHour] = useState(agent.scheduleHour);
   const [minute, setMinute] = useState(agent.scheduleMinute);
   const [focus, setFocus] = useState(agent.focus ?? "");
+  const [sources, setSources] = useState<AgentSourceConfig[]>(agent.sources);
   const [volume, setVolume] = useState(agent.maxItemsPerSection);
   const [delivery, setDelivery] = useState<AgentDeliveryConfig | null>(agent.delivery);
 
@@ -428,16 +499,26 @@ function EditDrawer({
       setHour(agent.scheduleHour);
       setMinute(agent.scheduleMinute);
       setFocus(agent.focus ?? "");
+      setSources(agent.sources);
       setVolume(agent.maxItemsPerSection);
       setDelivery(agent.delivery);
     }
-  }, [field, agent.scheduleHour, agent.scheduleMinute, agent.focus, agent.maxItemsPerSection, agent.delivery]);
+  }, [
+    field,
+    agent.scheduleHour,
+    agent.scheduleMinute,
+    agent.focus,
+    agent.sources,
+    agent.maxItemsPerSection,
+    agent.delivery,
+  ]);
 
   const saveMutation = useMutation({
     mutationFn: () => {
       if (field === "schedule")
         return api.agents.updateConfig(agentKey, { scheduleHour: hour, scheduleMinute: minute });
       if (field === "focus") return api.agents.updateConfig(agentKey, { focus: focus.trim() ? focus.trim() : null });
+      if (field === "sources") return api.agents.updateConfig(agentKey, { sources });
       if (field === "volume") return api.agents.updateConfig(agentKey, { maxItemsPerSection: volume });
       if (field === "delivery") return api.agents.updateConfig(agentKey, { delivery });
       return Promise.resolve({ agent });
@@ -489,8 +570,10 @@ function EditDrawer({
               value={volume}
               onChange={setVolume}
             />
+          ) : field === "sources" && agent.sourceConfig ? (
+            <SourceEditor agent={agent} value={sources} onChange={setSources} />
           ) : field === "delivery" ? (
-            <DeliveryEditor value={delivery} onChange={setDelivery} />
+            <DeliveryEditor value={delivery} sources={agent.sources} onChange={setDelivery} />
           ) : null}
         </div>
 
@@ -548,11 +631,166 @@ function NumberField({
   );
 }
 
-function DeliveryEditor({
+function sourceKey(source: AgentSourceConfig): string {
+  return `${source.platform}:${source.targetType}:${source.targetId}`;
+}
+
+function sourceToDelivery(source: AgentSourceConfig): AgentDeliveryConfig {
+  return {
+    enabled: true,
+    platform: source.platform,
+    targetType: source.targetType,
+    targetId: source.targetId,
+    label: source.label,
+  };
+}
+
+function SourceEditor({
+  agent,
   value,
   onChange,
 }: {
+  agent: AgentConfig;
+  value: AgentSourceConfig[];
+  onChange: (value: AgentSourceConfig[]) => void;
+}) {
+  const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
+  const whatsappGroups = useQuery({ queryKey: ["whatsapp-groups"], queryFn: () => api.channels.listWhatsAppGroups() });
+  const selected = new Set(value.map(sourceKey));
+  const maxSources = agent.sourceConfig?.maxSources ?? 0;
+
+  const toggle = (source: AgentSourceConfig) => {
+    const key = sourceKey(source);
+    if (selected.has(key)) {
+      onChange(value.filter((item) => sourceKey(item) !== key));
+      return;
+    }
+    if (value.length >= maxSources) return;
+    onChange([...value, source]);
+  };
+
+  const slackOptions = (slackChannels.data?.channels ?? [])
+    .filter((channel) => channel.isMember)
+    .map(
+      (channel): AgentSourceConfig => ({
+        platform: "slack",
+        targetType: "channel",
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      }),
+    );
+  const whatsappOptions = (whatsappGroups.data?.groups ?? []).map(
+    (group): AgentSourceConfig => ({
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: group.jid,
+      label: group.name,
+    }),
+  );
+  const availableCount =
+    (agent.sourceConfig?.supportsSlackChannels ? slackOptions.length : 0) +
+    (agent.sourceConfig?.supportsWhatsAppGroups ? whatsappOptions.length : 0);
+  const sourcesLoading =
+    (agent.sourceConfig?.supportsSlackChannels && slackChannels.isLoading) ||
+    (agent.sourceConfig?.supportsWhatsAppGroups && whatsappGroups.isLoading);
+  const countSummary = [
+    `${value.length} selected`,
+    sourcesLoading ? null : `${availableCount} available`,
+    maxSources > 0 ? `limit ${maxSources}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div className="space-y-5">
+      {agent.sourceConfig?.supportsSlackChannels ? (
+        <SourceGroup
+          title="Slack channels"
+          loading={slackChannels.isLoading}
+          empty="No Slack channels available."
+          selected={selected}
+          options={slackOptions}
+          onToggle={toggle}
+        />
+      ) : null}
+      {agent.sourceConfig?.supportsWhatsAppGroups ? (
+        <SourceGroup
+          title="WhatsApp groups"
+          loading={whatsappGroups.isLoading}
+          empty="No WhatsApp groups available."
+          selected={selected}
+          options={whatsappOptions}
+          onToggle={toggle}
+        />
+      ) : null}
+      <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">{countSummary}</p>
+    </div>
+  );
+}
+
+function SourceGroup({
+  title,
+  loading,
+  empty,
+  selected,
+  options,
+  onToggle,
+}: {
+  title: string;
+  loading: boolean;
+  empty: string;
+  selected: Set<string>;
+  options: AgentSourceConfig[];
+  onToggle: (source: AgentSourceConfig) => void;
+}) {
+  return (
+    <div>
+      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">{title}</span>
+      <div className="mt-2 max-h-56 overflow-y-auto rounded-lg border-[0.5px] border-border p-1">
+        {loading ? (
+          <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading...</p>
+        ) : options.length === 0 ? (
+          <p className="px-2 py-2 text-[12px] text-muted-foreground">{empty}</p>
+        ) : (
+          <div className="flex flex-col">
+            {options.map((source) => {
+              const active = selected.has(sourceKey(source));
+              return (
+                <button
+                  key={sourceKey(source)}
+                  type="button"
+                  onClick={() => onToggle(source)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
+                    active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+                  )}
+                >
+                  <span className="shrink-0">
+                    {source.platform === "slack" ? (
+                      <HashIcon size={14} aria-hidden />
+                    ) : (
+                      <UsersThreeIcon size={14} aria-hidden />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{source.label ?? source.targetId}</span>
+                  {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DeliveryEditor({
+  value,
+  sources,
+  onChange,
+}: {
   value: AgentDeliveryConfig | null;
+  sources: AgentSourceConfig[];
   onChange: (value: AgentDeliveryConfig | null) => void;
 }) {
   const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
@@ -598,21 +836,37 @@ function DeliveryEditor({
     (user) => user.id === session.data?.userId && user.type !== "agent" && user.slack_user_id,
   );
   const groupOptions = whatsappGroups.data?.groups ?? [];
+  const canPostToSource = sources.length === 1;
 
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-3 rounded-lg border-[0.5px] border-border px-3 py-2.5">
-        <span className="text-[13px] font-medium text-foreground">Send completed briefs</span>
+        <span className="text-[13px] font-medium text-foreground">Send completed outputs</span>
         <Switch
           checked={enabled}
           onCheckedChange={setEnabled}
-          aria-label="Send completed briefs"
+          aria-label="Send completed outputs"
           className="data-[state=checked]:bg-emerald-500"
         />
       </div>
 
       {enabled ? (
         <>
+          {canPostToSource ? (
+            <button
+              type="button"
+              onClick={() => onChange(sourceToDelivery(sources[0]))}
+              className="flex w-full items-center justify-between gap-3 rounded-lg border-[0.5px] border-border px-3 py-2.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-muted/50"
+            >
+              <span>Post back to {sources[0].label ?? sources[0].targetId}</span>
+              {value?.platform === sources[0].platform &&
+              value.targetType === sources[0].targetType &&
+              value.targetId === sources[0].targetId ? (
+                <CheckCircleIcon size={13} weight="fill" aria-hidden />
+              ) : null}
+            </button>
+          ) : null}
+
           <SegmentedControl
             label="Platform"
             options={[
@@ -682,7 +936,7 @@ function DeliveryEditor({
         </>
       ) : (
         <p className="text-[12px] leading-relaxed text-muted-foreground">
-          The brief will remain available on Home and will not be posted to a channel.
+          The output will remain available here and will not be posted to a channel.
         </p>
       )}
     </div>
@@ -760,8 +1014,6 @@ function TargetList({
     </div>
   );
 }
-
-// --- helpers ----------------------------------------------------------------
 
 function formatDate(value: string): string {
   const parsed = new Date(value.length === 10 ? `${value}T00:00:00` : value);

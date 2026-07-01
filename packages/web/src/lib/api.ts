@@ -1051,6 +1051,19 @@ export interface AgentDeliveryConfig {
   label: string | null;
 }
 
+export interface AgentSourceConfig {
+  platform: "slack" | "whatsapp";
+  targetType: "channel" | "group";
+  targetId: string;
+  label: string | null;
+}
+
+export interface AgentSourceConfigMeta {
+  maxSources: number;
+  supportsSlackChannels: boolean;
+  supportsWhatsAppGroups: boolean;
+}
+
 export interface AgentConfig {
   agentKey: string;
   title: string;
@@ -1064,6 +1077,8 @@ export interface AgentConfig {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
   sections: AgentSectionConfig[];
 }
 
@@ -1080,6 +1095,7 @@ export interface AgentOutputItem {
   actionLabel: string | null;
   actionPrompt: string | null;
   sourceUrl: string | null;
+  structuredPayload: Record<string, unknown> | null;
   knowledgeRefs: DailyBriefKnowledgeRefs;
   sortOrder: number;
 }
@@ -1116,6 +1132,12 @@ export interface AgentConfigPatch {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
+  sources?: AgentSourceConfig[];
+}
+
+export interface AgentOutputsResponse {
+  outputs: AgentOutput[];
+  nextCursor: string | null;
 }
 
 export type WebChatMessagePart =
@@ -1233,6 +1255,13 @@ export const api = {
         `/api/agents/${agentKey}/runs`,
         { method: "POST", body: JSON.stringify({}) },
       );
+    },
+    outputs(agentKey: string, opts?: { limit?: number; cursor?: string | null }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.cursor) params.set("cursor", opts.cursor);
+      const qs = params.toString();
+      return request<AgentOutputsResponse>(`/api/agents/${agentKey}/outputs${qs ? `?${qs}` : ""}`);
     },
   },
   webChat: {

@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
-import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
+import type { AgentDeliveryConfig, AgentSourceConfig } from "../db/repositories/agent-outputs";
 import type { DB } from "../db/schema";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
-import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService } from "./service";
+import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService, AgentSourceTargetError } from "./service";
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
@@ -125,6 +125,33 @@ function parseDeliveryConfig(value: unknown): AgentDeliveryConfig | null | undef
   return { enabled: true, platform, targetType, targetId, label };
 }
 
+function parseSourceConfigs(value: unknown): AgentSourceConfig[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new ConfigPatchError("sources must be an array");
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") throw new ConfigPatchError("source must be an object");
+    const raw = entry as Record<string, unknown>;
+    const platform = raw.platform;
+    const targetType = raw.targetType;
+    const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+    if (platform !== "slack" && platform !== "whatsapp") {
+      throw new ConfigPatchError("source.platform must be slack or whatsapp");
+    }
+    if (targetType !== "channel" && targetType !== "group") {
+      throw new ConfigPatchError("source.targetType must be channel or group");
+    }
+    if (!targetId) throw new ConfigPatchError("source.targetId is required");
+    if (platform === "slack" && targetType !== "channel") {
+      throw new ConfigPatchError("Slack sources must be channels");
+    }
+    if (platform === "whatsapp" && targetType !== "group") {
+      throw new ConfigPatchError("WhatsApp sources must be groups");
+    }
+    const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+    return { platform, targetType, targetId, label };
+  });
+}
+
 function parseConfigPatch(body: Record<string, unknown>) {
   const patch: {
     enabled?: boolean;
@@ -134,6 +161,7 @@ function parseConfigPatch(body: Record<string, unknown>) {
     sections?: Record<string, boolean>;
     focus?: string | null;
     delivery?: AgentDeliveryConfig | null;
+    sources?: AgentSourceConfig[];
   } = {};
   if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
   if (typeof body.scheduleHour === "number" && Number.isInteger(body.scheduleHour)) {
@@ -157,6 +185,8 @@ function parseConfigPatch(body: Record<string, unknown>) {
   }
   const delivery = parseDeliveryConfig(body.delivery);
   if (delivery !== undefined) patch.delivery = delivery;
+  const sources = parseSourceConfigs(body.sources);
+  if (sources !== undefined) patch.sources = sources;
   return patch;
 }
 
@@ -191,20 +221,38 @@ export function agentRoutes(service: AgentRunService) {
     const agentKey = c.req.param("agentKey");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     let patch: ReturnType<typeof parseConfigPatch>;
+    let agent: Awaited<ReturnType<AgentRunService["updateConfigForUser"]>>;
     try {
       patch = parseConfigPatch(body);
       if (patch.delivery !== undefined) {
         patch.delivery = await service.resolveDeliveryConfigForUser(userId, patch.delivery);
       }
+      agent = await service.updateConfigForUser(agentKey, userId, patch);
     } catch (err) {
-      if (err instanceof ConfigPatchError || err instanceof AgentDeliveryTargetError) {
+      if (
+        err instanceof ConfigPatchError ||
+        err instanceof AgentDeliveryTargetError ||
+        err instanceof AgentSourceTargetError
+      ) {
         return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
       }
       throw err;
     }
-    const agent = await service.updateConfigForUser(agentKey, userId, patch);
     if (!agent) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     return c.json({ agent });
+  });
+
+  routes.get("/:agentKey/outputs", async (c) => {
+    const userId = await getCurrentUserId(c, service);
+    if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
+    const agentKey = c.req.param("agentKey");
+    if (!service.listDefinitions().some((def) => def.key === agentKey)) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
+    }
+    const rawLimit = Number(c.req.query("limit") ?? "20");
+    const limit = Number.isInteger(rawLimit) ? rawLimit : 20;
+    const cursor = c.req.query("cursor") || null;
+    return c.json(await service.listOutputsForUser(agentKey, userId, { limit, cursor }));
   });
 
   routes.get("/:agentKey/outputs/:id", async (c) => {

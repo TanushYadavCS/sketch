@@ -12,6 +12,7 @@ import {
   type AgentOutputItemInput,
   type AgentOutputRow,
   type AgentOutputTriggerType,
+  type AgentSourceConfig,
   type AgentUserPrefs,
   createAgentOutputRepository,
 } from "../db/repositories/agent-outputs";
@@ -25,7 +26,7 @@ import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
-import type { AgentApiItem, AgentDefinition } from "./types";
+import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "./types";
 
 const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
 const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
@@ -68,6 +69,7 @@ export interface ResolvedAgentConfig {
   enabledSections: Record<string, boolean>;
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sources: AgentSourceConfig[];
 }
 
 export interface AgentSectionView {
@@ -89,6 +91,8 @@ export interface AgentConfigView {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sourceConfig: AgentSourceConfigDef | null;
+  sources: AgentSourceConfig[];
   sections: AgentSectionView[];
 }
 
@@ -117,6 +121,7 @@ export interface AgentSummaryView {
 }
 
 export class AgentDeliveryTargetError extends Error {}
+export class AgentSourceTargetError extends Error {}
 
 function whatsappNumberToJid(whatsappNumber: string): string {
   return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
@@ -234,6 +239,7 @@ export class AgentRunService {
       enabledSections,
       focus: prefs.focus ?? null,
       delivery: prefs.delivery ?? null,
+      sources: prefs.sources ?? [],
     };
   }
 
@@ -277,6 +283,8 @@ export class AgentRunService {
       itemsPerSectionRange: def.itemsPerSectionRange,
       focus: config.focus,
       delivery: config.delivery,
+      sourceConfig: def.sourceConfig ?? null,
+      sources: config.sources,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -296,6 +304,7 @@ export class AgentRunService {
       sections?: Record<string, boolean>;
       focus?: string | null;
       delivery?: AgentDeliveryConfig | null;
+      sources?: AgentSourceConfig[];
     },
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
@@ -309,7 +318,12 @@ export class AgentRunService {
         : undefined;
 
     let prefs: AgentUserPrefs | undefined;
-    if (patch.sections !== undefined || patch.focus !== undefined || patch.delivery !== undefined) {
+    if (
+      patch.sections !== undefined ||
+      patch.focus !== undefined ||
+      patch.delivery !== undefined ||
+      patch.sources !== undefined
+    ) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
       if (patch.sections) {
         for (const section of def.sections) {
@@ -318,7 +332,11 @@ export class AgentRunService {
       }
       const focus = patch.focus !== undefined ? (patch.focus?.trim() ? patch.focus.trim() : null) : current.focus;
       const delivery = patch.delivery !== undefined ? patch.delivery : current.delivery;
-      prefs = { sections, focus, delivery };
+      const sources =
+        patch.sources !== undefined
+          ? await this.resolveSourceConfigsForUser(def, userId, patch.sources)
+          : current.sources;
+      prefs = { sections, focus, delivery, sources };
     }
 
     await this.repo.upsertConfig(
@@ -413,6 +431,90 @@ export class AgentRunService {
     };
   }
 
+  async resolveSourceConfigsForUser(
+    agentKeyOrDef: string | AgentDefinition,
+    userId: string,
+    sources: AgentSourceConfig[],
+  ): Promise<AgentSourceConfig[]> {
+    const def = typeof agentKeyOrDef === "string" ? getAgentDefinition(agentKeyOrDef) : agentKeyOrDef;
+    if (!def?.sourceConfig) {
+      if (sources.length > 0) throw new AgentSourceTargetError("This agent does not support conversation sources");
+      return [];
+    }
+    if (sources.length > def.sourceConfig.maxSources) {
+      throw new AgentSourceTargetError(`Select at most ${def.sourceConfig.maxSources} sources`);
+    }
+
+    const resolved: AgentSourceConfig[] = [];
+    const seen = new Set<string>();
+    for (const source of sources) {
+      const normalized = await this.resolveSourceConfigForUser(userId, source, def.sourceConfig);
+      const key = `${normalized.platform}:${normalized.targetType}:${normalized.targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      resolved.push(normalized);
+    }
+    return resolved;
+  }
+
+  private async resolveSourceConfigForUser(
+    userId: string,
+    source: AgentSourceConfig,
+    config: AgentSourceConfigDef,
+  ): Promise<AgentSourceConfig> {
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new AgentSourceTargetError("User not found");
+
+    if (source.platform === "slack") {
+      if (!config.supportsSlackChannels || source.targetType !== "channel") {
+        throw new AgentSourceTargetError("Slack sources must be channels");
+      }
+      if (!user.slack_user_id) throw new AgentSourceTargetError("Slack sources are not available for this user");
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentSourceTargetError("Slack is not connected");
+      const channel = (await slack.listChannels()).find((candidate) => candidate.id === source.targetId);
+      if (!channel?.isMember) throw new AgentSourceTargetError("Slack channel is not available as a source");
+      if (!(await slack.isUserInChannel(source.targetId, user.slack_user_id))) {
+        throw new AgentSourceTargetError("Slack channel is not available for this user");
+      }
+      return {
+        platform: "slack",
+        targetType: "channel",
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      };
+    }
+
+    if (!config.supportsWhatsAppGroups || source.targetType !== "group") {
+      throw new AgentSourceTargetError("WhatsApp sources must be groups");
+    }
+    const group = await this.deps.db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "name"])
+      .where("jid", "=", source.targetId)
+      .executeTakeFirst();
+    if (!group) throw new AgentSourceTargetError("WhatsApp group is not available as a source");
+    if (!user.whatsapp_number) throw new AgentSourceTargetError("WhatsApp sources are not available for this user");
+    const whatsapp = this.deps.getWhatsApp?.() ?? null;
+    if (!whatsapp) throw new AgentSourceTargetError("WhatsApp is not connected");
+    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
+    if (
+      !(await whatsappGroupHasParticipant(
+        groupMetadata,
+        user.whatsapp_number,
+        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+      ))
+    ) {
+      throw new AgentSourceTargetError("WhatsApp group is not available for this user");
+    }
+    return {
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: group.jid,
+      label: group.name,
+    };
+  }
+
   private toApiOutput(
     def: AgentDefinition,
     value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompleted"]>>,
@@ -472,6 +574,22 @@ export class AgentRunService {
     return this.toApiOutput(def, await this.repo.getByIdForUser(def.key, id, userId));
   }
 
+  async listOutputsForUser(
+    agentKey: string,
+    userId: string,
+    options: { limit?: number; cursor?: string | null } = {},
+  ): Promise<{ outputs: AgentOutputApi[]; nextCursor: string | null }> {
+    const def = requireAgentDefinition(agentKey);
+    const result = await this.repo.listCompletedForUser(def.key, userId, options);
+    return {
+      outputs: result.outputs.flatMap((output) => {
+        const api = this.toApiOutput(def, output);
+        return api ? [api] : [];
+      }),
+      nextCursor: result.nextCursor,
+    };
+  }
+
   async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow | null> {
     const def = requireAgentDefinition(params.agentKey);
     const user = await this.deps.users.findById(params.userId);
@@ -518,6 +636,7 @@ export class AgentRunService {
     now = new Date(),
   ): Promise<{ outputDate: string } | null> {
     const config = await this.resolveConfig(def, user.id);
+    if (def.sourceConfig && config.sources.length === 0) return null;
     if (!config.enabled) return null;
     const timezone = config.timezone || user.timezone || "UTC";
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -618,6 +737,13 @@ export class AgentRunService {
               now,
               adminCanReadAllFiles,
               contentUserEmails,
+              agentConfig: {
+                enabledSections: config.enabledSections,
+                maxItemsPerSection: config.maxItemsPerSection,
+                focus: config.focus,
+                delivery: config.delivery,
+                sources: config.sources,
+              },
             })
           : Promise.resolve({}),
       ]);
@@ -631,6 +757,7 @@ export class AgentRunService {
         sections: enabledSections,
         maxItemsPerSection: config.maxItemsPerSection,
         focus: config.focus,
+        sources: config.sources,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
         previousDayOutput: this.formatOutputForContext(previousDay.output),
         ...definitionContext,
