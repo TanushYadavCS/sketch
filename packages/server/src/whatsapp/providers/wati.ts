@@ -153,13 +153,13 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
     }
 
     const phone = targetPhoneDigits(target);
-    const url = new URL(`${endpoint}/api/v1/sendTemplateMessages`);
+    const url = new URL(`${v3Endpoint}/api/ext/v3/messageTemplates/send`);
     const customParams = providerTemplateParameters(mapping.parameterMap, template.params);
     const body = {
+      channel: channelPhoneDigits ?? null,
       template_name: mapping.provider_template_name,
       broadcast_name: buildBroadcastName(template.key),
-      ...(channelPhoneDigits ? { channelNumber: channelPhoneDigits } : {}),
-      receivers: [
+      recipients: [
         {
           whatsappNumber: phone,
           customParams,
@@ -573,8 +573,12 @@ function sendResultFromWatiBody(body: unknown, target: WhatsAppTarget): WhatsApp
 
 function sendResultFromWatiTemplateBody(body: unknown, target: WhatsAppTarget): WhatsAppSendResult | null {
   const record = isRecord(body) ? body : {};
-  const receivers = Array.isArray(record.receivers) ? record.receivers : [];
-  const firstReceiver = isRecord(receivers[0]) ? receivers[0] : {};
+  const deliveryRows = Array.isArray(record.recipients)
+    ? record.recipients
+    : Array.isArray(record.receivers)
+      ? record.receivers
+      : [];
+  const firstReceiver = isRecord(deliveryRows[0]) ? deliveryRows[0] : {};
   const fallbackConversationId =
     target.kind === "dm"
       ? (target.providerConversationId ?? canonicalDmConversationId(target.phoneE164))

@@ -605,7 +605,7 @@ describe("Wati outbound provider", () => {
         return new Response(
           JSON.stringify({
             result: true,
-            receivers: [{ localMessageId: "local-template-1", whatsappNumber: "15551234567" }],
+            recipients: [{ localMessageId: "local-template-1", whatsappNumber: "15551234567" }],
           }),
         );
       });
@@ -628,11 +628,12 @@ describe("Wati outbound provider", () => {
       );
 
       const [url, init] = firstFetchCall(requestFetch);
-      expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendTemplateMessages");
+      expect(url.toString()).toBe("https://tenant.wati.io/api/ext/v3/messageTemplates/send");
       expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "Content-Type": "application/json" });
       expect(JSON.parse(init.body as string)).toMatchObject({
+        channel: null,
         template_name: "sketch_magic_link",
-        receivers: [
+        recipients: [
           {
             whatsappNumber: "15551234567",
             customParams: [
@@ -664,7 +665,7 @@ describe("Wati outbound provider", () => {
         status: "approved",
       });
       const requestFetch = vi.fn(async () => {
-        return new Response(JSON.stringify({ receivers: [{ localMessageId: "local-template-1" }] }));
+        return new Response(JSON.stringify({ recipients: [{ localMessageId: "local-template-1" }] }));
       });
       const provider = createWatiWhatsAppProvider({
         apiEndpoint: "https://tenant.wati.io",
@@ -686,7 +687,7 @@ describe("Wati outbound provider", () => {
 
       const [, init] = firstFetchCall(requestFetch);
       expect(JSON.parse(init.body as string)).toMatchObject({
-        channelNumber: "17435002445",
+        channel: "17435002445",
       });
     } finally {
       await db.destroy();
@@ -712,7 +713,7 @@ describe("Wati outbound provider", () => {
         status: "approved",
       });
       const requestFetch = vi.fn(async () => {
-        return new Response(JSON.stringify({ receivers: [{ localMessageId: "local-template-1" }] }));
+        return new Response(JSON.stringify({ recipients: [{ localMessageId: "local-template-1" }] }));
       });
       const provider = createWatiWhatsAppProvider({
         apiEndpoint: "https://tenant.wati.io",
