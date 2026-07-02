@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.40.2] -- 2026-07-02
+
+- Fix(Wati): send template-message variables with Wati v3's `custom_params` recipient field so approved WhatsApp templates can deliver for proactive DM workflows.
+
 ## [0.40.1] -- 2026-07-02
 
 - Fix(Wati): send template-message recipients with Wati v3's `phone_number` field so approved WhatsApp templates can deliver for proactive DM workflows.
