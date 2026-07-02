@@ -21,7 +21,14 @@
 import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { BINARY_EXTRACTABLE_MIMES, extractTextFromBinary } from "./extractors";
-import type { BrowseTreeItem, Connector, ConnectorCredentials, OAuthCredentials, SyncedItem } from "./types";
+import type {
+  AccessTokenProvider,
+  BrowseTreeItem,
+  Connector,
+  ConnectorCredentials,
+  OAuthCredentials,
+  SyncedItem,
+} from "./types";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -98,6 +105,8 @@ interface DriveOwner {
   permissionId?: string;
 }
 
+type DriveTokenSource = string | AccessTokenProvider;
+
 function assertOAuth(credentials: ConnectorCredentials): asserts credentials is OAuthCredentials {
   if (credentials.type !== "oauth") {
     throw new Error("Google Drive connector requires OAuth credentials");
@@ -106,9 +115,10 @@ function assertOAuth(credentials: ConnectorCredentials): asserts credentials is 
 
 async function driveRequest(
   path: string,
-  accessToken: string,
+  accessToken: DriveTokenSource,
   opts?: { params?: Record<string, string>; responseType?: "json" | "text" | "buffer" },
   attempt = 1,
+  tokenRefreshed = false,
 ): Promise<unknown> {
   const url = new URL(`${DRIVE_API}${path}`);
   if (opts?.params) {
@@ -119,8 +129,10 @@ async function driveRequest(
 
   let response: Response;
   try {
+    const token =
+      typeof accessToken === "string" ? accessToken : (await accessToken({ forceRefresh: tokenRefreshed })).accessToken;
     response = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
@@ -130,7 +142,7 @@ async function driveRequest(
     if (attempt < MAX_RETRIES) {
       const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
       await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return driveRequest(path, accessToken, opts, attempt + 1);
+      return driveRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
     }
 
     throw new Error(`Drive API ${path} network error after ${MAX_RETRIES} attempts: ${detail}`);
@@ -143,16 +155,20 @@ async function driveRequest(
     const retryAfter = response.headers.get("Retry-After");
     const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : 5000;
     await new Promise((resolve) => setTimeout(resolve, waitMs));
-    return driveRequest(path, accessToken, opts, attempt + 1);
+    return driveRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
   }
 
   if (!response.ok) {
     const body = await response.text();
 
+    if (response.status === 401 && typeof accessToken !== "string" && !tokenRefreshed) {
+      return driveRequest(path, accessToken, opts, attempt, true);
+    }
+
     if (response.status >= 500 && attempt < MAX_RETRIES) {
       const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
       await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return driveRequest(path, accessToken, opts, attempt + 1);
+      return driveRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
     }
 
     // Surface a clear message for the most common OAuth scope issue
@@ -225,7 +241,7 @@ function inferFileType(mimeType: string): string | null {
 
 async function fetchFileContent(
   file: DriveFile,
-  accessToken: string,
+  accessToken: DriveTokenSource,
   logger: Logger,
 ): Promise<{ content: string; hash: string } | null> {
   try {
@@ -343,7 +359,7 @@ export async function ensureValidToken(credentials: OAuthCredentials): Promise<O
  * List all shared drives the authenticated user has access to.
  * Used by the browse API for the drive picker.
  */
-export async function listSharedDrives(accessToken: string): Promise<SharedDriveInfo[]> {
+export async function listSharedDrives(accessToken: DriveTokenSource): Promise<SharedDriveInfo[]> {
   const drives: SharedDriveInfo[] = [];
   let pageToken: string | undefined;
 
@@ -384,7 +400,10 @@ const SAFE_FOLDER_ID = /^[a-zA-Z0-9_-]+$/;
  * List immediate children of a folder (files and subfolders).
  * Used by the browse API to let users preview folder contents before syncing.
  */
-export async function listFolderContents(accessToken: string, folderId: string): Promise<FolderContentItem[]> {
+export async function listFolderContents(
+  accessToken: DriveTokenSource,
+  folderId: string,
+): Promise<FolderContentItem[]> {
   if (!SAFE_FOLDER_ID.test(folderId)) {
     throw new Error(`Invalid folderId: "${folderId}" contains characters not allowed in a Drive folder ID`);
   }
@@ -425,7 +444,7 @@ export async function listFolderContents(accessToken: string, folderId: string):
  * List top-level folders in the user's My Drive.
  * Used by the browse API for the folder picker when no shared drives exist.
  */
-export async function listMyDriveFolders(accessToken: string): Promise<FolderInfo[]> {
+export async function listMyDriveFolders(accessToken: DriveTokenSource): Promise<FolderInfo[]> {
   const folders: FolderInfo[] = [];
   let pageToken: string | undefined;
 
@@ -457,7 +476,11 @@ export async function listMyDriveFolders(accessToken: string): Promise<FolderInf
  * Fetch members of a shared drive.
  * Returns email addresses of all users with access.
  */
-async function fetchDriveMemberEmails(driveId: string, accessToken: string, logger: Logger): Promise<string[]> {
+async function fetchDriveMemberEmails(
+  driveId: string,
+  accessToken: DriveTokenSource,
+  logger: Logger,
+): Promise<string[]> {
   const emails: string[] = [];
   let pageToken: string | undefined;
 
@@ -509,7 +532,7 @@ function extractFilePermissionEmails(file: DriveFile): string[] {
 export async function resolveFolderPath(
   file: DriveFile,
   driveName: string,
-  accessToken: string,
+  accessToken: DriveTokenSource,
   folderCache: Map<string, string>,
 ): Promise<string> {
   const parts: string[] = [driveName];
@@ -578,12 +601,13 @@ export function createGoogleDriveConnector(): Connector {
       });
     },
 
-    async *sync({ credentials, scopeConfig, cursor, logger }) {
+    async *sync({ credentials, accessTokenProvider, scopeConfig, cursor, logger }) {
       assertOAuth(credentials);
       let creds = credentials;
-      if (isTokenExpired(creds)) {
+      if (!accessTokenProvider && isTokenExpired(creds)) {
         creds = await refreshOAuthToken(creds);
       }
+      const accessToken: DriveTokenSource = accessTokenProvider ?? creds.access_token;
 
       const sharedDrives = (scopeConfig.sharedDrives as string[] | undefined) ?? [];
       const myDriveFolders = (scopeConfig.folders as string[] | undefined) ?? [];
@@ -591,34 +615,35 @@ export function createGoogleDriveConnector(): Connector {
       // Sync selected shared drives
       for (const driveId of sharedDrives) {
         if (cursor) {
-          yield* syncIncrementalDrive(creds.access_token, driveId, cursor, logger);
+          yield* syncIncrementalDrive(accessToken, driveId, cursor, logger);
         } else {
-          yield* syncSharedDrive(creds.access_token, driveId, logger);
+          yield* syncSharedDrive(accessToken, driveId, logger);
         }
       }
 
       // Sync My Drive folders (or all files if neither shared drives nor folders selected)
       if (myDriveFolders.length > 0 || sharedDrives.length === 0) {
         if (cursor) {
-          yield* syncIncremental(creds.access_token, cursor, logger);
+          yield* syncIncremental(accessToken, cursor, logger);
         } else {
-          yield* syncFull(creds.access_token, scopeConfig, logger);
+          yield* syncFull(accessToken, scopeConfig, logger);
         }
       }
     },
 
-    async getCursor({ credentials, currentCursor, logger }) {
+    async getCursor({ credentials, accessTokenProvider, currentCursor, logger }) {
       assertOAuth(credentials);
       let creds = credentials;
-      if (isTokenExpired(creds)) {
+      if (!accessTokenProvider && isTokenExpired(creds)) {
         creds = await refreshOAuthToken(creds);
       }
+      const accessToken: DriveTokenSource = accessTokenProvider ?? creds.access_token;
 
       if (currentCursor) {
         return currentCursor;
       }
 
-      const result = (await driveRequest("/changes/startPageToken", creds.access_token, {
+      const result = (await driveRequest("/changes/startPageToken", accessToken, {
         params: { supportsAllDrives: "true" },
       })) as {
         startPageToken: string;
@@ -634,10 +659,13 @@ export function createGoogleDriveConnector(): Connector {
       return null;
     },
 
-    async browse({ credentials }) {
-      const validCreds = await ensureValidToken(credentials as OAuthCredentials);
-      const sharedDrives = await listSharedDrives(validCreds.access_token);
-      const rootFolders = await listMyDriveFolders(validCreds.access_token);
+    async browse({ credentials, accessTokenProvider }) {
+      const validCreds = accessTokenProvider
+        ? (credentials as OAuthCredentials)
+        : await ensureValidToken(credentials as OAuthCredentials);
+      const accessToken: DriveTokenSource = accessTokenProvider ?? validCreds.access_token;
+      const sharedDrives = await listSharedDrives(accessToken);
+      const rootFolders = await listMyDriveFolders(accessToken);
       return {
         type: "tree" as const,
         items: rootFolders.map((f) => ({ id: f.id, name: f.name, hasChildren: true })),
@@ -654,9 +682,12 @@ export function createGoogleDriveConnector(): Connector {
       };
     },
 
-    async browseChildren({ credentials, parentId }) {
-      const validCreds = await ensureValidToken(credentials as OAuthCredentials);
-      const items = await listFolderContents(validCreds.access_token, parentId);
+    async browseChildren({ credentials, accessTokenProvider, parentId }) {
+      const validCreds = accessTokenProvider
+        ? (credentials as OAuthCredentials)
+        : await ensureValidToken(credentials as OAuthCredentials);
+      const accessToken: DriveTokenSource = accessTokenProvider ?? validCreds.access_token;
+      const items = await listFolderContents(accessToken, parentId);
       return items
         .filter((i) => i.mimeType === "application/vnd.google-apps.folder")
         .map((i): BrowseTreeItem => ({ id: i.id, name: i.name, hasChildren: true }));
@@ -673,7 +704,11 @@ export function createGoogleDriveConnector(): Connector {
  * 3. Resolve folder paths for each file
  * 4. Yield SyncedItem with access info
  */
-async function* syncSharedDrive(accessToken: string, driveId: string, logger: Logger): AsyncGenerator<SyncedItem> {
+async function* syncSharedDrive(
+  accessToken: DriveTokenSource,
+  driveId: string,
+  logger: Logger,
+): AsyncGenerator<SyncedItem> {
   // Get drive name
   const driveInfo = (await driveRequest(`/drives/${driveId}`, accessToken, {
     params: { fields: "id, name" },
@@ -742,7 +777,7 @@ async function* syncSharedDrive(accessToken: string, driveId: string, logger: Lo
  * Incremental sync for a shared drive using changes.list.
  */
 async function* syncIncrementalDrive(
-  accessToken: string,
+  accessToken: DriveTokenSource,
   driveId: string,
   startPageToken: string,
   logger: Logger,
@@ -832,7 +867,7 @@ async function* syncIncrementalDrive(
  * When no folders specified, syncs all accessible files.
  */
 async function* syncFull(
-  accessToken: string,
+  accessToken: DriveTokenSource,
   scopeConfig: Record<string, unknown>,
   logger: Logger,
 ): AsyncGenerator<SyncedItem> {
@@ -851,7 +886,7 @@ async function* syncFull(
  * Resolves folder paths and extracts per-file permissions.
  */
 async function* syncSelectedFolders(
-  accessToken: string,
+  accessToken: DriveTokenSource,
   folderIds: string[],
   logger: Logger,
 ): AsyncGenerator<SyncedItem> {
@@ -908,7 +943,7 @@ async function* syncSelectedFolders(
 }
 
 /** Sync all accessible files (no folder filter). Resolves folder paths and extracts per-file permissions. */
-async function* syncAllFiles(accessToken: string, logger: Logger): AsyncGenerator<SyncedItem> {
+async function* syncAllFiles(accessToken: DriveTokenSource, logger: Logger): AsyncGenerator<SyncedItem> {
   const fields =
     "nextPageToken, files(id, name, mimeType, webViewLink, parents, createdTime, modifiedTime, size, trashed, owners(displayName,emailAddress,permissionId), permissions(emailAddress, role, type, displayName))";
 
@@ -949,7 +984,7 @@ async function* syncAllFiles(accessToken: string, logger: Logger): AsyncGenerato
 }
 
 async function* syncIncremental(
-  accessToken: string,
+  accessToken: DriveTokenSource,
   startPageToken: string,
   logger: Logger,
 ): AsyncGenerator<SyncedItem> {

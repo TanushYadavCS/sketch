@@ -316,14 +316,16 @@ describe("CanvasProvider", () => {
   it("throws Canvas error details from access updates", async () => {
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(
-            JSON.stringify({ success: false, error: "Only Canvas-owned accounts can be shared", message: "Failed" }),
-            { status: 400 },
-          ),
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: false,
+            error: "Bad Request",
+            message: "Only Canvas-owned accounts can be shared",
+          }),
+          { status: 400 },
         ),
+      ),
     );
 
     const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
@@ -335,5 +337,84 @@ describe("CanvasProvider", () => {
       code: "BAD_REQUEST",
       message: "Only Canvas-owned accounts can be shared",
     });
+  });
+
+  it("mints Sketch connector credentials with user and role headers", async () => {
+    const envelope = {
+      version: 1,
+      algorithm: "RSA-OAEP-256+A256GCM",
+      keyId: "key-1",
+      encryptedKey: "encrypted-key",
+      iv: "iv",
+      tag: "tag",
+      ciphertext: "ciphertext",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            connectorType: "teams",
+            provider: "microsoft",
+            credentialKind: "oauth_access_token",
+            expiresAt: "2026-01-01T01:00:00.000Z",
+            envelope,
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    const result = await provider.mintConnectorCredential({
+      userEmail: "priya@example.com",
+      connectorType: "teams",
+      publicKeyId: "key-1",
+      accountId: "secrets:user-1:microsoft:microsoft-teams-oauth",
+      userName: "Priya Shah",
+      userOrgRole: "admin",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://canvas.example.com/api/sketch/credentials/mint", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer sk-test",
+        "Content-Type": "application/json",
+        "X-User-Email": "priya@example.com",
+        "X-User-Name": "Priya Shah",
+        "X-User-Org-Role": "admin",
+      },
+      body: JSON.stringify({
+        connectorType: "teams",
+        publicKeyId: "key-1",
+        accountId: "secrets:user-1:microsoft:microsoft-teams-oauth",
+      }),
+    });
+    expect(result).toMatchObject({
+      connectorType: "teams",
+      provider: "microsoft",
+      credentialKind: "oauth_access_token",
+      envelope,
+    });
+  });
+
+  it("rejects malformed Sketch connector credential mint responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ success: true, data: { connectorType: "teams" } }), {
+          status: 200,
+        }),
+      ),
+    );
+
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    await expect(
+      provider.mintConnectorCredential({
+        userEmail: "priya@example.com",
+        connectorType: "teams",
+      }),
+    ).rejects.toThrow("Canvas credential mint returned an invalid response");
   });
 });

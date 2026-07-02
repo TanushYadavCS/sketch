@@ -114,6 +114,27 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/connectors/credential-source", () => {
+    return HttpResponse.json({
+      mode: "local",
+      canvasConfigured: false,
+      canvasCredentialImportConfigured: false,
+      publicKeyId: null,
+    });
+  }),
+
+  http.get("/api/connectors/canvas/suggestions", () => {
+    return HttpResponse.json({ suggestion: null });
+  }),
+
+  http.get("/api/mcp-servers", () => {
+    return HttpResponse.json({ servers: [] });
+  }),
+
+  http.get("/api/mcp-servers/:providerId/connections", () => {
+    return HttpResponse.json({ connections: [] });
+  }),
+
   http.get("/api/users", () => {
     return HttpResponse.json({
       users: [

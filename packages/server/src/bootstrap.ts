@@ -14,6 +14,7 @@ import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
+import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
 import { startSyncScheduler } from "./connectors/sync";
 import { createPricingService } from "./cost/cost-pricing";
 import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
@@ -126,6 +127,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
+  await migrateManagedConnectorCredentialsToCanvas({ db, appConfig: config, logger });
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const conversationsRepo = createConversationRepository(db);

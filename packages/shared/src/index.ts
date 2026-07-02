@@ -1,6 +1,7 @@
 export * from "./agent-environment";
 export * from "./agent-tools";
 export * from "./automation";
+export * from "./integration-connectors";
 export * from "./llm-provider";
 export * from "./mcp-servers";
 export * from "./skills";

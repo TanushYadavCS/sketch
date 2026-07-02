@@ -46,6 +46,7 @@ export interface OAuthCredentials {
   accounts_server?: string;
   api_domain?: string;
   region?: string;
+  canvas_account_id?: string;
 }
 
 export interface ApiKeyCredentials {
@@ -59,6 +60,11 @@ export interface ServiceAccountCredentials {
 }
 
 export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials;
+
+export type AccessTokenProvider = (opts?: { forceRefresh?: boolean }) => Promise<{
+  accessToken: string;
+  expiresAt?: string;
+}>;
 
 /**
  * A file/item discovered during sync that should be indexed.
@@ -340,6 +346,7 @@ export interface Connector {
      * that don't need it ignore the field.
      */
     ownerEmail?: string | null;
+    accessTokenProvider?: AccessTokenProvider;
     /**
      * Resolve a speaker / attendee name to a Sketch-side identity. Built
      * by the dispatcher from the users table + person entity register
@@ -359,6 +366,7 @@ export interface Connector {
     scopeConfig: Record<string, unknown>;
     currentCursor: string | null;
     logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
   }): Promise<string | null>;
 
   /**
@@ -372,7 +380,11 @@ export interface Connector {
    * Returns immediately for sync connectors, or a BrowseJob for async ones (e.g. Notion).
    * Optional — connectors without scope selection don't implement this.
    */
-  browse?(opts: { credentials: ConnectorCredentials; logger: Logger }): Promise<BrowseResult | BrowseJob>;
+  browse?(opts: {
+    credentials: ConnectorCredentials;
+    logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
+  }): Promise<BrowseResult | BrowseJob>;
 
   /**
    * Browse for an existing connector — always returns sync results.
@@ -380,7 +392,11 @@ export interface Connector {
    * Connectors with async browse (e.g. Notion) should implement this
    * to return results directly without starting a background job.
    */
-  browseExisting?(opts: { credentials: ConnectorCredentials; logger: Logger }): Promise<BrowseResult>;
+  browseExisting?(opts: {
+    credentials: ConnectorCredentials;
+    logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
+  }): Promise<BrowseResult>;
 
   /**
    * Browse folder/subtree contents for tree-type scope pickers (e.g. Google Drive).
@@ -390,6 +406,7 @@ export interface Connector {
     credentials: ConnectorCredentials;
     parentId: string;
     logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
   }): Promise<BrowseTreeItem[]>;
 }
 

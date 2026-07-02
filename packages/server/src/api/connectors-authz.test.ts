@@ -6,10 +6,12 @@
  * gated `/:id/*` route returns 403 for an unauthorized caller — this catches the
  * forgotten-helper-call failure mode (`if (denied) return denied;` left out).
  */
+import { constants, createCipheriv, generateKeyPairSync, publicEncrypt, randomBytes } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createConnectorRepository } from "../db/repositories/connectors";
+import { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -23,6 +25,7 @@ const ADMIN_EMAIL = "admin@test.com";
 const MEMBER_EMAIL = "member@test.com";
 const OTHER_MEMBER_EMAIL = "other@test.com";
 const PASSWORD = "testpassword123";
+const GOOGLE_CLIENT_ID = "123456789-test.apps.googleusercontent.com";
 
 async function seedUsers(db: Kysely<DB>) {
   const settings = createSettingsRepository(db);
@@ -129,6 +132,56 @@ async function insertFile(db: Kysely<DB>, opts: { connectorConfigId: string; fil
   });
   await repo.linkConnectorFile(opts.connectorConfigId, result.id);
   return result.id;
+}
+
+async function insertCanvasProvider(db: Kysely<DB>) {
+  return createMcpServerRepository(db).create({
+    type: "canvas",
+    displayName: "Canvas",
+    url: "https://canvas.example.com/mcp",
+    apiUrl: "https://canvas.example.com",
+    credentials: JSON.stringify({ apiKey: "sk-test" }),
+    mode: "skill",
+  });
+}
+
+function encryptCanvasPayload(payload: unknown, publicKeyPem: string) {
+  const contentKey = randomBytes(32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", contentKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(payload), "utf8")), cipher.final()]);
+  const encryptedKey = publicEncrypt(
+    {
+      key: publicKeyPem,
+      oaepHash: "sha256",
+      padding: constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    contentKey,
+  );
+  return {
+    version: 1,
+    algorithm: "RSA-OAEP-256+A256GCM",
+    keyId: "key-1",
+    encryptedKey: encryptedKey.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+}
+
+function createCanvasCredentialImportApp(db: Kysely<DB>) {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    app: createApp(
+      db,
+      createTestConfig({
+        CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+        CANVAS_CREDENTIAL_PUBLIC_KEY_ID: "key-1",
+      }),
+      { logger },
+    ),
+    publicKeyPem: publicKey.export({ format: "pem", type: "spki" }).toString(),
+  };
 }
 
 describe("Connectors API — authorization", () => {
@@ -418,6 +471,59 @@ describe("Connectors API — authorization", () => {
   });
 
   describe("POST / — branch on perUserAuth", () => {
+    it("canvas credential source blocks local Canvas-supported connector creation", async () => {
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CONNECTOR_CREDENTIAL_SOURCE: "canvas",
+        }),
+        { logger },
+      );
+      const res = await canvasApp.request("/api/connectors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          connectorType: "gmail",
+          authType: "oauth",
+          credentials: {
+            access_token: "access",
+            refresh_token: "refresh",
+            client_id: "client",
+            client_secret: "secret",
+          },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: { code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED" },
+      });
+    });
+
+    it("local credential source requires ENCRYPTION_KEY before storing connector credentials", async () => {
+      const localApp = createApp(
+        db,
+        createTestConfig({
+          CONNECTOR_CREDENTIAL_SOURCE: "local",
+        }),
+        { logger },
+      );
+      const res = await localApp.request("/api/connectors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          connectorType: "fireflies",
+          authType: "api_key",
+          credentials: { api_key: "stub" },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: { code: "ENCRYPTION_REQUIRED" },
+      });
+    });
+
     it("member → 403 creating an org-wide (notion) connector", async () => {
       const res = await app.request("/api/connectors", {
         method: "POST",
@@ -444,6 +550,312 @@ describe("Connectors API — authorization", () => {
         }),
       });
       expect(res.status).toBe(409);
+    });
+  });
+
+  describe("GET /canvas/suggestions — personal connector nudges", () => {
+    it("returns a personal connector suggestion for a matching Canvas app", async () => {
+      await insertCanvasProvider(db);
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        }),
+        { logger },
+      );
+
+      const res = await canvasApp.request(
+        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&source=canvas_user_secrets",
+        {
+          headers: { Cookie: memberCookie },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        suggestion: {
+          connectorType: "gmail",
+          appId: "google-gmail-oauth",
+        },
+      });
+    });
+
+    it("does not suggest org-level connectors or already-connected personal connectors", async () => {
+      await insertCanvasProvider(db);
+      await insertConfig(db, { connectorType: "gmail", createdBy: memberId });
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        }),
+        { logger },
+      );
+
+      const existing = await canvasApp.request(
+        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&source=canvas_user_secrets",
+        {
+          headers: { Cookie: memberCookie },
+        },
+      );
+      const orgLevel = await canvasApp.request(
+        "/api/connectors/canvas/suggestions?appId=notion&source=canvas_user_secrets",
+        {
+          headers: { Cookie: memberCookie },
+        },
+      );
+
+      expect(existing.status).toBe(200);
+      expect(orgLevel.status).toBe(200);
+      await expect(existing.json()).resolves.toEqual({ suggestion: null });
+      await expect(orgLevel.json()).resolves.toEqual({ suggestion: null });
+    });
+
+    it("does not suggest a connector for Pipedream or missing-source connections", async () => {
+      await insertCanvasProvider(db);
+      const canvasApp = createApp(
+        db,
+        createTestConfig({
+          CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        }),
+        { logger },
+      );
+
+      const pipedream = await canvasApp.request(
+        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&source=pipedream",
+        {
+          headers: { Cookie: memberCookie },
+        },
+      );
+      const missingSource = await canvasApp.request("/api/connectors/canvas/suggestions?appId=google-gmail-oauth", {
+        headers: { Cookie: memberCookie },
+      });
+
+      expect(pipedream.status).toBe(200);
+      expect(missingSource.status).toBe(200);
+      await expect(pipedream.json()).resolves.toEqual({ suggestion: null });
+      await expect(missingSource.json()).resolves.toEqual({ suggestion: null });
+    });
+
+    it("does not suggest a connector when Canvas credential import is not configured", async () => {
+      await insertCanvasProvider(db);
+
+      const res = await app.request(
+        "/api/connectors/canvas/suggestions?appId=google-gmail-oauth&source=canvas_user_secrets",
+        {
+          headers: { Cookie: memberCookie },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ suggestion: null });
+    });
+  });
+
+  describe("POST /canvas/connect — connector authz", () => {
+    it("member → 403 starting a Canvas connect intent for an org-wide connector", async () => {
+      const res = await app.request("/api/connectors/canvas/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          connectorType: "notion",
+          callbackUrl: "https://sketch.example.com/connections",
+        }),
+      });
+
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe("POST /canvas/import — managed credential import", () => {
+    it("imports a Gmail connector with Canvas OAuth placeholder credentials", async () => {
+      await insertCanvasProvider(db);
+      const { app: canvasApp, publicKeyPem } = createCanvasCredentialImportApp(db);
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "https://canvas.example.com/api/sketch/credentials/mint") {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                connectorType: "gmail",
+                provider: "google",
+                credentialKind: "oauth_access_token",
+                envelope: encryptCanvasPayload(
+                  {
+                    type: "oauth_access_token",
+                    connectorType: "gmail",
+                    provider: "google",
+                    accessToken: "minted-access",
+                    tokenType: "Bearer",
+                    expiresAt: "2099-01-01T00:00:00.000Z",
+                  },
+                  publicKeyPem,
+                ),
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ historyId: "history-1" }), { status: 200 });
+      });
+
+      const res = await canvasApp.request("/api/connectors/canvas/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ connectorType: "gmail" }),
+      });
+
+      expect(res.status).toBe(201);
+      await expect(res.json()).resolves.toMatchObject({
+        connector: { connectorType: "gmail", syncStatus: "pending", alreadyConnected: false },
+      });
+      const connector = await createConnectorRepository(db).findByTypeAndOwner("gmail", memberId);
+      expect(connector?.credential_source).toBe("canvas");
+      expect(JSON.parse(connector?.credentials ?? "{}")).toMatchObject({
+        type: "oauth",
+        access_token: "",
+        refresh_token: "",
+        client_id: "canvas",
+        client_secret: "canvas",
+      });
+    });
+
+    it("creates a paused Google Calendar connector until scope is selected", async () => {
+      await insertCanvasProvider(db);
+      const { app: canvasApp, publicKeyPem } = createCanvasCredentialImportApp(db);
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "https://canvas.example.com/api/sketch/credentials/mint") {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                connectorType: "google_calendar",
+                provider: "google",
+                credentialKind: "oauth_access_token",
+                envelope: encryptCanvasPayload(
+                  {
+                    type: "oauth_access_token",
+                    connectorType: "google_calendar",
+                    provider: "google",
+                    accessToken: "calendar-access",
+                    expiresAt: "2099-01-01T00:00:00.000Z",
+                  },
+                  publicKeyPem,
+                ),
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ items: [{ id: "primary" }] }), { status: 200 });
+      });
+
+      const res = await canvasApp.request("/api/connectors/canvas/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ connectorType: "google_calendar" }),
+      });
+
+      expect(res.status).toBe(201);
+      await expect(res.json()).resolves.toMatchObject({
+        connector: { connectorType: "google_calendar", syncStatus: "paused" },
+      });
+    });
+
+    it("member → 403 importing an org-wide Canvas connector", async () => {
+      const { app: canvasApp } = createCanvasCredentialImportApp(db);
+      const res = await canvasApp.request("/api/connectors/canvas/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ connectorType: "notion" }),
+      });
+
+      expect(res.status).toBe(403);
+    });
+
+    it("does not hide Canvas public key mismatches behind an existing static connector", async () => {
+      await insertCanvasProvider(db);
+      const existing = await insertConfig(db, { connectorType: "notion", createdBy: adminId });
+      const { app: canvasApp } = createCanvasCredentialImportApp(db);
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "https://canvas.example.com/api/sketch/credentials/mint") {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: "Conflict",
+              message: "Sketch credential public key id does not match Canvas registration",
+            }),
+            { status: 409 },
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+
+      const res = await canvasApp.request("/api/connectors/canvas/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ connectorType: "notion" }),
+      });
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        error: {
+          code: "INVALID_CREDENTIALS",
+          message: expect.stringContaining("public key id does not match Canvas registration"),
+        },
+      });
+
+      const connector = await createConnectorRepository(db).findConfigById(existing.id);
+      expect(connector?.credential_source).toBe("local");
+    });
+
+    it("updates an existing connector to Canvas credentials", async () => {
+      await insertCanvasProvider(db);
+      await insertConfig(db, { connectorType: "google_calendar", createdBy: memberId });
+      const { app: canvasApp, publicKeyPem } = createCanvasCredentialImportApp(db);
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "https://canvas.example.com/api/sketch/credentials/mint") {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                connectorType: "google_calendar",
+                provider: "google",
+                credentialKind: "oauth_access_token",
+                envelope: encryptCanvasPayload(
+                  {
+                    type: "oauth_access_token",
+                    connectorType: "google_calendar",
+                    provider: "google",
+                    accessToken: "calendar-access",
+                    expiresAt: "2099-01-01T00:00:00.000Z",
+                  },
+                  publicKeyPem,
+                ),
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ items: [{ id: "primary" }] }), { status: 200 });
+      });
+
+      const res = await canvasApp.request("/api/connectors/canvas/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ connectorType: "google_calendar", scopeConfig: { calendarIds: ["primary"] } }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        connector: { connectorType: "google_calendar", alreadyConnected: true, syncStatus: "pending" },
+      });
+      const connector = await createConnectorRepository(db).findByTypeAndOwner("google_calendar", memberId);
+      expect(connector?.credential_source).toBe("canvas");
+      expect(connector?.scope_config).toBe(JSON.stringify({ calendarIds: ["primary"] }));
     });
   });
 
@@ -673,7 +1085,7 @@ describe("Connectors API — authorization", () => {
       const res = await app.request("/api/oauth/google/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
-        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+        body: JSON.stringify({ clientId: GOOGLE_CLIENT_ID, clientSecret: "csec" }),
       });
       expect(res.status).toBe(403);
     });
@@ -682,9 +1094,33 @@ describe("Connectors API — authorization", () => {
       const res = await app.request("/api/oauth/google/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: adminCookie },
-        body: JSON.stringify({ clientId: "cid", clientSecret: "csec" }),
+        body: JSON.stringify({ clientId: GOOGLE_CLIENT_ID, clientSecret: "csec" }),
       });
       expect(res.status).toBe(200);
+    });
+
+    it("normalizes a pasted Google client ID URL", async () => {
+      const res = await app.request("/api/oauth/google/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ clientId: `http://${GOOGLE_CLIENT_ID}/`, clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(200);
+
+      const status = await app.request("/api/oauth/google/status", { headers: { Cookie: adminCookie } });
+      const body = await status.json();
+      expect(body.clientId).toBe(GOOGLE_CLIENT_ID);
+    });
+
+    it("rejects a redirect URI pasted as the Google client ID", async () => {
+      const res = await app.request("/api/oauth/google/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ clientId: "http://localhost:5001/api/oauth/google/callback", clientSecret: "csec" }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.code).toBe("VALIDATION_ERROR");
     });
   });
 
@@ -740,19 +1176,53 @@ describe("Connectors API — authorization", () => {
 
     it("after admin configures client → 302 redirect to Google", async () => {
       const settings = createSettingsRepository(db);
-      await settings.update({ googleOauthClientId: "cid", googleOauthClientSecret: "csec" });
+      await settings.update({ googleOauthClientId: GOOGLE_CLIENT_ID, googleOauthClientSecret: "csec" });
 
       const res = await app.request("/api/oauth/google/authorize", {
         headers: { Cookie: memberCookie },
         redirect: "manual",
       });
       expect(res.status).toBe(302);
-      expect(res.headers.get("location")).toContain("accounts.google.com");
+      const location = res.headers.get("location") ?? "";
+      expect(location).toContain("accounts.google.com");
+      expect(new URL(location).searchParams.get("prompt")).toBe("consent select_account");
+      expect(new URL(location).searchParams.get("include_granted_scopes")).toBe("true");
+    });
+
+    it("normalizes legacy stored Google client ID URLs before redirecting", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ googleOauthClientId: `http://${GOOGLE_CLIENT_ID}/`, googleOauthClientSecret: "csec" });
+
+      const res = await app.request("/api/oauth/google/authorize", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = res.headers.get("location") ?? "";
+      expect(new URL(location).searchParams.get("client_id")).toBe(GOOGLE_CLIENT_ID);
+    });
+
+    it("redirects back to manage an existing connector before sending the user to Google", async () => {
+      const settings = createSettingsRepository(db);
+      await settings.update({ googleOauthClientId: GOOGLE_CLIENT_ID, googleOauthClientSecret: "csec" });
+      const existing = await insertConfig(db, { connectorType: "google_calendar", createdBy: memberId });
+
+      const res = await app.request("/api/oauth/google/authorize?connector=google_calendar", {
+        headers: { Cookie: memberCookie },
+        redirect: "manual",
+      });
+
+      expect(res.status).toBe(302);
+      const location = res.headers.get("location") ?? "";
+      expect(location).toBe(
+        `/files?oauth=error&reason=already_connected&connector=google_calendar&connectorId=${existing.id}`,
+      );
     });
 
     it("Gmail OAuth uses the same Google client config with Gmail scope", async () => {
       const settings = createSettingsRepository(db);
-      await settings.update({ googleOauthClientId: "cid", googleOauthClientSecret: "csec" });
+      await settings.update({ googleOauthClientId: GOOGLE_CLIENT_ID, googleOauthClientSecret: "csec" });
 
       const res = await app.request("/api/oauth/google/authorize?connector=gmail", {
         headers: { Cookie: memberCookie },

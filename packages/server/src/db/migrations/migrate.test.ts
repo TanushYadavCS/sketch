@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 111;
+const EXPECTED_MIGRATION_COUNT = 112;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -167,6 +167,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
     expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -303,6 +304,11 @@ describe("runMigrations — full sequence", () => {
       PRAGMA table_info(indexed_files)
     `.execute(db);
     expect(columns.rows.map((row) => row.name)).toContain("rollup_group_id");
+
+    const connectorColumns = await sql<{ name: string }>`
+      PRAGMA table_info(connector_configs)
+    `.execute(db);
+    expect(connectorColumns.rows.map((row) => row.name)).toContain("credential_source");
   });
 
   it("creates CRM object summaries table", async () => {
@@ -555,7 +561,8 @@ describe("runMigrations — incremental upgrade", () => {
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
         '114-agent-output-deliveries',
-        '115-whatsapp-template-mappings-and-provider-events'
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source'
       )
     `.execute(db);
     await sql`DROP TABLE agent_output_deliveries`.execute(db);
@@ -575,7 +582,8 @@ describe("runMigrations — incremental upgrade", () => {
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
         '114-agent-output-deliveries',
-        '115-whatsapp-template-mappings-and-provider-events'
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -589,6 +597,7 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "113-indexed-file-all-day-flag" },
       { name: "114-agent-output-deliveries" },
       { name: "115-whatsapp-template-mappings-and-provider-events" },
+      { name: "116-connector-credential-source" },
     ]);
   });
 });

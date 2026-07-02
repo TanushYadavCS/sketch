@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 111;
+const EXPECTED_MIGRATION_COUNT = 112;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -144,6 +144,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
     expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -313,6 +314,15 @@ describe("runMigrations on Postgres — full sequence", () => {
         AND column_name = 'rollup_group_id'
     `.execute(db);
     expect(columns.rows).toHaveLength(1);
+
+    const connectorColumns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'connector_configs'
+        AND column_name = 'credential_source'
+    `.execute(db);
+    expect(connectorColumns.rows).toHaveLength(1);
   });
 
   it("creates CRM object summaries table", async () => {

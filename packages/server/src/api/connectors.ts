@@ -10,12 +10,23 @@
  * Route ordering: static paths (/all-files, /search, /sources, /files/...)
  * must be registered before dynamic /:id to prevent param capture.
  */
+import { canvasAppSlugForPersonalConnector, personalCanvasConnectorTypeFromAppId } from "@sketch/shared";
 import { type Context, Hono } from "hono";
 import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { Config } from "../config";
 import { browseClickUpWorkspaces } from "../connectors/clickup";
+import {
+  CanvasConnectorCredentialProvider,
+  ConnectorCredentialConfigError,
+  assertStoredCredentialStorageConfigured,
+  canvasOAuthPlaceholderCredentials,
+  connectorCredentialSourceStatus,
+  isCanvasOAuthConnector,
+  isLocalConnectorBlockedInCanvasMode,
+  resolveConnectorCredentials,
+} from "../connectors/credential-providers";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "../connectors/email/envelope-metadata";
 import type { EmailAddr } from "../connectors/email/normalized-email";
 import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
@@ -39,7 +50,8 @@ import {
 } from "../connectors/search";
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import { removeConnectorSourceItems } from "../connectors/sync-reconcile";
-import type { ApiKeyCredentials, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
+import { parseCredentials, serializeCredentials } from "../connectors/sync-utils";
+import type { ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -136,6 +148,10 @@ function syncInBackground(
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
+      | "CONNECTOR_CREDENTIAL_SOURCE"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
     >
   >,
 ) {
@@ -208,6 +224,23 @@ const createConnectorSchema = z.object({
   scopeConfig: z.record(z.string(), z.unknown()).optional(),
 });
 
+const canvasConnectSchema = z.object({
+  connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
+  callbackUrl: z.string().url(),
+});
+
+const canvasImportSchema = z.object({
+  connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
+  accountId: z.string().trim().min(1).optional(),
+  scopeConfig: z.record(z.string(), z.unknown()).optional(),
+});
+
+const canvasSuggestionSchema = z.object({
+  appId: z.string().trim().min(1).max(128),
+  accountId: z.string().trim().min(1).optional(),
+  source: z.string().trim().min(1).optional(),
+});
+
 const rotateCredentialsSchema = z
   .object({
     api_key: z.string().trim().min(1).optional(),
@@ -251,6 +284,20 @@ const updateScopeSchema = z.object({
   scopeConfig: z.record(z.string(), z.unknown()),
 });
 
+const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
+  google_drive: "google-drive-oauth",
+  google_calendar: "google-calendar-oauth",
+  gmail: "google-gmail-oauth",
+  outlook: "microsoft-outlook-oauth",
+  teams: "microsoft-teams-oauth",
+  fireflies: "fireflies",
+  clickup: "clickup-api-key",
+  notion: "notion",
+  linear: "linear",
+};
+
+const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "clickup", "notion"]);
+
 export function connectorRoutes(
   connectorRepo: ConnectorRepo,
   db: Kysely<DB>,
@@ -265,12 +312,21 @@ export function connectorRoutes(
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
+      | "CONNECTOR_CREDENTIAL_SOURCE"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OPENROUTER_API_KEY"
     >
   >,
 ) {
   const routes = new Hono();
   const fileSharesRepo = createFileSharesRepository(db);
+  const canvasCredentialProvider = new CanvasConnectorCredentialProvider({
+    db,
+    appConfig: appConfig ?? {},
+    logger,
+  });
 
   type ConfigForPermissions = {
     connector_type: string;
@@ -317,6 +373,70 @@ export function connectorRoutes(
     return configVisible(config) && config.sync_status !== "disabled";
   }
 
+  function localConnectorBlockedResponse(c: Context, connectorType: ConnectorType) {
+    return c.json(
+      {
+        error: {
+          code: "CANVAS_CREDENTIAL_SOURCE_REQUIRED",
+          message: `${connectorType} credentials are managed by Canvas in this deployment. Use the Canvas connect flow.`,
+        },
+      },
+      400,
+    );
+  }
+
+  function localCredentialEncryptionRequiredResponse(c: Context) {
+    return c.json(
+      {
+        error: {
+          code: "ENCRYPTION_REQUIRED",
+          message: "Set ENCRYPTION_KEY or CONNECTOR_CREDENTIAL_SOURCE=canvas before storing connector credentials",
+        },
+      },
+      400,
+    );
+  }
+
+  function existingConnectorResponse(config: {
+    id: string;
+    connector_type: string;
+    sync_status: string;
+  }) {
+    return {
+      connector: {
+        id: config.id,
+        connectorType: config.connector_type,
+        syncStatus: config.sync_status,
+        alreadyConnected: true,
+      },
+    };
+  }
+
+  function hasNonEmptyStringArray(scopeConfig: Record<string, unknown>, keys: string[]): boolean {
+    return keys.some(
+      (key) => Array.isArray(scopeConfig[key]) && scopeConfig[key].some((item) => typeof item === "string"),
+    );
+  }
+
+  function hasUsableExistingScopeConfig(
+    connectorType: ConnectorType,
+    config?: { scope_config: string | null },
+  ): boolean {
+    if (!config?.scope_config) return false;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(config.scope_config) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+
+    if (connectorType === "google_drive") return hasNonEmptyStringArray(parsed, ["sharedDrives", "folders"]);
+    if (connectorType === "google_calendar") return hasNonEmptyStringArray(parsed, ["calendarIds"]);
+    if (connectorType === "clickup") return hasNonEmptyStringArray(parsed, ["workspaces", "spaces"]);
+    if (connectorType === "notion") return hasNonEmptyStringArray(parsed, ["rootPages"]);
+    return Object.keys(parsed).length > 0;
+  }
+
   function credentialHintForConnector(connectorType: ConnectorType, credentials: ConnectorCredentials): string | null {
     if (connectorType === "otter") return buildOtterCredentialHint(credentials);
     return credentials.type === "api_key" && credentials.api_key ? buildCredentialHint(credentials.api_key) : null;
@@ -334,6 +454,28 @@ export function connectorRoutes(
     const userId = c.get("sub");
     if (typeof userId !== "string" || !userId) return [];
     return userRepo.getAllEmailsForUser(userId);
+  }
+
+  async function getOwnerEmail(createdBy: string): Promise<string | null> {
+    if (!userRepo) return null;
+    const owner = await userRepo.findById(createdBy);
+    return owner?.email ?? null;
+  }
+
+  async function resolveStoredCredentials(config: {
+    id: string;
+    connector_type: string;
+    credentials: string;
+    credential_source?: string;
+    created_by: string;
+  }) {
+    return resolveConnectorCredentials({
+      db,
+      config,
+      appConfig: appConfig ?? {},
+      ownerEmail: await getOwnerEmail(config.created_by),
+      logger,
+    });
   }
 
   /* ── Static-path routes (must come before /:id) ─────── */
@@ -377,6 +519,7 @@ export function connectorRoutes(
           id: cfg.id,
           connectorType: cfg.connector_type,
           authType: cfg.auth_type,
+          credentialSource: cfg.credential_source,
           scopeConfig: JSON.parse(cfg.scope_config),
           syncStatus: cfg.sync_status,
           lastSyncedAt: cfg.last_synced_at,
@@ -395,6 +538,233 @@ export function connectorRoutes(
     return c.json({ connectors: connectorsWithCounts, teamMemberCount, connectorMemberCounts });
   });
 
+  routes.get("/credential-source", async (c) => {
+    return c.json(await connectorCredentialSourceStatus({ db, appConfig: appConfig ?? {} }));
+  });
+
+  routes.get("/canvas/suggestions", async (c) => {
+    const sub = c.get("sub");
+    if (!sub || typeof sub !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
+    }
+
+    const parsed = canvasSuggestionSchema.safeParse({
+      appId: c.req.query("appId"),
+      accountId: c.req.query("accountId"),
+      source: c.req.query("source"),
+    });
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+    if (parsed.data.source !== "canvas_user_secrets") {
+      return c.json({ suggestion: null });
+    }
+
+    const connectorType = personalCanvasConnectorTypeFromAppId(parsed.data.appId);
+    if (!connectorType) {
+      return c.json({ suggestion: null });
+    }
+
+    const connectorMeta = getConnector(connectorType);
+    if (!connectorMeta.perUserAuth) {
+      return c.json({ suggestion: null });
+    }
+
+    const [status, existingConnector] = await Promise.all([
+      connectorCredentialSourceStatus({ db, appConfig: appConfig ?? {} }),
+      connectorRepo.findByTypeAndOwner(connectorType, sub),
+    ]);
+
+    if (!status.canvasConfigured || !status.canvasCredentialImportConfigured || existingConnector) {
+      return c.json({ suggestion: null });
+    }
+
+    return c.json({
+      suggestion: {
+        connectorType,
+        appId: canvasAppSlugForPersonalConnector(connectorType),
+        ...(parsed.data.accountId ? { accountId: parsed.data.accountId } : {}),
+      },
+    });
+  });
+
+  routes.post("/canvas/connect", async (c) => {
+    const sub = c.get("sub");
+    const email = c.get("email");
+    if (!sub || typeof sub !== "string" || !email) {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in with an email is required" } }, 401);
+    }
+
+    const parsed = canvasConnectSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const connectorType = parsed.data.connectorType as ConnectorType;
+    const connectorMeta = getConnector(connectorType);
+    const appSlug = CANVAS_APP_BY_CONNECTOR[connectorType];
+    if (!appSlug) {
+      return c.json({ error: { code: "NOT_SUPPORTED", message: "Connector is not supported in Canvas mode" } }, 400);
+    }
+    if (!connectorMeta.perUserAuth) {
+      const denied = denyIfNotAdmin(c);
+      if (denied) return denied;
+    }
+
+    try {
+      const provider = await canvasCredentialProvider.loadProvider();
+      const result = await provider.initiateConnection(
+        email,
+        appSlug,
+        parsed.data.callbackUrl,
+        undefined,
+        c.get("role") === "admin" ? "admin" : "member",
+      );
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return c.json({ error: { code: err.code, message: err.message } }, 400);
+      }
+      throw err;
+    }
+  });
+
+  routes.post("/canvas/import", async (c) => {
+    const sub = c.get("sub");
+    const email = c.get("email");
+    if (!sub || typeof sub !== "string" || !email) {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in with an email is required" } }, 401);
+    }
+
+    if (!canvasCredentialProvider.hasCredentialImportConfig()) {
+      return c.json(
+        {
+          error: {
+            code: "CANVAS_CREDENTIAL_IMPORT_NOT_CONFIGURED",
+            message: "Canvas credential import requires a configured private key",
+          },
+        },
+        400,
+      );
+    }
+
+    const parsed = canvasImportSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid request";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const connectorType = parsed.data.connectorType as ConnectorType;
+    const connectorMeta = getConnector(connectorType);
+
+    let existingConnector:
+      | Awaited<ReturnType<typeof connectorRepo.findByTypeAndOwner>>
+      | Awaited<ReturnType<typeof connectorRepo.findConfigsByType>>[number]
+      | undefined;
+
+    if (!connectorMeta.perUserAuth) {
+      const denied = denyIfNotAdmin(c);
+      if (denied) return denied;
+      existingConnector = (await connectorRepo.findConfigsByType(connectorType))[0];
+    } else {
+      existingConnector = await connectorRepo.findByTypeAndOwner(connectorType, sub);
+    }
+
+    let validationCredentials: ConnectorCredentials;
+    try {
+      validationCredentials = await canvasCredentialProvider.mint({
+        connectorType,
+        userEmail: email,
+        accountId: parsed.data.accountId,
+        userOrgRole: c.get("role") === "admin" ? "admin" : "member",
+      });
+      await connectorMeta.validateCredentials(validationCredentials);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return c.json({ error: { code: err.code, message: err.message } }, 400);
+      }
+      const message = err instanceof Error ? err.message : "Canvas credential import failed";
+      logger.warn({ err, connectorType }, "Canvas credential import failed");
+      return c.json({ error: { code: "INVALID_CREDENTIALS", message } }, 400);
+    }
+
+    if (validationCredentials.type === "api_key" && !appConfig?.ENCRYPTION_KEY) {
+      return c.json(
+        {
+          error: {
+            code: "ENCRYPTION_REQUIRED",
+            message: "Canvas static-key import requires ENCRYPTION_KEY so the key is encrypted at rest",
+          },
+        },
+        400,
+      );
+    }
+
+    const needsScope =
+      SCOPE_REQUIRED_CONNECTORS.has(connectorType) &&
+      !parsed.data.scopeConfig &&
+      !hasUsableExistingScopeConfig(connectorType, existingConnector);
+    const storedCredentials: ConnectorCredentials = isCanvasOAuthConnector(connectorType)
+      ? canvasOAuthPlaceholderCredentials(parsed.data.accountId)
+      : validationCredentials;
+
+    const credentialHint =
+      validationCredentials.type === "api_key" && validationCredentials.api_key
+        ? buildCredentialHint(validationCredentials.api_key)
+        : null;
+
+    const scopeConfig =
+      parsed.data.scopeConfig !== undefined
+        ? JSON.stringify(parsed.data.scopeConfig)
+        : (existingConnector?.scope_config ?? undefined);
+
+    if (existingConnector) {
+      const config = await connectorRepo.updateConfig(existingConnector.id, {
+        credentials: serializeCredentials(storedCredentials),
+        credentialSource: "canvas",
+        ...(scopeConfig !== undefined ? { scopeConfig } : {}),
+        syncStatus: needsScope ? "paused" : "pending",
+        errorMessage: null,
+        ...(credentialHint !== null ? { credentialHint } : {}),
+      });
+
+      if (!needsScope) {
+        syncInBackground(db, config.id, logger, appConfig);
+      }
+
+      return c.json(existingConnectorResponse(config));
+    }
+
+    const config = await connectorRepo.createConfig({
+      connectorType,
+      authType: isCanvasOAuthConnector(connectorType) ? "oauth" : "api_key",
+      credentials: serializeCredentials(storedCredentials),
+      credentialSource: "canvas",
+      scopeConfig,
+      syncStatus: needsScope ? "paused" : "pending",
+      createdBy: sub,
+      credentialHint,
+    });
+
+    if (!needsScope) {
+      syncInBackground(db, config.id, logger, appConfig);
+    }
+
+    return c.json(
+      {
+        connector: {
+          id: config.id,
+          connectorType: config.connector_type,
+          syncStatus: config.sync_status,
+          alreadyConnected: false,
+        },
+      },
+      201,
+    );
+  });
+
   /** Create a new connector — validates credentials then auto-triggers first sync. */
   routes.post("/", async (c) => {
     const sub = c.get("sub");
@@ -411,6 +781,19 @@ export function connectorRoutes(
 
     const connectorType = parsed.data.connectorType as ConnectorType;
     const connectorMeta = getConnector(connectorType);
+
+    if (isLocalConnectorBlockedInCanvasMode(appConfig, connectorType)) {
+      return localConnectorBlockedResponse(c, connectorType);
+    }
+
+    try {
+      assertStoredCredentialStorageConfigured(appConfig);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return localCredentialEncryptionRequiredResponse(c);
+      }
+      throw err;
+    }
 
     // Org-wide connectors (perUserAuth: false) are admin-only.
     if (!connectorMeta.perUserAuth) {
@@ -460,7 +843,8 @@ export function connectorRoutes(
     const config = await connectorRepo.createConfig({
       connectorType,
       authType: parsed.data.authType,
-      credentials: JSON.stringify(credentials),
+      credentials: serializeCredentials(credentials),
+      credentialSource: "local",
       scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,
       createdBy: sub,
       credentialHint,
@@ -1035,18 +1419,21 @@ export function connectorRoutes(
     }
 
     try {
-      let credentials = JSON.parse(config.credentials) as ConnectorCredentials;
-      if (credentials.type === "oauth" && connector.refreshTokens) {
+      const resolved = await resolveStoredCredentials(config);
+      let credentials = resolved.credentials;
+      if (resolved.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
         const refreshed = await connector.refreshTokens(credentials as OAuthCredentials);
         if (refreshed) {
           credentials = refreshed;
-          await connectorRepo.updateConfig(config.id, { credentials: JSON.stringify(credentials) });
+          await connectorRepo.updateConfig(config.id, {
+            credentials: serializeCredentials(credentials),
+          });
         }
       }
 
       const result = connector.browseExisting
-        ? await connector.browseExisting({ credentials, logger })
-        : await connector.browse?.({ credentials, logger });
+        ? await connector.browseExisting({ credentials, logger, accessTokenProvider: resolved.accessTokenProvider })
+        : await connector.browse?.({ credentials, logger, accessTokenProvider: resolved.accessTokenProvider });
       if (!result) {
         return c.json({ error: "Connector does not support browsing" }, 400);
       }
@@ -1084,16 +1471,24 @@ export function connectorRoutes(
     }
 
     try {
-      let credentials = JSON.parse(config.credentials) as ConnectorCredentials;
-      if (credentials.type === "oauth" && connector.refreshTokens) {
+      const resolved = await resolveStoredCredentials(config);
+      let credentials = resolved.credentials;
+      if (resolved.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
         const refreshed = await connector.refreshTokens(credentials as OAuthCredentials);
         if (refreshed) {
           credentials = refreshed;
-          await connectorRepo.updateConfig(config.id, { credentials: JSON.stringify(credentials) });
+          await connectorRepo.updateConfig(config.id, {
+            credentials: serializeCredentials(credentials),
+          });
         }
       }
 
-      const items = await connector.browseChildren({ credentials, parentId: c.req.param("parentId"), logger });
+      const items = await connector.browseChildren({
+        credentials,
+        accessTokenProvider: resolved.accessTokenProvider,
+        parentId: c.req.param("parentId"),
+        logger,
+      });
       return c.json({ items });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Browse failed";
@@ -1155,21 +1550,25 @@ export function connectorRoutes(
     if (denied) return denied;
 
     try {
-      const credentials = JSON.parse(config.credentials) as OAuthCredentials;
-      const validCreds = await ensureValidToken(credentials);
+      const resolved = await resolveStoredCredentials(config);
+      const credentials = resolved.credentials as OAuthCredentials;
+      const validCreds = resolved.accessTokenProvider ? credentials : await ensureValidToken(credentials);
 
       // Persist refreshed token if it changed
-      if (validCreds.access_token !== credentials.access_token) {
-        await connectorRepo.updateConfig(config.id, { credentials: JSON.stringify(validCreds) });
+      if (!resolved.accessTokenProvider && validCreds.access_token !== credentials.access_token) {
+        await connectorRepo.updateConfig(config.id, {
+          credentials: serializeCredentials(validCreds),
+        });
       }
 
-      const sharedDrives = await listSharedDrives(validCreds.access_token);
+      const accessToken = resolved.accessTokenProvider ?? validCreds.access_token;
+      const sharedDrives = await listSharedDrives(accessToken);
       const currentScope = JSON.parse(config.scope_config) as Record<string, unknown>;
       const selectedDriveIds = (currentScope.sharedDrives as string[] | undefined) ?? [];
       const selectedFolderIds = (currentScope.folders as string[] | undefined) ?? [];
 
       // Always fetch root folders so users can pick shared drives, My Drive folders, or both
-      const rootFolders = await listMyDriveFolders(validCreds.access_token);
+      const rootFolders = await listMyDriveFolders(accessToken);
 
       return c.json({
         sharedDrives: sharedDrives.map((d) => ({
@@ -1207,14 +1606,18 @@ export function connectorRoutes(
     if (denied) return denied;
 
     try {
-      const credentials = JSON.parse(config.credentials) as OAuthCredentials;
-      const validCreds = await ensureValidToken(credentials);
+      const resolved = await resolveStoredCredentials(config);
+      const credentials = resolved.credentials as OAuthCredentials;
+      const validCreds = resolved.accessTokenProvider ? credentials : await ensureValidToken(credentials);
 
-      if (validCreds.access_token !== credentials.access_token) {
-        await connectorRepo.updateConfig(config.id, { credentials: JSON.stringify(validCreds) });
+      if (!resolved.accessTokenProvider && validCreds.access_token !== credentials.access_token) {
+        await connectorRepo.updateConfig(config.id, {
+          credentials: serializeCredentials(validCreds),
+        });
       }
 
-      const items = await listFolderContents(validCreds.access_token, c.req.param("folderId"));
+      const accessToken = resolved.accessTokenProvider ?? validCreds.access_token;
+      const items = await listFolderContents(accessToken, c.req.param("folderId"));
       return c.json({ items });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to browse folder";
@@ -1259,7 +1662,11 @@ export function connectorRoutes(
     if (denied) return denied;
 
     try {
-      const credentials = JSON.parse(config.credentials) as { type: string; api_key?: string; access_token?: string };
+      const credentials = parseCredentials(config.credentials) as {
+        type: string;
+        api_key?: string;
+        access_token?: string;
+      };
       const token = credentials.api_key ?? credentials.access_token ?? "";
       const workspaces = await browseClickUpWorkspaces(token);
       const currentScope = JSON.parse(config.scope_config) as Record<string, unknown>;
@@ -1334,7 +1741,11 @@ export function connectorRoutes(
     if (denied) return denied;
 
     try {
-      const credentials = JSON.parse(config.credentials) as { type: string; api_key?: string; access_token?: string };
+      const credentials = parseCredentials(config.credentials) as {
+        type: string;
+        api_key?: string;
+        access_token?: string;
+      };
       const token = credentials.api_key ?? credentials.access_token ?? "";
 
       const rootPages = await browseNotionRootPages(token);
@@ -1374,6 +1785,7 @@ export function connectorRoutes(
         id: config.id,
         connectorType: config.connector_type,
         authType: config.auth_type,
+        credentialSource: config.credential_source,
         scopeConfig: JSON.parse(config.scope_config),
         syncStatus: config.sync_status,
         lastSyncedAt: config.last_synced_at,
@@ -1698,6 +2110,19 @@ export function connectorRoutes(
     const denied = denyUnless(c, permissions.canUpdateCredentials);
     if (denied) return denied;
 
+    if (config.credential_source === "canvas") {
+      return localConnectorBlockedResponse(c, config.connector_type as ConnectorType);
+    }
+
+    try {
+      assertStoredCredentialStorageConfigured(appConfig);
+    } catch (err) {
+      if (err instanceof ConnectorCredentialConfigError) {
+        return localCredentialEncryptionRequiredResponse(c);
+      }
+      throw err;
+    }
+
     const parsed = rotateCredentialsSchema.safeParse(await c.req.json());
     if (!parsed.success) {
       return c.json(
@@ -1722,7 +2147,7 @@ export function connectorRoutes(
     }
 
     await connectorRepo.updateConfig(config.id, {
-      credentials: JSON.stringify(credentials),
+      credentials: serializeCredentials(credentials),
       credentialHint: credentialHintForConnector(config.connector_type as ConnectorType, credentials),
       syncStatus: "active",
       errorMessage: null,

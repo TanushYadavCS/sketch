@@ -77,6 +77,10 @@ export const configSchema = z.object({
   // Managed mode
   MANAGED_URL: z.string().optional(),
   MANAGED_AUTH_SECRET: z.string().optional(),
+  CONNECTOR_CREDENTIAL_SOURCE: z.enum(["local", "canvas"]).default("local"),
+  CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  CANVAS_CREDENTIAL_PRIVATE_KEY_PATH: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  CANVAS_CREDENTIAL_PUBLIC_KEY_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Zoho CRM OAuth
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),

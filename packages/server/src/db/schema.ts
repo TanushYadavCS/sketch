@@ -97,6 +97,7 @@ export interface ConnectorConfigsTable {
   connector_type: string;
   auth_type: string;
   credentials: string;
+  credential_source: Generated<string>;
   scope_config: Generated<string>;
 
   sync_status: Generated<string>;
