@@ -1,5 +1,7 @@
 import type { ConnectorType, SyncedItem } from "./types";
 
+const CONNECTOR_SCOPED_PROVIDER_FILE_ID_TYPES = new Set<string>(["google_calendar", "teams"]);
+
 export type SyncIdentity =
   | { kind: "provider_message_id"; connectorConfigId: string; providerMessageId: string }
   | { kind: "provider_file_id"; source: string; providerFileId: string; connectorConfigId?: string };
@@ -33,7 +35,7 @@ export function getSyncIdentity(input: SyncIdentityInput): SyncIdentity {
     };
   }
 
-  if (input.connectorType === "teams") {
+  if (CONNECTOR_SCOPED_PROVIDER_FILE_ID_TYPES.has(input.connectorType)) {
     return {
       kind: "provider_file_id",
       connectorConfigId: input.connectorConfigId,

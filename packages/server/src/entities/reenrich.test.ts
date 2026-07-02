@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EnrichmentDeps, MAX_FILES_PER_RUN } from "../connectors/enrichment";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { RecreateSummary } from "./recreate";
 import { runEnrichmentForFileBatches, runReenrichJob, wipeLlmEnrichmentForFiles } from "./reenrich";
 
 const logger = createTestLogger();
+const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 async function seedBase(db: Kysely<DB>) {
   const now = new Date().toISOString();
@@ -112,6 +114,7 @@ describe("entity re-enrich", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await db.destroy();
   });
 
@@ -343,6 +346,40 @@ describe("entity re-enrich", () => {
     });
 
     expect(seenFlags).toEqual([true, undefined]);
+  });
+
+  it("uses decrypted OpenRouter settings for re-enrichment embeddings", async () => {
+    const settings = createSettingsRepository(db, TEST_KEY);
+    await settings.ensure();
+    await settings.update({
+      llmProvider: "openrouter",
+      anthropicApiKey: "sk-or-db",
+      embeddingProvider: "openrouter",
+      enrichmentEnabled: 1,
+    });
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        data: [{ embedding: Array.from({ length: 3072 }, (_, i) => i / 3072) }],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      runAfter: false,
+      settingsEncryptionKey: TEST_KEY,
+      runEnrichmentImpl: async (deps) => {
+        await deps.embeddingProvider?.embedTexts(["hello"]);
+        return { filesProcessed: 1, filesSkipped: 0, filesFailed: 0, errors: [] };
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.headers).toMatchObject({ Authorization: "Bearer sk-or-db" });
   });
 
   it("uses caller-provided fact types for the rebuild replay", async () => {

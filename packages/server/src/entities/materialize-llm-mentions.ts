@@ -1,37 +1,10 @@
-import type { Kysely } from "kysely";
-import type { DB } from "../db/schema";
-import { type MentionType, type NonPersonMentionType, coerceMentionType, normalizeMentionType } from "./graph";
+import { type NonPersonMentionType, coerceMentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import { materializePersonFact } from "./materialize-person";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
-
-async function countActiveLlmFilesForName(
-  db: Kysely<DB>,
-  normalized: string,
-  mentionType: MentionType,
-  experimentalFlag: boolean,
-): Promise<number> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["indexed_file_id", "subject_name", "raw"])
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
-  const seen = new Set<string>();
-  for (const row of rows) {
-    if (!row.indexed_file_id || !row.subject_name) continue;
-    const raw = readJsonObject(row.raw);
-    const rowType = normalizeMentionType(coerceMentionType(row.subject_name, String(raw.type ?? ""), experimentalFlag));
-    if (rowType !== mentionType) continue;
-    if (normalizeEntityMatchName(mentionType, row.subject_name) !== normalized) continue;
-    seen.add(row.indexed_file_id);
-  }
-  return seen.size;
-}
 
 export async function materializeLlmExtractedFact(
   deps: MaterializeDeps,
@@ -54,7 +27,7 @@ export async function materializeLlmExtractedFact(
   if (!normalized) {
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
-  const fileCount = await countActiveLlmFilesForName(deps.db, normalized, mentionType, deps.experimentalFlag);
+  const fileCount = await deps.countActiveLlmFilesForName(normalized, mentionType);
   if (fileCount < deps.llmPromotionThreshold) {
     return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
   }

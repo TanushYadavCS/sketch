@@ -323,7 +323,8 @@ async function seedAttendeePerson({
   indexedFileId,
   contentHash,
 }: SeedAttendeePersonParams): Promise<void> {
-  if (!attendee.name) return;
+  const subjectName = attendee.name ?? displayNameFromEmail(attendee.email);
+  if (!subjectName) return;
   await factRepo.upsertFact({
     ...factContext,
     indexedFileId,
@@ -331,10 +332,10 @@ async function seedAttendeePerson({
     source: connectorType,
     factType: "attendee",
     relation: "attended",
-    subjectName: attendee.name,
+    subjectName,
     subjectEmail: attendee.email ?? null,
     subjectSource: connectorType,
-    subjectSourceId: `${providerFileId}:${attendee.email ?? attendee.name}`,
+    subjectSourceId: `${providerFileId}:${attendee.email ?? subjectName}`,
     contextSnippet: `Attended ${providerFileId}`,
     raw: { providerFileId, attendee },
   });

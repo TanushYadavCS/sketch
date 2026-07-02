@@ -17,6 +17,7 @@ export const configSchema = z.object({
   // Slack context
   SLACK_CHANNEL_HISTORY_LIMIT: z.coerce.number().default(5),
   SLACK_THREAD_HISTORY_LIMIT: z.coerce.number().default(50),
+  MAX_CONCURRENT_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
 
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
@@ -61,6 +62,14 @@ export const configSchema = z.object({
   // Slack mode
   SLACK_MODE: z.enum(["socket", "http"]).default("socket"),
   SLACK_SIGNING_SECRET: z.string().optional(),
+
+  // WhatsApp providers
+  WHATSAPP_DM_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
+  WHATSAPP_GROUP_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
+  WATI_API_ENDPOINT: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
+  WATI_ACCESS_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  WATI_WEBHOOK_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  WATI_CHANNEL_PHONE_NUMBER: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Security
   ENCRYPTION_KEY: z.string().optional(),
@@ -159,5 +168,19 @@ export function validateConfig(config: Config): void {
   if (config.SLACK_MODE === "http" && !config.SLACK_SIGNING_SECRET) {
     console.error("SLACK_MODE=http requires SLACK_SIGNING_SECRET");
     process.exit(1);
+  }
+  if (config.WHATSAPP_DM_PROVIDER === "wati") {
+    if (!config.WATI_API_ENDPOINT) {
+      console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_API_ENDPOINT");
+      process.exit(1);
+    }
+    if (!config.WATI_ACCESS_TOKEN) {
+      console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_ACCESS_TOKEN");
+      process.exit(1);
+    }
+    if (!config.WATI_WEBHOOK_TOKEN) {
+      console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_WEBHOOK_TOKEN");
+      process.exit(1);
+    }
   }
 }

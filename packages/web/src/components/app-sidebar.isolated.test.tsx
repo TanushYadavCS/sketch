@@ -76,6 +76,15 @@ describe("AppSidebar", () => {
     expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "false");
   });
 
+  it("selects Automations while viewing the builder route", () => {
+    mockPathname = "/scheduled-tasks/task-123/edit";
+
+    renderSidebar("admin");
+
+    expect(screen.getByRole("button", { name: "Automations" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("button", { name: "Home" })).toHaveAttribute("data-active", "false");
+  });
+
   it("shows Account link for managed admins", async () => {
     server.use(
       http.get("/api/setup/status", () =>

@@ -3,23 +3,23 @@
  *
  * In groups, the first message quotes the original mention message.
  */
-import type { WAMessage } from "@whiskeysockets/baileys";
-import type { WhatsAppBot } from "./bot";
+import type { WhatsAppInboundMessage, WhatsAppSendResult, WhatsAppTarget } from "./provider";
+import type { WhatsAppRuntime } from "./runtime";
 
 export function createWhatsAppMessageHandler(
-  whatsapp: WhatsAppBot,
-  jid: string,
-  quotedMessage?: WAMessage,
-): (text: string) => Promise<WAMessage | null> {
+  whatsapp: WhatsAppRuntime,
+  target: WhatsAppTarget,
+  quotedMessage?: WhatsAppInboundMessage,
+): (text: string) => Promise<WhatsAppSendResult | null> {
   let isFirstMessage = true;
   return async (text: string) => {
     if (!whatsapp.isConnected) return null;
-    let sent: WAMessage | null;
+    let sent: WhatsAppSendResult | null;
     if (isFirstMessage && quotedMessage) {
-      sent = await whatsapp.sendText(jid, text, { quoted: quotedMessage });
+      sent = await whatsapp.sendText(target, text, { quotedMessage });
       isFirstMessage = false;
     } else {
-      sent = await whatsapp.sendText(jid, text);
+      sent = await whatsapp.sendText(target, text);
       isFirstMessage = false;
     }
     return sent;

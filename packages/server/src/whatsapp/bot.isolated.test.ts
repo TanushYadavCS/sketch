@@ -7,6 +7,7 @@ import { createTestDb, createTestLogger } from "../test-utils";
 import {
   WhatsAppBot,
   extractContextInfo,
+  extractQuotedMessage,
   extractText,
   hasMediaContent,
   jidToPhoneNumber,
@@ -765,6 +766,41 @@ describe("extractContextInfo", () => {
     };
     const info = extractContextInfo(msg);
     expect(info?.mentionedJid).toEqual(["text@s.whatsapp.net"]);
+  });
+});
+
+describe("extractQuotedMessage", () => {
+  it("extracts quoted message id, participant, and text", () => {
+    const quoted = extractQuotedMessage({
+      stanzaId: "parent-1",
+      participant: "111@s.whatsapp.net",
+      quotedMessage: { conversation: "quoted issue text" },
+    });
+
+    expect(quoted).toEqual({
+      providerMessageId: "parent-1",
+      participantJid: "111@s.whatsapp.net",
+      text: "quoted issue text",
+    });
+  });
+
+  it("uses captions from quoted media messages", () => {
+    const quoted = extractQuotedMessage({
+      stanzaId: "parent-1",
+      participant: "111@s.whatsapp.net",
+      quotedMessage: { imageMessage: { caption: "screenshot caption" } },
+    });
+
+    expect(quoted?.text).toBe("screenshot caption");
+  });
+
+  it("returns undefined without a quoted provider message id", () => {
+    expect(
+      extractQuotedMessage({
+        participant: "111@s.whatsapp.net",
+        quotedMessage: { conversation: "quoted issue text" },
+      }),
+    ).toBeUndefined();
   });
 });
 

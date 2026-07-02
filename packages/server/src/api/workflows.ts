@@ -15,6 +15,8 @@ import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { executeAutomation } from "../workflows/runtime";
 
@@ -56,6 +58,7 @@ interface WorkflowRouteDeps {
   users: ReturnType<typeof createUserRepository>;
   getSlack?: () => SlackBot | null;
   whatsapp?: WhatsAppBot;
+  whatsappRuntime?: WhatsAppRuntime;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -63,6 +66,7 @@ interface WorkflowRouteDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 class WorkflowApiError extends Error {
@@ -197,7 +201,7 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
     };
   }
 
-  const whatsapp = deps.whatsapp;
+  const whatsapp = deps.whatsappRuntime ?? deps.whatsapp;
   if (!whatsapp?.isConnected) {
     throw new WorkflowApiError("NOT_CONNECTED", "WhatsApp is not connected");
   }
@@ -205,7 +209,11 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
   return {
     delivery,
     sendMessage: async (text: string) => {
-      await whatsapp.sendText(resolved.targetId, text);
+      if (deps.whatsappRuntime) {
+        await deps.whatsappRuntime.sendText(whatsappTargetFromDeliveryTarget(resolved.targetId), text);
+      } else {
+        await deps.whatsapp?.sendText(resolved.targetId, text);
+      }
     },
   };
 }
@@ -255,6 +263,7 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     sendDm: deps.sendDm,
     sendMessage: delivery.sendMessage,
     onEvent,
+    limitAgentExecution: deps.limitAgentExecution,
   });
 
   return {

@@ -26,13 +26,14 @@ import { McpServersSection } from "@/components/connections/mcp-servers-section"
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
 import { api } from "@/lib/api";
-import { PlusIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, MagnifyingGlassIcon, PlusIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
 import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
+import { Button } from "@sketch/ui/components/button";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 import { useDashboardAuth } from "./dashboard";
@@ -55,9 +56,40 @@ export const connectionsCallbackRoute = createRoute({
 
 function ConnectionsCallback() {
   useEffect(() => {
-    window.parent?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
-    window.opener?.postMessage({ type: "sketch-integration-connected" }, window.location.origin);
-    window.close();
+    const params = new URLSearchParams(window.location.search);
+    const appId = integrationAppConnectFromSearch(params.get("app"));
+    const error = params.get("error") ?? params.get("connect_error") ?? params.get("error_code");
+    const errorMessage = error ? "Connection was not completed. Please try again." : null;
+    const connectedPath = appId ? `/integrations?verify_connected=${encodeURIComponent(appId)}` : "/integrations";
+    const errorPath = `/integrations?connect_error=1${appId ? `&app=${encodeURIComponent(appId)}` : ""}`;
+    const embedded = window.parent && window.parent !== window;
+    const popup = Boolean(window.opener);
+
+    if (errorMessage) {
+      window.parent?.postMessage(
+        { type: "sketch-integration-connect-error", appId, message: errorMessage },
+        window.location.origin,
+      );
+      window.opener?.postMessage(
+        { type: "sketch-integration-connect-error", appId, message: errorMessage },
+        window.location.origin,
+      );
+      if (embedded || popup) {
+        window.close();
+        return;
+      }
+      window.location.replace(errorPath);
+      return;
+    }
+
+    window.parent?.postMessage({ type: "sketch-integration-connected", appId }, window.location.origin);
+    window.opener?.postMessage({ type: "sketch-integration-connected", appId }, window.location.origin);
+    if (embedded || popup) {
+      window.close();
+      return;
+    }
+
+    window.location.replace(connectedPath);
   }, []);
 
   return (
@@ -73,6 +105,23 @@ function ConnectionsCallback() {
 
 type IntegrationsTab = "applications" | "mcps" | "environment";
 const INTEGRATION_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+const VERIFY_CONNECTION_GRACE_MS = 30_000;
+const VERIFY_CONNECTION_POLL_MS = 1500;
+const APP_NAME_OVERRIDES: Record<string, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  gmail: "Gmail",
+};
+
+type DirectConnectState =
+  | { kind: "idle" }
+  | { kind: "starting"; appId: string }
+  | { kind: "verifying"; appId: string }
+  | { kind: "redirecting"; appId: string; appName: string }
+  | { kind: "provider_missing"; appId: string }
+  | { kind: "already_connected"; appId: string; appName: string }
+  | { kind: "connected"; appId: string; appName?: string }
+  | { kind: "error"; appId: string; message: string };
 
 export function integrationAppSearchFromSearch(value: string | null): string | null {
   const app = value?.trim();
@@ -81,6 +130,31 @@ export function integrationAppSearchFromSearch(value: string | null): string | n
 
 export function integrationAppConnectFromSearch(value: string | null): string | null {
   return integrationAppSearchFromSearch(value);
+}
+
+export function appNameFromId(appId: string): string {
+  const override = APP_NAME_OVERRIDES[appId.trim().toLowerCase()];
+  if (override) return override;
+  return appId
+    .replaceAll(/[_-]+/g, " ")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+function verificationAppFromSearch(params: URLSearchParams): string | null {
+  const app = integrationAppConnectFromSearch(params.get("verify_connected"));
+  if (app) return app;
+  const legacyApp = params.get("connected");
+  if (!legacyApp || legacyApp === "1") return null;
+  return integrationAppConnectFromSearch(legacyApp);
+}
+
+function connectErrorFromSearch(params: URLSearchParams): { appId: string; message: string } | null {
+  if (!params.has("connect_error")) return null;
+  return {
+    appId: integrationAppConnectFromSearch(params.get("app")) ?? "integration",
+    message: "Connection was not completed. Please try again.",
+  };
 }
 
 function removeSearchParams(paramsToRemove: string[]): void {
@@ -104,11 +178,98 @@ export function getPersonallyConnectedAppIds(connections: IntegrationConnection[
   );
 }
 
+function connectionMatchesApp(connection: IntegrationConnection, appId: string): boolean {
+  return connection.appId.trim().toLowerCase() === appId.trim().toLowerCase();
+}
+
+function DirectConnectPanel({
+  state,
+  onSearch,
+  onSetupProvider,
+  onDismiss,
+}: {
+  state: DirectConnectState;
+  onSearch: (appId: string) => void;
+  onSetupProvider: () => void;
+  onDismiss: () => void;
+}) {
+  if (state.kind === "idle") return null;
+
+  const label =
+    state.kind === "redirecting" || state.kind === "already_connected" || (state.kind === "connected" && state.appName)
+      ? state.appName
+      : appNameFromId(state.appId);
+  const isWorking = state.kind === "starting" || state.kind === "verifying" || state.kind === "redirecting";
+  const isSuccess = state.kind === "connected" || state.kind === "already_connected";
+  const title =
+    state.kind === "starting"
+      ? `Preparing ${label}`
+      : state.kind === "verifying"
+        ? `Checking ${label}`
+        : state.kind === "redirecting"
+          ? `Opening ${label}`
+          : state.kind === "provider_missing"
+            ? "Set up integrations first"
+            : state.kind === "already_connected" || state.kind === "connected"
+              ? `${label} is connected`
+              : `Could not connect ${label}`;
+  const description =
+    state.kind === "starting"
+      ? "Checking the exact app and preparing authorization."
+      : state.kind === "verifying"
+        ? "Confirming the connection."
+        : state.kind === "redirecting"
+          ? "Taking you to the authorization screen."
+          : state.kind === "provider_missing"
+            ? "Connect an integration provider before adding apps."
+            : state.kind === "already_connected" || state.kind === "connected"
+              ? "You can return to the conversation and try again."
+              : state.message;
+
+  return (
+    <section className="flex items-start justify-between gap-4 rounded-lg border border-border bg-muted/30 p-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background">
+          {isWorking ? (
+            <SpinnerGapIcon size={18} className="animate-spin text-muted-foreground" aria-hidden />
+          ) : isSuccess ? (
+            <CheckCircleIcon size={18} className="text-green-600" weight="fill" aria-hidden />
+          ) : (
+            <WarningIcon size={18} className="text-amber-600" weight="fill" aria-hidden />
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">{title}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+        </div>
+      </div>
+
+      {!isWorking && (
+        <div className="flex shrink-0 items-center gap-2">
+          {state.kind === "provider_missing" ? (
+            <Button size="sm" onClick={onSetupProvider}>
+              Set up provider
+            </Button>
+          ) : state.kind === "error" ? (
+            <Button size="sm" variant="outline" onClick={() => onSearch(state.appId)}>
+              <MagnifyingGlassIcon size={14} aria-hidden />
+              Search
+            </Button>
+          ) : null}
+          <Button size="sm" variant="outline" onClick={onDismiss}>
+            Done
+          </Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
-function ConnectionsPage() {
+export function ConnectionsPage() {
   const auth = useDashboardAuth();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<IntegrationsTab>(() => {
@@ -122,12 +283,25 @@ function ConnectionsPage() {
   });
   const [requestedAppSearch, setRequestedAppSearch] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
-    return integrationAppSearchFromSearch(new URLSearchParams(window.location.search).get("app"));
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("connect_error")) return null;
+    return integrationAppSearchFromSearch(params.get("app"));
   });
   const [requestedAppConnect, setRequestedAppConnect] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
     return integrationAppConnectFromSearch(new URLSearchParams(window.location.search).get("connect"));
   });
+  const [verifyConnectedAppId, setVerifyConnectedAppId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return verificationAppFromSearch(new URLSearchParams(window.location.search));
+  });
+  const [connectError, setConnectError] = useState<{ appId: string; message: string } | null>(() => {
+    if (typeof window === "undefined") return null;
+    return connectErrorFromSearch(new URLSearchParams(window.location.search));
+  });
+  const [directConnectState, setDirectConnectState] = useState<DirectConnectState>({ kind: "idle" });
+  const directConnectRequestRef = useRef<string | null>(null);
+  const verifyConnectedStartedAtRef = useRef<number | null>(null);
 
   const serversQuery = useQuery({
     queryKey: ["mcp-servers"],
@@ -188,20 +362,184 @@ function ConnectionsPage() {
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
 
+  const invalidateConnections = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["connections"] });
+  }, [queryClient]);
+
   useEffect(() => {
-    if (requestedAppConnect) {
+    if (connectError) {
       setActiveTab("applications");
-      if (!provider) return;
-      setShowAddIntegrationDialog(true);
-      removeSearchParams(["connect"]);
+      setDirectConnectState({ kind: "error", appId: connectError.appId, message: connectError.message });
+      removeSearchParams(["connect_error", "app"]);
+      setConnectError(null);
+      setRequestedAppSearch(null);
       return;
     }
+
+    if (verifyConnectedAppId) {
+      setActiveTab("applications");
+      const verifyStartedAt = verifyConnectedStartedAtRef.current ?? Date.now();
+      verifyConnectedStartedAtRef.current = verifyStartedAt;
+
+      if (serversQuery.isLoading || (provider && connectionsQuery.isLoading)) {
+        setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
+        return;
+      }
+
+      if (!provider) {
+        removeSearchParams(["verify_connected", "connected"]);
+        setVerifyConnectedAppId(null);
+        verifyConnectedStartedAtRef.current = null;
+        setDirectConnectState({
+          kind: "error",
+          appId: verifyConnectedAppId,
+          message: "Sketch could not verify the connection. Set up an integration provider and try again.",
+        });
+        return;
+      }
+
+      const completeVerification = (connection: IntegrationConnection) => {
+        removeSearchParams(["verify_connected", "connected"]);
+        setVerifyConnectedAppId(null);
+        verifyConnectedStartedAtRef.current = null;
+        setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
+        toast.success(`${connection.appName} connected`);
+        invalidateConnections();
+      };
+
+      const failVerification = (message: string) => {
+        removeSearchParams(["verify_connected", "connected"]);
+        setVerifyConnectedAppId(null);
+        verifyConnectedStartedAtRef.current = null;
+        setDirectConnectState({
+          kind: "error",
+          appId: verifyConnectedAppId,
+          message,
+        });
+      };
+
+      const connection = connectionsQuery.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
+      if (connection && isOwnedOrPersonalAppConnection(connection)) {
+        completeVerification(connection);
+        return;
+      }
+
+      if (Date.now() - verifyStartedAt < VERIFY_CONNECTION_GRACE_MS) {
+        setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
+        let cancelled = false;
+        let timeoutId: number | undefined;
+        const poll = () => {
+          timeoutId = window.setTimeout(async () => {
+            const result = await connectionsQuery.refetch();
+            if (cancelled) return;
+            const refreshedConnection = result.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
+            if (refreshedConnection && isOwnedOrPersonalAppConnection(refreshedConnection)) {
+              completeVerification(refreshedConnection);
+              return;
+            }
+            if (Date.now() - verifyStartedAt >= VERIFY_CONNECTION_GRACE_MS) {
+              failVerification("Sketch could not verify the connection. Please try connecting again.");
+              return;
+            }
+            setDirectConnectState({ kind: "verifying", appId: verifyConnectedAppId });
+            poll();
+          }, VERIFY_CONNECTION_POLL_MS);
+        };
+        poll();
+        return () => {
+          cancelled = true;
+          if (timeoutId) window.clearTimeout(timeoutId);
+        };
+      }
+
+      failVerification("Sketch could not verify the connection. Please try connecting again.");
+      return;
+    }
+
     if (!requestedAppSearch) return;
     setActiveTab("applications");
     if (!provider) return;
     setShowAddIntegrationDialog(true);
     removeSearchParams(["app"]);
-  }, [provider, requestedAppConnect, requestedAppSearch]);
+  }, [
+    provider,
+    connectError,
+    verifyConnectedAppId,
+    requestedAppSearch,
+    serversQuery.isLoading,
+    connectionsQuery.isLoading,
+    connectionsQuery.data,
+    connectionsQuery.refetch,
+    invalidateConnections,
+  ]);
+
+  useEffect(() => {
+    if (!requestedAppConnect) return;
+    setActiveTab("applications");
+
+    if (serversQuery.isLoading) {
+      setDirectConnectState({ kind: "starting", appId: requestedAppConnect });
+      return;
+    }
+
+    if (!provider) {
+      removeSearchParams(["connect"]);
+      setRequestedAppConnect(null);
+      setDirectConnectState({ kind: "provider_missing", appId: requestedAppConnect });
+      return;
+    }
+
+    if (connectionsQuery.isLoading) {
+      setDirectConnectState({ kind: "starting", appId: requestedAppConnect });
+      return;
+    }
+
+    const requestKey = `${provider.id}:${requestedAppConnect}`;
+    if (directConnectRequestRef.current === requestKey) return;
+    directConnectRequestRef.current = requestKey;
+    removeSearchParams(["connect"]);
+
+    const existingConnection = connectionsQuery.data?.find((connection) =>
+      connectionMatchesApp(connection, requestedAppConnect),
+    );
+    if (existingConnection && isOwnedOrPersonalAppConnection(existingConnection)) {
+      setRequestedAppConnect(null);
+      setDirectConnectState({
+        kind: "already_connected",
+        appId: requestedAppConnect,
+        appName: existingConnection.appName,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    const appId = requestedAppConnect;
+    const providerId = provider.id;
+    setDirectConnectState({ kind: "starting", appId });
+
+    async function startConnection() {
+      try {
+        const callbackUrl = `${window.location.origin}/integrations/callback?app=${encodeURIComponent(appId)}`;
+        const result = await api.mcpServers.createConnectionIntent(providerId, appId, callbackUrl);
+        if (cancelled) return;
+        setDirectConnectState({ kind: "redirecting", appId: result.app.id, appName: result.app.name });
+        window.location.assign(result.redirectUrl);
+      } catch (err) {
+        if (cancelled) return;
+        setRequestedAppConnect(null);
+        setDirectConnectState({
+          kind: "error",
+          appId,
+          message: err instanceof Error ? err.message : "Sketch could not prepare this integration.",
+        });
+      }
+    }
+
+    void startConnection();
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, requestedAppConnect, serversQuery.isLoading, connectionsQuery.isLoading, connectionsQuery.data]);
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
@@ -237,6 +575,17 @@ function ConnectionsPage() {
           <LoadingSkeleton />
         ) : activeTab === "applications" ? (
           <>
+            <DirectConnectPanel
+              state={directConnectState}
+              onSearch={(appId) => {
+                setDirectConnectState({ kind: "idle" });
+                setRequestedAppConnect(null);
+                setRequestedAppSearch(appId);
+                setShowAddIntegrationDialog(true);
+              }}
+              onSetupProvider={() => setShowProviderSelector(true)}
+              onDismiss={() => setDirectConnectState({ kind: "idle" })}
+            />
             {!provider ? (
               <ConnectionsBanner onConnect={() => setShowProviderSelector(true)} />
             ) : (
@@ -387,8 +736,8 @@ function ConnectionsPage() {
           }}
           providerId={provider.id}
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
-          initialAppId={requestedAppConnect}
-          initialSearch={requestedAppConnect ? null : requestedAppSearch}
+          initialAppId={null}
+          initialSearch={requestedAppSearch}
           onSuccess={invalidateAll}
         />
       )}

@@ -1,40 +1,16 @@
 import type { Kysely } from "kysely";
+import type { Selectable } from "kysely";
 import type { Config } from "../config";
-import type { AgentKnowledgeRefs, AgentOutputItemInput, AgentOutputItemRow } from "../db/repositories/agent-outputs";
-import type { createUserRepository } from "../db/repositories/users";
-import type { DB } from "../db/schema";
+import type {
+  AgentKnowledgeRefs,
+  AgentOutputItemInput,
+  AgentStoredItemRow,
+  AgentStructuredPayload,
+} from "../db/repositories/agent-outputs";
+import type { DB, UsersTable } from "../db/schema";
 import type { Logger } from "../logger";
 
-/**
- * Context handed to {@link AgentDefinition.augmentRuntimeContext}. The engine builds
- * the shared runtime context, then lets a definition add or override fields (e.g. an
- * experimental, definition-specific data slice) before it is serialized into the user
- * message. `baseContext` is the engine-built context so a definition can transform it.
- */
-export interface AgentRuntimeContextArgs {
-  db: Kysely<DB>;
-  config: Config;
-  users: ReturnType<typeof createUserRepository>;
-  userId: string;
-  maxItemsPerSection: number;
-  baseContext: Record<string, unknown>;
-}
-
-/**
- * Context handed to {@link AgentDefinition.onOutputSaved} after an output is persisted.
- * Lets a definition run side effects (e.g. promoting brief todos into durable tasks)
- * without baking definition-specific behavior into the generic engine.
- */
-export interface AgentOutputSavedArgs {
-  db: Kysely<DB>;
-  config: Config;
-  logger: Logger;
-  userId: string;
-  outputId: string;
-  items: AgentOutputItemInput[];
-}
-
-export type AgentStoredItem = AgentOutputItemRow & { knowledgeRefs: AgentKnowledgeRefs };
+export type AgentStoredItem = AgentStoredItemRow;
 
 export interface AgentSectionDef {
   key: string;
@@ -63,8 +39,39 @@ export interface AgentApiItem {
   actionLabel: string | null;
   actionPrompt: string | null;
   sourceUrl: string | null;
+  structuredPayload: AgentStructuredPayload | null;
   knowledgeRefs: AgentKnowledgeRefs;
   sortOrder: number;
+}
+
+export interface AgentRuntimeContextParams {
+  db: Kysely<DB>;
+  user: Selectable<UsersTable>;
+  outputDate: string;
+  timezone: string;
+  now: Date;
+  adminCanReadAllFiles: boolean;
+  contentUserEmails: string[] | undefined;
+}
+
+export interface AgentRuntimeContextArgs {
+  db: Kysely<DB>;
+  config: Config;
+  userId: string;
+  users: {
+    getAllEmailsForUser(userId: string): Promise<string[]>;
+  };
+  maxItemsPerSection: number;
+  baseContext: Record<string, unknown>;
+}
+
+export interface AgentOutputSavedArgs {
+  db: Kysely<DB>;
+  config: Config;
+  logger: Logger;
+  userId: string;
+  outputId: string;
+  items: AgentOutputItemInput[];
 }
 
 /**
@@ -91,20 +98,28 @@ export interface AgentDefinition {
    * Fully static instruction string. Per-user values (enabled sections, item cap,
    * focus) are NOT interpolated here; they flow through the runtime context in the
    * user message so this string stays byte-identical across users for prompt-cache reuse.
-   * `opts.experimentalFlag` may add gated guidance; when the flag is off the string
-   * stays static and cache-shared.
    */
   buildInstructions(opts?: { experimentalFlag?: boolean }): string;
   /** Derive display refs, source URLs, and canonical action labels from indexed data. */
   enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]>;
+  /** Optional per-definition runtime context appended to the agent run JSON. */
+  buildRuntimeContext?(params: AgentRuntimeContextParams): Promise<Record<string, unknown>>;
+  /**
+   * Optional pass over the emitted items before enrichment/validation. Used by
+   * sections whose canonical content is deterministic (e.g. meetings, where the
+   * list comes from the calendar, not the model): reconcile the model's items
+   * against the server-built skeleton in `runtimeContext` so nothing is invented,
+   * dropped, or has its identity fields overwritten by the model.
+   */
+  reconcileItems?(params: {
+    db: Kysely<DB>;
+    items: AgentOutputItemInput[];
+    runtimeContext: Record<string, unknown>;
+  }): Promise<AgentOutputItemInput[]>;
+  /** Optional per-definition runtime context augmentation after the shared context is built. */
+  augmentRuntimeContext?(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>>;
+  /** Optional side effects after an output is persisted. */
+  onOutputSaved?(args: AgentOutputSavedArgs): Promise<void>;
   /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
   toApiItem(item: AgentStoredItem): AgentApiItem;
-  /**
-   * Optional: add or override runtime-context fields before serialization. Returns a
-   * partial object merged over the engine-built context. Used for experimental,
-   * definition-specific data (e.g. open durable tasks for the daily brief).
-   */
-  augmentRuntimeContext?(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>>;
-  /** Optional: side effects to run after an output is persisted (e.g. task promotion). */
-  onOutputSaved?(args: AgentOutputSavedArgs): Promise<void>;
 }

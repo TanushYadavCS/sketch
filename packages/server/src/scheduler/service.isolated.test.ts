@@ -81,7 +81,11 @@ function buildMockSlack() {
 
 function buildMockWhatsApp(connected = true) {
   return {
-    sendText: vi.fn().mockResolvedValue({ key: { id: "wa-message-1" }, messageTimestamp: 1717480800 }),
+    sendText: vi.fn().mockResolvedValue({
+      providerMessageId: "wa-message-1",
+      providerConversationId: "5511999999999@s.whatsapp.net",
+      providerTimestamp: "2024-06-04T10:00:00.000Z",
+    }),
     get isConnected() {
       return connected;
     },
@@ -95,6 +99,7 @@ function buildDeps(
     whatsapp?: ReturnType<typeof buildMockWhatsApp>;
     runAgent?: ReturnType<typeof vi.fn>;
     queueManager?: QueueManager;
+    limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   } = {},
 ) {
   const mockRunAgent =
@@ -119,6 +124,7 @@ function buildDeps(
     runAgent: mockRunAgent,
     buildMcpServers: vi.fn().mockResolvedValue({}),
     loadIntegrationProvider: vi.fn().mockResolvedValue(null),
+    limitAgentExecution: overrides.limitAgentExecution ?? ((work) => work()),
     automationRunsRepo: {
       create: vi.fn().mockResolvedValue("run-1"),
       update: vi.fn().mockResolvedValue(undefined),
@@ -239,16 +245,32 @@ describe("addTask()", () => {
       timezone: "UTC",
       sessionMode: "fresh",
       createdBy: "U_USER1",
+      originPlatform: "slack",
+      originConversationId: "42",
+      originProviderThreadId: "111.222",
+      originMessageId: 12,
     });
 
     expect(task.id).toBeDefined();
     expect(task.prompt).toBe("Send weekly update");
     expect(task.status).toBe("active");
+    expect(task.originChat).toEqual({
+      platform: "slack",
+      conversationId: "42",
+      providerThreadId: "111.222",
+      currentMessageId: 12,
+    });
     expect(cronCallCount).toBe(1);
 
     const dbRow = await repo.getById(task.id);
     expect(dbRow).toBeDefined();
     expect(dbRow?.prompt).toBe("Send weekly update");
+    expect(dbRow).toMatchObject({
+      origin_platform: "slack",
+      origin_conversation_id: "42",
+      origin_provider_thread_id: "111.222",
+      origin_message_id: 12,
+    });
   });
 
   it("creates an interval-type cron with the correct schedule value", async () => {
@@ -479,6 +501,7 @@ describe("executeTask() invokes automation runtime", () => {
         inboxMessagesRepo: deps.inboxMessagesRepo,
         sendDm: deps.sendDm,
         userRepo: deps.userRepo,
+        limitAgentExecution: deps.limitAgentExecution,
       }),
     );
   });
@@ -839,7 +862,11 @@ describe("executeTask() delivery routing", () => {
     await lastExecuteAutomationParams?.sendMessage?.("WhatsApp message");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
-      "5511999999999@s.whatsapp.net",
+      {
+        kind: "dm",
+        phoneE164: "+5511999999999",
+        providerConversationId: "5511999999999@s.whatsapp.net",
+      },
       "WhatsApp message",
     );
 
@@ -884,7 +911,7 @@ describe("executeTask() delivery routing", () => {
     await lastExecuteAutomationParams?.sendMessage?.("Group workflow result");
 
     expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
-      "987654321@g.us",
+      { kind: "group", groupId: "987654321@g.us" },
       "Group workflow result",
     );
 

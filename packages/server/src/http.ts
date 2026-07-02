@@ -37,6 +37,7 @@ import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
+import { watiWebhookRoutes } from "./api/wati-webhook";
 import { webChatRoutes } from "./api/web-chat";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
@@ -70,22 +71,29 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
 import type { WhatsAppBot } from "./whatsapp/bot";
+import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
+import type { WhatsAppRuntime } from "./whatsapp/runtime";
 
 interface AppDeps {
   whatsapp?: WhatsAppBot;
+  whatsappRuntime?: WhatsAppRuntime;
+  watiWebhook?: WatiWhatsAppProvider;
   getSlack?: () => SlackBot | null;
   logger?: Logger;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onSlackDisconnect?: () => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
-  scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById">;
+  scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById"> &
+    Partial<Pick<TaskScheduler, "refreshTaskSchedule" | "executeStepById" | "getTaskById">>;
   runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
@@ -100,6 +108,7 @@ interface AppDeps {
   localDeviceGateway?: LocalDeviceGateway;
   localClaudeSessionService?: LocalClaudeSessionService;
   agentRunService?: AgentRunService;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -135,6 +144,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           inboxMessagesRepo: inboxMessages,
           getSlack: deps.getSlack,
           whatsapp: deps.whatsapp,
+          whatsappRuntime: deps.whatsappRuntime,
           sendDm: deps.sendDm,
         })
       : null;
@@ -185,6 +195,10 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         return c.json({ error: "Invalid request" }, 401);
       }
     });
+  }
+
+  if (deps?.watiWebhook) {
+    app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, logger));
   }
 
   app.use(
@@ -245,9 +259,21 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }
     }
 
-    if (deps?.whatsapp && user.whatsapp_number) {
+    if (deps?.whatsappRuntime && user.whatsapp_number) {
       try {
-        const jid = `${user.whatsapp_number.replace("+", "")}@s.whatsapp.net`;
+        const channelId = phoneE164ToWhatsAppJid(user.whatsapp_number);
+        const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
+        await deps.whatsappRuntime.sendText(
+          { kind: "dm", phoneE164: user.whatsapp_number, providerConversationId: channelId },
+          text,
+        );
+        channels.push("whatsapp");
+      } catch (err) {
+        logger.warn({ err }, "Failed to send magic link via WhatsApp");
+      }
+    } else if (deps?.whatsapp && user.whatsapp_number) {
+      try {
+        const jid = phoneE164ToWhatsAppJid(user.whatsapp_number);
         const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
         await deps.whatsapp.sendText(jid, text);
         channels.push("whatsapp");
@@ -292,6 +318,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       users,
       getSlack: deps?.getSlack,
       whatsapp: deps?.whatsapp,
+      whatsappRuntime: deps?.whatsappRuntime,
       runAgent: deps?.runAgent,
       buildMcpServers: deps?.buildMcpServers,
       loadIntegrationProvider: deps?.loadIntegrationProvider,
@@ -300,6 +327,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       inboxMessagesRepo: inboxMessages,
       sendDm: deps?.sendDm,
       queueManager: deps?.queueManager,
+      limitAgentExecution: deps?.limitAgentExecution,
     }),
   );
   if (deps?.runAgent) {
@@ -316,6 +344,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         inboxMessagesRepo: inboxMessages,
         getSlack: deps.getSlack,
         whatsapp: deps.whatsapp,
+        whatsappRuntime: deps.whatsappRuntime,
         runAgent: deps.runAgent,
         buildMcpServers: deps.buildMcpServers,
         loadIntegrationProvider: deps.loadIntegrationProvider,
@@ -350,12 +379,18 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
   if (deps?.agentRunService) {
-    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService));
+    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService, db));
     app.route("/api/agents", agentRoutes(deps.agentRunService));
   }
   app.route("/api/workspace", createWorkspaceApi({ config }));
   if (deps?.scheduler) {
-    app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, deps.scheduler, logger));
+    app.route(
+      "/api/scheduled-tasks",
+      scheduledTaskRoutes(db, deps.scheduler, {
+        logger,
+        loadIntegrationProvider: deps.loadIntegrationProvider,
+      }),
+    );
   }
   app.route(
     "/api/channels",
@@ -508,7 +543,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   // Managed login redirect: runs before SPA static serving so unauthenticated
   // requests never load the OSS login page. Must be outside the existsSync
   // check so it works even when web assets aren't built (e.g. CI).
-  if (config.MANAGED_URL) {
+  const managedUrl = config.MANAGED_URL;
+  if (managedUrl) {
     app.use("*", async (c, next) => {
       const path = c.req.path;
       if (path.startsWith("/api/") || path === "/health") {
@@ -522,9 +558,15 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         !!(await verifyJwt(platformToken, config.MANAGED_AUTH_SECRET));
 
       if (!isValidPlatformSession) {
-        const loginUrl = new URL("/login", config.MANAGED_URL);
-        const returnTo = new URL(c.req.url).searchParams.get("return_to");
-        if (path === "/login" && returnTo) {
+        const loginUrl = createManagedLoginUrl(managedUrl);
+        const requestUrl = new URL(c.req.url);
+        const returnTo =
+          path === "/login"
+            ? requestUrl.searchParams.get("return_to")
+            : path === "/integrations" || path.startsWith("/integrations/")
+              ? `${requestUrl.pathname}${requestUrl.search}`
+              : null;
+        if (returnTo) {
           loginUrl.searchParams.set("return_to", returnTo);
         }
         return c.redirect(loginUrl.toString());

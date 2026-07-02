@@ -1,6 +1,9 @@
 import { Hono } from "hono";
+import type { Kysely } from "kysely";
+import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
+import type { DB } from "../db/schema";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
-import type { AgentOutputApi, AgentRunService } from "./service";
+import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService } from "./service";
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
@@ -24,6 +27,7 @@ function toBriefShape(output: AgentOutputApi | null) {
     generatedAt: output.generatedAt,
     masthead: output.masthead,
     sections: {
+      meetings: output.sections.meetings ?? [],
       todos: output.sections.todos ?? [],
       customer_updates: output.sections.customer_updates ?? [],
       active_projects: output.sections.active_projects ?? [],
@@ -31,20 +35,39 @@ function toBriefShape(output: AgentOutputApi | null) {
   };
 }
 
-export function dailyBriefRoutes(service: AgentRunService) {
+/**
+ * Whether the reader has connected their own calendar. Drives the meetings
+ * section empty state: a connect nudge when false, an "empty day" line when true.
+ */
+async function hasCalendarConnector(db: Kysely<DB>, userId: string): Promise<boolean> {
+  const row = await db
+    .selectFrom("connector_configs")
+    .select("id")
+    .where("connector_type", "=", "google_calendar")
+    .where("created_by", "=", userId)
+    .limit(1)
+    .executeTakeFirst();
+  return Boolean(row);
+}
+
+export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
   const routes = new Hono();
 
   routes.get("/", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const date = c.req.query("date") || undefined;
-    const result = await service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, userId, date);
+    const [result, calendarConnected] = await Promise.all([
+      service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, userId, date),
+      hasCalendarConnector(db, userId),
+    ]);
     return c.json({
       brief: toBriefShape(result.output),
       running: result.running,
       briefDate: result.outputDate,
       timezone: result.timezone,
       enabledSections: result.enabledSections,
+      calendarConnected,
     });
   });
 
@@ -73,6 +96,35 @@ export function dailyBriefRoutes(service: AgentRunService) {
   return routes;
 }
 
+class ConfigPatchError extends Error {}
+
+function parseDeliveryConfig(value: unknown): AgentDeliveryConfig | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!value || typeof value !== "object") throw new ConfigPatchError("delivery must be an object or null");
+  const raw = value as Record<string, unknown>;
+  if (raw.enabled === false) return null;
+  if (raw.enabled !== true) throw new ConfigPatchError("delivery.enabled must be true or false");
+  const platform = raw.platform;
+  const targetType = raw.targetType;
+  const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+  if (platform !== "slack" && platform !== "whatsapp") {
+    throw new ConfigPatchError("delivery.platform must be slack or whatsapp");
+  }
+  if (targetType !== "channel" && targetType !== "dm" && targetType !== "group") {
+    throw new ConfigPatchError("delivery.targetType must be channel, dm, or group");
+  }
+  if (!targetId) throw new ConfigPatchError("delivery.targetId is required");
+  if (platform === "slack" && targetType !== "channel" && targetType !== "dm") {
+    throw new ConfigPatchError("Slack delivery supports channel or dm targets");
+  }
+  if (platform === "whatsapp" && targetType !== "group") {
+    throw new ConfigPatchError("WhatsApp delivery supports group targets");
+  }
+  const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+  return { enabled: true, platform, targetType, targetId, label };
+}
+
 function parseConfigPatch(body: Record<string, unknown>) {
   const patch: {
     enabled?: boolean;
@@ -81,6 +133,7 @@ function parseConfigPatch(body: Record<string, unknown>) {
     maxItemsPerSection?: number;
     sections?: Record<string, boolean>;
     focus?: string | null;
+    delivery?: AgentDeliveryConfig | null;
   } = {};
   if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
   if (typeof body.scheduleHour === "number" && Number.isInteger(body.scheduleHour)) {
@@ -102,6 +155,8 @@ function parseConfigPatch(body: Record<string, unknown>) {
   if (body.focus === null || typeof body.focus === "string") {
     patch.focus = body.focus as string | null;
   }
+  const delivery = parseDeliveryConfig(body.delivery);
+  if (delivery !== undefined) patch.delivery = delivery;
   return patch;
 }
 
@@ -135,7 +190,19 @@ export function agentRoutes(service: AgentRunService) {
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const agentKey = c.req.param("agentKey");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const agent = await service.updateConfigForUser(agentKey, userId, parseConfigPatch(body));
+    let patch: ReturnType<typeof parseConfigPatch>;
+    try {
+      patch = parseConfigPatch(body);
+      if (patch.delivery !== undefined) {
+        patch.delivery = await service.resolveDeliveryConfigForUser(userId, patch.delivery);
+      }
+    } catch (err) {
+      if (err instanceof ConfigPatchError || err instanceof AgentDeliveryTargetError) {
+        return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
+      }
+      throw err;
+    }
+    const agent = await service.updateConfigForUser(agentKey, userId, patch);
     if (!agent) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     return c.json({ agent });
   });

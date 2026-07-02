@@ -23,7 +23,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { inferAffiliationFromEmail } from "./affiliations";
+import { inferAffiliationFromEmail, isProviderManagedEmailDomain } from "./affiliations";
 import { recreateEntityGraph } from "./recreate";
 import { confirmReview } from "./resolve";
 
@@ -274,6 +274,38 @@ describe("ELP-02: affiliation inference", () => {
       { personEntityId: sharedMailbox.id, email: "support@vendorco.com", evidenceFileId: fileId },
     );
 
+    const observations = await db
+      .selectFrom("entity_candidates")
+      .selectAll()
+      .where("type", "=", "domain_observation")
+      .execute();
+    expect(observations).toHaveLength(0);
+    const rels = await db.selectFrom("entity_relationships").selectAll().execute();
+    expect(rels).toHaveLength(0);
+  });
+
+  it("provider-managed calendar domains skip works_at and candidate accumulation", async () => {
+    const domainsRepo = createEntityDomainsRepository(db);
+    const entityRepo = createEntityRepository(db);
+    const fileId = await seedFile(db, "file-calendar-resource");
+    const calendarResource = await entityRepo.upsertPersonEntity({
+      name: "Calendar Resource",
+      email: "c_room@group.calendar.google.com",
+      subtype: "external",
+      source: "google_calendar",
+      sourceId: "calendar-resource",
+    });
+
+    await inferAffiliationFromEmail(
+      { db, domainsRepo },
+      {
+        personEntityId: calendarResource.id,
+        email: "c_room@group.calendar.google.com",
+        evidenceFileId: fileId,
+      },
+    );
+
+    expect(isProviderManagedEmailDomain("group.v.calendar.google.com")).toBe(true);
     const observations = await db
       .selectFrom("entity_candidates")
       .selectAll()

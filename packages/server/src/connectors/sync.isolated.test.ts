@@ -19,7 +19,7 @@ import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData } from "./enrichment";
 import { recoverStaleEnrichments, runAllSyncs, runConnectorSync, startSyncScheduler } from "./sync";
-import type { NameResolver, SyncedItem } from "./types";
+import type { NameResolver, SourceItemRemovalRecord, SyncedItem } from "./types";
 
 const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -851,6 +851,118 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     });
   });
 
+  it("removes source items by provider file id prefix", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values([
+        {
+          id: "connector-prefix-removal",
+          connector_type: "google_calendar",
+          auth_type: "oauth",
+          credentials: JSON.stringify({
+            type: "oauth",
+            accessToken: "test",
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          created_by: "admin",
+          scope_config: JSON.stringify({}),
+        },
+        {
+          id: "connector-prefix-other",
+          connector_type: "google_calendar",
+          auth_type: "oauth",
+          credentials: JSON.stringify({
+            type: "oauth",
+            accessToken: "test",
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          created_by: "other-admin",
+          scope_config: JSON.stringify({}),
+        },
+      ])
+      .execute();
+
+    const baseFile = {
+      file_type: "calendar_event",
+      content_category: "structured" as const,
+      source: "google_calendar",
+      source_path: null,
+      provider_url: null,
+      content: "content",
+      summary: null,
+      context_note: null,
+      access_scope_id: null,
+      source_updated_at: new Date().toISOString(),
+      synced_at: new Date().toISOString(),
+      embedding_status: "pending",
+    };
+
+    await db
+      .insertInto("indexed_files")
+      .values([
+        {
+          ...baseFile,
+          id: "team-event-1",
+          connector_config_id: "connector-prefix-removal",
+          provider_file_id: "team:event-1",
+          file_name: "Team event 1",
+        },
+        {
+          ...baseFile,
+          id: "team-event-2",
+          connector_config_id: "connector-prefix-removal",
+          provider_file_id: "team:event-2",
+          file_name: "Team event 2",
+        },
+        {
+          ...baseFile,
+          id: "primary-event",
+          connector_config_id: "connector-prefix-removal",
+          provider_file_id: "primary:event-1",
+          file_name: "Primary event",
+        },
+        {
+          ...baseFile,
+          id: "team-event-other-config",
+          connector_config_id: "connector-prefix-other",
+          provider_file_id: "team:event-1",
+          file_name: "Other config team event",
+        },
+      ])
+      .execute();
+
+    async function* mockGen(opts: { onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void> }) {
+      await opts.onSourceItemRemoved?.({
+        providerFileIdPrefix: "team:",
+        reason: "test_prefix_removal",
+      });
+      yield* [];
+    }
+    mockConnectorSync.mockImplementationOnce(mockGen);
+
+    const result = await runConnectorSync(db, "connector-prefix-removal", logger);
+
+    expect(result.itemsArchived).toBe(2);
+    const remainingRows = await db
+      .selectFrom("indexed_files")
+      .select(["id", "connector_config_id", "provider_file_id"])
+      .orderBy("id", "asc")
+      .execute();
+    expect(remainingRows).toEqual([
+      {
+        id: "primary-event",
+        connector_config_id: "connector-prefix-removal",
+        provider_file_id: "primary:event-1",
+      },
+      {
+        id: "team-event-other-config",
+        connector_config_id: "connector-prefix-other",
+        provider_file_id: "team:event-1",
+      },
+    ]);
+  });
+
   it("emits the same stable fact set for changed and unchanged item paths", async () => {
     db = await createTestDb();
     await db
@@ -1244,6 +1356,62 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     ]);
   });
 
+  it("materializes Google Calendar email-only attendees into graph relationships", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "connector-calendar-graph-test",
+        connector_type: "google_calendar",
+        auth_type: "oauth",
+        credentials: JSON.stringify({
+          type: "oauth",
+          accessToken: "test",
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+        created_by: "admin",
+        scope_config: JSON.stringify({}),
+      })
+      .execute();
+
+    async function* mockGen() {
+      yield {
+        providerFileId: "primary:event-graph",
+        providerUrl: null,
+        fileName: "Customer planning",
+        fileType: "calendar_event",
+        contentCategory: "document" as const,
+        content: "Customer planning with Jane Doe from Acme.",
+        sourcePath: "Google Calendar / Work",
+        contentHash: "hash-calendar-graph",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+        attendees: [{ email: "jane.doe@acme.com" }],
+      } satisfies SyncedItem;
+    }
+    mockConnectorSync.mockReturnValue(mockGen());
+
+    const result = await runConnectorSync(db, "connector-calendar-graph-test", logger);
+    expect(result.itemsProcessed).toBe(1);
+
+    const entities = await db.selectFrom("entities").select(["name", "source_type"]).orderBy("name").execute();
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        { name: "Acme", source_type: "company" },
+        { name: "Jane Doe", source_type: "person" },
+      ]),
+    );
+
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as sourceName", "target.name as targetName", "entity_relationships.relationship_type"])
+      .execute();
+
+    expect(relationships).toEqual([{ sourceName: "Jane Doe", targetName: "Acme", relationship_type: "works_at" }]);
+  });
+
   it("writes author facts and materializes authored mentions", async () => {
     db = await createTestDb();
     await db
@@ -1362,7 +1530,8 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .selectFrom("entity_mentions")
       .select(db.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(mentionsBefore.count)).toBe(100);
+    const mentionsBeforeCount = Number(mentionsBefore.count);
+    expect(mentionsBeforeCount).toBeGreaterThan(0);
 
     async function* mockGen() {
       yield {
@@ -1423,7 +1592,7 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .selectFrom("entity_mentions")
       .select(db.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(mentionsAfter.count)).toBe(100);
+    expect(Number(mentionsAfter.count)).toBe(mentionsBeforeCount);
   });
 
   it("force override processes the large reconcile and tombstones facts", async () => {

@@ -11,8 +11,9 @@ import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
+import { up as applyScheduledTaskBuilderRevisions } from "./107-scheduled-task-builder-revisions";
 
-const EXPECTED_MIGRATION_COUNT = 113;
+const EXPECTED_MIGRATION_COUNT = 121;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -158,17 +159,25 @@ describe("runMigrations — full sequence", () => {
     expect(names[99]).toBe("104-daily-brief-item-metadata");
     expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
     expect(names[101]).toBe("106-agents");
-    expect(names[102]).toBe("107-tasks");
-    expect(names[103]).toBe("108-tasks-owner");
-    expect(names[104]).toBe("109-sub-entities");
-    expect(names[105]).toBe("110-tasks-assignee-name");
-    expect(names[106]).toBe("111-milestone-series-and-value-signature");
-    expect(names[107]).toBe("112-work-cycles");
-    expect(names[108]).toBe("113-work-cycles-connector");
-    expect(names[109]).toBe("114-work-cycles-connector-key");
-    expect(names[110]).toBe("115-container-name-qualification");
-    expect(names[111]).toBe("116-entity-provenance-tier");
-    expect(names[112]).toBe("117-trunk-name-embeddings");
+    expect(names[102]).toBe("107-scheduled-task-builder-revisions");
+    expect(names[103]).toBe("108-scheduled-task-origin-chat");
+    expect(names[104]).toBe("109-scheduled-task-origin-message-id");
+    expect(names[105]).toBe("110-google-calendar-provider-file-scope");
+    expect(names[106]).toBe("111-settings-embedding-provider");
+    expect(names[107]).toBe("112-agent-output-structured-payload");
+    expect(names[108]).toBe("113-indexed-file-all-day-flag");
+    expect(names[109]).toBe("114-agent-output-deliveries");
+    expect(names[110]).toBe("115-tasks");
+    expect(names[111]).toBe("116-tasks-owner");
+    expect(names[112]).toBe("117-sub-entities");
+    expect(names[113]).toBe("118-tasks-assignee-name");
+    expect(names[114]).toBe("119-milestone-series-and-value-signature");
+    expect(names[115]).toBe("120-work-cycles");
+    expect(names[116]).toBe("121-work-cycles-connector");
+    expect(names[117]).toBe("122-work-cycles-connector-key");
+    expect(names[118]).toBe("123-container-name-qualification");
+    expect(names[119]).toBe("124-entity-provenance-tier");
+    expect(names[120]).toBe("125-trunk-name-embeddings");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -647,6 +656,15 @@ describe("runMigrations — full sequence", () => {
     });
   });
 
+  it("creates agent output delivery audit storage", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const result = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='agent_output_deliveries'
+    `.execute(db);
+    expect(result.rows).toHaveLength(1);
+  });
+
   it("running migrations twice is idempotent (only applies each migration once)", async () => {
     await runMigrations(db, { quiet: true });
     await runMigrations(db, { quiet: true });
@@ -698,5 +716,20 @@ describe("runMigrations — incremental upgrade", () => {
       SELECT name FROM kysely_migration ORDER BY name ASC
     `.execute(db);
     expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
+  });
+
+  it("keeps the scheduled task revision migration idempotent when its columns already exist", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await expect(applyScheduledTaskBuilderRevisions(db as unknown as Kysely<unknown>)).resolves.not.toThrow();
+
+    const columns = await sql<{ name: string }>`PRAGMA table_info('scheduled_tasks')`.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "updated_at" }),
+        expect.objectContaining({ name: "revision" }),
+        expect.objectContaining({ name: "last_edited_by" }),
+      ]),
+    );
   });
 });

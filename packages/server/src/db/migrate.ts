@@ -106,17 +106,25 @@ import * as m103 from "./migrations/103-daily-briefs";
 import * as m104 from "./migrations/104-daily-brief-item-metadata";
 import * as m105 from "./migrations/105-normalize-indexed-file-source-timestamps";
 import * as m106 from "./migrations/106-agents";
-import * as m107 from "./migrations/107-tasks";
-import * as m108 from "./migrations/108-tasks-owner";
-import * as m109 from "./migrations/109-sub-entities";
-import * as m110 from "./migrations/110-tasks-assignee-name";
-import * as m111 from "./migrations/111-milestone-series-and-value-signature";
-import * as m112 from "./migrations/112-work-cycles";
-import * as m113 from "./migrations/113-work-cycles-connector";
-import * as m114 from "./migrations/114-work-cycles-connector-key";
-import * as m115 from "./migrations/115-container-name-qualification";
-import * as m116 from "./migrations/116-entity-provenance-tier";
-import * as m117 from "./migrations/117-trunk-name-embeddings";
+import * as m107 from "./migrations/107-scheduled-task-builder-revisions";
+import * as m108 from "./migrations/108-scheduled-task-origin-chat";
+import * as m109 from "./migrations/109-scheduled-task-origin-message-id";
+import * as m110 from "./migrations/110-google-calendar-provider-file-scope";
+import * as m111 from "./migrations/111-settings-embedding-provider";
+import * as m112 from "./migrations/112-agent-output-structured-payload";
+import * as m113 from "./migrations/113-indexed-file-all-day-flag";
+import * as m114 from "./migrations/114-agent-output-deliveries";
+import * as m115 from "./migrations/115-tasks";
+import * as m116 from "./migrations/116-tasks-owner";
+import * as m117 from "./migrations/117-sub-entities";
+import * as m118 from "./migrations/118-tasks-assignee-name";
+import * as m119 from "./migrations/119-milestone-series-and-value-signature";
+import * as m120 from "./migrations/120-work-cycles";
+import * as m121 from "./migrations/121-work-cycles-connector";
+import * as m122 from "./migrations/122-work-cycles-connector-key";
+import * as m123 from "./migrations/123-container-name-qualification";
+import * as m124 from "./migrations/124-entity-provenance-tier";
+import * as m125 from "./migrations/125-trunk-name-embeddings";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -227,17 +235,25 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "104-daily-brief-item-metadata": m104,
           "105-normalize-indexed-file-source-timestamps": m105,
           "106-agents": m106,
-          "107-tasks": m107,
-          "108-tasks-owner": m108,
-          "109-sub-entities": m109,
-          "110-tasks-assignee-name": m110,
-          "111-milestone-series-and-value-signature": m111,
-          "112-work-cycles": m112,
-          "113-work-cycles-connector": m113,
-          "114-work-cycles-connector-key": m114,
-          "115-container-name-qualification": m115,
-          "116-entity-provenance-tier": m116,
-          "117-trunk-name-embeddings": m117,
+          "107-scheduled-task-builder-revisions": m107,
+          "108-scheduled-task-origin-chat": m108,
+          "109-scheduled-task-origin-message-id": m109,
+          "110-google-calendar-provider-file-scope": m110,
+          "111-settings-embedding-provider": m111,
+          "112-agent-output-structured-payload": m112,
+          "113-indexed-file-all-day-flag": m113,
+          "114-agent-output-deliveries": m114,
+          "115-tasks": m115,
+          "116-tasks-owner": m116,
+          "117-sub-entities": m117,
+          "118-tasks-assignee-name": m118,
+          "119-milestone-series-and-value-signature": m119,
+          "120-work-cycles": m120,
+          "121-work-cycles-connector": m121,
+          "122-work-cycles-connector-key": m122,
+          "123-container-name-qualification": m123,
+          "124-entity-provenance-tier": m124,
+          "125-trunk-name-embeddings": m125,
         };
       },
     },

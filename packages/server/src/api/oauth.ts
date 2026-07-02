@@ -16,6 +16,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { verifyJwt } from "../auth/jwt";
 import type { Config } from "../config";
+import { GOOGLE_CALENDAR_SCOPE } from "../connectors/google-calendar";
 import { ensureValidToken } from "../connectors/google-drive";
 import {
   createMicrosoftGraphClient,
@@ -67,7 +68,7 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
-const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "gmail"]);
+const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "gmail"]);
 const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
 const MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE = "https://graph.microsoft.com/.default";
@@ -106,17 +107,30 @@ function cleanupExpiredStates() {
   }
 }
 
-function googleConnectorFromQuery(value: string | undefined): ConnectorType {
-  return value === "gmail" ? "gmail" : "google_drive";
+export function googleConnectorFromQuery(value: string | undefined): ConnectorType {
+  if (value === "gmail") return "gmail";
+  if (value === "google_calendar" || value === "calendar") return "google_calendar";
+  return "google_drive";
 }
 
-function googleScopesFor(connectorType: ConnectorType): string {
-  const providerScope = connectorType === "gmail" ? GMAIL_SCOPE : DRIVE_SCOPE;
+export function googleScopesFor(connectorType: ConnectorType): string {
+  const providerScope =
+    connectorType === "gmail" ? GMAIL_SCOPE : connectorType === "google_calendar" ? GOOGLE_CALENDAR_SCOPE : DRIVE_SCOPE;
   return `${providerScope} ${USERINFO_SCOPE}`;
 }
 
 function googleConnectorName(connectorType: ConnectorType): string {
-  return connectorType === "gmail" ? "Gmail" : "Google Drive";
+  if (connectorType === "gmail") return "Gmail";
+  if (connectorType === "google_calendar") return "Google Calendar";
+  return "Google Drive";
+}
+
+export function initialGoogleScopeConfig(connectorType: ConnectorType): Record<string, unknown> {
+  return connectorType === "google_calendar" ? { calendarIds: [] } : {};
+}
+
+export function shouldRunGoogleFirstSync(connectorType: ConnectorType): boolean {
+  return connectorType === "gmail";
 }
 
 function microsoftConnectorFromQuery(value: string | undefined): ConnectorType {
@@ -377,7 +391,7 @@ export function oauthRoutes(
         connectorType,
         authType: "oauth",
         credentials: JSON.stringify(validCreds),
-        scopeConfig: JSON.stringify({}),
+        scopeConfig: JSON.stringify(initialGoogleScopeConfig(connectorType)),
         createdBy: userId,
       });
 
@@ -386,12 +400,9 @@ export function oauthRoutes(
         "Google OAuth tokens saved",
       );
 
-      // Gmail has no post-connect scope-picker step to kick off the first sync
-      // (unlike Drive's folder picker), so connecting would otherwise leave the
-      // user on an empty Files list. Start a background sync with default scope.
-      if (connectorType === "gmail") {
+      if (shouldRunGoogleFirstSync(connectorType)) {
         runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
-          logger.error({ err, connectorId: connectorConfig.id }, "Gmail first sync failed");
+          logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Google first sync failed");
         });
       }
 

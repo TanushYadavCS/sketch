@@ -10,6 +10,7 @@
 
 export type IntegrationType =
   | "google_drive"
+  | "google_calendar"
   | "gmail"
   | "outlook"
   | "teams"
@@ -17,6 +18,7 @@ export type IntegrationType =
   | "notion"
   | "linear"
   | "fireflies"
+  | "otter"
   | "zoho_crm";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
@@ -96,6 +98,8 @@ export interface IntegrationDefinition {
   scopeType: "none" | "flat" | "nested" | "tree";
   /** Noun for scope items in the picker (pages, spaces, folders). */
   scopeItemNoun?: string;
+  /** Scope config key for flat generic pickers. Defaults to rootPages. */
+  scopeConfigKey?: string;
   /**
    * true  = each user holds their own credential row (per-user); any authenticated user can add it.
    * false = a single org-wide credential drives sync for everyone (admin-only).
@@ -221,6 +225,45 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     connectSteps: [
       "Create an OAuth 2.0 Client in Google Cloud Console",
       "Enable the Gmail API for your project",
+      "Add the redirect URI shown below to your OAuth client",
+      "Paste the Client ID and Client Secret, then connect with Google",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: true,
+  },
+  {
+    type: "google_calendar",
+    name: "Google Calendar",
+    description: "Calendar events and meetings",
+    category: "Calendar",
+    color: "#4285F4",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: [
+      {
+        key: "client_id",
+        label: "Client ID",
+        type: "text",
+        placeholder: "123456789.apps.googleusercontent.com",
+        helpText: "OAuth 2.0 Client ID from Google Cloud Console",
+      },
+      {
+        key: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        placeholder: "GOCSPX-...",
+        helpText: "OAuth 2.0 Client Secret",
+      },
+    ],
+    scopeLabel: "calendars",
+    scopeType: "flat",
+    scopeItemNoun: "calendars",
+    scopeConfigKey: "calendarIds",
+    itemNoun: "events",
+    credentialUrl: "https://console.cloud.google.com/apis/credentials",
+    connectSteps: [
+      "Create an OAuth 2.0 Client in Google Cloud Console",
+      "Enable the Google Calendar API for your project",
       "Add the redirect URI shown below to your OAuth client",
       "Paste the Client ID and Client Secret, then connect with Google",
     ],
@@ -380,6 +423,41 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Go to Fireflies Settings → Integrations → Fireflies API",
       "Generate an API key",
       "Paste the key below",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "otter",
+    name: "Otter",
+    description: "Meeting transcripts from Otter",
+    category: "Meetings",
+    color: "#1264FF",
+    authType: "api_key",
+    authFields: [
+      {
+        key: "email",
+        label: "Otter email",
+        type: "text",
+        placeholder: "you@example.com",
+        helpText: "Use the email address on the Otter account that can access the transcripts.",
+      },
+      {
+        key: "password",
+        label: "Otter password",
+        type: "password",
+        placeholder: "Otter password",
+        helpText: "If this account uses Google or SSO sign-in, create or reset an Otter password in Otter first.",
+      },
+    ],
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://help.otter.ai/hc/en-us/articles/360047845154-Change-or-reset-your-password",
+    connectSteps: [
+      "Enter the Otter email and password for the account that owns or can access the transcripts",
+      "If the account uses Google or SSO sign-in, create or reset an Otter password first",
+      "Sketch validates the Otter session and syncs recent owned and shared transcripts",
     ],
     perUserAuth: true,
     requiresOAuthClientSetup: false,

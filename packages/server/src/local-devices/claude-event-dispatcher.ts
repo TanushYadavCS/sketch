@@ -11,6 +11,7 @@ import { type createSettingsRepository, parseOrgContext } from "../db/repositori
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { extensionToMime } from "../files";
+import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
@@ -20,6 +21,8 @@ import type { SlackBot } from "../slack/bot";
 import { createSlackMessageHandler } from "../slack/message-handler";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
+import { type WhatsAppSendResult, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import type { LocalClaudeEventDelivery } from "./claude-sessions";
 
 export interface LocalClaudeEventDispatcherDeps {
@@ -39,6 +42,7 @@ export interface LocalClaudeEventDispatcherDeps {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   getSlack?: () => SlackBot | null;
   whatsapp?: WhatsAppBot;
+  whatsappRuntime?: WhatsAppRuntime;
   sendDm?: RunAgentParams["sendDm"];
 }
 
@@ -92,6 +96,13 @@ function pendingUploadsFromAgentResult(result: unknown): string[] {
   return (result as { pendingUploads?: string[] }).pendingUploads ?? [];
 }
 
+function pendingIntegrationConnectionsFromAgentResult(result: unknown) {
+  if (!result || typeof result !== "object") return [];
+  if (!("pendingIntegrationConnections" in result)) return [];
+  return (result as { pendingIntegrationConnections?: Parameters<typeof appendIntegrationConnectionLinks>[1] })
+    .pendingIntegrationConnections;
+}
+
 function providerTimestampFromWhatsApp(message: { messageTimestamp?: unknown } | null | undefined): string | null {
   const seconds = Number(message?.messageTimestamp);
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
@@ -125,11 +136,12 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
 
   async function captureWhatsAppBotReply(params: {
     conversationId: number;
-    sent: Awaited<ReturnType<ReturnType<typeof createWhatsAppMessageHandler>>>;
+    sent: WhatsAppSendResult | Awaited<ReturnType<WhatsAppBot["sendText"]>> | null;
     text: string;
     botName?: string | null;
   }): Promise<void> {
-    const providerMessageId = params.sent?.key?.id;
+    const providerMessageId =
+      params.sent && "providerMessageId" in params.sent ? params.sent.providerMessageId : params.sent?.key?.id;
     if (!providerMessageId) return;
     await deps.conversations.insertMessage({
       conversationId: params.conversationId,
@@ -139,17 +151,25 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       isBot: true,
       addressedToSketch: false,
       text: params.text,
-      providerTimestamp: providerTimestampFromWhatsApp(params.sent),
+      providerTimestamp:
+        params.sent && "providerTimestamp" in params.sent
+          ? params.sent.providerTimestamp
+          : providerTimestampFromWhatsApp(params.sent),
     });
   }
 
   async function deliverResult(delivery: LocalClaudeEventDelivery, result: unknown, botName?: string | null) {
-    const finalText = finalTextFromAgentResult(result);
     const pendingUploads = pendingUploadsFromAgentResult(result);
     const target = delivery.session.origin_delivery_target;
     const originPlatform = platform(delivery.session.origin_platform);
     const conversationId = delivery.session.origin_conversation_id;
     if (!originPlatform || !target) return;
+    const finalText = appendIntegrationConnectionLinks(
+      finalTextFromAgentResult(result),
+      pendingIntegrationConnectionsFromAgentResult(result),
+      originPlatform,
+      { BASE_URL: deps.config.BASE_URL, PORT: deps.config.PORT },
+    );
 
     if (originPlatform === "slack") {
       const slack = deps.getSlack?.();
@@ -172,10 +192,23 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       return;
     }
 
+    if (deps.whatsappRuntime?.isConnected) {
+      const whatsAppTarget = whatsappTargetFromDeliveryTarget(target);
+      const onFinalMessage = createWhatsAppMessageHandler(deps.whatsappRuntime, whatsAppTarget);
+      if (finalText) {
+        const sent = await onFinalMessage(finalText);
+        if (conversationId) await captureWhatsAppBotReply({ conversationId, sent, text: finalText, botName });
+      }
+      for (const filePath of pendingUploads) {
+        const ext = filePath.split(".").pop() ?? "";
+        await deps.whatsappRuntime.sendFile(whatsAppTarget, filePath, extensionToMime(ext), basename(filePath));
+      }
+      return;
+    }
+
     if (!deps.whatsapp?.isConnected) return;
-    const onFinalMessage = createWhatsAppMessageHandler(deps.whatsapp, target);
     if (finalText) {
-      const sent = await onFinalMessage(finalText);
+      const sent = await deps.whatsapp.sendText(target, finalText);
       if (conversationId) await captureWhatsAppBotReply({ conversationId, sent, text: finalText, botName });
     }
     for (const filePath of pendingUploads) {

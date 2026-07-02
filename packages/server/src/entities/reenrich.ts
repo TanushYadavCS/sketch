@@ -1,10 +1,14 @@
 import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { createEmbeddingProvider } from "../connectors/embeddings";
 import { floorRetryForDomains } from "../connectors/engagement-floor";
 import { type EnrichmentDeps, type EnrichmentResult, MAX_FILES_PER_RUN, runEnrichment } from "../connectors/enrichment";
+import {
+  createEnrichmentEmbeddingProvider,
+  resolveOpenRouterEnrichmentConfig,
+} from "../connectors/enrichment-providers";
 import { type IndexedFileFactType, PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import type { MaterializeProgress } from "./materialize";
 import {
@@ -70,6 +74,8 @@ export interface ReenrichDeps {
   coMentionContributesToThreshold?: number;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
+  openRouterApiKey?: string | null;
+  settingsEncryptionKey?: string;
   /**
    * Threads the experimental gate into the re-enrich extraction phase so the
    * flag-gated extraction-time spine features (tool classification,
@@ -493,19 +499,16 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     deps.onPhase?.("wiping");
     deps.onProgress?.({ phase: "wipe", completed: 0, total: 1 });
-    const settings = await deps.db
-      .selectFrom("settings")
-      .select("gemini_api_key")
-      .where("id", "=", "default")
-      .executeTakeFirst();
-    const embeddingProvider = settings?.gemini_api_key
-      ? createEmbeddingProvider({
-          provider: "gemini",
-          apiKey: settings.gemini_api_key,
-          maxRpm: deps.geminiMaxRpm,
-          maxRetries: deps.geminiMaxRetries,
-        })
-      : null;
+    const settings = await createSettingsRepository(deps.db, deps.settingsEncryptionKey).get();
+    const openRouterConfig = resolveOpenRouterEnrichmentConfig(settings ?? null, deps.openRouterApiKey);
+    const embeddingProvider = createEnrichmentEmbeddingProvider({
+      geminiApiKey: settings?.gemini_api_key,
+      embeddingProvider: settings?.embedding_provider,
+      geminiMaxRpm: deps.geminiMaxRpm,
+      geminiMaxRetries: deps.geminiMaxRetries,
+      logger: deps.logger,
+      ...openRouterConfig,
+    });
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const wipe = await wipeLlmEnrichmentForFiles(
       deps.db,

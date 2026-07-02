@@ -23,16 +23,14 @@ import { isOwnedOrPersonalAppConnection } from "./connection-status";
 type AddIntegrationStep =
   | { kind: "search" }
   | { kind: "direct_loading"; appId: string }
-  | { kind: "direct_ready"; app: IntegrationApp }
+  | { kind: "direct_ready"; app: IntegrationApp; redirectUrl: string }
   | { kind: "direct_not_found"; appId: string }
   | { kind: "oauth"; app: IntegrationApp }
   | { kind: "oauth_cancelled"; app: IntegrationApp }
   | { kind: "popup_blocked"; app: IntegrationApp }
   | { kind: "connected"; app: IntegrationApp };
 
-function normalizeAppLookup(value: string | undefined): string {
-  return value?.trim().toLowerCase() ?? "";
-}
+const OAUTH_POPUP_CLOSED_GRACE_MS = 30_000;
 
 function appNameFromId(appId: string): string {
   return appId
@@ -69,6 +67,7 @@ export function AddIntegrationDialog({
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const oauthWindowRef = useRef<Window | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const oauthAttemptRef = useRef(0);
   const cancelledRef = useRef(false);
   const directRequestRef = useRef<string | null>(null);
 
@@ -122,12 +121,9 @@ export function AddIntegrationDialog({
 
     async function loadDirectApp() {
       try {
-        const result = await api.mcpServers.listApps(providerId, appId, 10);
-        const target = normalizeAppLookup(appId);
-        const app = result.apps.find(
-          (candidate) => normalizeAppLookup(candidate.id) === target || normalizeAppLookup(candidate.name) === target,
-        );
-        if (!cancelled) setStep(app ? { kind: "direct_ready", app } : { kind: "direct_not_found", appId });
+        const callbackUrl = `${window.location.origin}/integrations/callback`;
+        const result = await api.mcpServers.createConnectionIntent(providerId, appId, callbackUrl);
+        if (!cancelled) setStep({ kind: "direct_ready", app: result.app, redirectUrl: result.redirectUrl });
       } catch {
         if (!cancelled) {
           toast.error("Failed to load integration");
@@ -182,6 +178,7 @@ export function AddIntegrationDialog({
 
   const resetAndClose = () => {
     cancelledRef.current = true;
+    oauthAttemptRef.current += 1;
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = undefined;
@@ -199,52 +196,121 @@ export function AddIntegrationDialog({
     onOpenChange(false);
   };
 
+  const startOAuthWindow = (
+    app: IntegrationApp,
+    redirectUrl: string,
+    preopenedPopup?: Window | null,
+    attemptId = oauthAttemptRef.current + 1,
+  ) => {
+    if (attemptId > oauthAttemptRef.current) oauthAttemptRef.current = attemptId;
+    if (oauthAttemptRef.current !== attemptId) {
+      if (preopenedPopup && !preopenedPopup.closed) preopenedPopup.close();
+      return;
+    }
+    if (connectedAppIds.has(app.id)) {
+      if (preopenedPopup && !preopenedPopup.closed) preopenedPopup.close();
+      return;
+    }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = undefined;
+    }
+    setStep({ kind: "oauth", app });
+
+    const popup = preopenedPopup ?? window.open(redirectUrl, "_blank", "width=600,height=700");
+
+    if (!popup || popup.closed) {
+      setStep({ kind: "popup_blocked", app });
+      return;
+    }
+    if (preopenedPopup) popup.location.href = redirectUrl;
+
+    oauthWindowRef.current = popup;
+    cancelledRef.current = false;
+    let popupClosedAt: number | null = null;
+    let isVerifying = false;
+    let finalizeAfterVerify = false;
+
+    const stopPolling = () => {
+      clearInterval(intervalId);
+      if (pollIntervalRef.current === intervalId) pollIntervalRef.current = undefined;
+      oauthWindowRef.current = null;
+    };
+
+    const verifyConnection = async (finalIfMissing: boolean) => {
+      if (oauthAttemptRef.current !== attemptId) return;
+      if (isVerifying) {
+        if (finalIfMissing) finalizeAfterVerify = true;
+        return;
+      }
+      isVerifying = true;
+      const shouldFinalizeIfMissing = finalIfMissing || finalizeAfterVerify;
+      finalizeAfterVerify = false;
+      try {
+        const connections = await api.mcpServers.listConnections(providerId);
+        const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
+        if (cancelledRef.current || oauthAttemptRef.current !== attemptId) return;
+        if (connected) {
+          toast.success("App connected successfully!");
+          onSuccess();
+          resetAndClose();
+        } else if (shouldFinalizeIfMissing) {
+          stopPolling();
+          toast.error("App connection cancelled");
+          setStep({ kind: "oauth_cancelled", app });
+        }
+      } catch {
+        if (cancelledRef.current || oauthAttemptRef.current !== attemptId) return;
+        stopPolling();
+        toast.error("Could not verify connection status");
+        setStep({ kind: "oauth_cancelled", app });
+      } finally {
+        isVerifying = false;
+        if (finalizeAfterVerify && !cancelledRef.current && oauthAttemptRef.current === attemptId) {
+          void verifyConnection(true);
+        }
+      }
+    };
+
+    const intervalId = setInterval(() => {
+      if (oauthAttemptRef.current !== attemptId) {
+        clearInterval(intervalId);
+        return;
+      }
+      if (popup.closed) {
+        popupClosedAt ??= Date.now();
+        const finalIfMissing = Date.now() - popupClosedAt >= OAUTH_POPUP_CLOSED_GRACE_MS;
+        void verifyConnection(finalIfMissing);
+      } else {
+        popupClosedAt = null;
+      }
+    }, 500);
+    pollIntervalRef.current = intervalId;
+  };
+
   const handleStartOAuth = async (app: IntegrationApp) => {
     if (connectedAppIds.has(app.id)) return;
+    const attemptId = oauthAttemptRef.current + 1;
+    oauthAttemptRef.current = attemptId;
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = undefined;
+    }
     setStep({ kind: "oauth", app });
+    const popup = window.open("about:blank", "_blank", "width=600,height=700");
+
+    if (!popup || popup.closed) {
+      setStep({ kind: "popup_blocked", app });
+      return;
+    }
 
     try {
       const callbackUrl = `${window.location.origin}/integrations/callback`;
-      const result = await api.mcpServers.createConnection(providerId, app.id, callbackUrl);
-      const popup = window.open(result.redirectUrl, "_blank", "width=600,height=700");
-
-      if (!popup || popup.closed) {
-        setStep({ kind: "popup_blocked", app });
-        return;
-      }
-
-      oauthWindowRef.current = popup;
-      cancelledRef.current = false;
-
-      const verifyConnection = async () => {
-        try {
-          const connections = await api.mcpServers.listConnections(providerId);
-          const connected = connections.some((c) => c.appId === app.id && isOwnedOrPersonalAppConnection(c));
-          if (cancelledRef.current) return;
-          if (connected) {
-            toast.success("App connected successfully!");
-            onSuccess();
-            resetAndClose();
-          } else {
-            toast.error("App connection cancelled");
-            setStep({ kind: "oauth_cancelled", app });
-          }
-        } catch {
-          if (cancelledRef.current) return;
-          toast.error("Could not verify connection status");
-          setStep({ kind: "oauth_cancelled", app });
-        }
-      };
-
-      pollIntervalRef.current = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = undefined;
-          oauthWindowRef.current = null;
-          verifyConnection();
-        }
-      }, 500);
+      const result = await api.mcpServers.createConnectionIntent(providerId, app.id, callbackUrl, app);
+      startOAuthWindow(result.app, result.redirectUrl, popup, attemptId);
     } catch (err) {
+      if (!popup.closed) popup.close();
+      if (oauthAttemptRef.current !== attemptId) return;
       toast.error(err instanceof Error ? err.message : "Failed to start connection");
       setStep({ kind: "search" });
     }
@@ -366,7 +432,10 @@ export function AddIntegrationDialog({
               <Button variant="outline" onClick={resetAndClose}>
                 Cancel
               </Button>
-              <Button onClick={() => handleStartOAuth(step.app)} disabled={connectedAppIds.has(step.app.id)}>
+              <Button
+                onClick={() => startOAuthWindow(step.app, step.redirectUrl)}
+                disabled={connectedAppIds.has(step.app.id)}
+              >
                 {connectedAppIds.has(step.app.id) ? "Already added" : `Connect ${step.app.name}`}
               </Button>
             </DialogFooter>

@@ -95,6 +95,8 @@ const CRM_ACTIVITY_FILE_TYPES_SQL = sql.join(
   ["crm_task", "crm_call", "crm_event", "crm_meeting", "crm_note"].map((t) => sql`${t}`),
 );
 
+const CONNECTOR_SCOPED_PROVIDER_FILE_ID_SOURCES = new Set<string>(["google_calendar", "teams"]);
+
 /**
  * The Files-list (browse) visibility rule, Gmail-style:
  *  - drop rollup *members* (activities shown under their parent object instead), and
@@ -382,6 +384,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       connectorConfigId: string;
       mimeType?: string | null;
       rollupGroupId?: string | null;
+      isAllDay?: boolean;
     }) {
       const now = new Date().toISOString();
       const sourceCreatedAt = normalizeSourceTimestampForStorage(data.sourceCreatedAt);
@@ -394,7 +397,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .where("connector_config_id", "=", data.connectorConfigId)
             .where("provider_message_id", "=", data.providerMessageId)
             .executeTakeFirst()
-        : data.source === "teams"
+        : CONNECTOR_SCOPED_PROVIDER_FILE_ID_SOURCES.has(data.source)
           ? await db
               .selectFrom("indexed_files")
               .selectAll()
@@ -438,6 +441,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           synced_at: now,
         };
         if (data.mimeType !== undefined) updates.mime_type = data.mimeType;
+        if (data.isAllDay !== undefined) updates.is_all_day = data.isAllDay ? 1 : 0;
         if (contentChanged || categoryChanged || sourceVersionChanged) {
           updates.embedding_status = "pending";
           updates.summary_status = "pending";
@@ -473,6 +477,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           source_updated_at: sourceUpdatedAt,
           rollup_group_id: data.rollupGroupId ?? null,
           synced_at: now,
+          is_all_day: data.isAllDay ? 1 : 0,
           mime_type: data.mimeType ?? null,
           embedding_status: "pending",
           summary_status: "pending",

@@ -21,7 +21,15 @@ function clearProviderRoutingEnv() {
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
   );
+}
+
+function setModelRoutingEnv(model: string) {
+  process.env.ANTHROPIC_MODEL = model;
+  process.env.ANTHROPIC_SMALL_FAST_MODEL = model;
+  process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
 }
 
 export function applyLlmEnvFromSettings(settings: LlmSettings | null, logger?: Logger): void {
@@ -42,7 +50,7 @@ export function applyLlmEnvFromSettings(settings: LlmSettings | null, logger?: L
     clearProviderRoutingEnv();
     unsetEnv("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION");
     process.env.ANTHROPIC_API_KEY = settings.anthropic_api_key;
-    process.env.ANTHROPIC_MODEL = settings.model_id || "claude-sonnet-4-6";
+    setModelRoutingEnv(settings.model_id || "claude-sonnet-4-6");
     logger?.info({ llmProvider: "anthropic", source: "db" }, "Configured LLM provider from DB settings");
     return;
   }
@@ -67,7 +75,7 @@ export function applyLlmEnvFromSettings(settings: LlmSettings | null, logger?: L
     process.env.AWS_ACCESS_KEY_ID = settings.aws_access_key_id;
     process.env.AWS_SECRET_ACCESS_KEY = settings.aws_secret_access_key;
     process.env.AWS_REGION = settings.aws_region;
-    process.env.ANTHROPIC_MODEL = settings.model_id || "us.anthropic.claude-sonnet-4-6";
+    setModelRoutingEnv(settings.model_id || "us.anthropic.claude-sonnet-4-6");
     logger?.info({ llmProvider: "bedrock", source: "db" }, "Configured LLM provider from DB settings");
     return;
   }
@@ -90,7 +98,7 @@ export function applyLlmEnvFromSettings(settings: LlmSettings | null, logger?: L
     process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api";
     process.env.ANTHROPIC_AUTH_TOKEN = settings.anthropic_api_key;
     process.env.ANTHROPIC_API_KEY = "";
-    process.env.ANTHROPIC_MODEL = settings.model_id;
+    setModelRoutingEnv(settings.model_id);
     logger?.info({ llmProvider: "openrouter", source: "db" }, "Configured LLM provider from DB settings");
     return;
   }

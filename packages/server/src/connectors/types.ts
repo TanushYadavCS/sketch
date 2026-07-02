@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 
 export type ConnectorType =
   | "google_drive"
+  | "google_calendar"
   | "gmail"
   | "outlook"
   | "teams"
@@ -17,6 +18,7 @@ export type ConnectorType =
   | "notion"
   | "linear"
   | "fireflies"
+  | "otter"
   | "zoho_crm";
 
 export type AuthType = "oauth" | "api_key" | "service_account";
@@ -88,6 +90,11 @@ export interface SyncedItem {
   contentHash: string | null;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
+  /**
+   * Whole-day item with no specific time of day (e.g. a Google Calendar all-day
+   * event). Calendar connectors always set this; other sources leave it unset.
+   */
+  isAllDay?: boolean;
   /** MIME type of the original file (e.g. "image/png", "application/pdf"). */
   mimeType?: string;
   /**
@@ -139,8 +146,8 @@ export interface SyncedItem {
   decisions?: DecisionSeed[];
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
-   * Sync seeds person entities from entries where `name` is present; entries
-   * with only `email` are ignored — `accessEmails` already covers ACL.
+   * Sync seeds person entities from entries where `name` is present or can be
+   * derived from `email`; `accessEmails` separately covers ACL.
    */
   attendees?: Array<{ name?: string; email?: string }>;
   authorEmail?: string;
@@ -381,6 +388,7 @@ export interface SuppressedEmailRecord {
 
 export interface SourceItemRemovalRecord {
   providerFileId?: string;
+  providerFileIdPrefix?: string;
   providerMessageId?: string | null;
   sourceCreatedBefore?: string;
   reason: string;

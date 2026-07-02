@@ -217,6 +217,16 @@ describe("update()", () => {
     const updated = await repo.update(created.id, { next_run_at: null });
     expect(updated?.next_run_at).toBeNull();
   });
+
+  it("increments revision only when requested", async () => {
+    const created = await repo.add(baseTask);
+    await repo.update(created.id, { next_run_at: null });
+    const unchanged = await repo.getById(created.id);
+    expect(unchanged?.revision).toBe(0);
+
+    const updated = await repo.update(created.id, { prompt: "Changed" }, { incrementRevision: true });
+    expect(updated?.revision).toBe(1);
+  });
 });
 
 describe("updateRunTimestamps()", () => {
@@ -261,6 +271,14 @@ describe("updateStatus()", () => {
 
     const fetched = await repo.getById(created.id);
     expect(fetched?.status).toBe("completed");
+  });
+
+  it("increments revision when requested", async () => {
+    const created = await repo.add({ ...baseTask, status: "active" });
+    await repo.updateStatus(created.id, "paused", { incrementRevision: true });
+
+    const fetched = await repo.getById(created.id);
+    expect(fetched?.revision).toBe(1);
   });
 });
 

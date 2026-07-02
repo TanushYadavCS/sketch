@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { up as backfillProvenanceTier } from "./116-entity-provenance-tier";
+import { up as backfillProvenanceTier } from "./124-entity-provenance-tier";
 
 const NOW = "2026-06-26T00:00:00.000Z";
 
@@ -25,7 +25,7 @@ async function insertEntity(db: Kysely<DB>, id: string, name: string): Promise<v
     .execute();
 }
 
-describe("116-entity-provenance-tier", () => {
+describe("124-entity-provenance-tier", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {

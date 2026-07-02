@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeAutomation } from "./runtime";
+import { executeAutomation, testAutomationStep } from "./runtime";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -66,6 +66,7 @@ function makeParams(overrides: Record<string, unknown> = {}) {
   const runsRepo = {
     create: vi.fn().mockResolvedValue("run-1"),
     update: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue([]),
   };
   const stepContentRepo = {
     getByTask: vi.fn().mockResolvedValue([
@@ -284,8 +285,10 @@ describe("executeAutomation agent steps", () => {
 
   it("keeps light-mode agent steps on the lightweight SDK path", async () => {
     const runAgent = vi.fn();
+    const limitAgentExecution = vi.fn((work: () => Promise<unknown>) => work());
     const params = makeParams({
       runAgent,
+      limitAgentExecution,
       task: makeTask({
         steps: JSON.stringify([
           { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
@@ -304,6 +307,7 @@ describe("executeAutomation agent steps", () => {
     await executeAutomation(params as never);
 
     expect(runAgent).not.toHaveBeenCalled();
+    expect(limitAgentExecution).toHaveBeenCalledTimes(1);
     expect(params.sendMessage).toHaveBeenCalledWith("light result");
   });
 
@@ -341,6 +345,90 @@ describe("executeAutomation agent steps", () => {
       expect.objectContaining({ eventType: "run.started" }),
       "Automation: execution event delivery failed",
     );
+  });
+});
+
+describe("testAutomationStep", () => {
+  it("uses the latest completed upstream output instead of the current step-test run", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "step two result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const params = makeParams({
+      runAgent,
+      task: makeTask({
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+          {
+            id: "step1",
+            type: "agent",
+            label: "Collect accounts",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentMode: "sketch",
+          },
+          {
+            id: "step2",
+            type: "agent",
+            label: "Summarize accounts",
+            icon: "sketch-ai",
+            position: { x: 0, y: 200 },
+            agentMode: "sketch",
+          },
+        ]),
+        edges: JSON.stringify([
+          { id: "trigger-step1", from: "trigger", to: "step1" },
+          { id: "step1-step2", from: "step1", to: "step2" },
+        ]),
+      }),
+      stepContentRepo: {
+        getByTask: vi.fn().mockResolvedValue([
+          {
+            task_id: "task-1",
+            step_id: "step2",
+            content_type: "prompt",
+            content: "Summarize the upstream account list.",
+            apps: null,
+            updated_at: "2026-04-27T09:00:00.000Z",
+          },
+        ]),
+      },
+    });
+    params._runsRepo.create.mockResolvedValue("run-current");
+    params._runsRepo.list.mockResolvedValue([
+      {
+        id: "run-current",
+        task_id: "task-1",
+        status: "running",
+        step_outputs: "{}",
+        trigger_data: null,
+        error_message: null,
+        started_at: "2026-06-01T00:00:02.000Z",
+        completed_at: null,
+      },
+      {
+        id: "run-previous",
+        task_id: "task-1",
+        status: "completed",
+        step_outputs: JSON.stringify({
+          step1: { status: "completed", output: { accounts: ["Acme"] }, duration_ms: 12 },
+        }),
+        trigger_data: null,
+        error_message: null,
+        started_at: "2026-06-01T00:00:01.000Z",
+        completed_at: "2026-06-01T00:00:01.500Z",
+      },
+    ]);
+
+    await testAutomationStep({
+      ...params,
+      stepId: "step2",
+      useLatestUpstreamOutput: true,
+    } as never);
+
+    expect(runAgent.mock.calls[0][0].userMessage).toContain('"accounts": [');
+    expect(runAgent.mock.calls[0][0].userMessage).toContain('"Acme"');
   });
 });
 

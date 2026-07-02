@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 113;
+const EXPECTED_MIGRATION_COUNT = 121;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -135,17 +135,25 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[99]).toBe("104-daily-brief-item-metadata");
     expect(names[100]).toBe("105-normalize-indexed-file-source-timestamps");
     expect(names[101]).toBe("106-agents");
-    expect(names[102]).toBe("107-tasks");
-    expect(names[103]).toBe("108-tasks-owner");
-    expect(names[104]).toBe("109-sub-entities");
-    expect(names[105]).toBe("110-tasks-assignee-name");
-    expect(names[106]).toBe("111-milestone-series-and-value-signature");
-    expect(names[107]).toBe("112-work-cycles");
-    expect(names[108]).toBe("113-work-cycles-connector");
-    expect(names[109]).toBe("114-work-cycles-connector-key");
-    expect(names[110]).toBe("115-container-name-qualification");
-    expect(names[111]).toBe("116-entity-provenance-tier");
-    expect(names[112]).toBe("117-trunk-name-embeddings");
+    expect(names[102]).toBe("107-scheduled-task-builder-revisions");
+    expect(names[103]).toBe("108-scheduled-task-origin-chat");
+    expect(names[104]).toBe("109-scheduled-task-origin-message-id");
+    expect(names[105]).toBe("110-google-calendar-provider-file-scope");
+    expect(names[106]).toBe("111-settings-embedding-provider");
+    expect(names[107]).toBe("112-agent-output-structured-payload");
+    expect(names[108]).toBe("113-indexed-file-all-day-flag");
+    expect(names[109]).toBe("114-agent-output-deliveries");
+    expect(names[110]).toBe("115-tasks");
+    expect(names[111]).toBe("116-tasks-owner");
+    expect(names[112]).toBe("117-sub-entities");
+    expect(names[113]).toBe("118-tasks-assignee-name");
+    expect(names[114]).toBe("119-milestone-series-and-value-signature");
+    expect(names[115]).toBe("120-work-cycles");
+    expect(names[116]).toBe("121-work-cycles-connector");
+    expect(names[117]).toBe("122-work-cycles-connector-key");
+    expect(names[118]).toBe("123-container-name-qualification");
+    expect(names[119]).toBe("124-entity-provenance-tier");
+    expect(names[120]).toBe("125-trunk-name-embeddings");
   });
 
   it("creates the task assignee_name column", async () => {

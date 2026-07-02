@@ -60,7 +60,10 @@ export async function createDatabase(config: Config): Promise<Kysely<DB>> {
      * chunk/file tables keep the default L2 metric — their score is only a soft
      * ranking signal blended with FTS, so changing it would shift existing search.
      */
-    const COSINE_TABLES = new Set<keyof typeof PK_BY_TABLE>(["entity_name_embeddings", "entity_review_queue_embeddings"]);
+    const COSINE_TABLES = new Set<keyof typeof PK_BY_TABLE>([
+      "entity_name_embeddings",
+      "entity_review_queue_embeddings",
+    ]);
 
     for (const table of Object.keys(PK_BY_TABLE) as Array<keyof typeof PK_BY_TABLE>) {
       const pk = PK_BY_TABLE[table];

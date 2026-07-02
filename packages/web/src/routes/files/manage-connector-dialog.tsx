@@ -88,6 +88,7 @@ export function ManageConnectorDialog({
     onSuccess: () => {
       toast.success("Sync started.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });
@@ -113,11 +114,9 @@ export function ManageConnectorDialog({
     onError: (error: Error) => toast.error(error.message),
   });
 
-  // For api_key connectors, "Update credentials" opens a non-destructive rotate
-  // dialog (server validates the new key and replaces in place — no data loss
-  // if the user cancels). For OAuth connectors, fall back to the disconnect →
-  // reauth flow (destructive; can't be avoided without redoing the OAuth
-  // callback uniqueness contract).
+  // For local credential connectors, "Update credentials" validates replacement
+  // credentials before swapping them in place. OAuth connectors fall back to
+  // reconnect because their redirect callback owns the uniqueness contract.
   const updateCredentials = () => {
     if (!canUpdateCredentials) return;
     if (definition?.authType === "api_key") {
@@ -220,6 +219,7 @@ export function ManageConnectorDialog({
               connectorType={connector.connectorType}
               scopeConfig={connector.scopeConfig}
               hierarchyLevels={connector.hierarchyLevels}
+              scopeConfigKey={definition.scopeConfigKey}
               scopeLabel={definition.scopeLabel}
               scopeEntries={scopeEntries}
               onBrowsingChange={setIsBrowsingScope}
@@ -313,45 +313,46 @@ export function ManageConnectorDialog({
         </AlertDialogContent>
       </AlertDialog>
 
-      <RotateKeyDialog
+      <RotateCredentialsDialog
         open={showRotateKey}
         onOpenChange={setShowRotateKey}
         connectorId={connector.id}
-        connectorName={definition.name}
-        credentialUrl={definition.credentialUrl}
+        definition={definition}
       />
     </>
   );
 }
 
 /**
- * In-place rotate-key dialog. Calls POST /api/connectors/:id/rotate-key, which
- * validates the new key and swaps it on the existing row. Cancel is safe — the
- * existing key isn't touched until the new one validates.
+ * In-place credential dialog. Calls POST /api/connectors/:id/rotate-key, which
+ * validates the new credentials and swaps them on the existing row.
  */
-function RotateKeyDialog({
+function RotateCredentialsDialog({
   open,
   onOpenChange,
   connectorId,
-  connectorName,
-  credentialUrl,
+  definition,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   connectorId: string;
-  connectorName: string;
-  credentialUrl: string;
+  definition: IntegrationDefinition;
 }) {
   const queryClient = useQueryClient();
-  const [apiKey, setApiKey] = useState("");
+  const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const allFieldsFilled = definition.authFields.every((field) => (fieldValues[field.key] ?? "").trim().length > 0);
 
   const mutation = useMutation({
-    mutationFn: () => api.integrations.rotateKey(connectorId, apiKey.trim()),
+    mutationFn: () =>
+      api.integrations.rotateCredentials(
+        connectorId,
+        Object.fromEntries(definition.authFields.map((field) => [field.key, fieldValues[field.key]?.trim() ?? ""])),
+      ),
     onSuccess: () => {
       toast.success("Credentials updated.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
-      setApiKey("");
+      setFieldValues({});
       setError(null);
       onOpenChange(false);
     },
@@ -360,7 +361,7 @@ function RotateKeyDialog({
 
   const handleClose = (next: boolean) => {
     if (!next) {
-      setApiKey("");
+      setFieldValues({});
       setError(null);
     }
     onOpenChange(next);
@@ -370,38 +371,48 @@ function RotateKeyDialog({
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Update {connectorName} credentials</DialogTitle>
+          <DialogTitle>Update {definition.name} credentials</DialogTitle>
           <DialogDescription>
-            Paste a new API key. The existing key stays in place until the new one validates — cancelling here keeps
-            your current connection intact. Get a key at{" "}
-            <a
-              href={credentialUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-primary underline-offset-2 hover:underline"
-            >
-              {credentialUrl}
-            </a>
-            .
+            Enter new credentials. The existing connection stays in place until the new credentials validate.
+            {definition.credentialUrl && (
+              <>
+                {" "}
+                Get credentials at{" "}
+                <a
+                  href={definition.credentialUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary underline-offset-2 hover:underline"
+                >
+                  {definition.credentialUrl}
+                </a>
+                .
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label htmlFor="rotate-api-key">New API key</Label>
-          <Input
-            id="rotate-api-key"
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="Paste new API key"
-            autoComplete="off"
-          />
+          {definition.authFields.map((field) => (
+            <div key={field.key} className="space-y-1.5">
+              <Label htmlFor={`rotate-${field.key}`}>{field.label}</Label>
+              <Input
+                id={`rotate-${field.key}`}
+                type={field.type === "password" ? "password" : "text"}
+                value={fieldValues[field.key] ?? ""}
+                onChange={(e) => setFieldValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                placeholder={field.placeholder}
+                autoComplete="off"
+              />
+              {field.helpText && <p className="text-[11px] text-muted-foreground">{field.helpText}</p>}
+            </div>
+          ))}
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => handleClose(false)} disabled={mutation.isPending}>
             Cancel
           </Button>
-          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending || !apiKey.trim()}>
+          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending || !allFieldsFilled}>
             {mutation.isPending ? "Updating…" : "Update credentials"}
           </Button>
         </DialogFooter>
@@ -416,6 +427,7 @@ function ScopeEditorDispatch({
   connectorType,
   scopeConfig,
   hierarchyLevels,
+  scopeConfigKey,
   scopeLabel,
   scopeEntries,
   onBrowsingChange,
@@ -425,6 +437,7 @@ function ScopeEditorDispatch({
   connectorType: string;
   scopeConfig: Record<string, unknown>;
   hierarchyLevels?: HierarchyLevel[] | null;
+  scopeConfigKey?: string;
   scopeLabel: string;
   scopeEntries: [string, unknown][];
   onBrowsingChange?: (browsing: boolean) => void;
@@ -478,6 +491,7 @@ function ScopeEditorDispatch({
       <GenericScopeEditor
         connectorId={connectorId}
         scopeConfig={scopeConfig}
+        scopeConfigKey={scopeConfigKey}
         noun={scopeLabel}
         onBrowsingChange={onBrowsingChange}
       />
@@ -524,6 +538,10 @@ function EmailScopeEditor({
     onSuccess: () => {
       toast.success("Sync scope updated — re-syncing.");
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
+      queryClient.invalidateQueries({ queryKey: ["all-files"] });
+      queryClient.invalidateQueries({ queryKey: ["hybrid-search"] });
     },
     onError: (error: Error) => toast.error(error.message),
   });

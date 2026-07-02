@@ -46,6 +46,22 @@ export function GmailLogo({ size = 16, className, style }: LogoProps) {
   );
 }
 
+export function GoogleCalendarLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M6 2h2v2h8V2h2v2h1.5A2.5 2.5 0 0 1 22 6.5v13A2.5 2.5 0 0 1 19.5 22h-15A2.5 2.5 0 0 1 2 19.5v-13A2.5 2.5 0 0 1 4.5 4H6V2Zm14 8H4v9.5c0 .28.22.5.5.5h15a.5.5 0 0 0 .5-.5V10ZM4.5 6a.5.5 0 0 0-.5.5V8h16V6.5a.5.5 0 0 0-.5-.5h-15Zm4 7h3v3h-3v-3Zm5 0h3v3h-3v-3Z" />
+    </svg>
+  );
+}
+
 export function OutlookLogo({ size = 16, className, style }: LogoProps) {
   return (
     <svg
@@ -143,6 +159,22 @@ export function ZohoLogo({ size = 16, className, style }: LogoProps) {
   );
 }
 
+export function OtterLogo({ size = 16, className, style }: LogoProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      width={size}
+      height={size}
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      <path d="M4 9.5a2 2 0 0 1 4 0v5a2 2 0 0 1-4 0v-5Zm6-3.5a2 2 0 0 1 4 0v12a2 2 0 0 1-4 0V6Zm6 3.5a2 2 0 0 1 4 0v5a2 2 0 0 1-4 0v-5Z" />
+    </svg>
+  );
+}
+
 export function ConnectorLogo({
   type,
   size = 16,
@@ -160,6 +192,8 @@ export function ConnectorLogo({
       return <GoogleDriveLogo {...props} />;
     case "gmail":
       return <GmailLogo {...props} />;
+    case "google_calendar":
+      return <GoogleCalendarLogo {...props} />;
     case "outlook":
       return <OutlookLogo {...props} />;
     case "teams":
@@ -170,6 +204,8 @@ export function ConnectorLogo({
       return <NotionLogo {...props} />;
     case "linear":
       return <LinearLogo {...props} />;
+    case "otter":
+      return <OtterLogo {...props} />;
     case "zoho_crm":
       return <ZohoLogo {...props} />;
     default:

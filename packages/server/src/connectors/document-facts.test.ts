@@ -52,7 +52,7 @@ describe("document-derived llm_task extraction", () => {
     expect(generateJSONCalls).toEqual([
       {
         prompt: expect.stringContaining("Source date: 2025-04-25"),
-        opts: { maxTokens: 2048, label: "extractLlmTask", dumpDir: undefined },
+        opts: { maxTokens: 8192, label: "extractLlmTask", dumpDir: undefined },
       },
     ]);
     expect(await activeLlmTaskFacts(db)).toHaveLength(1);

@@ -31,7 +31,7 @@ describe("search provider fallback", () => {
     });
 
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
-      Response.json({ error: { message: "stop after provider selection" } }, { status: 500 }),
+      Response.json({ error: { message: "stop after provider selection" } }, { status: 400 }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -48,7 +48,7 @@ describe("search provider fallback", () => {
       "Content-Type": "application/json",
     });
     expect(JSON.parse(String(init.body))).toMatchObject({
-      model: "google/gemini-embedding-2-preview",
+      model: "google/gemini-embedding-2",
       input: ["habuild fireflies"],
       dimensions: 3072,
     });

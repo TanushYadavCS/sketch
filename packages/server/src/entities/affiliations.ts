@@ -85,6 +85,11 @@ export function isRoleAccountEmail(email: string): boolean {
   return ROLE_ACCOUNT_LOCAL_PARTS.has(head);
 }
 
+export function isProviderManagedEmailDomain(domain: string): boolean {
+  const normalized = domain.trim().toLowerCase();
+  return normalized === "calendar.google.com" || normalized.endsWith(".calendar.google.com");
+}
+
 /**
  * Derive a `works_at` edge (or a structured domain-observation candidate) from
  * a person entity's email domain. Idempotent under the repo's UNIQUE keys.
@@ -103,6 +108,7 @@ export async function inferAffiliationFromEmail(deps: AffiliationDeps, input: In
   if (!rawEmail) return;
   const domain = deps.domainsRepo.normalizeEmailDomain(rawEmail);
   if (!domain) return;
+  if (isProviderManagedEmailDomain(domain)) return;
   if (await deps.domainsRepo.isPersonalOrShared(domain)) return;
   // Role-account local-parts (hello@, info@, support@, …) are shared
   // mailboxes, not people. Skip both works_at inference and candidate

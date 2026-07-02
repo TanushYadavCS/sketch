@@ -26,7 +26,7 @@ import { cleanupIntegrationAccess, startIntegrationAccess } from "../integration
 import type { Logger } from "../logger";
 import type { RecordWorkflowStep, WorkflowStepUsage } from "../telemetry/agent-run-telemetry";
 import { resolveWorkflowDelivery } from "./delivery";
-import type { StepOutput, WorkflowStep } from "./types";
+import type { StepOutput, WorkflowEdge, WorkflowStep } from "./types";
 
 export interface ExecuteAutomationParams {
   task: ScheduledTaskRow;
@@ -47,6 +47,7 @@ export interface ExecuteAutomationParams {
   sendMessage?: (text: string) => Promise<void>;
   onEvent?: (event: AutomationExecutionEvent) => Promise<void>;
   recordWorkflowStep?: RecordWorkflowStep;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export type AutomationExecutionEvent =
@@ -111,23 +112,9 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     creatorEmail = creator.email;
   }
 
-  // 2. Parse steps (legacy tasks without steps get a single agent step)
-  let steps: WorkflowStep[];
-  if (task.steps) {
-    steps = JSON.parse(task.steps);
-  } else {
-    steps = [
-      { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
-      {
-        id: "step1",
-        type: "agent",
-        label: task.prompt,
-        icon: "sketch-ai",
-        position: { x: 0, y: 100 },
-        agentMode: "sketch",
-      },
-    ];
-  }
+  const steps = parseWorkflowSteps(task);
+  const edges = parseWorkflowEdges(task);
+  const executionSteps = resolveExecutionOrder(steps, edges);
 
   // 3. Load step content
   const contentRows = await stepContentRepo.getByTask(task.id);
@@ -159,14 +146,11 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     "Automation: execution started",
   );
 
-  // 5. Execute steps in array order
   const stepOutputs: Record<string, StepOutput> = {};
   let previousOutput: unknown = triggerData ?? null;
   let failed = false;
 
-  for (const step of steps) {
-    if (step.type === "trigger") continue;
-
+  for (const step of executionSteps) {
     const content = contentMap.get(step.id);
     const startTime = Date.now();
 
@@ -184,54 +168,18 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     });
 
     try {
-      let output: unknown;
-
-      if (step.type === "action") {
-        if (!content || content.content_type !== "script") {
-          throw new Error(`Action step "${step.label}" has no script`);
-        }
-        output = await executeActionStep({
-          script: content.content,
-          step,
-          input: previousOutput,
-          taskId: task.id,
-          task,
-          runId,
-          logger,
-          config: params.config,
-          creatorId,
-          creatorEmail,
-          workspaceDir,
-          loadIntegrationProvider: params.loadIntegrationProvider,
-          listAgentEnvForRuntime: params.listAgentEnvForRuntime,
-        });
-      } else if (step.type === "agent") {
-        const prompt = content?.content ?? (!task.steps ? task.prompt : null);
-        if (!prompt) {
-          throw new Error(`Agent step "${step.label}" has no prompt`);
-        }
-        output = await executeAgentStep({
-          prompt,
-          step,
-          input: previousOutput,
-          task,
-          db: params.db,
-          logger,
-          config: params.config,
-          workspaceDir,
-          creator,
-          creatorEmail,
-          runAgent: params.runAgent,
-          buildMcpServers: params.buildMcpServers,
-          getSlack: params.getSlack,
-          loadIntegrationProvider: params.loadIntegrationProvider,
-          userRepo: params.userRepo,
-          inboxMessagesRepo: params.inboxMessagesRepo,
-          sendDm: params.sendDm,
-          outputPlatform: resolveWorkflowDelivery(task).platform,
-          recordWorkflowStep: params.recordWorkflowStep,
-        });
-      }
+      const output = await executeWorkflowStep({
+        params,
+        step,
+        content,
+        input: previousOutput,
+        task,
+        runId,
+        workspaceDir,
+        creator,
+        creatorId,
+        creatorEmail,
+      });
 
       const normalizedOutput = normalizeStepOutput(output);
       const durationMs = Date.now() - startTime;
@@ -260,16 +208,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         error: { message: error.message, stack: error.stack },
       };
 
-      let foundFailed = false;
-      for (const s of steps) {
-        if (s.id === step.id) {
-          foundFailed = true;
-          continue;
-        }
-        if (foundFailed && s.type !== "trigger" && !stepOutputs[s.id]) {
-          stepOutputs[s.id] = { output: null, status: "skipped", duration_ms: 0 };
-        }
-      }
+      markSkippedAfterFailure({ failedStepId: step.id, executionSteps, edges, stepOutputs });
 
       await runsRepo.update(runId, {
         status: "failed",
@@ -301,7 +240,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   }
 
   // 6. On success: deliver final output + write context file
-  const executionSteps = steps.filter((s) => s.type !== "trigger");
   const lastStep = executionSteps[executionSteps.length - 1];
   const finalOutput = lastStep ? (stepOutputs[lastStep.id]?.output ?? null) : null;
 
@@ -352,6 +290,308 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   });
 
   return { runId, status: failed ? "failed" : "completed", finalOutput, stepOutputs };
+}
+
+export async function testAutomationStep(
+  params: ExecuteAutomationParams & {
+    stepId: string;
+    input?: unknown;
+    useLatestUpstreamOutput?: boolean;
+  },
+): Promise<AutomationExecutionResult> {
+  const { task, triggerData, logger, runsRepo, stepContentRepo, stepId } = params;
+  const creatorId = task.created_by;
+  let creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
+  let creatorEmail: string | null = null;
+  if (creatorId) {
+    creator = await params.userRepo.findById(creatorId);
+    if (!creator) {
+      const runId = await runsRepo.create({ taskId: task.id, triggerData: { type: "step_test", stepId } });
+      await runsRepo.update(runId, {
+        status: "failed",
+        errorMessage: "Creator no longer exists",
+        completedAt: new Date().toISOString(),
+      });
+      return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+    }
+    creatorEmail = creator.email;
+  }
+
+  const steps = parseWorkflowSteps(task);
+  const edges = parseWorkflowEdges(task);
+  const step = steps.find((candidate) => candidate.id === stepId);
+  if (!step) throw new Error(`Step ${stepId} not found`);
+
+  const runId = await runsRepo.create({ taskId: task.id, triggerData: { type: "step_test", stepId, triggerData } });
+  const stepOutputs: Record<string, StepOutput> = {};
+  const workspaceDir = resolveWorkspaceDir(params.config.DATA_DIR, task);
+  await mkdir(workspaceDir, { recursive: true });
+
+  if (step.type === "trigger") {
+    const output = buildTriggerSamplePayload(task, step);
+    stepOutputs[step.id] = { output, status: "completed", duration_ms: 0 };
+    await runsRepo.update(runId, {
+      status: "completed",
+      stepOutputs,
+      completedAt: new Date().toISOString(),
+    });
+    return { runId, status: "completed", finalOutput: output, stepOutputs };
+  }
+
+  const contentRows = await stepContentRepo.getByTask(task.id);
+  const contentMap = new Map(contentRows.map((r) => [r.step_id, r]));
+  const content = contentMap.get(step.id);
+  const startTime = Date.now();
+
+  try {
+    const input = params.useLatestUpstreamOutput
+      ? await resolveLatestUpstreamOutput({ params, stepId, edges, currentRunId: runId })
+      : (params.input ?? null);
+    const output = await executeWorkflowStep({
+      params,
+      step,
+      content,
+      input,
+      task,
+      runId,
+      workspaceDir,
+      creator,
+      creatorId,
+      creatorEmail,
+    });
+    const normalizedOutput = normalizeStepOutput(output);
+    stepOutputs[step.id] = {
+      output: normalizedOutput,
+      status: "completed",
+      duration_ms: Date.now() - startTime,
+    };
+    await runsRepo.update(runId, {
+      status: "completed",
+      stepOutputs,
+      completedAt: new Date().toISOString(),
+    });
+    return { runId, status: "completed", finalOutput: normalizedOutput, stepOutputs };
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    stepOutputs[step.id] = {
+      output: null,
+      status: "failed",
+      duration_ms: Date.now() - startTime,
+      error: { message: error.message, stack: error.stack },
+    };
+    await runsRepo.update(runId, {
+      status: "failed",
+      stepOutputs,
+      completedAt: new Date().toISOString(),
+      errorMessage: `Step "${step.label}" failed: ${error.message}`,
+    });
+    logger.error({ err, taskId: task.id, runId, stepId: step.id }, "Automation: step test failed");
+    return { runId, status: "failed", finalOutput: null, stepOutputs };
+  }
+}
+
+async function executeWorkflowStep(params: {
+  params: ExecuteAutomationParams;
+  step: WorkflowStep;
+  content: Awaited<ReturnType<ReturnType<typeof createAutomationStepContentRepository>["getByStep"]>> | undefined;
+  input: unknown;
+  task: ScheduledTaskRow;
+  runId: string;
+  workspaceDir: string;
+  creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
+  creatorId: string | null;
+  creatorEmail: string | null;
+}): Promise<unknown> {
+  const { step, content, input, task, runId, workspaceDir, creator, creatorId, creatorEmail } = params;
+  const runtimeParams = params.params;
+
+  if (step.type === "action") {
+    if (!content || content.content_type !== "script") {
+      throw new Error(`Action step "${step.label}" has no script`);
+    }
+    return executeActionStep({
+      script: content.content,
+      step,
+      input,
+      taskId: task.id,
+      task,
+      runId,
+      logger: runtimeParams.logger,
+      config: runtimeParams.config,
+      creatorId,
+      creatorEmail,
+      workspaceDir,
+      loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
+      listAgentEnvForRuntime: runtimeParams.listAgentEnvForRuntime,
+    });
+  }
+
+  if (step.type === "agent") {
+    const prompt = content?.content ?? (!task.steps ? task.prompt : null);
+    if (!prompt) {
+      throw new Error(`Agent step "${step.label}" has no prompt`);
+    }
+    return executeAgentStep({
+      prompt,
+      step,
+      input,
+      task,
+      db: runtimeParams.db,
+      logger: runtimeParams.logger,
+      config: runtimeParams.config,
+      workspaceDir,
+      creator,
+      creatorEmail,
+      runAgent: runtimeParams.runAgent,
+      buildMcpServers: runtimeParams.buildMcpServers,
+      getSlack: runtimeParams.getSlack,
+      loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
+      userRepo: runtimeParams.userRepo,
+      inboxMessagesRepo: runtimeParams.inboxMessagesRepo,
+      sendDm: runtimeParams.sendDm,
+      outputPlatform: resolveWorkflowDelivery(task).platform,
+      recordWorkflowStep: runtimeParams.recordWorkflowStep,
+      limitAgentExecution: runtimeParams.limitAgentExecution,
+    });
+  }
+
+  return null;
+}
+
+function parseWorkflowSteps(task: ScheduledTaskRow): WorkflowStep[] {
+  if (task.steps) return JSON.parse(task.steps) as WorkflowStep[];
+  return [
+    { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+    {
+      id: "step1",
+      type: "agent",
+      label: task.prompt,
+      icon: "sketch-ai",
+      position: { x: 0, y: 100 },
+      agentMode: "sketch",
+    },
+  ];
+}
+
+function parseWorkflowEdges(task: ScheduledTaskRow): WorkflowEdge[] {
+  if (!task.edges) return [];
+  const parsed = JSON.parse(task.edges) as unknown;
+  return Array.isArray(parsed) ? (parsed as WorkflowEdge[]) : [];
+}
+
+function resolveExecutionOrder(steps: WorkflowStep[], edges: WorkflowEdge[]): WorkflowStep[] {
+  const executionSteps = steps.filter((step) => step.type !== "trigger");
+  if (edges.length === 0) return executionSteps;
+
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const indegree = new Map(steps.map((step) => [step.id, 0]));
+  const outgoing = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (!byId.has(edge.from) || !byId.has(edge.to)) continue;
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+  }
+
+  const queue = steps.filter((step) => (indegree.get(step.id) ?? 0) === 0);
+  const ordered: WorkflowStep[] = [];
+  while (queue.length > 0) {
+    const step = queue.shift();
+    if (!step) continue;
+    ordered.push(step);
+    for (const nextId of outgoing.get(step.id) ?? []) {
+      const nextCount = (indegree.get(nextId) ?? 0) - 1;
+      indegree.set(nextId, nextCount);
+      if (nextCount === 0) {
+        const nextStep = byId.get(nextId);
+        if (nextStep) queue.push(nextStep);
+      }
+    }
+  }
+
+  if (ordered.length !== steps.length) throw new Error("Automation graph contains a cycle");
+  return ordered.filter((step) => step.type !== "trigger");
+}
+
+function markSkippedAfterFailure(params: {
+  failedStepId: string;
+  executionSteps: WorkflowStep[];
+  edges: WorkflowEdge[];
+  stepOutputs: Record<string, StepOutput>;
+}): void {
+  if (params.edges.length === 0) {
+    let foundFailed = false;
+    for (const step of params.executionSteps) {
+      if (step.id === params.failedStepId) {
+        foundFailed = true;
+        continue;
+      }
+      if (foundFailed && !params.stepOutputs[step.id]) {
+        params.stepOutputs[step.id] = { output: null, status: "skipped", duration_ms: 0 };
+      }
+    }
+    return;
+  }
+
+  const downstream = new Set<string>();
+  const outgoing = new Map<string, string[]>();
+  for (const edge of params.edges) {
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+  }
+  const stack = [...(outgoing.get(params.failedStepId) ?? [])];
+  while (stack.length > 0) {
+    const stepId = stack.pop();
+    if (!stepId || downstream.has(stepId)) continue;
+    downstream.add(stepId);
+    stack.push(...(outgoing.get(stepId) ?? []));
+  }
+  for (const step of params.executionSteps) {
+    if (downstream.has(step.id) && !params.stepOutputs[step.id]) {
+      params.stepOutputs[step.id] = { output: null, status: "skipped", duration_ms: 0 };
+    }
+  }
+}
+
+async function resolveLatestUpstreamOutput(params: {
+  params: ExecuteAutomationParams;
+  stepId: string;
+  edges: WorkflowEdge[];
+  currentRunId: string;
+}): Promise<unknown> {
+  const upstreamId = params.edges.find((edge) => edge.to === params.stepId)?.from;
+  if (!upstreamId) return null;
+  const runs = await params.params.runsRepo.list(params.params.task.id, 20);
+  for (const run of runs) {
+    if (run.id === params.currentRunId || run.status !== "completed" || !run.step_outputs) continue;
+    try {
+      const outputs = JSON.parse(run.step_outputs) as Record<string, StepOutput>;
+      if (outputs[upstreamId]?.status === "completed") return outputs[upstreamId]?.output ?? null;
+    } catch {}
+  }
+  return null;
+}
+
+function buildTriggerSamplePayload(task: ScheduledTaskRow, step: WorkflowStep): unknown {
+  const config = step.triggerConfig;
+  if (config?.type === "schedule") {
+    return {
+      type: "schedule",
+      taskId: task.id,
+      scheduledAt: new Date().toISOString(),
+      scheduleType: config.scheduleType ?? task.schedule_type,
+      scheduleValue: config.scheduleValue ?? task.schedule_value,
+      timezone: config.timezone ?? task.timezone,
+    };
+  }
+  if (config?.type === "canvas") {
+    return {
+      type: "canvas",
+      taskId: task.id,
+      app: config.app ?? null,
+      eventDescription: config.eventDescription ?? null,
+      receivedAt: new Date().toISOString(),
+    };
+  }
+  return { type: "webhook", taskId: task.id, receivedAt: new Date().toISOString() };
 }
 
 function resolveWorkspaceDir(dataDir: string, task: ScheduledTaskRow): string {
@@ -589,6 +829,7 @@ interface AgentStepParams {
   sendDm?: RunAgentParams["sendDm"];
   outputPlatform: "slack" | "whatsapp";
   recordWorkflowStep?: RecordWorkflowStep;
+  limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -632,49 +873,53 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
     ...buildPlatformFormattingLines(outputPlatform),
   ];
 
-  const run = query({
-    prompt: userMessage,
-    options: {
-      maxTurns: 10,
-      ...(modelOverride ? { model: modelOverride } : {}),
-      cwd: workspaceDir,
-      systemPrompt: systemPromptLines.join("\n"),
-      permissionMode: "bypassPermissions" as const,
-      settingSources: [],
-      stderr: (chunk: string) => {
-        stderrChunks.push(chunk);
-      },
-    },
-  });
+  const limitAgentExecution = params.limitAgentExecution ?? (<T>(work: () => Promise<T>) => work());
 
   let lastText = "";
   let stepUsage: WorkflowStepUsage | null = null;
   try {
-    for await (const message of run) {
-      if (!message || typeof message !== "object" || !("type" in message)) continue;
-      if (message.type === "assistant" && "message" in message) {
-        const msg = message.message as { content?: Array<{ type: string; text?: string }> };
-        if (msg.content) {
-          for (const block of msg.content) {
-            if (block.type === "text" && block.text) {
-              lastText = block.text;
+    await limitAgentExecution(async () => {
+      const run = query({
+        prompt: userMessage,
+        options: {
+          maxTurns: 10,
+          ...(modelOverride ? { model: modelOverride } : {}),
+          cwd: workspaceDir,
+          systemPrompt: systemPromptLines.join("\n"),
+          permissionMode: "bypassPermissions" as const,
+          settingSources: [],
+          stderr: (chunk: string) => {
+            stderrChunks.push(chunk);
+          },
+        },
+      });
+
+      for await (const message of run) {
+        if (!message || typeof message !== "object" || !("type" in message)) continue;
+        if (message.type === "assistant" && "message" in message) {
+          const msg = message.message as { content?: Array<{ type: string; text?: string }> };
+          if (msg.content) {
+            for (const block of msg.content) {
+              if (block.type === "text" && block.text) {
+                lastText = block.text;
+              }
             }
           }
+        } else if (message.type === "result") {
+          const resultMsg = message as Record<string, unknown>;
+          const u = resultMsg.usage as Record<string, unknown> | undefined;
+          const modelKeys = Object.keys((resultMsg.modelUsage as Record<string, unknown>) ?? {});
+          stepUsage = {
+            model: modelKeys.length > 0 ? modelKeys[0] : (modelOverride ?? null),
+            inputTokens: (u?.input_tokens as number) ?? 0,
+            outputTokens: (u?.output_tokens as number) ?? 0,
+            cacheReadTokens: (u?.cache_read_input_tokens as number) ?? 0,
+            cacheCreationTokens: (u?.cache_creation_input_tokens as number) ?? 0,
+            sdkCostUsd: (resultMsg.total_cost_usd as number) ?? 0,
+          };
         }
-      } else if (message.type === "result") {
-        const resultMsg = message as Record<string, unknown>;
-        const u = resultMsg.usage as Record<string, unknown> | undefined;
-        const modelKeys = Object.keys((resultMsg.modelUsage as Record<string, unknown>) ?? {});
-        stepUsage = {
-          model: modelKeys.length > 0 ? modelKeys[0] : (modelOverride ?? null),
-          inputTokens: (u?.input_tokens as number) ?? 0,
-          outputTokens: (u?.output_tokens as number) ?? 0,
-          cacheReadTokens: (u?.cache_read_input_tokens as number) ?? 0,
-          cacheCreationTokens: (u?.cache_creation_input_tokens as number) ?? 0,
-          sdkCostUsd: (resultMsg.total_cost_usd as number) ?? 0,
-        };
       }
-    }
+    });
   } catch (err) {
     const stderrText = stderrChunks.join("").slice(0, 2000);
     logger.error({ err, stepId: step.id, stderrText }, "Automation agent: step failed (Claude Code subprocess error)");

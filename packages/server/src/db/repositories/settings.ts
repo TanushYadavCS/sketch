@@ -162,6 +162,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         microsoftOauthClientSecret: string | null;
         microsoftOauthTenant: string | null;
         geminiApiKey: string | null;
+        embeddingProvider: string | null;
         enrichmentEnabled: number | null;
         adminCanReadAllFiles: boolean;
         syncIntervalMinutes: number | null;
@@ -200,6 +201,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       }
       if (data.microsoftOauthTenant !== undefined) updates.microsoft_oauth_tenant = data.microsoftOauthTenant;
       if (data.geminiApiKey !== undefined) updates.gemini_api_key = data.geminiApiKey;
+      if (data.embeddingProvider !== undefined) updates.embedding_provider = data.embeddingProvider;
       if (data.enrichmentEnabled !== undefined) updates.enrichment_enabled = data.enrichmentEnabled;
       if (data.adminCanReadAllFiles !== undefined) updates.admin_can_read_all_files = data.adminCanReadAllFiles ? 1 : 0;
       if (data.syncIntervalMinutes !== undefined) updates.sync_interval_minutes = data.syncIntervalMinutes;

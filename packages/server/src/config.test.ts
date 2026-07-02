@@ -29,8 +29,31 @@ describe("configSchema", () => {
         expect(result.data.SQLITE_PATH).toBe("./data/sketch.db");
         expect(result.data.SLACK_CHANNEL_HISTORY_LIMIT).toBe(5);
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
+        expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
+        expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("baileys");
+        expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
+      }
+    });
+
+    it("parses WhatsApp provider configuration", () => {
+      const result = configSchema.safeParse({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WHATSAPP_GROUP_PROVIDER: "none",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_ACCESS_TOKEN: "access-token",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+        WATI_CHANNEL_PHONE_NUMBER: "+15551234567",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_DM_PROVIDER).toBe("wati");
+        expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("none");
+        expect(result.data.WATI_API_ENDPOINT).toBe("https://tenant.wati.io");
+        expect(result.data.WATI_ACCESS_TOKEN).toBe("access-token");
+        expect(result.data.WATI_WEBHOOK_TOKEN).toBe("webhook-token");
+        expect(result.data.WATI_CHANNEL_PHONE_NUMBER).toBe("+15551234567");
       }
     });
 
@@ -129,6 +152,14 @@ describe("configSchema", () => {
         expect(result.data.MAX_FILE_SIZE_MB).toBe(50);
       }
     });
+
+    it("coerces MAX_CONCURRENT_AGENT_RUNS string to number", () => {
+      const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "2" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(2);
+      }
+    });
   });
 
   describe("invalid configs", () => {
@@ -155,6 +186,16 @@ describe("configSchema", () => {
     it("rejects Microsoft connector concurrency outside the bounded Graph limit", () => {
       expect(configSchema.safeParse({ OUTLOOK_MAX_INFLIGHT: "32" }).success).toBe(false);
       expect(configSchema.safeParse({ TEAMS_MAX_INFLIGHT: "32" }).success).toBe(false);
+    });
+
+    it("rejects agent concurrency below one", () => {
+      const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "0" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid Wati endpoint URLs", () => {
+      const result = configSchema.safeParse({ WATI_API_ENDPOINT: "not-a-url" });
+      expect(result.success).toBe(false);
     });
   });
 });
@@ -268,6 +309,60 @@ describe("validateConfig", () => {
     it("does not exit when SLACK_MODE is absent (defaults to socket)", () => {
       const exitSpy = mockProcessExit();
       const config = makeConfig();
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Wati validation", () => {
+    it("does not require Wati credentials unless Wati is the configured DM provider", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ WHATSAPP_DM_PROVIDER: "baileys" });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("exits when Wati is configured without an API endpoint", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_ACCESS_TOKEN: "access-token",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("exits when Wati is configured without an access token", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("exits when Wati is configured without a webhook token", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_ACCESS_TOKEN: "access-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("accepts complete Wati configuration", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_ACCESS_TOKEN: "access-token",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
       validateConfig(config);
       expect(exitSpy).not.toHaveBeenCalled();
     });

@@ -5,10 +5,12 @@
  */
 import { serve } from "@hono/node-server";
 import type { Kysely } from "kysely";
+import { createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
+import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
@@ -53,12 +55,17 @@ import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
+import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
+import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
+import { createWhatsAppRuntime } from "./whatsapp/runtime";
 
 export interface ServerHandle {
   config: Config;
   server: ReturnType<typeof serve>;
   db: Kysely<DB>;
   whatsapp: WhatsAppBot;
+  whatsappRuntime: ReturnType<typeof createWhatsAppRuntime>;
   getSlack: () => SlackBot | null;
   shutdown: () => Promise<void>;
 }
@@ -154,6 +161,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const tracer = telemetry.tracer;
   const priceMap = new OpenRouterPriceMap({ ttlMs: config.OPENROUTER_PRICE_TTL_HOURS * 60 * 60 * 1000, logger });
   const pricing = createPricingService(priceMap, logger);
+  const agentRunLimiter = createAgentRunLimiter({ limit: config.MAX_CONCURRENT_AGENT_RUNS, logger });
+  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => agentRunLimiter.run(work);
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -198,7 +207,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
           }
         : {}),
     };
-    return instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams));
+    return limitAgentExecution(() =>
+      instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
+    );
   };
 
   // 4. LLM env from DB
@@ -237,6 +248,25 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8. WhatsApp
   const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
+  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, logger);
+  const watiWhatsApp =
+    config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
+      ? createWatiWhatsAppProvider({
+          apiEndpoint: config.WATI_API_ENDPOINT ?? "",
+          accessToken: config.WATI_ACCESS_TOKEN ?? "",
+          webhookToken: config.WATI_WEBHOOK_TOKEN ?? "",
+          channelPhoneNumber: config.WATI_CHANNEL_PHONE_NUMBER,
+          logger,
+        })
+      : null;
+  const whatsappRuntime = createWhatsAppRuntime({
+    dmProviderId: config.WHATSAPP_DM_PROVIDER,
+    groupProviderId: config.WHATSAPP_GROUP_PROVIDER,
+    dmProviders: [baileysWhatsApp.dmProvider, ...(watiWhatsApp ? [watiWhatsApp.dmProvider] : [])],
+    groupProviders: [baileysWhatsApp.groupProvider],
+    inboundProviders: [baileysWhatsApp.inboundProvider, ...(watiWhatsApp ? [watiWhatsApp.inboundProvider] : [])],
+    logger,
+  });
 
   const sendDirectMessage = async ({
     userId,
@@ -267,9 +297,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
     if (platform === "whatsapp") {
       if (!recipient?.whatsapp_number) throw new Error("No WhatsApp number for recipient");
-      const channelId = `${recipient.whatsapp_number.replace("+", "")}@s.whatsapp.net`;
-      await whatsapp.sendText(channelId, message);
-      return { channelId, messageRef: "" };
+      const channelId = phoneE164ToWhatsAppJid(recipient.whatsapp_number);
+      const sent = await whatsappRuntime.sendText(
+        { kind: "dm", phoneE164: recipient.whatsapp_number, providerConversationId: channelId },
+        message,
+      );
+      return { channelId: sent?.providerConversationId ?? channelId, messageRef: sent?.providerMessageId ?? "" };
     }
 
     throw new Error(`Unsupported platform: ${platform}`);
@@ -329,7 +362,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger,
     queueManager,
     getSlack: () => slack,
-    whatsapp,
+    whatsapp: whatsappRuntime,
     settingsRepo,
     runAgent: trackedRunAgent,
     buildMcpServers,
@@ -341,11 +374,19 @@ export async function createServer(config: Config, options?: CreateServerOptions
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
     recordWorkflowStep,
+    limitAgentExecution,
   });
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const agentOutputDelivery = createAgentOutputDeliveryService({
+    db,
+    logger,
+    getSlack: () => slack,
+    whatsapp: whatsappRuntime,
+    settingsRepo,
+  });
   const agentRunService = new AgentRunService({
     db,
     config,
@@ -356,6 +397,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     buildMcpServers,
     loadIntegrationProvider,
     queueManager,
+    outputDelivery: agentOutputDelivery,
+    getSlack: () => slack,
+    getWhatsApp: () => whatsapp,
   });
   const agentScheduler = new AgentScheduler({ service: agentRunService, logger });
   agentScheduler.start();
@@ -395,7 +439,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
   });
 
-  wireWhatsAppHandlers(whatsapp, {
+  wireWhatsAppHandlers(whatsappRuntime, {
     db,
     config,
     logger,
@@ -414,6 +458,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 9. HTTP server
   const app = createApp(db, config, {
     whatsapp,
+    whatsappRuntime,
+    watiWebhook: watiWhatsApp ?? undefined,
     getSlack: () => slack,
     scheduler,
     runAgent: trackedRunAgent,
@@ -445,6 +491,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     localDeviceGateway,
     localClaudeSessionService,
     agentRunService,
+    limitAgentExecution,
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
   localDeviceGateway.attach(server);
@@ -484,6 +531,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     server,
     db,
     whatsapp,
+    whatsappRuntime,
     getSlack: () => slack,
     shutdown,
   };

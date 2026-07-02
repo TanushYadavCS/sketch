@@ -19,14 +19,27 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { clearEnrichmentData, isEnrichmentActive, matchesAsWord, runEnrichment } from "./enrichment";
+import type { GeminiGenerator } from "./gemini-generate";
 
 /** Insert the minimum rows needed to have an indexed file ready for enrichment. */
-async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promise<void> {
+async function seedFile(
+  db: Kysely<DB>,
+  fileId: string,
+  content: string,
+  opts: {
+    connectorType?: string;
+    fileName?: string;
+    fileType?: string;
+    contentCategory?: string;
+    source?: string;
+    sourcePath?: string;
+  } = {},
+): Promise<void> {
   await db
     .insertInto("connector_configs")
     .values({
       id: "conn-1",
-      connector_type: "google_drive",
+      connector_type: opts.connectorType ?? "google_drive",
       auth_type: "oauth",
       credentials: "{}",
       created_by: "admin",
@@ -40,11 +53,11 @@ async function seedFile(db: Kysely<DB>, fileId: string, content: string): Promis
       id: fileId,
       connector_config_id: "conn-1",
       provider_file_id: fileId,
-      file_name: "test.txt",
-      file_type: "text",
-      content_category: "document",
-      source: "google_drive",
-      source_path: "My Drive",
+      file_name: opts.fileName ?? "test.txt",
+      file_type: opts.fileType ?? "text",
+      content_category: opts.contentCategory ?? "document",
+      source: opts.source ?? "google_drive",
+      source_path: opts.sourcePath ?? "My Drive",
       provider_url: null,
       content,
       summary: null,
@@ -246,6 +259,52 @@ describe("runEnrichment — batch chunk insert", () => {
     for (let i = 0; i < chunks.length; i++) {
       expect(chunks[i].chunk_index).toBe(i);
     }
+  });
+
+  it("runs smart enrichment for short calendar event documents", async () => {
+    const fileId = randomUUID();
+    await seedFile(db, fileId, "Planning review with Jane Doe from Acme about pricing next steps tomorrow morning.", {
+      connectorType: "google_calendar",
+      fileName: "Planning review",
+      fileType: "calendar_event",
+      source: "google_calendar",
+      sourcePath: "Google Calendar / Work",
+    });
+    await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "=", fileId).execute();
+
+    let extractCalls = 0;
+    const generator = {
+      generate: async () => "Planning review summary.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          extractCalls += 1;
+          return { mentions: [], relations: [] } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    const result = await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      fileIds: [fileId],
+      generator,
+    });
+
+    const file = await db
+      .selectFrom("indexed_files")
+      .select(["embedding_status", "summary", "summary_status"])
+      .where("id", "=", fileId)
+      .executeTakeFirstOrThrow();
+
+    expect(result.filesProcessed).toBe(1);
+    expect(extractCalls).toBe(1);
+    expect(file).toEqual({
+      embedding_status: "done",
+      summary: "Planning review summary.",
+      summary_status: "done",
+    });
   });
 });
 

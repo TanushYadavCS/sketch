@@ -7,6 +7,7 @@ import type { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { EntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
+import type { MentionType } from "./graph";
 import type { CandidatePool } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
@@ -65,6 +66,7 @@ export interface MaterializeDeps {
   birthGateDryRun: boolean;
   experimentalFlag: boolean;
   embeddingProvider: EmbeddingProvider | null;
+  countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
 }
 
 export type MaterializeResult =

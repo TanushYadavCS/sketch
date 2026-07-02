@@ -56,6 +56,17 @@ export interface ConversationBacklogContext {
   nextCursor?: number;
 }
 
+export interface QuotedMessageContext {
+  id?: number;
+  providerMessageId: string;
+  senderName?: string | null;
+  senderJid?: string | null;
+  text: string;
+  attachments: Attachment[];
+  providerTimestamp?: string | null;
+  receivedAt?: string | null;
+}
+
 export interface LocalClaudeSessionEventContext {
   sessionId: string;
   eventId?: string;
@@ -86,6 +97,7 @@ export interface SketchContextParams {
     groupDescription?: string;
   };
   conversationBacklog?: ConversationBacklogContext;
+  quotedMessage?: QuotedMessageContext;
   localClaudeSessionEvent?: LocalClaudeSessionEventContext;
   visionAnalysisEnabled?: boolean;
 }
@@ -140,8 +152,27 @@ function renderConversationBacklogLines(
   return messageLines.length > 0 ? [...lines, "", ...messageLines] : lines;
 }
 
+function renderQuotedMessageLines(
+  quotedMessage: QuotedMessageContext | undefined,
+  attachmentOptions: AttachmentPromptOptions = {},
+): string[] {
+  if (!quotedMessage) return [];
+
+  const lines = [
+    "The current message is a WhatsApp reply to this quoted message.",
+    `text: ${quotedMessage.text || (quotedMessage.attachments.length > 0 ? "See attached files." : "")}`,
+  ];
+  if (quotedMessage.senderName?.trim()) {
+    lines.splice(1, 0, `sender: ${quotedMessage.senderName}`);
+  }
+  if (quotedMessage.attachments.length > 0) {
+    lines.push(formatAttachmentsForPrompt(quotedMessage.attachments, attachmentOptions));
+  }
+  return lines;
+}
+
 export function getImageAttachmentPathsFromSketchContext(
-  params: Pick<SketchContextParams, "messages" | "conversationBacklog">,
+  params: Pick<SketchContextParams, "messages" | "conversationBacklog" | "quotedMessage">,
 ): string[] {
   const paths: string[] = [];
   for (const message of params.messages) {
@@ -153,6 +184,9 @@ export function getImageAttachmentPathsFromSketchContext(
     for (const attachment of message.attachments) {
       if (isImageAttachment(attachment)) paths.push(attachment.localPath);
     }
+  }
+  for (const attachment of params.quotedMessage?.attachments ?? []) {
+    if (isImageAttachment(attachment)) paths.push(attachment.localPath);
   }
   return paths;
 }
@@ -278,6 +312,7 @@ const SOURCE_LABELS: Record<string, { label: string; noun: string }> = {
   notion: { label: "Notion", noun: "pages" },
   linear: { label: "Linear", noun: "issues" },
   fireflies: { label: "Fireflies", noun: "meeting transcripts" },
+  otter: { label: "Otter", noun: "meeting transcripts" },
   conversation: { label: "Conversations", noun: "messages" },
   local: { label: "Workspace Files", noun: "files" },
 };
@@ -353,16 +388,27 @@ export function buildSystemContext(params: {
   if (params.platform === "web") {
     sections.push(
       "",
-      "## Web Chat Integration Connections",
+      "## Web Chat Automations",
       "",
-      "When the user asks to connect an integration, asks which accounts are connected, or when a task needs a specific app account, use the integration search-apps capability to resolve the provider app and connected status.",
-      "Call search-apps without queries when the user asks what integration accounts are connected. It returns connected accounts from provider state.",
-      "If the app identity is ambiguous or maps to multiple provider apps, ask one concise clarification only for the missing product/app identity, such as 'Which Zoho product should I use?'",
-      "Never ask whether to show, pull up, open, or display a connection card. Forbidden examples: 'Should I pull up the connection card?', 'I can pull up the right card for you', 'Want me to show the connector card?', 'I'll open the connection card'.",
-      "When an app is not connected and a connection card is available in the current chat, tell the user to use the Connect button on that card. Do not send them to Settings -> Integrations unless no card is available or they explicitly ask for settings.",
-      "Do not describe card rendering mechanics. Answer from the returned app/account status and continue only with task-relevant guidance if needed.",
+      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste or link to the builder URL unless the user explicitly asks for the literal URL.",
     );
   }
+
+  sections.push(
+    "",
+    "## Integration Connections",
+    "",
+    "When the user asks to connect an integration, asks which accounts are connected, or when a task needs a specific app account, use the integration search-apps capability to resolve the provider app and connected status.",
+    "Call search-apps without queries when the user asks what integration accounts are connected. It returns connected accounts from provider state.",
+    "If the app identity is ambiguous or maps to multiple provider apps, ask one concise clarification only for the missing product/app identity, such as 'Which Zoho product should I use?'",
+    "Never ask whether to show, pull up, open, or display a connection card or link. Forbidden examples: 'Should I pull up the connection card?', 'I can pull up the right card for you', 'Want me to show the connector card?', 'I'll open the connection card'.",
+    "When an app is not connected, say that app needs to be connected and continue only with task-relevant guidance if needed. If Sketch can detect the missing app, it will add an app-specific setup option automatically after your response; do not mention that rendering step.",
+    "For missing Canvas/provider apps returned by search-apps, do not give manual navigation, API-key, or 'look for this app' setup instructions. Sketch will resolve the returned app identity into the right connection target.",
+    "Do not send users to Settings -> Integrations unless no setup card/link is available or they explicitly ask for settings.",
+    "Do not include a separate 'connect these apps' section, raw integration URLs, or repeated connect instructions in your own answer. Sketch appends the concrete setup card/link when one is available.",
+    "Do not tell the user how to use the setup card/link. Sketch renders the actionable setup UI outside your text.",
+    "Do not describe card or link rendering mechanics. Answer from the returned app/account status.",
+  );
 
   sections.push(
     "",
@@ -593,6 +639,11 @@ export function buildSketchContext(params: SketchContextParams): string {
   if (threadLines.length > 0) {
     const tag = params.threadTag ?? "thread";
     sectionParts.push(`<${tag}>\n${threadLines.join("\n")}\n</${tag}>`);
+  }
+
+  const quotedMessageLines = renderQuotedMessageLines(params.quotedMessage, attachmentOptions);
+  if (quotedMessageLines.length > 0) {
+    sectionParts.push(`<quoted_message>\n${quotedMessageLines.join("\n")}\n</quoted_message>`);
   }
 
   if (params.taskPrompt) {

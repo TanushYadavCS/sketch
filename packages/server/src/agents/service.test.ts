@@ -254,6 +254,6 @@ function runResult(): RunAgentResult {
       auxLlmCalls: [],
       sdkCostUsd: 0,
     },
-    trace: { progressEvents: [], finalText: "Done" },
+    trace: { progressEvents: [], finalText: "Done", automationArtifacts: [] },
   };
 }
