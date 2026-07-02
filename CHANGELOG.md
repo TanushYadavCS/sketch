@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.39.0] -- 2026-07-02
+
+- WhatsApp/Wati hardening: move Wati webhooks onto an explicit QueueManager fast-ack path, classify status callbacks away from agent execution, dedupe inbound provider retries, and persist provider event metadata without logging message content.
+- WhatsApp delivery coherence: route direct sends, agent replies, scheduler/workflow outputs, onboarding/magic-link/introduction sends, sendDm, quoted replies, and media capture through the provider runtime while preserving Baileys group behavior.
+- WhatsApp templates: add provider-specific logical template mappings, Wati template list/sync/send support, and clear failures for proactive WhatsApp DMs when an approved mapping is missing.
+- Connectors: add Otter transcript sync support, connector registration, UI metadata, and a local check script for self-hosted verification.
+
 ## [0.38.1] -- 2026-06-30
 
 - Fix(Wati): acknowledge authenticated Wati webhooks immediately after JSON parsing, then process the provider event asynchronously so inbound callbacks do not wait on the agent pipeline.
