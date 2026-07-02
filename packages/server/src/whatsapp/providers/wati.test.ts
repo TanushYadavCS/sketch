@@ -635,7 +635,7 @@ describe("Wati outbound provider", () => {
         template_name: "sketch_magic_link",
         recipients: [
           {
-            whatsappNumber: "15551234567",
+            phone_number: "15551234567",
             customParams: [
               { name: "name", value: "Alice" },
               { name: "bot", value: "Sketch" },
