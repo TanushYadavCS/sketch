@@ -161,7 +161,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       broadcast_name: buildBroadcastName(template.key),
       recipients: [
         {
-          whatsappNumber: phone,
+          phone_number: phone,
           customParams,
         },
       ],
