@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.40.1] -- 2026-07-02
+
+- Fix(Wati): send template-message recipients with Wati v3's `phone_number` field so approved WhatsApp templates can deliver for proactive DM workflows.
+
 ## [0.40.0] -- 2026-07-02
 
 - Connector credentials: add local-vs-Canvas credential source support so open-source Sketch keeps local credential storage while managed tenants can resolve supported connector credentials from Canvas.
