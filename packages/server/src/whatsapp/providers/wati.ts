@@ -162,7 +162,7 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       recipients: [
         {
           phone_number: phone,
-          customParams,
+          custom_params: customParams,
         },
       ],
     };
