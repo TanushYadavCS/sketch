@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
+import { QueueManager } from "../queue";
 import { createTestLogger } from "../test-utils";
-import { extractWebhookToken, isValidWebhookToken, watiWebhookRoutes } from "./wati-webhook";
+import { WATI_WEBHOOK_QUEUE_KEY, extractWebhookToken, isValidWebhookToken, watiWebhookRoutes } from "./wati-webhook";
 
 function createTestApp(
   handleWebhook = vi.fn(async () => [
@@ -9,6 +10,13 @@ function createTestApp(
   ]),
 ) {
   const app = new Hono();
+  const queueManager = new QueueManager();
+  const queue = {
+    enqueue: vi.fn((work: () => Promise<void>) => {
+      void work();
+    }),
+  };
+  const getQueue = vi.spyOn(queueManager, "getQueue").mockReturnValue(queue as never);
   app.route(
     "/whatsapp/wati",
     watiWebhookRoutes(
@@ -16,15 +24,16 @@ function createTestApp(
         webhookToken: "secret-token",
         handleWebhook,
       },
+      queueManager,
       createTestLogger(),
     ),
   );
-  return { app, handleWebhook };
+  return { app, handleWebhook, queue, getQueue };
 }
 
 describe("watiWebhookRoutes", () => {
   it("accepts query-token authenticated webhook payloads for Wati setups without custom headers", async () => {
-    const { app, handleWebhook } = createTestApp();
+    const { app, handleWebhook, queue, getQueue } = createTestApp();
 
     const res = await app.request("/whatsapp/wati/events?token=secret-token", {
       method: "POST",
@@ -34,6 +43,8 @@ describe("watiWebhookRoutes", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    expect(getQueue).toHaveBeenCalledWith(WATI_WEBHOOK_QUEUE_KEY);
+    expect(queue.enqueue).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(handleWebhook).toHaveBeenCalledWith({ eventType: "message" }));
   });
 
@@ -75,7 +86,7 @@ describe("watiWebhookRoutes", () => {
   });
 
   it("rejects missing or incorrect webhook tokens before processing the body", async () => {
-    const { app, handleWebhook } = createTestApp();
+    const { app, handleWebhook, queue } = createTestApp();
 
     const res = await app.request("/whatsapp/wati/events", {
       method: "POST",
@@ -87,11 +98,12 @@ describe("watiWebhookRoutes", () => {
     });
 
     expect(res.status).toBe(401);
+    expect(queue.enqueue).not.toHaveBeenCalled();
     expect(handleWebhook).not.toHaveBeenCalled();
   });
 
   it("returns 400 for invalid JSON after authentication", async () => {
-    const { app, handleWebhook } = createTestApp();
+    const { app, handleWebhook, queue } = createTestApp();
 
     const res = await app.request("/whatsapp/wati/events", {
       method: "POST",
@@ -103,6 +115,7 @@ describe("watiWebhookRoutes", () => {
     });
 
     expect(res.status).toBe(400);
+    expect(queue.enqueue).not.toHaveBeenCalled();
     expect(handleWebhook).not.toHaveBeenCalled();
   });
 });

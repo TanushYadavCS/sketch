@@ -1,10 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Logger } from "../logger";
+import type { QueueManager } from "../queue";
 import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
+
+export const WATI_WEBHOOK_QUEUE_KEY = "whatsapp:wati:webhooks";
 
 export function watiWebhookRoutes(
   provider: Pick<WatiWhatsAppProvider, "handleWebhook" | "webhookToken">,
+  queueManager: QueueManager,
   logger: Logger,
 ) {
   const routes = new Hono();
@@ -23,12 +27,21 @@ export function watiWebhookRoutes(
       return c.json({ error: { code: "INVALID_JSON", message: "Invalid JSON body" } }, 400);
     }
 
-    setImmediate(() => {
-      void Promise.resolve()
-        .then(() => provider.handleWebhook(payload))
-        .catch((err) => {
-          logger.error({ err }, "Wati webhook processing failed");
-        });
+    queueManager.getQueue(WATI_WEBHOOK_QUEUE_KEY).enqueue(async () => {
+      try {
+        const results = await provider.handleWebhook(payload);
+        logger.debug(
+          {
+            messages: results.filter((result) => result.kind === "message").length,
+            deliveryStatuses: results.filter((result) => result.kind === "delivery_status").length,
+            ignored: results.filter((result) => result.kind === "ignored").length,
+            unrecognized: results.filter((result) => result.kind === "unrecognized").length,
+          },
+          "Wati webhook processed",
+        );
+      } catch (err) {
+        logger.error({ err }, "Wati webhook processing failed");
+      }
     });
 
     return c.json({ ok: true }, 200);

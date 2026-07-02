@@ -37,6 +37,7 @@ import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
@@ -200,7 +201,12 @@ export interface RunAgentParams {
   currentUserId?: string | null;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;

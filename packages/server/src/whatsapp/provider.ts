@@ -1,4 +1,5 @@
 import type { Attachment } from "../files";
+import type { WhatsAppTemplateRequest } from "./templates";
 
 export const WHATSAPP_BAILEYS_PROVIDER_ID = "baileys";
 export const WHATSAPP_NONE_PROVIDER_ID = "none";
@@ -88,6 +89,7 @@ interface WhatsAppProviderBase {
   capabilities: WhatsAppCapabilities;
   isConnected: boolean;
   sendText: (target: WhatsAppTarget, text: string, options?: WhatsAppSendOptions) => Promise<WhatsAppSendResult | null>;
+  sendTemplate?: (target: WhatsAppTarget, template: WhatsAppTemplateRequest) => Promise<WhatsAppSendResult | null>;
   sendFile?: (target: WhatsAppTarget, filePath: string, mimeType: string, fileName: string) => Promise<void>;
   startComposing?: (target: WhatsAppTarget) => void;
   stopComposing?: (target: WhatsAppTarget) => void;
