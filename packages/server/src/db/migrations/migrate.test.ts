@@ -554,10 +554,13 @@ describe("runMigrations — incremental upgrade", () => {
         '111-settings-embedding-provider',
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
-        '114-agent-output-deliveries'
+        '114-agent-output-deliveries',
+        '115-whatsapp-template-mappings-and-provider-events'
       )
     `.execute(db);
     await sql`DROP TABLE agent_output_deliveries`.execute(db);
+    await sql`DROP TABLE whatsapp_template_mappings`.execute(db);
+    await sql`DROP TABLE whatsapp_provider_events`.execute(db);
 
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
 
@@ -571,7 +574,8 @@ describe("runMigrations — incremental upgrade", () => {
         '111-settings-embedding-provider',
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
-        '114-agent-output-deliveries'
+        '114-agent-output-deliveries',
+        '115-whatsapp-template-mappings-and-provider-events'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -584,6 +588,7 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "112-agent-output-structured-payload" },
       { name: "113-indexed-file-all-day-flag" },
       { name: "114-agent-output-deliveries" },
+      { name: "115-whatsapp-template-mappings-and-provider-events" },
     ]);
   });
 });
