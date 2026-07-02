@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.40.0] -- 2026-07-02
+
+- Connector credentials: add local-vs-Canvas credential source support so open-source Sketch keeps local credential storage while managed tenants can resolve supported connector credentials from Canvas.
+- Canvas-managed OAuth: add encrypted Canvas credential envelope handling, access-token minting, and remint-on-expiry support for Google Drive and Microsoft connector sync paths.
+- Managed connector migration: reconcile eligible local OAuth connector configs into Canvas-owned placeholders, pause unsafe rows, and scrub local OAuth identity tokens when Canvas is the credential source.
+- Managed UX: add Canvas-backed connect/import/suggestion APIs and UI flows so users can connect supported integrations through Canvas while Sketch continues to run connector sync.
+
 ## [0.39.0] -- 2026-07-02
 
 - WhatsApp/Wati hardening: move Wati webhooks onto an explicit QueueManager fast-ack path, classify status callbacks away from agent execution, dedupe inbound provider retries, and persist provider event metadata without logging message content.
