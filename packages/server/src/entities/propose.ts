@@ -42,7 +42,8 @@ export type CandidateReason =
   | "strict-normalized"
   | "token-set"
   | "minhash"
-  | "adjacency";
+  | "adjacency"
+  | "embedding";
 
 export interface ProposeInput {
   name: string;
@@ -120,6 +121,7 @@ export type EntityLookup = {
     score: number;
     reason: Extract<CandidateReason, "strict-normalized" | "token-set" | "minhash">;
   }>;
+  retrieveEmbeddingCandidates?(entityType: ProposeEntityType, name: string): Promise<RankedCandidate[]>;
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
   getPersonScopeKeys?(entityId: string): string[];
@@ -142,7 +144,7 @@ export interface ProposeDeps {
   onEntityResolved?: (entity: Entity) => void | Promise<void>;
 }
 
-interface RankedCandidate {
+export interface RankedCandidate {
   entity: Entity;
   score: number;
   reason: CandidateReason;
@@ -500,6 +502,29 @@ async function birthGateOrCreate(
   return { kind: "created", entity };
 }
 
+async function embeddingCandidatesThenCreate(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  createReason: "skipFuzzy" | "ranked_empty",
+): Promise<ProposeResult> {
+  if ((input.entityType === "person" || input.entityType === "company") && deps.lookup.retrieveEmbeddingCandidates) {
+    try {
+      const retrieved = await deps.lookup.retrieveEmbeddingCandidates(input.entityType, input.name);
+      const ranked: RankedCandidate[] = [];
+      for (const candidate of retrieved) {
+        if (!isEligibleMatchTarget(input, candidate.entity)) continue;
+        if (await deps.reviewRepo.isRejected(candidate.entity.id, normalized)) continue;
+        ranked.push(candidate);
+      }
+      if (ranked.length > 0) return queueProposal(deps, input, normalized, ranked, "embedding");
+    } catch (err) {
+      deps.logger?.warn({ err, entityType: input.entityType }, "embedding candidate retrieval failed open");
+    }
+  }
+  return birthGateOrCreate(deps, input, normalized, createReason);
+}
+
 async function decideScopedPersonCandidates(
   deps: ProposeDeps,
   input: ProposeInput,
@@ -731,7 +756,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.skipFuzzy) {
-    return birthGateOrCreate(deps, input, normalized, "skipFuzzy");
+    return embeddingCandidatesThenCreate(deps, input, normalized, "skipFuzzy");
   }
 
   // 4) Fuzzy-rank against same-type entities.
@@ -750,7 +775,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 6) Decide.
   if (ranked.length === 0) {
-    return birthGateOrCreate(deps, input, normalized, "ranked_empty");
+    return embeddingCandidatesThenCreate(deps, input, normalized, "ranked_empty");
   }
   if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
   return queueProposal(deps, input, normalized, ranked, ranked[0].reason);

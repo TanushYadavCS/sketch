@@ -7,7 +7,7 @@ import type { DB } from "../../db/schema";
 import type { KnownEntityForPrompt } from "../file-scope-context";
 import type { EmbeddingProvider } from "./types";
 
-export type NameDedupEntityType = "project" | "product";
+export type NameDedupEntityType = "project" | "product" | "person" | "company";
 export type NameEmbeddingKind = "entity" | "review";
 export type NameDedupQuery = { name: string; type: NameDedupEntityType };
 
@@ -35,7 +35,8 @@ type RetrievedNameRow = {
 };
 
 const NAME_EMBEDDING_BATCH_SIZE = 64;
-const NAME_EMBEDDING_TYPES: NameDedupEntityType[] = ["project", "product"];
+const NAME_EMBEDDING_TYPES: NameDedupEntityType[] = ["project", "product", "person", "company"];
+const REVIEW_NAME_EMBEDDING_TYPES: NameDedupEntityType[] = ["project", "product"];
 export const NAME_DEDUP_COSINE_THRESHOLD = 0.62;
 export const NAME_DEDUP_TOP_K = 10;
 export const NAME_DEDUP_OVERFETCH = 4;
@@ -45,9 +46,12 @@ function storageAvailable(db: Kysely<DB>): boolean {
   return isPg(db) || dbIndex.isSqliteVecAvailable();
 }
 
-function requestedTypes(types: NameDedupEntityType[] | undefined): NameDedupEntityType[] {
-  const requested = types ?? NAME_EMBEDDING_TYPES;
-  return NAME_EMBEDDING_TYPES.filter((type) => requested.includes(type));
+function requestedTypes(
+  types: NameDedupEntityType[] | undefined,
+  allowedTypes: NameDedupEntityType[] = NAME_EMBEDDING_TYPES,
+): NameDedupEntityType[] {
+  const requested = types ?? allowedTypes;
+  return allowedTypes.filter((type) => requested.includes(type));
 }
 
 async function missingEntityRows(db: Kysely<DB>, types: NameDedupEntityType[]): Promise<MissingNameRow[]> {
@@ -141,8 +145,12 @@ export async function reconcileMissingNameEmbeddings(
   if (!provider || !storageAvailable(db)) return;
 
   try {
-    const types = requestedTypes(opts.types);
-    const [entities, reviews] = await Promise.all([missingEntityRows(db, types), missingReviewRows(db, types)]);
+    const entityTypes = requestedTypes(opts.types);
+    const reviewTypes = requestedTypes(opts.types, REVIEW_NAME_EMBEDDING_TYPES);
+    const [entities, reviews] = await Promise.all([
+      missingEntityRows(db, entityTypes),
+      missingReviewRows(db, reviewTypes),
+    ]);
     await embedMissingRows(db, provider, "entity", entities);
     await embedMissingRows(db, provider, "review", reviews);
   } catch (err) {
@@ -282,6 +290,32 @@ async function retrieveReviewRows(
     ORDER BY ranked.distance ASC
   `.execute(db);
   return result.rows;
+}
+
+export async function retrieveEntityNameCandidates(
+  db: Kysely<DB>,
+  provider: EmbeddingProvider | null | undefined,
+  query: NameDedupQuery,
+  opts: RetrieveNameDedupCandidatesOptions = {},
+): Promise<Array<{ entityId: string; name: string; type: string; similarity: number }>> {
+  if (!provider || !storageAvailable(db)) return [];
+
+  try {
+    const topK = opts.topK ?? NAME_DEDUP_TOP_K;
+    const minCosine = opts.minCosine ?? NAME_DEDUP_COSINE_THRESHOLD;
+    const vecLimit = Math.max(1, topK * NAME_DEDUP_OVERFETCH);
+    const [embedding] = await provider.embedTexts([query.name]);
+    if (!embedding) return [];
+    return (await retrieveEntityRows(db, query, JSON.stringify(embedding), vecLimit))
+      .filter((row): row is RetrievedNameRow & { entityId: string } => row.entityId !== null)
+      .filter((row) => row.similarity >= minCosine)
+      .sort((left, right) => right.similarity - left.similarity)
+      .slice(0, topK)
+      .map((row) => ({ entityId: row.entityId, name: row.name, type: row.type, similarity: row.similarity }));
+  } catch (err) {
+    logger.warn({ err, stage: "retrieveEntityNameCandidates" }, "entity name retrieval failed open");
+    return [];
+  }
 }
 
 export async function retrieveNameDedupCandidates(
