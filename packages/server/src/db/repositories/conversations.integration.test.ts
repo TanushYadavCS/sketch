@@ -413,6 +413,84 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(updated.last_seen_message_id).toBe(message.row.id);
     });
 
+    it("merges legacy conversation rows into an existing canonical provider id", async () => {
+      const repo = createConversationRepository(db);
+      const legacy = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "wati-conversation-1",
+      });
+      const canonicalRef = {
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "dm:+1234567890",
+      };
+      const canonical = await repo.getOrCreate(canonicalRef);
+      const legacyMessage = await repo.insertMessage({
+        conversationId: legacy.id,
+        providerMessageId: "legacy-1",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "old context",
+      });
+      await repo.insertMessage({
+        conversationId: legacy.id,
+        providerMessageId: "duplicate",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "legacy duplicate",
+      });
+      const canonicalMessage = await repo.insertMessage({
+        conversationId: canonical.id,
+        providerMessageId: "canonical-1",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "new context",
+      });
+      await repo.insertMessage({
+        conversationId: canonical.id,
+        providerMessageId: "duplicate",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "canonical duplicate",
+      });
+      await repo.updateWatermark(legacy.id, legacyMessage.row.id);
+      await repo.updateWatermark(canonical.id, canonicalMessage.row.id);
+      await repo.updateCursor({
+        conversationId: legacy.id,
+        scopeType: "whatsapp_dm",
+        scopeKey: "default",
+        messageId: legacyMessage.row.id,
+      });
+      await repo.updateCursor({
+        conversationId: canonical.id,
+        scopeType: "whatsapp_dm",
+        scopeKey: "default",
+        messageId: canonicalMessage.row.id,
+      });
+
+      const claimed = await repo.claimProviderConversationId(legacy.id, canonicalRef, "Alice");
+
+      expect(claimed.id).toBe(canonical.id);
+      expect(claimed.provider_conversation_id).toBe("dm:+1234567890");
+      expect(claimed.last_seen_message_id).toBe(legacyMessage.row.id);
+      const legacyRow = await db.selectFrom("conversations").selectAll().where("id", "=", legacy.id).executeTakeFirst();
+      expect(legacyRow).toBeUndefined();
+      const messages = await repo.listMessages(canonical.id, { includeBotMessages: true });
+      expect(messages.messages.map((message) => message.providerMessageId).sort()).toEqual([
+        "canonical-1",
+        "duplicate",
+        "legacy-1",
+      ]);
+      expect(messages.messages.every((message) => message.conversationId === canonical.id)).toBe(true);
+      const cursor = await repo.getCursor({
+        conversationId: canonical.id,
+        scopeType: "whatsapp_dm",
+        scopeKey: "default",
+      });
+      expect(cursor?.last_seen_message_id).toBe(legacyMessage.row.id);
+    });
+
     it("filters backlog by Slack thread id and stores thread metadata", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({

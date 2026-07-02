@@ -48,7 +48,12 @@ function createTestSystemApp(
       slackUserId: string;
       message: string;
     }) => Promise<{ channelId: string; messageRef: string }>;
-    sendDm?: (params: { userId: string; platform: "slack" | "whatsapp"; message: string }) => Promise<{
+    sendDm?: (params: {
+      userId: string;
+      platform: "slack" | "whatsapp";
+      message: string;
+      template?: unknown;
+    }) => Promise<{
       channelId: string;
       messageRef: string;
     }>;
@@ -1802,18 +1807,24 @@ describe("POST /api/system/onboarding-introductions", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, status: "sent", sent: 2, failed: 0 });
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: admin.id,
-      platform: "whatsapp",
-      message:
-        "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
-    });
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: teammate.id,
-      platform: "whatsapp",
-      message:
-        "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
-    });
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: admin.id,
+        platform: "whatsapp",
+        message:
+          "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
+        template: expect.objectContaining({ key: "whatsapp.introduction" }),
+      }),
+    );
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: teammate.id,
+        platform: "whatsapp",
+        message:
+          "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
+        template: expect.objectContaining({ key: "whatsapp.introduction" }),
+      }),
+    );
     const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
     expect(workflow).toBeUndefined();
   });
@@ -1906,12 +1917,15 @@ describe("POST /api/system/onboarding-introductions", () => {
       ],
     });
     expect(sendDm).toHaveBeenCalledTimes(1);
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: admin.id,
-      platform: "whatsapp",
-      message:
-        "Hi, I'm Sketch, your AI coworker in your workspace. You can message me here when you need help with your workspace.",
-    });
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: admin.id,
+        platform: "whatsapp",
+        message:
+          "Hi, I'm Sketch, your AI coworker in your workspace. You can message me here when you need help with your workspace.",
+        template: expect.objectContaining({ key: "whatsapp.introduction" }),
+      }),
+    );
   });
 
   it("requires admin WhatsApp number before WhatsApp introductions", async () => {

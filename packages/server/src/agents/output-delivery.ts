@@ -9,8 +9,9 @@ import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
-import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
+import { buildProactiveUpdateTemplate } from "../whatsapp/templates";
 import { isSlackDmChannelId, isSlackUserId } from "../workflows/delivery";
 import { type RenderableAgentOutput, renderAgentOutputForDelivery } from "./output-renderer";
 import type { AgentDefinition } from "./types";
@@ -67,13 +68,24 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
   async function sendWhatsApp(delivery: AgentDeliveryConfig, text: string): Promise<string[]> {
     if (!deps.whatsapp.isConnected) throw new Error("WhatsApp is not connected.");
     const refs: string[] = [];
+    const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
     for (const chunk of chunkText(text, WHATSAPP_TEXT_LIMIT)) {
-      const sent = await deps.whatsapp.sendText(whatsappTargetFromDeliveryTarget(delivery.targetId), chunk);
+      const sent =
+        target.kind === "dm"
+          ? await deps.whatsapp.sendTemplate(
+              target,
+              buildProactiveUpdateTemplate({
+                recipientName: delivery.label,
+                botName: (await deps.settingsRepo.get())?.bot_name,
+                messageSummary: chunk,
+              }),
+            )
+          : await deps.whatsapp.sendText(target, chunk);
       const messageRef = sent?.providerMessageId;
       if (!messageRef) continue;
       refs.push(messageRef);
       await capture.captureWhatsApp({
-        deliveryTarget: delivery.targetId,
+        deliveryTarget: target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : delivery.targetId,
         messageRef,
         providerTimestamp: sent.providerTimestamp,
         text: chunk,

@@ -86,6 +86,11 @@ function buildMockWhatsApp(connected = true) {
       providerConversationId: "5511999999999@s.whatsapp.net",
       providerTimestamp: "2024-06-04T10:00:00.000Z",
     }),
+    sendTemplate: vi.fn().mockResolvedValue({
+      providerMessageId: "wa-template-1",
+      providerConversationId: "dm:+5511999999999",
+      providerTimestamp: "2024-06-04T10:00:00.000Z",
+    }),
     get isConnected() {
       return connected;
     },
@@ -845,7 +850,7 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
-  it("WhatsApp: sendMessage calls sendText", async () => {
+  it("WhatsApp DM: sendMessage calls sendTemplate", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -861,13 +866,17 @@ describe("executeTask() delivery routing", () => {
 
     await lastExecuteAutomationParams?.sendMessage?.("WhatsApp message");
 
-    expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).toHaveBeenCalledWith(
+    expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).not.toHaveBeenCalled();
+    expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendTemplate).toHaveBeenCalledWith(
       {
         kind: "dm",
         phoneE164: "+5511999999999",
         providerConversationId: "5511999999999@s.whatsapp.net",
       },
-      "WhatsApp message",
+      expect.objectContaining({
+        key: "whatsapp.proactive_update",
+        params: expect.objectContaining({ messageSummary: "WhatsApp message" }),
+      }),
     );
 
     const captured = await db
@@ -886,8 +895,8 @@ describe("executeTask() delivery routing", () => {
     expect(captured).toMatchObject({
       platform: "whatsapp",
       kind: "dm",
-      provider_conversation_id: "5511999999999@s.whatsapp.net",
-      provider_message_id: "wa-message-1",
+      provider_conversation_id: "dm:+5511999999999",
+      provider_message_id: "wa-template-1",
       sender_jid: "bot",
       is_bot: 1,
       text: "WhatsApp message",

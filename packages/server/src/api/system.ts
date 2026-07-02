@@ -12,6 +12,8 @@ import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import { upsertSlackIdentity } from "../slack/upsert-identity";
+import { buildIntroductionTemplate } from "../whatsapp/templates";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { upsertWhatsAppIdentity } from "../whatsapp/upsert-identity";
 
 type InboxMessagesRepo = ReturnType<typeof createInboxMessagesRepository>;
@@ -40,6 +42,7 @@ interface SystemDeps {
     userId: string;
     platform: "slack" | "whatsapp";
     message: string;
+    template?: WhatsAppTemplateRequest;
   }) => Promise<{ channelId: string; messageRef: string }>;
   whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
@@ -626,7 +629,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       }
 
       const requestedNumbers = parsed.data.whatsappNumbers ?? [];
-      const targetUsers = new Map<string, { id: string; whatsapp_number: string | null }>();
+      const targetUsers = new Map<string, { id: string; name: string; whatsapp_number: string | null }>();
       const missingNumbers: string[] = [];
       targetUsers.set(admin.id, admin);
       for (const whatsappNumber of requestedNumbers) {
@@ -663,7 +666,17 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       }
       for (const user of targetUsers.values()) {
         try {
-          const delivery = await deps.sendDm({ userId: user.id, platform: "whatsapp", message });
+          const delivery = await deps.sendDm({
+            userId: user.id,
+            platform: "whatsapp",
+            message,
+            template: buildIntroductionTemplate({
+              recipientName: user.name,
+              botName: settingsRow?.bot_name ?? "Sketch",
+              orgName: parsed.data.orgName ?? settingsRow?.org_name,
+              fallbackText: message,
+            }),
+          });
           deliveries.push({
             userId: user.id,
             ok: true,

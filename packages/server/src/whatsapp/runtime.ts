@@ -13,11 +13,13 @@ import {
   type WhatsAppSendResult,
   type WhatsAppTarget,
 } from "./provider";
+import type { WhatsAppTemplateRequest } from "./templates";
 
 export interface WhatsAppRuntime {
   isConnected: boolean;
   onMessage(handler: WhatsAppMessageHandler): void;
   sendText(target: WhatsAppTarget, text: string, options?: WhatsAppSendOptions): Promise<WhatsAppSendResult | null>;
+  sendTemplate(target: WhatsAppTarget, template: WhatsAppTemplateRequest): Promise<WhatsAppSendResult | null>;
   sendFile(target: WhatsAppTarget, filePath: string, mimeType: string, fileName: string): Promise<void>;
   startComposing(target: WhatsAppTarget): void;
   stopComposing(target: WhatsAppTarget): void;
@@ -92,6 +94,18 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
 
     async sendText(target, text, options) {
       return resolveProviderForTarget(target).sendText(target, text, options);
+    },
+
+    async sendTemplate(target, template) {
+      const provider = resolveProviderForTarget(target);
+      if (provider.sendTemplate) return provider.sendTemplate(target, template);
+      if (provider.capabilities.templates) {
+        throw new Error(`WhatsApp provider ${provider.id} cannot send templates from this runtime`);
+      }
+      if (!template.fallbackText) {
+        throw new Error(`WhatsApp provider ${provider.id} does not support templates`);
+      }
+      return provider.sendText(target, template.fallbackText);
     },
 
     async sendFile(target, filePath, mimeType, fileName) {

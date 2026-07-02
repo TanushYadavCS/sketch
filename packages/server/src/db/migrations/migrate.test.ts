@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 111;
+const EXPECTED_MIGRATION_COUNT = 112;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -166,7 +166,8 @@ describe("runMigrations — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
-    expect(names[110]).toBe("115-connector-credential-source");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -482,6 +483,17 @@ describe("runMigrations — full sequence", () => {
     expect(result.rows).toHaveLength(1);
   });
 
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    await runMigrations(db, { quiet: true });
+
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+  });
+
   it("running migrations twice is idempotent (only applies each migration once)", async () => {
     await runMigrations(db, { quiet: true });
     await runMigrations(db, { quiet: true });
@@ -549,10 +561,13 @@ describe("runMigrations — incremental upgrade", () => {
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
         '114-agent-output-deliveries',
-        '115-connector-credential-source'
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source'
       )
     `.execute(db);
     await sql`DROP TABLE agent_output_deliveries`.execute(db);
+    await sql`DROP TABLE whatsapp_template_mappings`.execute(db);
+    await sql`DROP TABLE whatsapp_provider_events`.execute(db);
 
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
 
@@ -567,7 +582,8 @@ describe("runMigrations — incremental upgrade", () => {
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
         '114-agent-output-deliveries',
-        '115-connector-credential-source'
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -580,7 +596,8 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "112-agent-output-structured-payload" },
       { name: "113-indexed-file-all-day-flag" },
       { name: "114-agent-output-deliveries" },
-      { name: "115-connector-credential-source" },
+      { name: "115-whatsapp-template-mappings-and-provider-events" },
+      { name: "116-connector-credential-source" },
     ]);
   });
 });

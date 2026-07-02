@@ -27,6 +27,8 @@ import type { WhatsAppBot } from "../whatsapp/bot";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
 import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
+import { buildProactiveUpdateTemplate } from "../whatsapp/templates";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type ChannelRepo = ReturnType<typeof createChannelRepository>;
@@ -79,7 +81,12 @@ interface AgentRunRouteDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
@@ -222,10 +229,19 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             platform: parsed.data.target.platform,
           };
           if (parsed.data.deliveryMode === "target" && deps.sendDm) {
+            const template =
+              parsed.data.target.platform === "whatsapp"
+                ? buildProactiveUpdateTemplate({
+                    recipientName: target.name,
+                    botName: settingsRow?.bot_name,
+                    messageSummary: parsed.data.message,
+                  })
+                : undefined;
             delivery.request = await deps.sendDm({
               userId: target.id,
               platform: parsed.data.target.platform,
               message: parsed.data.message,
+              ...(template ? { template } : {}),
             });
           }
           const deliveryTarget =
@@ -265,10 +281,19 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             toolConfig,
           );
           if (parsed.data.deliveryMode === "target" && finalText && deps.sendDm) {
+            const template =
+              parsed.data.target.platform === "whatsapp"
+                ? buildProactiveUpdateTemplate({
+                    recipientName: target.name,
+                    botName: settingsRow?.bot_name,
+                    messageSummary: finalText,
+                  })
+                : undefined;
             delivery.response = await deps.sendDm({
               userId: target.id,
               platform: parsed.data.target.platform,
               message: finalText,
+              ...(template ? { template } : {}),
             });
           }
 

@@ -1,5 +1,6 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
+import { buildProactiveUpdateTemplate } from "../../whatsapp/templates";
 import type { SelectableUser, SketchMcpDeps, ToolResult } from "./types";
 
 function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
@@ -56,6 +57,14 @@ async function deliverMessageToUser(
     userId: params.recipientUserId,
     platform,
     message: params.message,
+    ...(platform === "whatsapp"
+      ? {
+          template: buildProactiveUpdateTemplate({
+            recipientName: recipient.name,
+            messageSummary: params.message,
+          }),
+        }
+      : {}),
   });
 
   let inboxMessageId: string | undefined;

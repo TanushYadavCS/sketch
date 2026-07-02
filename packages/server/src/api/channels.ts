@@ -2,16 +2,21 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import type { createWhatsAppTemplateMappingRepository } from "../db/repositories/whatsapp-template-mappings";
 import { createEmailTransport, verifyEmailTransport } from "../email";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
 import { denyIfNotAdmin } from "./auth-helpers";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type WhatsAppGroupsRepo = ReturnType<typeof createWhatsAppGroupRepository>;
+type WhatsAppTemplateMappingsRepo = ReturnType<typeof createWhatsAppTemplateMappingRepository>;
 
 interface ChannelDeps {
   whatsapp?: WhatsAppBot;
+  watiProvider?: Pick<WatiWhatsAppProvider, "listTemplates">;
+  whatsappTemplateMappings?: WhatsAppTemplateMappingsRepo;
   getSlack?: () => SlackBot | null;
   whatsappGroups?: WhatsAppGroupsRepo;
   onSlackDisconnect?: () => Promise<void>;
@@ -25,6 +30,16 @@ const smtpConfigSchema = z.object({
   user: z.string().min(1),
   password: z.string().min(1),
   from: z.string().email(),
+});
+
+const templateMappingSchema = z.object({
+  provider: z.string().trim().min(1).default("wati"),
+  logicalKey: z.string().trim().min(1),
+  providerTemplateName: z.string().trim().min(1),
+  language: z.string().trim().min(1).default("en_US"),
+  status: z.string().trim().min(1).default("approved"),
+  category: z.string().trim().min(1).nullable().optional(),
+  parameterMap: z.record(z.string(), z.string()).nullable().optional(),
 });
 
 export function channelRoutes(deps: ChannelDeps) {
@@ -80,6 +95,57 @@ export function channelRoutes(deps: ChannelDeps) {
     }
 
     return c.json({ groups: await deps.whatsappGroups.list() });
+  });
+
+  routes.get("/whatsapp/templates/provider", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
+    if (!deps.watiProvider) {
+      return c.json({ error: { code: "NOT_CONFIGURED", message: "Wati is not configured" } }, 404);
+    }
+
+    return c.json({ provider: "wati", templates: await deps.watiProvider.listTemplates() });
+  });
+
+  routes.get("/whatsapp/templates/mappings", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
+    const provider = c.req.query("provider")?.trim() || undefined;
+    return c.json({ mappings: (await deps.whatsappTemplateMappings?.listMappings(provider)) ?? [] });
+  });
+
+  routes.put("/whatsapp/templates/mappings", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
+    if (!deps.whatsappTemplateMappings) {
+      return c.json({ error: { code: "NOT_CONFIGURED", message: "Template mappings are not configured" } }, 404);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = templateMappingSchema.safeParse(body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid template mapping";
+      return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    const mapping = await deps.whatsappTemplateMappings.upsertMapping(parsed.data);
+    return c.json({ mapping });
+  });
+
+  routes.post("/whatsapp/templates/sync", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
+    if (!deps.watiProvider || !deps.whatsappTemplateMappings) {
+      return c.json({ error: { code: "NOT_CONFIGURED", message: "Wati templates are not configured" } }, 404);
+    }
+
+    const templates = await deps.watiProvider.listTemplates();
+    const updatedMappings = await deps.whatsappTemplateMappings.syncProviderTemplates("wati", templates);
+    return c.json({ provider: "wati", templates, updatedMappings });
   });
 
   routes.delete("/slack", async (c) => {

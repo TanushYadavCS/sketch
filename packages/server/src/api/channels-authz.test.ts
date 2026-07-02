@@ -3,11 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
+import { createWhatsAppTemplateMappingRepository } from "../db/repositories/whatsapp-template-mappings";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
 
 const ADMIN_EMAIL = "admin@test.com";
 const MEMBER_EMAIL = "member@test.com";
@@ -48,7 +50,10 @@ async function login(app: ReturnType<typeof createApp>, email: string): Promise<
   return res.headers.get("set-cookie") ?? "";
 }
 
-function makeApp(db: Kysely<DB>, options: { whatsappConnected?: boolean } = {}) {
+function makeApp(
+  db: Kysely<DB>,
+  options: { whatsappConnected?: boolean; watiProvider?: Pick<WatiWhatsAppProvider, "listTemplates"> } = {},
+) {
   let whatsappConnected = options.whatsappConnected ?? true;
   const slack = {
     listChannels: vi.fn().mockResolvedValue([]),
@@ -73,6 +78,7 @@ function makeApp(db: Kysely<DB>, options: { whatsappConnected?: boolean } = {}) 
     logger,
     getSlack: () => slack,
     whatsapp,
+    watiWebhook: options.watiProvider as WatiWhatsAppProvider | undefined,
     onSlackDisconnect,
     onSmtpUpdated,
   });
@@ -137,6 +143,20 @@ describe("Channels API authorization", () => {
       app.request("/api/channels/email", { method: "DELETE", headers: { Cookie: memberCookie } }),
       app.request("/api/channels/whatsapp/pair", { headers: { Cookie: memberCookie } }),
       app.request("/api/channels/whatsapp", { method: "DELETE", headers: { Cookie: memberCookie } }),
+      app.request("/api/channels/whatsapp/templates/provider", { headers: { Cookie: memberCookie } }),
+      app.request("/api/channels/whatsapp/templates/mappings", { headers: { Cookie: memberCookie } }),
+      app.request("/api/channels/whatsapp/templates/mappings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          logicalKey: "whatsapp.magic_link",
+          providerTemplateName: "sketch_magic_link",
+        }),
+      }),
+      app.request("/api/channels/whatsapp/templates/sync", {
+        method: "POST",
+        headers: { Cookie: memberCookie },
+      }),
       app.request("/api/setup/slack", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: memberCookie },
@@ -254,5 +274,67 @@ describe("Channels API authorization", () => {
     const settingsAfterSlack = await createSettingsRepository(db).get();
     expect(settingsAfterSlack?.slack_bot_token).toBe("xoxb-admin");
     expect(settingsAfterSlack?.slack_app_token).toBe("xapp-admin");
+  });
+
+  it("allows admins to configure and sync WhatsApp template mappings", async () => {
+    const listTemplates = vi.fn().mockResolvedValue([
+      {
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "APPROVED",
+        category: "UTILITY",
+      },
+    ]);
+    const { app } = makeApp(db, { watiProvider: { listTemplates } });
+
+    const upsertRes = await app.request("/api/channels/whatsapp/templates/mappings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Cookie: adminCookie },
+      body: JSON.stringify({
+        logicalKey: "whatsapp.magic_link",
+        providerTemplateName: "sketch_magic_link",
+        status: "pending",
+        parameterMap: { name: "recipientName", link: "magicLinkUrl" },
+      }),
+    });
+    expect(upsertRes.status).toBe(200);
+    await expect(upsertRes.json()).resolves.toMatchObject({
+      mapping: {
+        provider: "wati",
+        logical_key: "whatsapp.magic_link",
+        provider_template_name: "sketch_magic_link",
+        status: "pending",
+      },
+    });
+
+    const syncRes = await app.request("/api/channels/whatsapp/templates/sync", {
+      method: "POST",
+      headers: { Cookie: adminCookie },
+    });
+    expect(syncRes.status).toBe(200);
+    await expect(syncRes.json()).resolves.toMatchObject({ provider: "wati", updatedMappings: 1 });
+    expect(listTemplates).toHaveBeenCalledOnce();
+
+    const mappingsRes = await app.request("/api/channels/whatsapp/templates/mappings?provider=wati", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(mappingsRes.status).toBe(200);
+    await expect(mappingsRes.json()).resolves.toMatchObject({
+      mappings: [
+        {
+          provider: "wati",
+          logical_key: "whatsapp.magic_link",
+          provider_template_name: "sketch_magic_link",
+          status: "approved",
+          category: "UTILITY",
+        },
+      ],
+    });
+
+    const mapping = await createWhatsAppTemplateMappingRepository(db).findApprovedMapping(
+      "wati",
+      "whatsapp.magic_link",
+    );
+    expect(mapping?.parameterMap).toEqual({ name: "recipientName", link: "magicLinkUrl" });
   });
 });

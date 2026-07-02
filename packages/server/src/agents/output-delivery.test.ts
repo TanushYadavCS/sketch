@@ -13,6 +13,7 @@ function createMockWhatsApp(overrides: Partial<WhatsAppRuntime> = {}): WhatsAppR
     isConnected: false,
     onMessage: vi.fn(),
     sendText: vi.fn(),
+    sendTemplate: vi.fn(),
     sendFile: vi.fn(),
     startComposing: vi.fn(),
     stopComposing: vi.fn(),
@@ -172,6 +173,58 @@ describe("createAgentOutputDeliveryService", () => {
       "wa-message-4",
     ]);
     expect(captured.every((row) => row.text.length <= 4000)).toBe(true);
+  });
+
+  it("sends WhatsApp DM deliveries through logical templates", async () => {
+    const whatsapp = createMockWhatsApp({
+      isConnected: true,
+      sendTemplate: vi.fn(async () => ({
+        providerMessageId: "wa-template-1",
+        providerConversationId: "dm:+15551234567",
+        providerTimestamp: "2024-06-04T07:20:00.000Z",
+      })),
+    });
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: "dm:+15551234567",
+        label: "Alice",
+      },
+      output: {
+        id: "output-delivery",
+        outputDate: "2026-06-26",
+        masthead: { title: "Daily Brief", summary: "Start here." },
+        sections: {},
+      },
+    });
+
+    expect(whatsapp.sendText).not.toHaveBeenCalled();
+    expect(whatsapp.sendTemplate).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+15551234567" },
+      expect.objectContaining({
+        key: "whatsapp.proactive_update",
+        params: expect.objectContaining({
+          recipientName: "Alice",
+          messageSummary: expect.stringContaining("Daily Brief"),
+        }),
+      }),
+    );
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .select(["provider_message_id", "text"])
+      .executeTakeFirstOrThrow();
+    expect(captured.provider_message_id).toBe("wa-template-1");
   });
 
   it("records a failed attempt when the target platform is unavailable", async () => {
