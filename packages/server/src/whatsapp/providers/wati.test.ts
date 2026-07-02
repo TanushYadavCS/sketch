@@ -605,7 +605,7 @@ describe("Wati outbound provider", () => {
         return new Response(
           JSON.stringify({
             result: true,
-            recipients: [{ localMessageId: "local-template-1", whatsappNumber: "15551234567" }],
+            recipients: [{ local_message_id: "local-template-1", phone_number: "15551234567" }],
           }),
         );
       });
@@ -636,7 +636,7 @@ describe("Wati outbound provider", () => {
         recipients: [
           {
             phone_number: "15551234567",
-            customParams: [
+            custom_params: [
               { name: "name", value: "Alice" },
               { name: "bot", value: "Sketch" },
               { name: "link", value: "https://sketch.test/magic" },
