@@ -184,7 +184,6 @@ async function syncRecordedLinearPayload(db: Kysely<DB>, syncRunId: string): Pro
       factContext,
       item,
       indexedFileId: itemResult.indexedFileId,
-      experimentalFlag: true,
     });
   }
 
@@ -212,7 +211,7 @@ describe("Linear project entity seeding", () => {
   it("materializes one Linear project seed with a bare project source ref", async () => {
     await syncRecordedLinearPayload(db, "sync-run-1");
 
-    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     expect(summary.entitiesCreated).toBe(1);
     const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();

@@ -4,7 +4,7 @@
  * Resolve-logic coverage lives in resolve.test.ts; this file focuses on
  * what only the HTTP layer can express: owner-scope enforcement,
  * auth-before-mutation on GET /:id, multi-user-evidence admin escalation,
- * and the EXPERIMENTAL_FLAG gate on the mount point.
+ * and the entity-review route mount point.
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
@@ -282,26 +282,11 @@ async function structuralContributesToEvidenceNotes(db: Kysely<DB>, relationship
 }
 
 describe("entity-review routes — mounting", () => {
-  it("returns 200 without EXPERIMENTAL_FLAG (Files is GA, route always mounted)", async () => {
+  it("returns 200 for the Files review route", async () => {
     const db = await createTestDb();
     try {
       await seedUsers(db);
-      const app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: false }), {
-        logger: createTestLogger(),
-      });
-      const cookie = await login(app, OWNER_EMAIL);
-      const res = await app.request("/api/entity-review", { headers: { Cookie: cookie } });
-      expect(res.status).toBe(200);
-    } finally {
-      await db.destroy();
-    }
-  });
-
-  it("returns 200 when flag is on", async () => {
-    const db = await createTestDb();
-    try {
-      await seedUsers(db);
-      const app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+      const app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
         logger: createTestLogger(),
       });
       const cookie = await login(app, OWNER_EMAIL);
@@ -329,7 +314,7 @@ describe("entity-review routes — owner-scope & auth-before-mutation", () => {
     otherId = await userIdByEmail(db, OTHER_EMAIL);
     await seedConnectorConfig(db, "config-owner", ownerId);
     await seedConnectorConfig(db, "config-other", otherId);
-    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
     ownerCookie = await login(app, OWNER_EMAIL);
@@ -493,7 +478,7 @@ describe("entity-review routes — list endpoint shape", () => {
     await seedConnectorConfig(db, "config-owner", ownerId);
     const otherId = await userIdByEmail(db, OTHER_EMAIL);
     await seedConnectorConfig(db, "config-other", otherId);
-    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
     ownerCookie = await login(app, OWNER_EMAIL);
@@ -569,7 +554,7 @@ describe("entity-review routes — types filter", () => {
     db = await createTestDb();
     await seedUsers(db);
     ownerId = await userIdByEmail(db, OWNER_EMAIL);
-    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
     adminCookie = await login(app, ADMIN_EMAIL);
@@ -617,7 +602,6 @@ describe("entity-review A4 backend", () => {
   let ownerId: string;
   let otherId: string;
   let ownerCookie: string;
-  let offApp: ReturnType<typeof createApp>;
 
   beforeEach(async () => {
     db = await createTestDb();
@@ -628,10 +612,7 @@ describe("entity-review A4 backend", () => {
     await seedConnectorConfig(db, "config-other", otherId);
     await seedIndexedFile(db, "a4-owner-file", "config-owner");
     await seedIndexedFile(db, "a4-other-file", "config-other");
-    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
-      logger: createTestLogger(),
-    });
-    offApp = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: false }), {
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
     ownerCookie = await login(app, OWNER_EMAIL);
@@ -915,62 +896,6 @@ describe("entity-review A4 backend", () => {
     expect(task.parent_entity_id).toBe(body.targetEntityId);
   });
 
-  it("does not run confirm-time structural assignee backfill when experimental flag is off", async () => {
-    const projectName = "A4 Flag Off Backfill Project";
-    const personId = await seedEntity(db, { name: "A4 Flag Off Person", sourceType: "person" });
-    const single = await seedReviewRow(db, {
-      proposedName: projectName,
-      entityType: "project",
-      triggeredBy: ownerId,
-      evidenceFileIds: ["a4-owner-file"],
-      source: "linear",
-      sourceId: "a4-flag-off-backfill-project",
-      candidateReason: "birth-gated",
-    });
-    const singleTaskId = await seedStructuralTask(db, {
-      sourceTaskId: "a4-flag-off-single-task",
-      fileId: "a4-owner-file",
-      assigneeEntityId: personId,
-      parentEntityId: null,
-      parentName: projectName,
-      parentSourceRef: "linear:a4-flag-off-backfill-project",
-    });
-
-    const offCookie = await login(offApp, OWNER_EMAIL);
-    const singleRes = await offApp.request(`/api/entity-review/${single.id}/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Cookie: offCookie },
-      body: JSON.stringify({ candidateGeneratedAt: single.candidateGeneratedAt }),
-    });
-    expect(singleRes.status).toBe(200);
-    const singleTask = await db
-      .selectFrom("tasks")
-      .select("parent_entity_id")
-      .where("id", "=", singleTaskId)
-      .executeTakeFirstOrThrow();
-    expect(singleTask.parent_entity_id).toBeNull();
-    await expect(structuralContributesToRows(db)).resolves.toHaveLength(0);
-
-    const batch = await seedReviewRow(db, {
-      proposedName: "A4 Flag Off Batch Backfill Project",
-      entityType: "project",
-      triggeredBy: ownerId,
-      evidenceFileIds: ["a4-owner-file"],
-      source: "linear",
-      sourceId: "a4-flag-off-batch-backfill-project",
-      candidateReason: "birth-gated",
-    });
-    const batchRes = await offApp.request("/api/entity-review/confirm-batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Cookie: offCookie },
-      body: JSON.stringify({
-        items: [{ reviewId: batch.id, candidateGeneratedAt: batch.candidateGeneratedAt }],
-      }),
-    });
-    expect(batchRes.status).toBe(404);
-    await expect(structuralContributesToRows(db)).resolves.toHaveLength(0);
-  });
-
   it("reclassify changes type, merges compatible collisions, and refuses incompatible source or seed refs", async () => {
     const product = await seedReviewRow(db, {
       proposedName: "A4 Solo Foo",
@@ -1129,7 +1054,7 @@ describe("entity-review A4 backend", () => {
     expect(invalidTypeRes.status).toBe(400);
   });
 
-  it("separates tracker and inferred bulk accept paths and keeps A4 routes absent when flag is off", async () => {
+  it("separates tracker and inferred bulk accept paths", async () => {
     const tracker = await seedReviewRow(db, {
       proposedName: "A4 Tracker Project",
       entityType: "project",
@@ -1176,43 +1101,6 @@ describe("entity-review A4 backend", () => {
     };
     expect(batch.results.find((result) => result.reviewId === tracker.id)?.ok).toBe(true);
     expect(batch.results.find((result) => result.reviewId === inferred.id)?.error?.code).toBe("CANDIDATE_MISSING");
-
-    const offCookie = await login(offApp, OWNER_EMAIL);
-    for (const path of [
-      "/api/entity-review/summary",
-      "/api/entity-review/confirm-batch",
-      "/api/entity-review/reject-batch",
-      `/api/entity-review/${inferred.id}/reclassify-type`,
-    ]) {
-      const res = await offApp.request(path, {
-        method: path.includes("summary") ? "GET" : "POST",
-        headers: { "Content-Type": "application/json", Cookie: offCookie },
-        body: path.includes("summary")
-          ? undefined
-          : JSON.stringify({
-              items: [],
-              newEntityType: "project",
-              candidateGeneratedAt: inferred.candidateGeneratedAt,
-            }),
-      });
-      expect(res.status).toBe(404);
-    }
-
-    const single = await seedReviewRow(db, {
-      proposedName: "A4 Flag Off Single",
-      entityType: "project",
-      triggeredBy: ownerId,
-      evidenceFileIds: ["a4-owner-file"],
-      source: "linear",
-      sourceId: "flag-off-single",
-      candidateReason: "birth-gated",
-    });
-    const singleRes = await offApp.request(`/api/entity-review/${single.id}/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Cookie: offCookie },
-      body: JSON.stringify({ candidateGeneratedAt: single.candidateGeneratedAt }),
-    });
-    expect(singleRes.status).toBe(200);
   });
 });
 
@@ -1228,7 +1116,7 @@ describe("entity-review routes — dismiss endpoint", () => {
     await seedUsers(db);
     ownerId = await userIdByEmail(db, OWNER_EMAIL);
     await seedConnectorConfig(db, "config-owner", ownerId);
-    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
     ownerCookie = await login(app, OWNER_EMAIL);
@@ -1339,7 +1227,7 @@ describe("entity-review routes — child tasks preview", () => {
     await seedUsers(db);
     ownerId = await userIdByEmail(db, OWNER_EMAIL);
     await seedConnectorConfig(db, "config-owner", ownerId);
-    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
     ownerCookie = await login(app, OWNER_EMAIL);

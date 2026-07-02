@@ -99,7 +99,7 @@ export interface AgentDefinition {
    * focus) are NOT interpolated here; they flow through the runtime context in the
    * user message so this string stays byte-identical across users for prompt-cache reuse.
    */
-  buildInstructions(opts?: { experimentalFlag?: boolean }): string;
+  buildInstructions(): string;
   /** Derive display refs, source URLs, and canonical action labels from indexed data. */
   enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]>;
   /** Optional per-definition runtime context appended to the agent run JSON. */

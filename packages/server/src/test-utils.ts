@@ -165,7 +165,6 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     MAX_CONCURRENT_AGENT_RUNS: 4,
     MAX_FILE_SIZE_MB: 20,
     MAX_UPLOAD_SIZE_MB: 50,
-    EXPERIMENTAL_FLAG: false,
     BIRTH_GATE_DRY_RUN: true,
     LLM_PROMOTION_THRESHOLD: 2,
     LLM_TASK_CORROBORATION_THRESHOLD: 2,

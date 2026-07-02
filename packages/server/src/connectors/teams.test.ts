@@ -414,7 +414,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 30 }),
+      scopeConfig: JSON.stringify({ initialDays: 60 }),
       createdBy: "owner",
     });
     mockTeamsGraph();

@@ -82,7 +82,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -112,7 +111,6 @@ describe("document-derived facts", () => {
           { source: "linear", sourceId: "a-project" },
         ],
       },
-      experimentalFlag: true,
       contentChanged: true,
       generator: fakeGenerator,
     });
@@ -124,7 +122,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
     const enrichFacts = await activeLlmTaskFacts(db);
@@ -142,7 +139,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -166,7 +162,6 @@ describe("document-derived facts", () => {
       factContext: { connectorConfigId: CONNECTOR_ID, createdByUserId: USER_ID, lastSeenSyncRunId: "sync-1" },
       indexedFileId: FILE_ID,
       item: { ...baseSyncedItem(), fileType: "issue" },
-      experimentalFlag: true,
       contentChanged: true,
       generator: fakeGenerator,
     });
@@ -187,7 +182,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID_2],
     });
 
@@ -222,7 +216,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -254,7 +247,6 @@ describe("document-derived facts", () => {
           { source: "linear", sourceId: "project-a" },
         ],
       },
-      experimentalFlag: true,
       contentChanged: true,
       generator: fakeGenerator,
     });
@@ -265,7 +257,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
     const enrichRaw = JSON.parse((await activeLlmTaskFacts(db))[0].raw ?? "{}");
@@ -284,7 +275,6 @@ describe("document-derived facts", () => {
         logger: createTestLogger(),
         embeddingProvider: null,
         generator: fakeGenerator,
-        experimentalFlag: true,
         fileIds: [FILE_ID],
       });
     }
@@ -301,7 +291,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
     expect(extractMock).toHaveBeenLastCalledWith(expect.objectContaining({ priorTitles: [] }));
@@ -311,7 +300,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -327,7 +315,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
     expect(await activeTasks(db)).toHaveLength(1);
@@ -339,7 +326,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
     expect(await activeTasks(db)).toHaveLength(1);
@@ -351,7 +337,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -387,7 +372,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -397,7 +381,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -421,7 +404,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
     extractMock.mockResolvedValueOnce([taskCandidate]);
@@ -430,7 +412,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID_2],
     });
 
@@ -440,7 +421,6 @@ describe("document-derived facts", () => {
       logger: createTestLogger(),
       embeddingProvider: null,
       generator: fakeGenerator,
-      experimentalFlag: true,
       fileIds: [FILE_ID],
     });
 
@@ -468,7 +448,7 @@ describe("document-derived facts", () => {
         attendees: [],
         parentRefs: [],
       },
-      { experimentalFlag: true, contentChanged: false, generator: fakeGenerator },
+      { contentChanged: false, generator: fakeGenerator },
     );
     expect(skipped.changed).toBe(false);
 
@@ -486,7 +466,7 @@ describe("document-derived facts", () => {
         attendees: [],
         parentRefs: [],
       },
-      { experimentalFlag: true, contentChanged: true, generator: fakeGenerator },
+      { contentChanged: true, generator: fakeGenerator },
     );
     expect(emitted.changed).toBe(true);
   });

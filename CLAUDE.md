@@ -105,21 +105,11 @@ Vitest, three projects per package by filename suffix. Default to plain unit; th
 - Static migration imports instead of FileMigrationProvider (for tsdown bundler compatibility)
 - `CURRENT_TIMESTAMP` in migrations for cross-dialect compatibility (SQLite + Postgres)
 
-## Feature Gating (`EXPERIMENTAL_FLAG`)
+## Feature Rollout
 
-New features that aren't ready for general availability are gated behind `config.EXPERIMENTAL_FLAG` (env var, defaults to `false`). If the flag is off, the feature must be **completely invisible** — no routes, no tools, no prompt references, no UI. Gate at all 4 layers:
+Files, Connections, and entity discovery are generally available in this app. Do not add a broad `EXPERIMENTAL_FLAG` gate. If a new feature needs staged rollout, use a narrow capability-specific setting and make sure routes, tools, prompts, and UI stay consistent when it is disabled.
 
-1. **HTTP routes** (`http.ts`): Wrap new API routes in `if (config.EXPERIMENTAL_FLAG) { app.route(...) }`
-2. **Agent tools** (`sketch-tools.ts`): Conditionally include tools using the spread pattern:
-   ```ts
-   ...(deps.experimentalFlag
-     ? [tool("MyTool", ...), tool("AnotherTool", ...)]
-     : ([] as ReturnType<typeof tool>[])),
-   ```
-3. **System prompt** (`prompt.ts`): Wrap any instructions referencing experimental tools in `if (params.experimentalFlag) { ... }` so the agent isn't told about tools it can't use
-4. **Frontend** (`app-sidebar.tsx`): Hide navigation items using `setupStatus.experimentalFlag`
-
-The flag flows: `config` → `bootstrap.ts` (injected in `trackedRunAgent`) → `RunAgentParams` → both `SketchMcpDeps` (tools) and `buildSystemContext` (prompt).
+Operational safety switches such as `BIRTH_GATE_DRY_RUN` may remain runtime config when they protect data quality during a live rollout.
 
 ## Related Repos
 

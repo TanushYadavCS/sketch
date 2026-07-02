@@ -69,8 +69,7 @@ export function normalizeRelationEndpointType(raw: unknown): RelationEndpointTyp
   return (RELATION_ENDPOINT_TYPES as readonly string[]).includes(type) ? (type as RelationEndpointType) : null;
 }
 
-export function coerceMentionType(name: string, type: string, experimentalFlag = false): string {
-  if (!experimentalFlag) return type;
+export function coerceMentionType(name: string, type: string): string {
   return TOOL_NAME_DENYLIST.has(name.trim().toLowerCase()) ? "tool" : type;
 }
 

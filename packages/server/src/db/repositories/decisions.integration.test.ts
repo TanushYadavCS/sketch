@@ -28,7 +28,6 @@ describe("decision sub-entity supersession postgres", () => {
 
     await expect(
       upsertDecisionFact(db, {
-        experimentalFlag: false,
         indexedFileId: "decision-file-forward",
         connectorConfigId: CONNECTOR_ID,
         createdByUserId: USER_ID,
@@ -39,11 +38,9 @@ describe("decision sub-entity supersession postgres", () => {
         decidedAt: "2026-06-22T09:00:00.000Z",
         evidence: { fileIds: ["decision-file-forward"], entityIds: [project.id, TEST_ACCOUNT_ENTITY_ID] },
       }),
-    ).resolves.toEqual({ emitted: false });
-    expect(await countDecisionRows(db)).toBe(0);
+    ).resolves.toEqual({ emitted: true, factKey: expect.any(String), decisionId: expect.any(String) });
 
     await upsertDecisionFactsForFile(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-forward",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -58,10 +55,9 @@ describe("decision sub-entity supersession postgres", () => {
         },
       ],
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     await upsertDecisionFactsForFile(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-forward",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -76,7 +72,7 @@ describe("decision sub-entity supersession postgres", () => {
         },
       ],
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     let rows = await decisionRows(db, project.id, "pricing tier");
     expect(rows).toHaveLength(2);
@@ -93,7 +89,6 @@ describe("decision sub-entity supersession postgres", () => {
     });
 
     await upsertDecisionFactsForFile(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-forward",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -108,7 +103,7 @@ describe("decision sub-entity supersession postgres", () => {
         },
       ],
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     rows = await decisionRows(db, project.id, "pricing tier");
     expect(rows).toHaveLength(2);
@@ -122,7 +117,6 @@ describe("decision sub-entity supersession postgres", () => {
     await seedFile(db, "decision-file-order", "2026-06-22T10:00:00.000Z");
 
     await upsertDecisionFact(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-order",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -133,10 +127,9 @@ describe("decision sub-entity supersession postgres", () => {
       decidedAt: "2026-06-22T12:00:00.000Z",
       evidence: { fileIds: ["decision-file-order"], entityIds: [project.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     await upsertDecisionFact(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-order",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -147,7 +140,7 @@ describe("decision sub-entity supersession postgres", () => {
       decidedAt: "2026-06-22T10:00:00.000Z",
       evidence: { fileIds: ["decision-file-order"], entityIds: [project.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const asOf = await createSubEntityRepository(db).getSubEntitiesAsOf({
       parentEntityId: project.id,
@@ -184,7 +177,6 @@ describe("decision sub-entity supersession postgres", () => {
     await seedFile(db, "decision-file-b1", "2026-06-22T09:10:00.000Z");
 
     await upsertDecisionFact(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-a1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -196,7 +188,6 @@ describe("decision sub-entity supersession postgres", () => {
       evidence: { fileIds: ["decision-file-a1"], entityIds: [projectA.id] },
     });
     await upsertDecisionFact(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-a2",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -208,7 +199,6 @@ describe("decision sub-entity supersession postgres", () => {
       evidence: { fileIds: ["decision-file-a2"], entityIds: [projectA.id] },
     });
     await upsertDecisionFact(db, {
-      experimentalFlag: true,
       indexedFileId: "decision-file-b1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: USER_ID,
@@ -219,7 +209,7 @@ describe("decision sub-entity supersession postgres", () => {
       decidedAt: "2026-06-22T09:10:00.000Z",
       evidence: { fileIds: ["decision-file-b1"], entityIds: [projectB.id] },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const projectARows = await decisionRows(db, projectA.id, "support model");
     const projectBRows = await decisionRows(db, projectB.id, "support model");

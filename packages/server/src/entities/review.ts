@@ -32,7 +32,6 @@ import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { isAdmin } from "../api/auth-helpers";
-import type { Config } from "../config";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo, readReviewFreezeMs } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
@@ -143,10 +142,7 @@ async function backfillStructuralAssigneeForConfirmedProjects(
   await reconcileStructuralAssigneeContributesTo(db, logger, { scope: { kind: "tasks", taskIds } });
 }
 
-export function entityReviewRoutes(
-  db: Kysely<DB>,
-  deps: { config: Pick<Config, "EXPERIMENTAL_FLAG">; logger: Logger },
-) {
+export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -233,153 +229,151 @@ export function entityReviewRoutes(
     return c.json({ rows: rowsWithSummary, total });
   });
 
-  if (deps.config.EXPERIMENTAL_FLAG) {
-    app.get("/summary", async (c) => {
-      const repo = createEntityReviewRepo(db);
-      const summary = await repo.summarizePendingByTypeAndOrigin({
-        ownerUserId: c.get("sub"),
-        isAdmin: isAdmin(c),
-      });
-      return c.json(summary);
+  app.get("/summary", async (c) => {
+    const repo = createEntityReviewRepo(db);
+    const summary = await repo.summarizePendingByTypeAndOrigin({
+      ownerUserId: c.get("sub"),
+      isAdmin: isAdmin(c),
     });
+    return c.json(summary);
+  });
 
-    app.post("/confirm-batch", async (c) => {
-      const body = (await c.req.json().catch(() => ({}))) as {
-        items?: Array<{ reviewId?: string; candidateGeneratedAt?: string; mergeIntoEntityId?: string }>;
-      };
-      if (!Array.isArray(body.items)) {
-        return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
-      }
-      const repo = createEntityReviewRepo(db);
-      const results: Array<{
-        reviewId: string;
-        ok: boolean;
-        targetEntityId?: string;
-        error?: { code: string; message: string };
-      }> = [];
-      const confirmedProjectTargetEntityIds = new Set<string>();
-      for (const item of body.items) {
-        const reviewId = item.reviewId ?? "";
-        if (!item.reviewId || !item.candidateGeneratedAt) {
-          results.push({
-            reviewId,
-            ok: false,
-            error: { code: "BAD_REQUEST", message: "reviewId and candidateGeneratedAt are required" },
-          });
-          continue;
-        }
-        const row = await repo.getById(item.reviewId);
-        if (!row) {
-          results.push({
-            reviewId: item.reviewId,
-            ok: false,
-            error: { code: "ROW_NOT_FOUND", message: "review row not found" },
-          });
-          continue;
-        }
-        const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
-        if (denied) {
-          results.push({ reviewId: item.reviewId, ok: false, error: await readErrorResponse(denied) });
-          continue;
-        }
-        try {
-          const result = await confirmReview({ db, userId: c.get("sub") }, item.reviewId, {
-            mergeIntoEntityId: item.mergeIntoEntityId,
-            candidateGeneratedAt: item.candidateGeneratedAt,
-          });
-          if (result.row.entity_type === "project") confirmedProjectTargetEntityIds.add(result.targetEntityId);
-          results.push({ reviewId: item.reviewId, ok: true, targetEntityId: result.targetEntityId });
-        } catch (err) {
-          results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
-        }
-      }
-      if (deps.config.EXPERIMENTAL_FLAG && confirmedProjectTargetEntityIds.size > 0) {
-        await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [...confirmedProjectTargetEntityIds]);
-      }
-      return c.json({ results });
-    });
-
-    app.post("/reject-batch", async (c) => {
-      const body = (await c.req.json().catch(() => ({}))) as {
-        items?: Array<{ reviewId?: string; candidateGeneratedAt?: string }>;
-      };
-      if (!Array.isArray(body.items)) {
-        return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
-      }
-      const repo = createEntityReviewRepo(db);
-      const results: Array<{ reviewId: string; ok: boolean; error?: { code: string; message: string } }> = [];
-      for (const item of body.items) {
-        const reviewId = item.reviewId ?? "";
-        if (!item.reviewId || !item.candidateGeneratedAt) {
-          results.push({
-            reviewId,
-            ok: false,
-            error: { code: "BAD_REQUEST", message: "reviewId and candidateGeneratedAt are required" },
-          });
-          continue;
-        }
-        const row = await repo.getById(item.reviewId);
-        if (!row) {
-          results.push({
-            reviewId: item.reviewId,
-            ok: false,
-            error: { code: "ROW_NOT_FOUND", message: "review row not found" },
-          });
-          continue;
-        }
-        const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
-        if (denied) {
-          results.push({ reviewId: item.reviewId, ok: false, error: await readErrorResponse(denied) });
-          continue;
-        }
-        try {
-          await rejectReview({ db, userId: c.get("sub") }, item.reviewId, {
-            candidateGeneratedAt: item.candidateGeneratedAt,
-          });
-          results.push({ reviewId: item.reviewId, ok: true });
-        } catch (err) {
-          results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
-        }
-      }
-      return c.json({ results });
-    });
-
-    app.post("/:id/reclassify-type", async (c) => {
-      const id = c.req.param("id");
-      const body = (await c.req.json().catch(() => ({}))) as {
-        newEntityType?: string;
-        candidateGeneratedAt?: string;
-      };
-      if (!body.candidateGeneratedAt || !body.newEntityType) {
-        return c.json(
-          { error: { code: "BAD_REQUEST", message: "newEntityType and candidateGeneratedAt are required" } },
-          400,
-        );
-      }
-      if (!RECLASSIFIABLE_TYPES.has(body.newEntityType)) {
-        return c.json(
-          { error: { code: "BAD_REQUEST", message: "newEntityType must be project, product, or team" } },
-          400,
-        );
-      }
-
-      const repo = createEntityReviewRepo(db);
-      const row = await repo.getById(id);
-      if (!row) return c.json({ error: { code: "NOT_FOUND", message: "review row not found" } }, 404);
-      const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
-      if (denied) return denied;
-
-      try {
-        const result = await reclassifyReview({ db, userId: c.get("sub") }, id, {
-          newEntityType: body.newEntityType,
-          candidateGeneratedAt: body.candidateGeneratedAt,
+  app.post("/confirm-batch", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      items?: Array<{ reviewId?: string; candidateGeneratedAt?: string; mergeIntoEntityId?: string }>;
+    };
+    if (!Array.isArray(body.items)) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
+    }
+    const repo = createEntityReviewRepo(db);
+    const results: Array<{
+      reviewId: string;
+      ok: boolean;
+      targetEntityId?: string;
+      error?: { code: string; message: string };
+    }> = [];
+    const confirmedProjectTargetEntityIds = new Set<string>();
+    for (const item of body.items) {
+      const reviewId = item.reviewId ?? "";
+      if (!item.reviewId || !item.candidateGeneratedAt) {
+        results.push({
+          reviewId,
+          ok: false,
+          error: { code: "BAD_REQUEST", message: "reviewId and candidateGeneratedAt are required" },
         });
-        return c.json(result);
-      } catch (err) {
-        return handleResolveError(c, err);
+        continue;
       }
-    });
-  }
+      const row = await repo.getById(item.reviewId);
+      if (!row) {
+        results.push({
+          reviewId: item.reviewId,
+          ok: false,
+          error: { code: "ROW_NOT_FOUND", message: "review row not found" },
+        });
+        continue;
+      }
+      const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+      if (denied) {
+        results.push({ reviewId: item.reviewId, ok: false, error: await readErrorResponse(denied) });
+        continue;
+      }
+      try {
+        const result = await confirmReview({ db, userId: c.get("sub") }, item.reviewId, {
+          mergeIntoEntityId: item.mergeIntoEntityId,
+          candidateGeneratedAt: item.candidateGeneratedAt,
+        });
+        if (result.row.entity_type === "project") confirmedProjectTargetEntityIds.add(result.targetEntityId);
+        results.push({ reviewId: item.reviewId, ok: true, targetEntityId: result.targetEntityId });
+      } catch (err) {
+        results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
+      }
+    }
+    if (confirmedProjectTargetEntityIds.size > 0) {
+      await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [...confirmedProjectTargetEntityIds]);
+    }
+    return c.json({ results });
+  });
+
+  app.post("/reject-batch", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      items?: Array<{ reviewId?: string; candidateGeneratedAt?: string }>;
+    };
+    if (!Array.isArray(body.items)) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
+    }
+    const repo = createEntityReviewRepo(db);
+    const results: Array<{ reviewId: string; ok: boolean; error?: { code: string; message: string } }> = [];
+    for (const item of body.items) {
+      const reviewId = item.reviewId ?? "";
+      if (!item.reviewId || !item.candidateGeneratedAt) {
+        results.push({
+          reviewId,
+          ok: false,
+          error: { code: "BAD_REQUEST", message: "reviewId and candidateGeneratedAt are required" },
+        });
+        continue;
+      }
+      const row = await repo.getById(item.reviewId);
+      if (!row) {
+        results.push({
+          reviewId: item.reviewId,
+          ok: false,
+          error: { code: "ROW_NOT_FOUND", message: "review row not found" },
+        });
+        continue;
+      }
+      const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+      if (denied) {
+        results.push({ reviewId: item.reviewId, ok: false, error: await readErrorResponse(denied) });
+        continue;
+      }
+      try {
+        await rejectReview({ db, userId: c.get("sub") }, item.reviewId, {
+          candidateGeneratedAt: item.candidateGeneratedAt,
+        });
+        results.push({ reviewId: item.reviewId, ok: true });
+      } catch (err) {
+        results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
+      }
+    }
+    return c.json({ results });
+  });
+
+  app.post("/:id/reclassify-type", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      newEntityType?: string;
+      candidateGeneratedAt?: string;
+    };
+    if (!body.candidateGeneratedAt || !body.newEntityType) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "newEntityType and candidateGeneratedAt are required" } },
+        400,
+      );
+    }
+    if (!RECLASSIFIABLE_TYPES.has(body.newEntityType)) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "newEntityType must be project, product, or team" } },
+        400,
+      );
+    }
+
+    const repo = createEntityReviewRepo(db);
+    const row = await repo.getById(id);
+    if (!row) return c.json({ error: { code: "NOT_FOUND", message: "review row not found" } }, 404);
+    const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+    if (denied) return denied;
+
+    try {
+      const result = await reclassifyReview({ db, userId: c.get("sub") }, id, {
+        newEntityType: body.newEntityType,
+        candidateGeneratedAt: body.candidateGeneratedAt,
+      });
+      return c.json(result);
+    } catch (err) {
+      return handleResolveError(c, err);
+    }
+  });
 
   app.get("/:id", async (c) => {
     const id = c.req.param("id");
@@ -471,7 +465,7 @@ export function entityReviewRoutes(
         candidateGeneratedAt: body.candidateGeneratedAt,
         nameOverride: body.nameOverride,
       });
-      if (deps.config.EXPERIMENTAL_FLAG && result.row.entity_type === "project") {
+      if (result.row.entity_type === "project") {
         await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [result.targetEntityId]);
       }
       return c.json({

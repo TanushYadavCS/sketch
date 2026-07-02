@@ -249,7 +249,7 @@ describe("A1 birth gate", () => {
     });
   });
 
-  it("auto-creates product mentions with the gate off (EXPERIMENTAL_FLAG invisible)", async () => {
+  it("auto-creates product mentions with the birth gate dry run off", async () => {
     await seedConnector(db);
     await seedFile(db, "file-1");
     await upsertLlmMention(db, "file-1", "Canvas Copilot", "product");

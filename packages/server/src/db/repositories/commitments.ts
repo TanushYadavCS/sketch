@@ -16,7 +16,6 @@ export interface CommitmentFactRaw extends CommitmentSeed {
 }
 
 export interface UpsertCommitmentFactInput {
-  experimentalFlag?: boolean;
   indexedFileId?: string | null;
   connectorConfigId: string;
   createdByUserId?: string | null;
@@ -65,7 +64,6 @@ export async function upsertCommitmentFact(
   const connectorConfigId = requireNonEmpty(input.connectorConfigId, "connectorConfigId");
   const source = requireNonEmpty(input.source, "source");
   const commitmentId = requireNonEmpty(input.commitmentId, "commitmentId");
-  if (!input.experimentalFlag) return { emitted: false };
 
   await createIndexedFileFactRepository(db).upsertFact({
     indexedFileId: input.indexedFileId ?? null,

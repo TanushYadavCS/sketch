@@ -4,12 +4,7 @@ import { upsertLlmTaskFact } from "../db/repositories/indexed-file-facts";
 import { TEST_ACCOUNT_ENTITY_ID, createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import {
-  buildMaterializeDeps,
-  materializeFromFact,
-  materializeUnmaterializedFacts,
-  shouldMarkMaterialized,
-} from "./materialize";
+import { buildMaterializeDeps, materializeFromFact, materializeUnmaterializedFacts } from "./materialize";
 
 const U1 = "llm-task-u1";
 const U2 = "llm-task-u2";
@@ -28,9 +23,8 @@ describe("llm task materialization", () => {
     await db.destroy();
   });
 
-  it("drops chatter and keeps flag-off emission and materialization invisible", async () => {
-    const offEmission = await upsertLlmTaskFact(db, {
-      experimentalFlag: false,
+  it("drops chatter without minting an uncorroborated task", async () => {
+    const emission = await upsertLlmTaskFact(db, {
       indexedFileId: "llm-file-1",
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: U1,
@@ -41,28 +35,39 @@ describe("llm task materialization", () => {
       promptVersion: PROMPT_VERSION,
     });
     let factCount = await countRows("indexed_file_facts");
-    expect(offEmission).toEqual({ emitted: false });
-    expect(factCount).toBe(0);
+    expect(emission).toEqual({ emitted: true, factKey: expect.any(String), candidateId: expect.any(String) });
+    expect(factCount).toBe(1);
 
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", "llm-file-1")
+      .executeTakeFirstOrThrow();
+    const deps = await buildMaterializeDeps(db, { llmTaskCorroborationThreshold: 2 });
+    const result = await materializeFromFact(deps, fact);
+    factCount = await countRows("tasks");
+    expect(result).toEqual({ kind: "skipped", reason: "llm_task_ungated" });
+    expect(factCount).toBe(0);
+  });
+
+  it("materializes owner-action tasks with default dependencies", async () => {
     await seedLlmFact({
       fileId: "llm-file-1",
-      candidateId: "chatter-1",
-      title: "let's circle back on pricing",
-      hasOwnerVerbObject: false,
+      candidateId: "owner-action-1",
+      title: "Send pricing deck",
+      hasOwnerVerbObject: true,
       ownerUserId: U1,
-      corroborationKey: "lets circle back on pricing|global",
+      owner: { name: "Owner One" },
+      corroborationKey: "send pricing deck|global",
     });
     const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
-    const depsOff = await buildMaterializeDeps(db, { experimentalFlag: false });
-    const offResult = await materializeFromFact(depsOff, fact);
-    expect(offResult).toEqual({ kind: "skipped", reason: "experimental_off" });
-    expect(shouldMarkMaterialized(offResult)).toBe(true);
-
-    const depsOn = await buildMaterializeDeps(db, { experimentalFlag: true, llmTaskCorroborationThreshold: 2 });
-    const onResult = await materializeFromFact(depsOn, fact);
-    factCount = await countRows("tasks");
-    expect(onResult).toEqual({ kind: "skipped", reason: "llm_task_ungated" });
-    expect(factCount).toBe(0);
+    await expect(materializeFromFact(await buildMaterializeDeps(db, {}), fact)).resolves.toMatchObject({
+      kind: "task_materialized",
+      created: true,
+    });
+    const tasks = await db.selectFrom("tasks").selectAll().execute();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ title: "Send pricing deck", source: "llm", created_by_user_id: U1 });
   });
 
   it("mints only after owner-scoped distinct-file corroboration", async () => {
@@ -84,7 +89,6 @@ describe("llm task materialization", () => {
     });
 
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
     expect(await countRows("tasks")).toBe(0);
@@ -98,7 +102,6 @@ describe("llm task materialization", () => {
       corroborationKey: "send pricing deck|global",
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -128,7 +131,6 @@ describe("llm task materialization", () => {
       corroborationKey: "send pricing deck|global",
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -159,7 +161,6 @@ describe("llm task materialization", () => {
     });
 
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -194,7 +195,6 @@ describe("llm task materialization", () => {
     });
 
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -247,7 +247,6 @@ describe("llm task materialization", () => {
       entityIds: ["project-x", TEST_ACCOUNT_ENTITY_ID],
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
 
@@ -280,7 +279,6 @@ describe("llm task materialization", () => {
       corroborationKey: "follow up on launch note|global",
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmTaskCorroborationThreshold: 2,
     });
     await repo.expireOrphanedTasks();
@@ -302,7 +300,6 @@ describe("llm task materialization", () => {
     entityIds?: string[];
   }): Promise<string> {
     await upsertLlmTaskFact(db, {
-      experimentalFlag: true,
       indexedFileId: input.fileId,
       connectorConfigId: CONNECTOR_ID,
       createdByUserId: input.ownerUserId,

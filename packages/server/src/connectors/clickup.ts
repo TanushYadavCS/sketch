@@ -312,10 +312,9 @@ export function resolveListCycle(params: {
   workspaceName: string;
   workspaceId: string;
   storedMapping: unknown;
-  experimentalFlag: boolean;
   logger?: Pick<Logger, "warn">;
 }): SyncedTaskCycle | null {
-  if (!params.experimentalFlag || !hasStoredHierarchyMapping(params.storedMapping)) {
+  if (!hasStoredHierarchyMapping(params.storedMapping)) {
     return detectSprintCycle(params.list, params.space, params.folder);
   }
 
@@ -482,30 +481,6 @@ function taskToSyncedItem(
   };
 }
 
-function clickupProjectSeed(params: {
-  node: ClickUpFolder | ClickUpList;
-  workspaceName: string;
-  workspaceId: string;
-  spaceName: string;
-  spaceId: string;
-}): EntitySeed {
-  const name = qualifyContainerName(params.node.name, params.spaceName);
-  return {
-    name,
-    sourceType: "project",
-    source: "clickup",
-    sourceId: params.node.id,
-    aliases: name === params.node.name ? undefined : [params.node.name],
-    metadata: {
-      workspaceName: params.workspaceName,
-      workspaceId: params.workspaceId,
-      spaceName: params.spaceName,
-      spaceId: params.spaceId,
-      path: `${params.workspaceName} / ${params.spaceName} / ${params.node.name}`,
-    },
-  };
-}
-
 function clickupHierarchySeed(params: {
   node: { id: string; name: string };
   sourceType: "team" | "project";
@@ -656,7 +631,7 @@ export function createClickUpConnector(): Connector {
       await clickupRequest("/user", token, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed, onPersonSeed, experimentalFlag = false }) {
+    async *sync({ credentials, scopeConfig, cursor, logger, onEntitySeed, onPersonSeed }) {
       const token = getAccessToken(credentials);
       const allowedWorkspaces = (scopeConfig.workspaces as string[] | undefined) ?? [];
       const allowedSpaces = (scopeConfig.spaces as string[] | undefined) ?? [];
@@ -686,15 +661,13 @@ export function createClickUpConnector(): Connector {
           "Workspace members resolved",
         );
 
-        const workspaceMapping = experimentalFlag
-          ? resolveHierarchyMapping(
-              CLICKUP_HIERARCHY_LEVELS,
-              hasStoredMapping ? storedHierarchyMapping : computeStructureAwareDefault(CLICKUP_HIERARCHY_LEVELS),
-              { logger },
-            )
-          : undefined;
+        const workspaceMapping = resolveHierarchyMapping(
+          CLICKUP_HIERARCHY_LEVELS,
+          hasStoredMapping ? storedHierarchyMapping : computeStructureAwareDefault(CLICKUP_HIERARCHY_LEVELS),
+          { logger },
+        );
 
-        if (experimentalFlag && workspaceMapping) {
+        if (workspaceMapping) {
           await maybeSeedMappedClickUpNode({
             onEntitySeed,
             mapping: workspaceMapping,
@@ -703,17 +676,6 @@ export function createClickUpConnector(): Connector {
             workspaceName,
             workspaceId: team.id,
             parentPath: [],
-          });
-        }
-
-        // Seed workspace as top-level entity
-        if (!experimentalFlag && onEntitySeed) {
-          await onEntitySeed({
-            name: workspaceName,
-            sourceType: "clickup_workspace",
-            source: "clickup",
-            sourceId: team.id,
-            metadata: { memberCount: workspaceEmails.length },
           });
         }
 
@@ -744,21 +706,12 @@ export function createClickUpConnector(): Connector {
           spaces: ClickUpSpace[];
         };
 
+        let syncedAnyAllowedSpace = false;
         for (const space of spacesRes.spaces) {
           if (allowedSpaces.length > 0 && !allowedSpaces.includes(space.id)) {
             continue;
           }
-
-          // Seed space as entity with workspace context
-          if (!experimentalFlag && onEntitySeed) {
-            await onEntitySeed({
-              name: space.name,
-              sourceType: "clickup_space",
-              source: "clickup",
-              sourceId: space.id,
-              metadata: { private: space.private, workspaceName, workspaceId: team.id },
-            });
-          }
+          syncedAnyAllowedSpace = true;
 
           // Build access scope for this space.
           // Private spaces use space members; public spaces use all workspace members.
@@ -787,40 +740,33 @@ export function createClickUpConnector(): Connector {
             folders: ClickUpFolder[];
           };
 
-          // Folderless lists are fetched up-front only on the experimental path, where the
-          // structure-aware default mapping needs to know whether the space has any. When the
-          // flag is off they are fetched after the folder loop (the original order) so a failure
-          // there cannot block folder-list tasks that have already been traversed.
           let hierarchyMapping: HierarchyMapping | undefined;
-          let folderlessLists: ClickUpList[] = [];
-          if (experimentalFlag) {
-            const folderlessListsRes = (await clickupRequest(`/space/${space.id}/list`, token, logger)) as {
-              lists: ClickUpList[];
-            };
-            folderlessLists = folderlessListsRes.lists;
-            hierarchyMapping = resolveHierarchyMapping(
-              CLICKUP_HIERARCHY_LEVELS,
-              hasStoredMapping
-                ? storedHierarchyMapping
-                : computeStructureAwareDefault(CLICKUP_HIERARCHY_LEVELS, {
-                    hasFolders: foldersRes.folders.length > 0,
-                    hasFolderlessLists: folderlessLists.length > 0,
-                  }),
-              { logger },
-            );
-            if (hierarchyMapping) {
-              await maybeSeedMappedClickUpNode({
-                onEntitySeed,
-                mapping: hierarchyMapping,
-                levelKey: "space",
-                node: space,
-                workspaceName,
-                workspaceId: team.id,
-                spaceName: space.name,
-                spaceId: space.id,
-                parentPath: [workspaceName],
-              });
-            }
+          const folderlessListsRes = (await clickupRequest(`/space/${space.id}/list`, token, logger)) as {
+            lists: ClickUpList[];
+          };
+          const folderlessLists = folderlessListsRes.lists;
+          hierarchyMapping = resolveHierarchyMapping(
+            CLICKUP_HIERARCHY_LEVELS,
+            hasStoredMapping
+              ? storedHierarchyMapping
+              : computeStructureAwareDefault(CLICKUP_HIERARCHY_LEVELS, {
+                  hasFolders: foldersRes.folders.length > 0,
+                  hasFolderlessLists: folderlessLists.length > 0,
+                }),
+            { logger },
+          );
+          if (hierarchyMapping) {
+            await maybeSeedMappedClickUpNode({
+              onEntitySeed,
+              mapping: hierarchyMapping,
+              levelKey: "space",
+              node: space,
+              workspaceName,
+              workspaceId: team.id,
+              spaceName: space.name,
+              spaceId: space.id,
+              parentPath: [workspaceName],
+            });
           }
 
           for (const folder of foldersRes.folders) {
@@ -828,18 +774,7 @@ export function createClickUpConnector(): Connector {
               lists: ClickUpList[];
             };
             const lists = listsRes.lists;
-            if (!experimentalFlag && onEntitySeed && lists.length > 0) {
-              await onEntitySeed(
-                clickupProjectSeed({
-                  node: folder,
-                  workspaceName,
-                  workspaceId: team.id,
-                  spaceName: space.name,
-                  spaceId: space.id,
-                }),
-              );
-            }
-            if (experimentalFlag && hierarchyMapping) {
+            if (hierarchyMapping) {
               await maybeSeedMappedClickUpNode({
                 onEntitySeed,
                 mapping: hierarchyMapping,
@@ -853,7 +788,7 @@ export function createClickUpConnector(): Connector {
               });
             }
             for (const list of lists) {
-              if (experimentalFlag && hierarchyMapping) {
+              if (hierarchyMapping) {
                 await maybeSeedMappedClickUpNode({
                   onEntitySeed,
                   mapping: hierarchyMapping,
@@ -873,7 +808,6 @@ export function createClickUpConnector(): Connector {
                 workspaceName,
                 workspaceId: team.id,
                 storedMapping: storedHierarchyMapping,
-                experimentalFlag,
                 logger,
               });
               yield* fetchTasksFromList(
@@ -896,25 +830,8 @@ export function createClickUpConnector(): Connector {
             }
           }
 
-          if (!experimentalFlag) {
-            const folderlessListsRes = (await clickupRequest(`/space/${space.id}/list`, token, logger)) as {
-              lists: ClickUpList[];
-            };
-            folderlessLists = folderlessListsRes.lists;
-          }
           for (const list of folderlessLists) {
-            if (!experimentalFlag && onEntitySeed) {
-              await onEntitySeed(
-                clickupProjectSeed({
-                  node: list,
-                  workspaceName,
-                  workspaceId: team.id,
-                  spaceName: space.name,
-                  spaceId: space.id,
-                }),
-              );
-            }
-            if (experimentalFlag && hierarchyMapping) {
+            if (hierarchyMapping) {
               await maybeSeedMappedClickUpNode({
                 onEntitySeed,
                 mapping: hierarchyMapping,
@@ -933,7 +850,6 @@ export function createClickUpConnector(): Connector {
               workspaceName,
               workspaceId: team.id,
               storedMapping: storedHierarchyMapping,
-              experimentalFlag,
               logger,
             });
             yield* fetchTasksFromList(
@@ -956,8 +872,20 @@ export function createClickUpConnector(): Connector {
           }
         }
 
-        // Sync ClickUp Docs at workspace level
-        yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
+        // Sync ClickUp Docs at workspace level.
+        // Docs are fetched per-workspace with no space-level filter, so they would leak
+        // across workspaces the user never selected. When workspaces are explicitly scoped,
+        // this team already passed the workspace filter above. When only spaces are selected
+        // (workspaces empty), sync docs only if this workspace contains a selected space;
+        // otherwise a workspace reachable by the token but never opted into would still have
+        // its docs ingested. With neither workspaces nor spaces selected, the connection is
+        // unscoped and every workspace's docs sync (unchanged behavior).
+        const workspaceInDocScope =
+          allowedWorkspaces.includes(team.id) ||
+          (allowedWorkspaces.length === 0 && (allowedSpaces.length === 0 || syncedAnyAllowedSpace));
+        if (workspaceInDocScope) {
+          yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
+        }
       }
 
       // Seed assignees collected during task traversal as person entities

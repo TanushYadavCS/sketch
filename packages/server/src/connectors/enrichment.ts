@@ -241,7 +241,6 @@ async function emitAndMaterializeDocumentFactsFromStoredFile(
 ): Promise<void> {
   const context = await buildStoredDocumentFactContext(deps.db, file);
   const result = await emitDocumentDerivedFacts(deps.db, context, {
-    experimentalFlag: deps.experimentalFlag,
     contentChanged: true,
     generator: generator ?? undefined,
     dumpDir: deps.debugDumpDir,
@@ -249,7 +248,6 @@ async function emitAndMaterializeDocumentFactsFromStoredFile(
   });
   if (result.changed) {
     await materializeUnmaterializedFacts(deps.db, deps.logger, {
-      experimentalFlag: deps.experimentalFlag,
       embeddingProvider: deps.embeddingProvider,
       factTypes: ["llm_task"],
     });
@@ -330,10 +328,7 @@ async function markEmbeddingFailure(
   await query.execute();
 }
 
-export async function loadBaselineKnownEntities(
-  db: Kysely<DB>,
-  opts: { experimentalFlag?: boolean } = {},
-): Promise<KnownEntityForPrompt[]> {
+export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
   const baseEntities = await db
     .selectFrom("entities")
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
@@ -347,18 +342,16 @@ export async function loadBaselineKnownEntities(
     )
     .where(whereLiveEntity())
     .execute();
-  const projectEntities = opts.experimentalFlag
-    ? await db
-        .selectFrom("entities")
-        .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
-        .where("source_type", "=", "project")
-        .where("status", "=", "confirmed")
-        .where(whereLiveEntity())
-        .orderBy("hotness", "desc")
-        .orderBy("name", "asc")
-        .limit(PROJECT_BASELINE_LIMIT)
-        .execute()
-    : [];
+  const projectEntities = await db
+    .selectFrom("entities")
+    .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
+    .where("source_type", "=", "project")
+    .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
+    .orderBy("hotness", "desc")
+    .orderBy("name", "asc")
+    .limit(PROJECT_BASELINE_LIMIT)
+    .execute();
   const entities = [...baseEntities, ...projectEntities];
   return entities.map((entity) => ({
     id: entity.id,
@@ -380,7 +373,6 @@ export interface EnrichmentDeps {
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
-  experimentalFlag?: boolean;
   /** Download image from Google Drive by provider file ID. Returns buffer + mime type. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
   /** If set, only enrich these specific file IDs (ignoring pending status). */
@@ -465,7 +457,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   }
 
   try {
-    deps.knownEntities = await loadBaselineKnownEntities(db, { experimentalFlag: deps.experimentalFlag });
+    deps.knownEntities = await loadBaselineKnownEntities(db);
   } catch {
     // entities table may not exist yet — ignore
   }
@@ -594,7 +586,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               const generator = getGenerator();
               if (!generator) throw new Error("Enrichment generator unavailable");
               const knownEntities = await buildFileScopedKnownEntities(
-                { db, logger, experimentalFlag: deps.experimentalFlag },
+                { db, logger },
                 file.id,
                 deps.knownEntities ?? [],
                 file.content,
@@ -612,7 +604,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   orgContext: deps.orgContext,
                   knownEntities,
                   participantBlock,
-                  experimentalFlag: deps.experimentalFlag,
                   debugDumpDir: deps.debugDumpDir,
                   ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
                 },
@@ -644,7 +635,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger, {
-                  experimentalFlag: deps.experimentalFlag,
                   embeddingProvider: deps.embeddingProvider,
                 });
               }
@@ -892,7 +882,7 @@ async function enrichTextDocument(
   if (!summaryAlreadyResolved && generator && wordCount >= minWordsForSummary) {
     try {
       const knownEntities = await buildFileScopedKnownEntities(
-        { db, logger, experimentalFlag: deps.experimentalFlag },
+        { db, logger },
         file.id,
         deps.knownEntities ?? [],
         file.content,
@@ -909,7 +899,6 @@ async function enrichTextDocument(
           participantBlock,
           debugDumpDir: deps.debugDumpDir,
           ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
-          experimentalFlag: deps.experimentalFlag,
         },
         {
           id: file.id,
@@ -939,7 +928,6 @@ async function enrichTextDocument(
       await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger, {
-          experimentalFlag: deps.experimentalFlag,
           embeddingProvider,
         });
       }

@@ -181,7 +181,6 @@ export async function replaySourceFacts(
     birthGateLiveTypes: opts.birthGateLiveTypes,
     structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
     birthGateDryRun: opts.birthGateDryRun,
-    experimentalFlag: opts.experimentalFlag,
     embeddingProvider: opts.embeddingProvider,
   });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
@@ -256,7 +255,6 @@ async function materializeUnmaterializedFactsInner(
     birthGateLiveTypes: opts.birthGateLiveTypes,
     structuralAutoBirthTypes: opts.structuralAutoBirthTypes,
     birthGateDryRun: opts.birthGateDryRun,
-    experimentalFlag: opts.experimentalFlag,
     embeddingProvider: opts.embeddingProvider,
   });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));

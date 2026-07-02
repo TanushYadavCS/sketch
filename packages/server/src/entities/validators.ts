@@ -9,7 +9,6 @@ export type LlmMentionValidationResult =
       reason:
         | "name_absent_from_content"
         | "short_token_no_boundary"
-        | "type_removed"
         | "missing_current_reference"
         | "name_is_domain_or_url";
     };
@@ -80,16 +79,11 @@ export function validateLlmMention(input: {
   fileContent: string;
   resolutionContext?: string | null;
   source: "llm_extraction" | "connector_extracted";
-  experimentalFlag?: boolean;
 }): LlmMentionValidationResult {
   if (input.source !== "llm_extraction") return { ok: true };
   if (isDomainOrUrlOrEmailName(input.displayName)) {
     return { ok: false, reason: "name_is_domain_or_url" };
   }
-  if (!input.experimentalFlag && input.entityType?.trim().toLowerCase() === "feature") {
-    return { ok: false, reason: "type_removed" };
-  }
-
   const content = normalizePresenceText(input.fileContent);
   const names = [input.displayName, ...(input.aliases ?? [])]
     .map((name) => normalizePresenceText(name))

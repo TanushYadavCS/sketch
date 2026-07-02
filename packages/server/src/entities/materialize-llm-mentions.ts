@@ -14,9 +14,7 @@ export async function materializeLlmExtractedFact(
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
   const raw = readJsonObject(fact.raw);
-  const mentionType = normalizeMentionType(
-    coerceMentionType(fact.subject_name, String(raw.type ?? ""), deps.experimentalFlag),
-  );
+  const mentionType = normalizeMentionType(coerceMentionType(fact.subject_name, String(raw.type ?? "")));
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }

@@ -43,7 +43,6 @@ describe("document-derived llm_task extraction", () => {
     const generator = fakeGenerator(generateJSON);
 
     const result = await emitDocumentDerivedFacts(db, baseContext(), {
-      experimentalFlag: true,
       contentChanged: true,
       generator,
     });
@@ -65,7 +64,6 @@ describe("document-derived llm_task extraction", () => {
     });
 
     const result = await emitDocumentDerivedFacts(db, baseContext(), {
-      experimentalFlag: true,
       contentChanged: true,
       generator,
       logger,
@@ -81,7 +79,6 @@ describe("document-derived llm_task extraction", () => {
 
   it("skips gracefully when no generator is available", async () => {
     const result = await emitDocumentDerivedFacts(db, baseContext(), {
-      experimentalFlag: true,
       contentChanged: true,
     });
 
@@ -100,7 +97,7 @@ describe("document-derived llm_task extraction", () => {
       const result = await emitDocumentDerivedFacts(
         db,
         { ...baseContext(), fileType },
-        { experimentalFlag: true, contentChanged: true, generator },
+        { contentChanged: true, generator },
       );
 
       expect(result.changed).toBe(false);
@@ -116,7 +113,7 @@ describe("document-derived llm_task extraction", () => {
       const result = await emitDocumentDerivedFacts(
         db,
         { ...baseContext(), fileType },
-        { experimentalFlag: true, contentChanged: true, generator },
+        { contentChanged: true, generator },
       );
 
       expect(result.changed).toBe(true);

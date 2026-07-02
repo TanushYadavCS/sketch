@@ -36,7 +36,6 @@ let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
-let configuredExperimentalFlag = false;
 
 /**
  * Set the default `llmPromotionThreshold` used by entry points
@@ -52,7 +51,6 @@ export function configureMaterializeDefaults(opts: {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
-  experimentalFlag?: boolean;
 }): void {
   if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
     configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
@@ -67,7 +65,6 @@ export function configureMaterializeDefaults(opts: {
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
   if (opts.structuralAutoBirthTypes) configuredStructuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
-  if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
@@ -205,7 +202,7 @@ function llmFileCountKey(normalizedName: string, mentionType: MentionType): stri
   return `${mentionType}\u0000${normalizedName}`;
 }
 
-async function buildActiveLlmFileCounts(db: Kysely<DB>, experimentalFlag: boolean): Promise<Map<string, number>> {
+async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
   const rows = await db
     .selectFrom("indexed_file_facts")
     .select(["indexed_file_id", "subject_name", "raw"])
@@ -217,9 +214,7 @@ async function buildActiveLlmFileCounts(db: Kysely<DB>, experimentalFlag: boolea
   for (const row of rows) {
     if (!row.indexed_file_id || !row.subject_name) continue;
     const raw = readJsonObject(row.raw);
-    const mentionType = normalizeMentionType(
-      coerceMentionType(row.subject_name, String(raw.type ?? ""), experimentalFlag),
-    );
+    const mentionType = normalizeMentionType(coerceMentionType(row.subject_name, String(raw.type ?? "")));
     if (!mentionType) continue;
     const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
     if (!normalizedName) continue;
@@ -328,7 +323,6 @@ export interface BuildMaterializeDepsOptions {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
-  experimentalFlag?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
 }
 
@@ -357,7 +351,6 @@ export async function buildMaterializeDeps(
   const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
   const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
-  const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
   const embeddingProvider = opts.embeddingProvider ?? null;
   let activeLlmFileCounts: Promise<Map<string, number>> | null = null;
 
@@ -400,7 +393,7 @@ export async function buildMaterializeDeps(
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
     findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
   };
-  if (embeddingProvider && experimentalFlag) {
+  if (embeddingProvider) {
     lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
       if (!isNameDedupEntityType(entityType)) return [];
       try {
@@ -443,10 +436,9 @@ export async function buildMaterializeDeps(
     birthGateLiveTypes,
     structuralAutoBirthTypes,
     birthGateDryRun,
-    experimentalFlag,
     embeddingProvider,
     countActiveLlmFilesForName: async (normalizedName, mentionType) => {
-      activeLlmFileCounts ??= buildActiveLlmFileCounts(db, experimentalFlag);
+      activeLlmFileCounts ??= buildActiveLlmFileCounts(db);
       const counts = await activeLlmFileCounts;
       return counts.get(llmFileCountKey(normalizedName, mentionType)) ?? 0;
     },

@@ -19,7 +19,6 @@ import { parseOrgContext } from "../src/db/repositories/settings";
 import type { DB } from "../src/db/schema";
 
 const DB_PATH = "/Users/hkalra/projects/claude/sketch/data/sketch.db";
-const EXPERIMENTAL = true;
 
 async function main() {
   const fileIds = process.argv.slice(2);
@@ -73,12 +72,7 @@ async function main() {
       continue;
     }
 
-    const knownEntities = await buildFileScopedKnownEntities(
-      { db, experimentalFlag: EXPERIMENTAL } as never,
-      file.id,
-      [],
-      file.content,
-    );
+    const knownEntities = await buildFileScopedKnownEntities({ db } as never, file.id, [], file.content);
     const participantBlock = await buildParticipantBlock({ db } as never, {
       fileId: file.id,
       fileContent: file.content,
