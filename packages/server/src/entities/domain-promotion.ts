@@ -4,7 +4,9 @@ import { createEntityRepository, whereLiveEntity } from "../db/repositories/enti
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
+import { isPersonalOrSharedDomain } from "./personal-domains";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
+import { isEmailProviderName } from "./validators";
 
 export const DOMAIN_PROMOTION_THRESHOLD = 1;
 
@@ -194,6 +196,14 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     const domain = candidate.domain;
     const proposedName = candidate.proposed_company_name ?? candidate.name;
     if (!domain || !proposedName) continue;
+    // Belt-and-suspenders: never mint or link a company for a consumer webmail /
+    // shared domain, even if a stale domain_observation candidate slipped through
+    // upstream. Guards both the domain (independent of the DB seed) and the
+    // provider brand name ("Gmail").
+    if (isPersonalOrSharedDomain(domain) || isEmailProviderName(proposedName)) {
+      logger.info({ domain, proposedName }, "Skipping personal/shared domain promotion");
+      continue;
+    }
     const observedPeople = parseStringArray(candidate.observed_person_entity_ids);
     const evidenceFiles = parseStringArray(candidate.evidence_file_ids);
 
