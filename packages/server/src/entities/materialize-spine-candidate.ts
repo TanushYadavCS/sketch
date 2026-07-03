@@ -73,7 +73,7 @@ export async function materializeSpineCandidate(
     return { kind: "entity_linked", entity, mentionWritten: Boolean(fact.indexed_file_id), countEntity: false };
   }
 
-  if (args.forceQueue || deps.birthGateTypes.has(spineType)) {
+  if (args.forceQueue || (deps.birthGateTypes.has(spineType) && !deps.birthGateDryRun)) {
     const owner = deps.resolveOwner(fact);
     if (!owner) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
