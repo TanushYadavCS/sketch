@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { z } from "zod";
-import { denyIfNotAdmin } from "./auth-helpers";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
+import { denyIfNotAdmin } from "./auth-helpers";
 
 const declareProductBodySchema = z.object({
   name: z.string().trim().min(1),
