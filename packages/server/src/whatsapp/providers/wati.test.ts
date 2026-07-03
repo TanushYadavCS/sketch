@@ -15,6 +15,8 @@ import {
   parseWatiWebhookEvent,
 } from "./wati";
 
+const WATI_USER_AGENT = "Sketch/1.0 (+https://getsketch.ai)";
+
 function documentedMessagePayload(overrides: Record<string, unknown> = {}) {
   return {
     id: "69282478274a880fe782b2d9",
@@ -253,6 +255,7 @@ describe("Wati outbound provider", () => {
     expect(init.headers).toEqual({
       Authorization: "Bearer wati-token",
       "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": WATI_USER_AGENT,
     });
     expect(init.body).toBeInstanceOf(URLSearchParams);
     expect((init.body as URLSearchParams).get("messageText")).toBe("hello");
@@ -302,7 +305,7 @@ describe("Wati outbound provider", () => {
     const [url, init] = firstFetchCall(requestFetch);
     expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendSessionFile/15551234567");
     expect(init.method).toBe("POST");
-    expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
     expect(init.body).toBeInstanceOf(FormData);
     expect((init.body as FormData).get("target")).toBeNull();
   });
@@ -336,9 +339,33 @@ describe("Wati outbound provider", () => {
     const [url, init] = firstFetchCall(requestFetch);
     expect(url.toString()).toBe("https://live-mt-server.wati.io/api/ext/v3/conversations/messages/file");
     expect(init.method).toBe("POST");
-    expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
     expect(init.body).toBeInstanceOf(FormData);
     expect((init.body as FormData).get("target")).toBe("17435002445:15551234567");
+  });
+
+  it("lists Wati templates with the configured User-Agent", async () => {
+    const requestFetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          messageTemplates: [{ elementName: "daily_brief", language: { code: "en_US" }, status: "APPROVED" }],
+        }),
+      );
+    });
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    const templates = await provider.listTemplates();
+
+    const [url, init] = firstFetchCall(requestFetch);
+    expect(url.toString()).toBe("https://tenant.wati.io/api/ext/v3/messageTemplates?page_number=1&page_size=100");
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
+    expect(templates).toEqual([expect.objectContaining({ providerTemplateName: "daily_brief" })]);
   });
 
   it("downloads Wati media into the workspace attachment directory", async () => {
@@ -374,15 +401,16 @@ describe("Wati outbound provider", () => {
         }),
       ]);
       expect(await readFile(attachments?.[0]?.localPath ?? "", "utf8")).toBe("image-bytes");
-      const [url] = firstFetchCall(requestFetch);
+      const [url, init] = firstFetchCall(requestFetch);
       expect(url.pathname).toBe("/api/ext/v3/conversations/messages/file/wati-internal-id");
+      expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
   });
 
   it("retries Wati media download with the WhatsApp message id after an internal id miss", async () => {
-    const requestFetch = vi.fn(async (url: URL) => {
+    const requestFetch = vi.fn(async (url: URL, _init?: RequestInit) => {
       if (url.pathname.endsWith("/wati-internal-id")) {
         return new Response("missing", { status: 404 });
       }
@@ -417,6 +445,10 @@ describe("Wati outbound provider", () => {
       expect(requestFetch.mock.calls.map(([url]) => (url as URL).pathname)).toEqual([
         "/api/ext/v3/conversations/messages/file/wati-internal-id",
         "/api/ext/v3/conversations/messages/file/wamid.media",
+      ]);
+      expect(requestFetch.mock.calls.map(([, init]) => (init as RequestInit).headers)).toEqual([
+        { Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT },
+        { Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT },
       ]);
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
@@ -629,7 +661,11 @@ describe("Wati outbound provider", () => {
 
       const [url, init] = firstFetchCall(requestFetch);
       expect(url.toString()).toBe("https://tenant.wati.io/api/ext/v3/messageTemplates/send");
-      expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "Content-Type": "application/json" });
+      expect(init.headers).toEqual({
+        Authorization: "Bearer wati-token",
+        "Content-Type": "application/json",
+        "User-Agent": WATI_USER_AGENT,
+      });
       expect(JSON.parse(init.body as string)).toMatchObject({
         channel: null,
         template_name: "sketch_magic_link",

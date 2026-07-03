@@ -40,6 +40,7 @@ const WATI_CAPABILITIES: WhatsAppCapabilities = {
 const MEDIA_MESSAGE_TYPES = new Set(["image", "document", "voice", "audio", "video", "sticker", "media_placeholder"]);
 const UNSUPPORTED_INBOUND_MESSAGE_TYPES = new Set(["reaction"]);
 const INBOUND_EVENT_TYPES = new Set(["message", "messagereceived", "message_received"]);
+const WATI_USER_AGENT = "Sketch/1.0 (+https://getsketch.ai)";
 
 export interface WatiWhatsAppConfig {
   apiEndpoint: string;
@@ -532,7 +533,7 @@ function phoneDigits(value: unknown): string | null {
 }
 
 function authorizationHeaders(accessToken: string): Record<string, string> {
-  return { Authorization: `Bearer ${accessToken}` };
+  return { Authorization: `Bearer ${accessToken}`, "User-Agent": WATI_USER_AGENT };
 }
 
 async function fetchJson(requestFetch: typeof fetch, url: URL, init: RequestInit): Promise<unknown> {
