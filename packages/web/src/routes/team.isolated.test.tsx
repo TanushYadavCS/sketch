@@ -92,7 +92,9 @@ describe("TeamPage", () => {
       await user.click(screen.getByRole("button", { name: /Add member/i }));
 
       await waitFor(() => {
-        expect(screen.getByText("Add a new team member. Name and email are required.")).toBeInTheDocument();
+        expect(
+          screen.getByText("Add a new team member. Name, email, and WhatsApp number are required."),
+        ).toBeInTheDocument();
       });
     });
 
@@ -294,11 +296,11 @@ describe("TeamPage", () => {
             user: {
               id: "u1",
               name: "Alice Smith",
-              email: null,
-              email_verified_at: null,
+              email: "alice@example.com",
+              email_verified_at: "2026-01-01T00:00:00Z",
               auth_role: body.authRole ?? "member",
               slack_user_id: "U001",
-              whatsapp_number: null,
+              whatsapp_number: "+14155550101",
               description: null,
               type: "human",
               role: null,

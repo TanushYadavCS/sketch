@@ -141,11 +141,11 @@ export const handlers = [
         {
           id: "u1",
           name: "Alice Smith",
-          email: null,
-          email_verified_at: null,
+          email: "alice@example.com",
+          email_verified_at: "2026-01-01T00:00:00Z",
           auth_role: "member",
           slack_user_id: "U001",
-          whatsapp_number: null,
+          whatsapp_number: "+14155550101",
           description: null,
           type: "human",
           role: null,
@@ -159,11 +159,11 @@ export const handlers = [
         {
           id: "u2",
           name: "Bob Jones",
-          email: null,
-          email_verified_at: null,
+          email: "bob@example.com",
+          email_verified_at: "2026-01-02T00:00:00Z",
           auth_role: "admin",
           slack_user_id: null,
-          whatsapp_number: "+919876543210",
+          whatsapp_number: "+14155550102",
           description: null,
           type: "human",
           role: null,
@@ -180,9 +180,9 @@ export const handlers = [
 
   http.post("/api/users", async ({ request }) => {
     const body = (await request.json()) as { name?: string; email?: string; whatsappNumber?: string };
-    if (!body.name || (!body.email && !body.whatsappNumber)) {
+    if (!body.name || !body.email || !body.whatsappNumber) {
       return HttpResponse.json(
-        { error: { code: "VALIDATION_ERROR", message: "Name and either email or WhatsApp number required" } },
+        { error: { code: "VALIDATION_ERROR", message: "Name, email, and WhatsApp number required" } },
         { status: 400 },
       );
     }

@@ -7,7 +7,7 @@
  * additions from SKE-51.
  */
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createChannelRepository } from "../db/repositories/channels";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -57,6 +57,7 @@ describe("Users API — agent fields", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await db.destroy();
   });
 
@@ -91,6 +92,7 @@ describe("Users API — agent fields", () => {
         name: "Real Person",
         type: "human",
         email: "person@test.com",
+        whatsappNumber: "+14155550101",
         allowedTools: ["Read"],
       }),
     });
@@ -129,6 +131,70 @@ describe("Users API — agent fields", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.user.whatsapp_number).toBe("+919876543210");
+  });
+
+  it("rejects human member creation without a WhatsApp number", async () => {
+    const res = await app.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "Email Only",
+        type: "human",
+        email: "email-only@test.com",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Email and WhatsApp number");
+  });
+
+  it("registers managed human members with the platform before local create", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: true }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Person",
+        type: "human",
+        email: "managed.person@gmail.com",
+        whatsappNumber: "+14155550106",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://platform.test/api/tenant/members",
+      expect.objectContaining({
+        method: "PUT",
+        headers: expect.objectContaining({
+          Authorization: "Bearer tenant-token",
+          "Content-Type": "application/json",
+        }),
+        body: JSON.stringify({
+          tenantUserId: body.user.id,
+          email: "managed.person@gmail.com",
+          name: "Managed Person",
+          phoneNumber: "+14155550106",
+          sendInvite: true,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
   });
 
   it("rejects WhatsApp numbers without an international country code", async () => {
@@ -210,6 +276,7 @@ describe("Users API — agent fields", () => {
         name: "Real Person",
         type: "human",
         email: "rp@test.com",
+        whatsappNumber: "+14155550102",
       }),
     });
     expect(create.status).toBe(201);
@@ -311,6 +378,7 @@ describe("Users API — agent fields", () => {
           name: "Real Person",
           type: "human",
           email: "rp2@test.com",
+          whatsappNumber: "+14155550103",
           slackChannelIds: ["C-MARKETING"],
         }),
       });
@@ -472,6 +540,7 @@ describe("Users API — agent fields", () => {
           name: "Real Person",
           type: "human",
           email: "rp3@test.com",
+          whatsappNumber: "+14155550104",
           whatsappGroupJids: ["group-marketing@g.us"],
         }),
       });
@@ -562,6 +631,7 @@ describe("Users API — agent fields", () => {
           name: "Real Person",
           type: "human",
           email: "rp4@test.com",
+          whatsappNumber: "+14155550105",
           isWhatsappFallback: true,
         }),
       });
