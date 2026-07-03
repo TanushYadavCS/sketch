@@ -1,4 +1,46 @@
+import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
+
+interface CommitmentBackfillDb {
+  indexed_file_facts: {
+    id: string;
+    source: string;
+    raw: string | null;
+    created_by_user_id: string | null;
+    deleted_at: string | null;
+  };
+  sub_entities: {
+    id: string;
+    parent_entity_id: string | null;
+    parent_scope_key: string;
+    kind: string;
+    normalized_name: string;
+    display_name: string;
+    status: string;
+    status_authority: string;
+    valid_to: string | null;
+    provenance: string;
+    due_at: string | null;
+    created_by_user_id: string | null;
+    source_fact_id: string | null;
+    metadata_json: string | null;
+    updated_at: string;
+  };
+  sub_entity_evidence: {
+    sub_entity_id: string;
+    kind: string;
+    ref_id: string;
+  };
+}
+
+interface CommitmentRaw {
+  parentEntityId?: string;
+  title: string;
+  status: string;
+  dueAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+}
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema
@@ -30,6 +72,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addPrimaryKeyConstraint("sub_entity_evidence_pkey", ["sub_entity_id", "kind", "ref_id"])
     .execute();
 
+  await backfillCommitmentSubEntities(db as Kysely<CommitmentBackfillDb>);
+
   await sql`
     CREATE UNIQUE INDEX idx_sub_entities_current_scope_kind_name
     ON sub_entities(parent_scope_key, kind, normalized_name)
@@ -45,6 +89,105 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .on("sub_entity_evidence")
     .columns(["kind", "ref_id"])
     .execute();
+}
+
+async function backfillCommitmentSubEntities(db: Kysely<CommitmentBackfillDb>): Promise<void> {
+  const facts = await db
+    .selectFrom("indexed_file_facts")
+    .select(["id", "source", "raw", "created_by_user_id"])
+    .where("fact_type", "=", "commitment")
+    .where("deleted_at", "is", null)
+    .execute();
+  const subEntityIdsByKey = new Map<string, string>();
+  const now = new Date().toISOString();
+  for (const fact of facts) {
+    const raw = readCommitmentRaw(fact.raw);
+    if (!raw) continue;
+    const parentScopeKey = raw.parentEntityId ?? "global";
+    const normalizedName = normalizeName(raw.title);
+    const key = `${parentScopeKey}\u001fcommitment\u001f${normalizedName}`;
+    let subEntityId = subEntityIdsByKey.get(key);
+    if (!subEntityId) {
+      subEntityId = randomUUID();
+      subEntityIdsByKey.set(key, subEntityId);
+      await db
+        .insertInto("sub_entities")
+        .values({
+          id: subEntityId,
+          parent_entity_id: raw.parentEntityId ?? null,
+          parent_scope_key: parentScopeKey,
+          kind: "commitment",
+          normalized_name: normalizedName,
+          display_name: raw.title,
+          status: raw.status,
+          status_authority: "external",
+          valid_to: null,
+          provenance: fact.source === "llm" ? "corroborated_llm" : "structural",
+          due_at: raw.dueAt ?? null,
+          created_by_user_id: fact.created_by_user_id,
+          source_fact_id: fact.id,
+          metadata_json: null,
+          updated_at: now,
+        })
+        .execute();
+    }
+    await insertSubEntityEvidence(db, subEntityId, "fact", fact.id);
+    for (const fileId of raw.evidence.fileIds) {
+      await insertSubEntityEvidence(db, subEntityId, "file", fileId);
+    }
+    for (const entityId of raw.evidence.entityIds) {
+      await insertSubEntityEvidence(db, subEntityId, "entity", entityId);
+    }
+  }
+}
+
+async function insertSubEntityEvidence(
+  db: Kysely<CommitmentBackfillDb>,
+  subEntityId: string,
+  kind: string,
+  refId: string,
+): Promise<void> {
+  await db
+    .insertInto("sub_entity_evidence")
+    .values({ sub_entity_id: subEntityId, kind, ref_id: refId })
+    .onConflict((oc) => oc.columns(["sub_entity_id", "kind", "ref_id"]).doNothing())
+    .execute();
+}
+
+function readCommitmentRaw(raw: string | null): CommitmentRaw | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) return null;
+    if (typeof parsed.title !== "string" || parsed.title.trim().length === 0) return null;
+    const status = typeof parsed.status === "string" && parsed.status.length > 0 ? parsed.status : "open";
+    const evidence = readEvidence(parsed.evidence);
+    if (!evidence) return null;
+    return {
+      parentEntityId: readOptionalString(parsed.parentEntityId),
+      title: parsed.title.trim(),
+      status,
+      dueAt: readOptionalString(parsed.dueAt),
+      evidence,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readEvidence(value: unknown): CommitmentRaw["evidence"] | null {
+  if (!isRecord(value)) return null;
+  if (!Array.isArray(value.fileIds) || !value.fileIds.every((id) => typeof id === "string")) return null;
+  if (!Array.isArray(value.entityIds) || !value.entityIds.every((id) => typeof id === "string")) return null;
+  return { fileIds: value.fileIds, entityIds: value.entityIds };
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
