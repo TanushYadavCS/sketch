@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.41.1] -- 2026-07-03
+
+- Fix(Wati): send an explicit `User-Agent` header on all Wati API requests. Cloudflare in front of Wati's v3 API rejects requests without one (HTTP 403 error 1010), which blocked template sends before Wati received them.
+
 ## [0.41.0] -- 2026-07-03
 
 - Managed WhatsApp: add `WHATSAPP_DM_PROVIDER=managed`, a DM provider for managed tenants that receives normalized inbound events from the sketch-platform shared-number gateway (`/api/system/whatsapp/managed/events`) and sends outbound text and template messages through the platform outbound API with a tenant-scoped token. Groups stay on Baileys; self-hosted Wati/Baileys behavior is unchanged.
