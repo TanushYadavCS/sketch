@@ -1,8 +1,10 @@
 import type { Kysely } from "kysely";
 import type { Selectable } from "kysely";
 import type {
+  AgentDeliveryConfig,
   AgentKnowledgeRefs,
   AgentOutputItemInput,
+  AgentSourceConfig,
   AgentStoredItemRow,
   AgentStructuredPayload,
 } from "../db/repositories/agent-outputs";
@@ -23,6 +25,12 @@ export interface AgentDefaults {
   scheduleHour: number;
   scheduleMinute: number;
   maxItemsPerSection: number;
+}
+
+export interface AgentSourceConfigDef {
+  maxSources: number;
+  supportsSlackChannels: boolean;
+  supportsWhatsAppGroups: boolean;
 }
 
 export interface AgentApiItem {
@@ -50,6 +58,13 @@ export interface AgentRuntimeContextParams {
   now: Date;
   adminCanReadAllFiles: boolean;
   contentUserEmails: string[] | undefined;
+  agentConfig?: {
+    enabledSections: Record<string, boolean>;
+    maxItemsPerSection: number;
+    focus: string | null;
+    delivery: AgentDeliveryConfig | null;
+    sources: AgentSourceConfig[];
+  };
 }
 
 /**
@@ -67,6 +82,7 @@ export interface AgentDefinition {
   category: string;
   defaults: AgentDefaults;
   sections: AgentSectionDef[];
+  sourceConfig?: AgentSourceConfigDef;
   allowedTools: string[];
   /** Allowed range for the per-section item cap; surfaced to the config editor. */
   itemsPerSectionRange: { min: number; max: number };

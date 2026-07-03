@@ -8,6 +8,7 @@ import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { AgentRunService, type AgentRunServiceDeps } from "./service";
@@ -122,6 +123,13 @@ function allowSlackDelivery(
       isUserInChannel,
     }),
   };
+}
+
+function runtimeContextFromUserMessage(userMessage: string): Record<string, unknown> {
+  const marker = "Runtime context:\n";
+  const markerIndex = userMessage.indexOf(marker);
+  if (markerIndex === -1) throw new Error("Runtime context marker missing");
+  return JSON.parse(userMessage.slice(markerIndex + marker.length)) as Record<string, unknown>;
 }
 
 async function seedIndexedFile(
@@ -759,6 +767,49 @@ describe("AgentRunService", () => {
     });
   });
 
+  it("resolves Slack delivery mentions to known channel members", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await users.create({ name: "Ada", email: "ada@example.com", slackUserId: "U_ADA" });
+    const isUserInChannel = vi.fn(async (_channelId: string, slackUserId: string) => slackUserId !== "U_MISSING");
+    const service = createService(db, [], {
+      getSlack: () => ({
+        listChannels: vi.fn(async () => [{ id: "C_DAILY", name: "daily", type: "private_channel", isMember: true }]),
+        isUserInChannel,
+      }),
+    });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#spoofed",
+        mentions: [{ platform: "slack", targetId: "U_ADA", label: "Spoofed Ada" }],
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C_DAILY",
+      label: "#daily",
+      mentions: [{ platform: "slack", targetId: "U_ADA", label: "Ada <ada@example.com>" }],
+    });
+    expect(isUserInChannel).toHaveBeenCalledWith("C_DAILY", "U_ADA");
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+        mentions: [{ platform: "slack", targetId: "U_UNKNOWN", label: "Unknown" }],
+      }),
+    ).rejects.toThrow("Slack mention target is not available");
+  });
+
   it("resolves WhatsApp group delivery only when the current user is a participant", async () => {
     const users = createUserRepository(db);
     const user = await users.create({
@@ -852,6 +903,150 @@ describe("AgentRunService", () => {
       label: "Leadership",
     });
     expect(resolveJidToPhone).toHaveBeenCalledWith("86702773280883@lid");
+  });
+
+  it("resolves WhatsApp delivery mentions to known group participants", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15551234567",
+    });
+    await users.create({ name: "Ada", email: "ada@example.com", whatsappNumber: "+15557654321" });
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "15551234567@s.whatsapp.net" }, { id: "15557654321@s.whatsapp.net" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Spoofed",
+        mentions: [{ platform: "whatsapp", targetId: "+15557654321", label: "Spoofed Ada" }],
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: "120363000000001@g.us",
+      label: "Leadership",
+      mentions: [{ platform: "whatsapp", targetId: "+15557654321", label: "Ada" }],
+    });
+  });
+
+  it("drops saved conversation sources that fail run-time Slack membership revalidation", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    let currentUserInChannel = true;
+    const listChannels = vi.fn(async () => [
+      { id: "C_PRIVATE", name: "private-room", type: "private_channel", isMember: true },
+    ]);
+    const isUserInChannel = vi.fn(async () => currentUserInChannel);
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "No configured sources are currently available." },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Summarizer", summary: "No configured sources are currently available." },
+          items: [],
+        },
+        items: [],
+      });
+      return {
+        messageSent: true,
+        sessionId: "agent-session",
+        costUsd: 0,
+        auxCostUsd: 0,
+        pendingUploads: [],
+        durationMs: 0,
+        durationApiMs: 0,
+        numTurns: 0,
+        stopReason: null,
+        errorSubtype: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+        model: null,
+        isResumedSession: false,
+        totalAttachments: 0,
+        imageCount: 0,
+        nonImageCount: 0,
+        mimeTypes: [],
+        fileSizes: [],
+        promptMode: "text" as const,
+        toolCalls: [],
+        auxLlmCalls: [],
+        sdkCostUsd: 0,
+        rawUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        trace: { progressEvents: [], finalText: "Done" },
+      };
+    });
+    const service = new AgentRunService({
+      db,
+      config: createTestConfig(),
+      logger: createTestLogger(),
+      users,
+      settings: createSettingsRepository(db),
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      queueManager: createPausedQueueManager(tasks),
+      getSlack: () => ({ listChannels, isUserInChannel }),
+    });
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      sources: [
+        {
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C_PRIVATE",
+          label: "#private-room",
+        },
+      ],
+    });
+
+    currentUserInChannel = false;
+    const row = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    const runtimeContext = runtimeContextFromUserMessage(runAgent.mock.calls[0][0].userMessage);
+    const completed = await db
+      .selectFrom("agent_outputs")
+      .select("raw_payload_json")
+      .where("id", "=", row.id)
+      .executeTakeFirstOrThrow();
+    const rawPayload = JSON.parse(completed.raw_payload_json ?? "{}") as Record<string, unknown>;
+
+    expect(runtimeContext.sources).toEqual([]);
+    expect(runtimeContext.summarySources).toEqual([]);
+    expect(JSON.stringify(runtimeContext)).not.toContain("C_PRIVATE");
+    expect(rawPayload.summaryWindow).toMatchObject({ end: NOW.toISOString() });
+    expect(isUserInChannel).toHaveBeenCalledWith("C_PRIVATE", "U_AGENT");
   });
 
   it("rejects WhatsApp group delivery when the current user is not a participant", async () => {

@@ -58,6 +58,13 @@ export interface ListConversationMessagesOptions {
   providerThreadId?: string | null;
 }
 
+export interface ListConversationMessagesInWindowOptions {
+  afterReceivedAt: string;
+  beforeReceivedAt: string;
+  limit?: number;
+  includeBotMessages?: boolean;
+}
+
 export interface SearchConversationMessagesOptions {
   query: string;
   afterMessageId?: number;
@@ -447,6 +454,29 @@ export function createConversationRepository(db: Kysely<DB>) {
         messages,
         hasMore,
         nextCursor: hasMore ? visibleRows[visibleRows.length - 1]?.id : undefined,
+      };
+    },
+
+    async listMessagesInWindow(
+      conversationId: number,
+      options: ListConversationMessagesInWindowOptions,
+    ): Promise<{ messages: StoredConversationMessage[]; hasMore: boolean }> {
+      const limit = Math.max(1, Math.min(options.limit ?? 100, 500));
+      let query = db
+        .selectFrom("conversation_messages")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .where("received_at", ">", options.afterReceivedAt)
+        .where("received_at", "<=", options.beforeReceivedAt);
+      if (!options.includeBotMessages) query = query.where("is_bot", "=", 0);
+      const rows = await query
+        .orderBy("received_at", "asc")
+        .orderBy("id", "asc")
+        .limit(limit + 1)
+        .execute();
+      return {
+        messages: rows.slice(0, limit).map(toStored),
+        hasMore: rows.length > limit,
       };
     },
 

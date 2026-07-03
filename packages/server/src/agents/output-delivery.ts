@@ -109,6 +109,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
           sections: params.definition.sections,
           output: params.output,
           platform: params.delivery.platform,
+          mentions: params.delivery.mentions,
         });
         const messageRefs =
           params.delivery.platform === "slack"

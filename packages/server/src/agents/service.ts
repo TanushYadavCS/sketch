@@ -8,10 +8,12 @@ import { ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import {
   type AgentDeliveryConfig,
+  type AgentDeliveryMention,
   type AgentMasthead,
   type AgentOutputItemInput,
   type AgentOutputRow,
   type AgentOutputTriggerType,
+  type AgentSourceConfig,
   type AgentUserPrefs,
   createAgentOutputRepository,
 } from "../db/repositories/agent-outputs";
@@ -25,7 +27,7 @@ import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
-import type { AgentApiItem, AgentDefinition } from "./types";
+import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "./types";
 
 const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
 const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
@@ -68,6 +70,7 @@ export interface ResolvedAgentConfig {
   enabledSections: Record<string, boolean>;
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sources: AgentSourceConfig[];
 }
 
 export interface AgentSectionView {
@@ -89,6 +92,8 @@ export interface AgentConfigView {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sourceConfig: AgentSourceConfigDef | null;
+  sources: AgentSourceConfig[];
   sections: AgentSectionView[];
 }
 
@@ -117,6 +122,7 @@ export interface AgentSummaryView {
 }
 
 export class AgentDeliveryTargetError extends Error {}
+export class AgentSourceTargetError extends Error {}
 
 function whatsappNumberToJid(whatsappNumber: string): string {
   return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
@@ -124,6 +130,16 @@ function whatsappNumberToJid(whatsappNumber: string): string {
 
 function normalizeWhatsappNumber(whatsappNumber: string): string {
   return whatsappNumber.replace(/^\+/, "");
+}
+
+function normalizeWhatsappMentionTarget(targetId: string): string {
+  if (targetId.startsWith("dm:+")) return targetId.slice("dm:".length);
+  if (targetId.startsWith("+")) return targetId;
+  if (targetId.endsWith("@s.whatsapp.net")) {
+    return `+${normalizeWhatsappNumber(targetId.replace("@s.whatsapp.net", ""))}`;
+  }
+  if (/^\d+$/.test(targetId)) return `+${targetId}`;
+  return targetId;
 }
 
 async function whatsappGroupHasParticipant(
@@ -142,6 +158,28 @@ async function whatsappGroupHasParticipant(
   }
 
   return false;
+}
+
+function withMentions(mentions: AgentDeliveryMention[]): Pick<AgentDeliveryConfig, "mentions"> {
+  return mentions.length > 0 ? { mentions } : {};
+}
+
+function isSummaryWindow(value: unknown): value is Record<string, unknown> {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof (value as Record<string, unknown>).start === "string" &&
+    typeof (value as Record<string, unknown>).end === "string"
+  );
+}
+
+function rawPayloadWithRunMetadata(
+  rawPayload: WriteAgentOutputPayload,
+  runtimeContext: Record<string, unknown>,
+): WriteAgentOutputPayload | (WriteAgentOutputPayload & { summaryWindow: Record<string, unknown> }) {
+  const summaryWindow = runtimeContext.summaryWindow;
+  return isSummaryWindow(summaryWindow) ? { ...rawPayload, summaryWindow } : rawPayload;
 }
 
 function localDateInTimezone(now: Date, timezone: string): string {
@@ -234,6 +272,7 @@ export class AgentRunService {
       enabledSections,
       focus: prefs.focus ?? null,
       delivery: prefs.delivery ?? null,
+      sources: prefs.sources ?? [],
     };
   }
 
@@ -277,6 +316,8 @@ export class AgentRunService {
       itemsPerSectionRange: def.itemsPerSectionRange,
       focus: config.focus,
       delivery: config.delivery,
+      sourceConfig: def.sourceConfig ?? null,
+      sources: config.sources,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -296,6 +337,7 @@ export class AgentRunService {
       sections?: Record<string, boolean>;
       focus?: string | null;
       delivery?: AgentDeliveryConfig | null;
+      sources?: AgentSourceConfig[];
     },
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
@@ -309,7 +351,12 @@ export class AgentRunService {
         : undefined;
 
     let prefs: AgentUserPrefs | undefined;
-    if (patch.sections !== undefined || patch.focus !== undefined || patch.delivery !== undefined) {
+    if (
+      patch.sections !== undefined ||
+      patch.focus !== undefined ||
+      patch.delivery !== undefined ||
+      patch.sources !== undefined
+    ) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
       if (patch.sections) {
         for (const section of def.sections) {
@@ -318,7 +365,11 @@ export class AgentRunService {
       }
       const focus = patch.focus !== undefined ? (patch.focus?.trim() ? patch.focus.trim() : null) : current.focus;
       const delivery = patch.delivery !== undefined ? patch.delivery : current.delivery;
-      prefs = { sections, focus, delivery };
+      const sources =
+        patch.sources !== undefined
+          ? await this.resolveSourceConfigsForUser(def, userId, patch.sources)
+          : current.sources;
+      prefs = { sections, focus, delivery, sources };
     }
 
     await this.repo.upsertConfig(
@@ -362,10 +413,14 @@ export class AgentRunService {
         if (delivery.targetId !== user.slack_user_id) {
           throw new AgentDeliveryTargetError("Slack DM delivery must target the current user");
         }
-        return {
+        const normalized = {
           ...delivery,
           targetId: user.slack_user_id,
           label: user.email ? `${user.name} <${user.email}>` : user.name,
+        };
+        return {
+          ...normalized,
+          ...withMentions(await this.resolveDeliveryMentions(normalized)),
         };
       }
 
@@ -376,10 +431,14 @@ export class AgentRunService {
       if (!(await slack.isUserInChannel(delivery.targetId, user.slack_user_id))) {
         throw new AgentDeliveryTargetError("Slack channel is not available for this user");
       }
-      return {
+      const normalized = {
         ...delivery,
         targetId: channel.id,
         label: `#${channel.name}`,
+      };
+      return {
+        ...normalized,
+        ...withMentions(await this.resolveDeliveryMentions(normalized)),
       };
     }
 
@@ -406,11 +465,192 @@ export class AgentRunService {
       throw new AgentDeliveryTargetError("WhatsApp group is not available for this user");
     }
 
-    return {
+    const normalized = {
       ...delivery,
       targetId: group.jid,
       label: group.name,
     };
+    return {
+      ...normalized,
+      ...withMentions(await this.resolveDeliveryMentions(normalized, { whatsappGroup: groupMetadata })),
+    };
+  }
+
+  private async resolveDeliveryMentions(
+    delivery: AgentDeliveryConfig,
+    context: { whatsappGroup?: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>> } = {},
+  ): Promise<AgentDeliveryMention[]> {
+    const mentions = delivery.mentions ?? [];
+    if (mentions.length === 0) return [];
+
+    const resolved: AgentDeliveryMention[] = [];
+    const seen = new Set<string>();
+
+    for (const mention of mentions) {
+      if (mention.platform !== delivery.platform) {
+        throw new AgentDeliveryTargetError("Delivery mention platform must match the delivery platform");
+      }
+
+      if (mention.platform === "slack") {
+        const user = await this.deps.users.findBySlackId(mention.targetId);
+        if (!user || user.type === "agent" || !user.slack_user_id) {
+          throw new AgentDeliveryTargetError("Slack mention target is not available");
+        }
+        if (delivery.targetType === "channel") {
+          const slack = this.deps.getSlack?.() ?? null;
+          if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+          if (!(await slack.isUserInChannel(delivery.targetId, user.slack_user_id))) {
+            throw new AgentDeliveryTargetError("Slack mention target is not in the delivery channel");
+          }
+        }
+        const key = `${mention.platform}:${user.slack_user_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        resolved.push({
+          platform: "slack",
+          targetId: user.slack_user_id,
+          label: user.email ? `${user.name} <${user.email}>` : user.name,
+        });
+        continue;
+      }
+
+      const whatsappNumber = normalizeWhatsappMentionTarget(mention.targetId);
+      const user = await this.deps.users.findByWhatsappNumber(whatsappNumber);
+      if (!user || user.type === "agent" || !user.whatsapp_number) {
+        throw new AgentDeliveryTargetError("WhatsApp mention target is not available");
+      }
+      if (delivery.targetType === "group") {
+        const whatsapp = this.deps.getWhatsApp?.() ?? null;
+        if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
+        const group = context.whatsappGroup ?? (await whatsapp.getGroupMetadata(delivery.targetId));
+        if (
+          !(await whatsappGroupHasParticipant(
+            group,
+            user.whatsapp_number,
+            async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+          ))
+        ) {
+          throw new AgentDeliveryTargetError("WhatsApp mention target is not in the delivery group");
+        }
+      }
+      const key = `${mention.platform}:${user.whatsapp_number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      resolved.push({ platform: "whatsapp", targetId: user.whatsapp_number, label: user.name });
+    }
+
+    return resolved;
+  }
+
+  async resolveSourceConfigsForUser(
+    agentKeyOrDef: string | AgentDefinition,
+    userId: string,
+    sources: AgentSourceConfig[],
+  ): Promise<AgentSourceConfig[]> {
+    const def = typeof agentKeyOrDef === "string" ? getAgentDefinition(agentKeyOrDef) : agentKeyOrDef;
+    if (!def?.sourceConfig) {
+      if (sources.length > 0) throw new AgentSourceTargetError("This agent does not support conversation sources");
+      return [];
+    }
+    if (sources.length > def.sourceConfig.maxSources) {
+      throw new AgentSourceTargetError(`Select at most ${def.sourceConfig.maxSources} sources`);
+    }
+
+    const resolved: AgentSourceConfig[] = [];
+    const seen = new Set<string>();
+    for (const source of sources) {
+      const normalized = await this.resolveSourceConfigForUser(userId, source, def.sourceConfig);
+      const key = `${normalized.platform}:${normalized.targetType}:${normalized.targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      resolved.push(normalized);
+    }
+    return resolved;
+  }
+
+  private async resolveSourceConfigForUser(
+    userId: string,
+    source: AgentSourceConfig,
+    config: AgentSourceConfigDef,
+  ): Promise<AgentSourceConfig> {
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new AgentSourceTargetError("User not found");
+
+    if (source.platform === "slack") {
+      if (!config.supportsSlackChannels || source.targetType !== "channel") {
+        throw new AgentSourceTargetError("Slack sources must be channels");
+      }
+      if (!user.slack_user_id) throw new AgentSourceTargetError("Slack sources are not available for this user");
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentSourceTargetError("Slack is not connected");
+      const channel = (await slack.listChannels()).find((candidate) => candidate.id === source.targetId);
+      if (!channel?.isMember) throw new AgentSourceTargetError("Slack channel is not available as a source");
+      if (!(await slack.isUserInChannel(source.targetId, user.slack_user_id))) {
+        throw new AgentSourceTargetError("Slack channel is not available for this user");
+      }
+      return {
+        platform: "slack",
+        targetType: "channel",
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      };
+    }
+
+    if (!config.supportsWhatsAppGroups || source.targetType !== "group") {
+      throw new AgentSourceTargetError("WhatsApp sources must be groups");
+    }
+    const group = await this.deps.db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "name"])
+      .where("jid", "=", source.targetId)
+      .executeTakeFirst();
+    if (!group) throw new AgentSourceTargetError("WhatsApp group is not available as a source");
+    if (!user.whatsapp_number) throw new AgentSourceTargetError("WhatsApp sources are not available for this user");
+    const whatsapp = this.deps.getWhatsApp?.() ?? null;
+    if (!whatsapp) throw new AgentSourceTargetError("WhatsApp is not connected");
+    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
+    if (
+      !(await whatsappGroupHasParticipant(
+        groupMetadata,
+        user.whatsapp_number,
+        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+      ))
+    ) {
+      throw new AgentSourceTargetError("WhatsApp group is not available for this user");
+    }
+    return {
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: group.jid,
+      label: group.name,
+    };
+  }
+
+  private async resolveSourcesForRun(
+    def: AgentDefinition,
+    userId: string,
+    sources: AgentSourceConfig[],
+  ): Promise<AgentSourceConfig[]> {
+    if (!def.sourceConfig) return [];
+
+    const resolved: AgentSourceConfig[] = [];
+    const seen = new Set<string>();
+    for (const source of sources) {
+      try {
+        const normalized = await this.resolveSourceConfigForUser(userId, source, def.sourceConfig);
+        const key = `${normalized.platform}:${normalized.targetType}:${normalized.targetId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        resolved.push(normalized);
+      } catch (err) {
+        this.deps.logger.warn(
+          { err, agentKey: def.key, userId, platform: source.platform, targetType: source.targetType },
+          "Agent: dropping inaccessible source for generation",
+        );
+      }
+    }
+
+    return resolved;
   }
 
   private toApiOutput(
@@ -472,6 +712,22 @@ export class AgentRunService {
     return this.toApiOutput(def, await this.repo.getByIdForUser(def.key, id, userId));
   }
 
+  async listOutputsForUser(
+    agentKey: string,
+    userId: string,
+    options: { limit?: number; cursor?: string | null } = {},
+  ): Promise<{ outputs: AgentOutputApi[]; nextCursor: string | null }> {
+    const def = requireAgentDefinition(agentKey);
+    const result = await this.repo.listCompletedForUser(def.key, userId, options);
+    return {
+      outputs: result.outputs.flatMap((output) => {
+        const api = this.toApiOutput(def, output);
+        return api ? [api] : [];
+      }),
+      nextCursor: result.nextCursor,
+    };
+  }
+
   async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow | null> {
     const def = requireAgentDefinition(params.agentKey);
     const user = await this.deps.users.findById(params.userId);
@@ -518,6 +774,7 @@ export class AgentRunService {
     now = new Date(),
   ): Promise<{ outputDate: string } | null> {
     const config = await this.resolveConfig(def, user.id);
+    if (def.sourceConfig && config.sources.length === 0) return null;
     if (!config.enabled) return null;
     const timezone = config.timezone || user.timezone || "UTC";
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -596,6 +853,7 @@ export class AgentRunService {
 
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
+    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
     const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
 
     try {
@@ -618,6 +876,13 @@ export class AgentRunService {
               now,
               adminCanReadAllFiles,
               contentUserEmails,
+              agentConfig: {
+                enabledSections: config.enabledSections,
+                maxItemsPerSection: config.maxItemsPerSection,
+                focus: config.focus,
+                delivery: config.delivery,
+                sources,
+              },
             })
           : Promise.resolve({}),
       ]);
@@ -631,6 +896,7 @@ export class AgentRunService {
         sections: enabledSections,
         maxItemsPerSection: config.maxItemsPerSection,
         focus: config.focus,
+        sources,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
         previousDayOutput: this.formatOutputForContext(previousDay.output),
         ...definitionContext,
@@ -755,7 +1021,7 @@ export class AgentRunService {
         await this.repo.completeOutput({
           outputId: params.outputId,
           masthead: payload.masthead,
-          rawPayload: payload.rawPayload,
+          rawPayload: rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext),
           items,
         });
         params.onSaved();
