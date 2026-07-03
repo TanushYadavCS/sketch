@@ -647,6 +647,28 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       };
     },
 
+    async touchActiveFactsForFile(input: {
+      indexedFileId: string;
+      source: string;
+      factType: IndexedFileFactType;
+      lastSeenSyncRunId: string;
+      contentHash?: string | null;
+    }): Promise<number> {
+      const result = await db
+        .updateTable("indexed_file_facts")
+        .set({
+          last_seen_sync_run_id: input.lastSeenSyncRunId,
+          content_hash: input.contentHash ?? null,
+          updated_at: new Date().toISOString(),
+        })
+        .where("indexed_file_id", "=", input.indexedFileId)
+        .where("source", "=", input.source)
+        .where("fact_type", "=", input.factType)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
+
     async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {
       if (indexedFileIds.length === 0) return;
       await db
