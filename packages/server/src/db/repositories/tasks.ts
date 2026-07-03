@@ -32,6 +32,7 @@ export interface UpsertTaskInput {
 
 export interface TaskListOptions {
   viewer: FileViewer;
+  viewerUserId?: string | null;
   status?: TaskStatus;
   limit?: number;
 }
@@ -200,7 +201,7 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async listTasksByParent(entityId: string, opts: TaskListOptions): Promise<Selectable<TasksTable>[]> {
-      let query = visibleTaskQuery(db, opts.viewer)
+      let query = visibleTaskQuery(db, opts.viewer, opts.viewerUserId)
         .where("tasks.parent_entity_id", "=", entityId)
         .orderBy("tasks.status", "asc")
         .orderBy("tasks.updated_at", "desc")
@@ -210,7 +211,7 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async listTasksByAssignee(entityId: string, opts: TaskListOptions): Promise<Selectable<TasksTable>[]> {
-      let query = visibleTaskQuery(db, opts.viewer)
+      let query = visibleTaskQuery(db, opts.viewer, opts.viewerUserId)
         .where("tasks.assignee_entity_id", "=", entityId)
         .orderBy("tasks.status", "asc")
         .orderBy("tasks.updated_at", "desc")
@@ -352,22 +353,28 @@ async function promoteBriefTaskEvidence(db: Kysely<DB>, taskId: string, refs: Ag
   }
 }
 
-function visibleTaskQuery(db: Kysely<DB>, viewer: FileViewer) {
-  const query = db
+function visibleTaskQuery(db: Kysely<DB>, viewer: FileViewer, viewerUserId?: string | null) {
+  let query = db
     .selectFrom("tasks")
     .selectAll("tasks")
     .where("tasks.valid_to", "is", null);
 
-  if (viewer.isAdmin) return query;
+  if (!viewer.isAdmin) {
+    query = query.where((eb) =>
+      eb.exists(sql<boolean>`(
+          SELECT 1 FROM task_evidence
+          INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
+          WHERE task_evidence.task_id = tasks.id
+            AND task_evidence.kind = 'file'
+            AND ${fileVisibilityPredicate(viewer)}
+        )`),
+    );
+  }
+
+  if (!viewerUserId) return query.where("tasks.provenance", "!=", "brief");
 
   return query.where((eb) =>
-    eb.exists(sql<boolean>`(
-        SELECT 1 FROM task_evidence
-        INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
-        WHERE task_evidence.task_id = tasks.id
-          AND task_evidence.kind = 'file'
-          AND ${fileVisibilityPredicate(viewer)}
-      )`),
+    eb.or([eb("tasks.provenance", "!=", "brief"), eb("tasks.created_by_user_id", "=", viewerUserId)]),
   );
 }
 
