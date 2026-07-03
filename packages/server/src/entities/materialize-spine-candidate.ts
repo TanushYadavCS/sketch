@@ -80,8 +80,10 @@ export async function materializeSpineCandidate(
 
   const reviewRow = await deps.reviewRepo.findSeedReviewRow(args.subjectSource, args.subjectSourceId);
   const autoBirth = !args.forceQueue && deps.structuralAutoBirthTypes.has(spineType) && !reviewRow;
+  const shouldQueue =
+    Boolean(reviewRow) || args.forceQueue || (deps.birthGateTypes.has(spineType) && !deps.birthGateDryRun);
 
-  if (!autoBirth && (args.forceQueue || (deps.birthGateTypes.has(spineType) && !deps.birthGateDryRun))) {
+  if (!autoBirth && shouldQueue) {
     const owner = deps.resolveOwner(fact);
     if (!owner) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
