@@ -73,6 +73,7 @@ describe("createAgentOutputDeliveryService", () => {
         targetType: "channel",
         targetId: "C_DAILY",
         label: "#daily",
+        mentions: [{ platform: "slack", targetId: "UOWNER", label: "Owner" }],
       },
       output: {
         id: "output-delivery",
@@ -103,7 +104,8 @@ describe("createAgentOutputDeliveryService", () => {
       },
     });
 
-    expect(slack.postMessage).toHaveBeenCalledWith("C_DAILY", expect.stringContaining("*Daily Brief - Jun 26*"));
+    expect(slack.postMessage).toHaveBeenCalledWith("C_DAILY", expect.stringContaining("*Daily Brief | Jun 26*"));
+    expect(slack.postMessage).toHaveBeenCalledWith("C_DAILY", expect.stringContaining("Cc: <@UOWNER>"));
     const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
     expect(attempt.status).toBe("sent");
     expect(attempt.message_refs_json).toBe(JSON.stringify(["123.456"]));
@@ -112,18 +114,14 @@ describe("createAgentOutputDeliveryService", () => {
     expect(captured[0].provider_message_id).toBe("123.456");
   });
 
-  it("sends WhatsApp delivery chunks and records every message ref", async () => {
-    let sentCount = 0;
+  it("sends compact WhatsApp delivery and records the message ref", async () => {
     const whatsapp = createMockWhatsApp({
       isConnected: true,
-      sendText: vi.fn(async () => {
-        sentCount += 1;
-        return {
-          providerMessageId: `wa-message-${sentCount}`,
-          providerConversationId: "120363000000001@g.us",
-          providerTimestamp: "2024-06-04T07:20:00.000Z",
-        };
-      }),
+      sendText: vi.fn(async () => ({
+        providerMessageId: "wa-message-1",
+        providerConversationId: "120363000000001@g.us",
+        providerTimestamp: "2024-06-04T07:20:00.000Z",
+      })),
     });
     const service = createAgentOutputDeliveryService({
       db,
@@ -150,28 +148,22 @@ describe("createAgentOutputDeliveryService", () => {
       },
     });
 
-    expect(whatsapp.sendText).toHaveBeenCalledTimes(4);
+    expect(whatsapp.sendText).toHaveBeenCalledTimes(1);
     for (const call of vi.mocked(whatsapp.sendText).mock.calls) {
       expect(call[0]).toEqual({ kind: "group", groupId: "120363000000001@g.us" });
       expect(call[1].length).toBeLessThanOrEqual(4000);
+      expect(call[1]).toContain("...");
     }
 
     const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
     expect(attempt.status).toBe("sent");
-    expect(attempt.message_refs_json).toBe(
-      JSON.stringify(["wa-message-1", "wa-message-2", "wa-message-3", "wa-message-4"]),
-    );
+    expect(attempt.message_refs_json).toBe(JSON.stringify(["wa-message-1"]));
     const captured = await db
       .selectFrom("conversation_messages")
       .select(["text", "provider_message_id"])
       .orderBy("provider_message_id")
       .execute();
-    expect(captured.map((row) => row.provider_message_id)).toEqual([
-      "wa-message-1",
-      "wa-message-2",
-      "wa-message-3",
-      "wa-message-4",
-    ]);
+    expect(captured.map((row) => row.provider_message_id)).toEqual(["wa-message-1"]);
     expect(captured.every((row) => row.text.length <= 4000)).toBe(true);
   });
 

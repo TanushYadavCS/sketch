@@ -1049,6 +1049,13 @@ export interface AgentDeliveryConfig {
   targetType: "channel" | "dm" | "group";
   targetId: string;
   label: string | null;
+  mentions?: AgentDeliveryMention[];
+}
+
+export interface AgentDeliveryMention {
+  platform: "slack" | "whatsapp";
+  targetId: string;
+  label: string | null;
 }
 
 export interface AgentSourceConfig {

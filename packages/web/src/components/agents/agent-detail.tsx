@@ -6,6 +6,7 @@
 import {
   type AgentConfig,
   type AgentDeliveryConfig,
+  type AgentDeliveryMention,
   type AgentDetailResponse,
   type AgentOutput,
   type AgentOutputsResponse,
@@ -56,10 +57,11 @@ function formatTime(hour: number, minute: number): string {
 
 function deliverySummary(delivery: AgentDeliveryConfig | null): string {
   if (!delivery) return "Web only";
+  const tagged = delivery.mentions?.length ? ` · ${delivery.mentions.length} tagged` : "";
   if (delivery.platform === "slack" && delivery.targetType === "channel")
-    return `Slack ${delivery.label ?? delivery.targetId}`;
-  if (delivery.platform === "slack") return `Slack DM ${delivery.label ?? delivery.targetId}`;
-  return `WhatsApp ${delivery.label ?? delivery.targetId}`;
+    return `Slack ${delivery.label ?? delivery.targetId}${tagged}`;
+  if (delivery.platform === "slack") return `Slack DM ${delivery.label ?? delivery.targetId}${tagged}`;
+  return `WhatsApp ${delivery.label ?? delivery.targetId}${tagged}`;
 }
 
 export function AgentDetail({ agentKey }: { agentKey: string }) {
@@ -635,6 +637,10 @@ function sourceKey(source: AgentSourceConfig): string {
   return `${source.platform}:${source.targetType}:${source.targetId}`;
 }
 
+function mentionKey(mention: AgentDeliveryMention): string {
+  return `${mention.platform}:${mention.targetId}`;
+}
+
 function sourceToDelivery(source: AgentSourceConfig): AgentDeliveryConfig {
   return {
     enabled: true,
@@ -801,6 +807,7 @@ function DeliveryEditor({
   const platform = value?.platform ?? "slack";
   const targetType = value?.targetType ?? (platform === "slack" ? "channel" : "group");
   const enabled = value !== null;
+  const mentions = value?.mentions ?? [];
 
   const setEnabled = (next: boolean) => {
     if (!next) {
@@ -818,25 +825,53 @@ function DeliveryEditor({
       targetType: next === "slack" ? "channel" : "group",
       targetId: "",
       label: null,
+      mentions: [],
     });
   };
 
   const setTargetType = (next: "channel" | "dm" | "group") => {
     if (!enabled) return;
-    onChange({ enabled: true, platform, targetType: next, targetId: "", label: null });
+    onChange({ enabled: true, platform, targetType: next, targetId: "", label: null, mentions: [] });
   };
 
   const selectTarget = (targetId: string, label: string) => {
     if (!enabled) return;
-    onChange({ enabled: true, platform, targetType, targetId, label });
+    onChange({ enabled: true, platform, targetType, targetId, label, mentions: [] });
+  };
+
+  const toggleMention = (mention: AgentDeliveryMention) => {
+    if (!value?.targetId) return;
+    const key = mentionKey(mention);
+    const selected = mentions.some((item) => mentionKey(item) === key);
+    const next = selected ? mentions.filter((item) => mentionKey(item) !== key) : [...mentions, mention];
+    onChange({ ...value, mentions: next });
   };
 
   const channelOptions = (slackChannels.data?.channels ?? []).filter((channel) => channel.isMember);
   const dmOptions = (users.data?.users ?? []).filter(
     (user) => user.id === session.data?.userId && user.type !== "agent" && user.slack_user_id,
   );
+  const slackMentionOptions = (users.data?.users ?? [])
+    .filter((user) => user.type !== "agent" && user.slack_user_id)
+    .map(
+      (user): AgentDeliveryMention => ({
+        platform: "slack",
+        targetId: user.slack_user_id ?? "",
+        label: user.email ? `${user.name} <${user.email}>` : user.name,
+      }),
+    );
+  const whatsappMentionOptions = (users.data?.users ?? [])
+    .filter((user) => user.type !== "agent" && user.whatsapp_number)
+    .map(
+      (user): AgentDeliveryMention => ({
+        platform: "whatsapp",
+        targetId: user.whatsapp_number ?? "",
+        label: user.name,
+      }),
+    );
   const groupOptions = whatsappGroups.data?.groups ?? [];
   const canPostToSource = sources.length === 1;
+  const mentionOptions = platform === "slack" ? slackMentionOptions : whatsappMentionOptions;
 
   return (
     <div className="space-y-5">
@@ -933,6 +968,25 @@ function DeliveryEditor({
               )}
             </div>
           </div>
+
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
+              Notify people
+            </span>
+            <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border-[0.5px] border-border p-1">
+              {!value?.targetId ? (
+                <p className="px-2 py-2 text-[12px] text-muted-foreground">Choose a destination first.</p>
+              ) : (
+                <MentionList
+                  loading={users.isLoading}
+                  empty={platform === "slack" ? "No Slack people available." : "No WhatsApp people available."}
+                  selected={new Set(mentions.map(mentionKey))}
+                  options={mentionOptions}
+                  onToggle={toggleMention}
+                />
+              )}
+            </div>
+          </div>
         </>
       ) : (
         <p className="text-[12px] leading-relaxed text-muted-foreground">
@@ -1011,6 +1065,47 @@ function TargetList({
           {selectedId === option.id ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
         </button>
       ))}
+    </div>
+  );
+}
+
+function MentionList({
+  loading,
+  empty,
+  selected,
+  options,
+  onToggle,
+}: {
+  loading: boolean;
+  empty: string;
+  selected: Set<string>;
+  options: AgentDeliveryMention[];
+  onToggle: (mention: AgentDeliveryMention) => void;
+}) {
+  if (loading) return <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading...</p>;
+  if (options.length === 0) return <p className="px-2 py-2 text-[12px] text-muted-foreground">{empty}</p>;
+  return (
+    <div className="flex flex-col">
+      {options.map((option) => {
+        const active = selected.has(mentionKey(option));
+        return (
+          <button
+            key={mentionKey(option)}
+            type="button"
+            onClick={() => onToggle(option)}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
+              active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+            )}
+          >
+            <span className="shrink-0">
+              <UserIcon size={14} aria-hidden />
+            </span>
+            <span className="min-w-0 flex-1 truncate">{option.label ?? option.targetId}</span>
+            {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -759,6 +759,49 @@ describe("AgentRunService", () => {
     });
   });
 
+  it("resolves Slack delivery mentions to known channel members", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await users.create({ name: "Ada", email: "ada@example.com", slackUserId: "U_ADA" });
+    const isUserInChannel = vi.fn(async (_channelId: string, slackUserId: string) => slackUserId !== "U_MISSING");
+    const service = createService(db, [], {
+      getSlack: () => ({
+        listChannels: vi.fn(async () => [{ id: "C_DAILY", name: "daily", type: "private_channel", isMember: true }]),
+        isUserInChannel,
+      }),
+    });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#spoofed",
+        mentions: [{ platform: "slack", targetId: "U_ADA", label: "Spoofed Ada" }],
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "slack",
+      targetType: "channel",
+      targetId: "C_DAILY",
+      label: "#daily",
+      mentions: [{ platform: "slack", targetId: "U_ADA", label: "Ada <ada@example.com>" }],
+    });
+    expect(isUserInChannel).toHaveBeenCalledWith("C_DAILY", "U_ADA");
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+        mentions: [{ platform: "slack", targetId: "U_UNKNOWN", label: "Unknown" }],
+      }),
+    ).rejects.toThrow("Slack mention target is not available");
+  });
+
   it("resolves WhatsApp group delivery only when the current user is a participant", async () => {
     const users = createUserRepository(db);
     const user = await users.create({
@@ -852,6 +895,49 @@ describe("AgentRunService", () => {
       label: "Leadership",
     });
     expect(resolveJidToPhone).toHaveBeenCalledWith("86702773280883@lid");
+  });
+
+  it("resolves WhatsApp delivery mentions to known group participants", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15551234567",
+    });
+    await users.create({ name: "Ada", email: "ada@example.com", whatsappNumber: "+15557654321" });
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "120363000000001@g.us",
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "15551234567@s.whatsapp.net" }, { id: "15557654321@s.whatsapp.net" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+
+    await expect(
+      service.resolveDeliveryConfigForUser(user.id, {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Spoofed",
+        mentions: [{ platform: "whatsapp", targetId: "+15557654321", label: "Spoofed Ada" }],
+      }),
+    ).resolves.toEqual({
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: "120363000000001@g.us",
+      label: "Leadership",
+      mentions: [{ platform: "whatsapp", targetId: "+15557654321", label: "Ada" }],
+    });
   });
 
   it("rejects WhatsApp group delivery when the current user is not a participant", async () => {

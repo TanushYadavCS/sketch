@@ -1,6 +1,11 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
-import type { AgentDeliveryConfig, AgentSourceConfig } from "../db/repositories/agent-outputs";
+import type {
+  AgentDeliveryConfig,
+  AgentDeliveryMention,
+  AgentDeliveryPlatform,
+  AgentSourceConfig,
+} from "../db/repositories/agent-outputs";
 import type { DB } from "../db/schema";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService, AgentSourceTargetError } from "./service";
@@ -98,6 +103,35 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
 
 class ConfigPatchError extends Error {}
 
+function parseDeliveryMentions(value: unknown, deliveryPlatform: AgentDeliveryPlatform): AgentDeliveryMention[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ConfigPatchError("delivery.mentions must be an array");
+  if (value.length > 20) throw new ConfigPatchError("delivery.mentions supports at most 20 people");
+  const mentions: AgentDeliveryMention[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") throw new ConfigPatchError("delivery mention must be an object");
+    const raw = entry as Record<string, unknown>;
+    const platform = raw.platform;
+    const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+    if (platform !== "slack" && platform !== "whatsapp") {
+      throw new ConfigPatchError("delivery mention platform must be slack or whatsapp");
+    }
+    if (platform !== deliveryPlatform) {
+      throw new ConfigPatchError("delivery mention platform must match delivery.platform");
+    }
+    if (!targetId) throw new ConfigPatchError("delivery mention targetId is required");
+    const key = `${platform}:${targetId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+    mentions.push({ platform, targetId, label });
+  }
+
+  return mentions;
+}
+
 function parseDeliveryConfig(value: unknown): AgentDeliveryConfig | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -122,7 +156,15 @@ function parseDeliveryConfig(value: unknown): AgentDeliveryConfig | null | undef
     throw new ConfigPatchError("WhatsApp delivery supports group targets");
   }
   const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
-  return { enabled: true, platform, targetType, targetId, label };
+  const mentions = parseDeliveryMentions(raw.mentions, platform);
+  return {
+    enabled: true,
+    platform,
+    targetType,
+    targetId,
+    label,
+    ...(mentions.length > 0 ? { mentions } : {}),
+  };
 }
 
 function parseSourceConfigs(value: unknown): AgentSourceConfig[] | undefined {

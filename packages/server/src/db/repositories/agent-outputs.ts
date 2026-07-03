@@ -45,12 +45,19 @@ export type AgentDeliveryTargetType = "channel" | "dm" | "group";
 export type AgentSourcePlatform = "slack" | "whatsapp";
 export type AgentSourceTargetType = "channel" | "group";
 
+export interface AgentDeliveryMention {
+  platform: AgentDeliveryPlatform;
+  targetId: string;
+  label: string | null;
+}
+
 export interface AgentDeliveryConfig {
   enabled: true;
   platform: AgentDeliveryPlatform;
   targetType: AgentDeliveryTargetType;
   targetId: string;
   label: string | null;
+  mentions?: AgentDeliveryMention[];
 }
 
 export interface AgentSourceConfig {

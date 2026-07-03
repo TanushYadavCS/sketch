@@ -8,6 +8,7 @@ import { ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import {
   type AgentDeliveryConfig,
+  type AgentDeliveryMention,
   type AgentMasthead,
   type AgentOutputItemInput,
   type AgentOutputRow,
@@ -131,6 +132,16 @@ function normalizeWhatsappNumber(whatsappNumber: string): string {
   return whatsappNumber.replace(/^\+/, "");
 }
 
+function normalizeWhatsappMentionTarget(targetId: string): string {
+  if (targetId.startsWith("dm:+")) return targetId.slice("dm:".length);
+  if (targetId.startsWith("+")) return targetId;
+  if (targetId.endsWith("@s.whatsapp.net")) {
+    return `+${normalizeWhatsappNumber(targetId.replace("@s.whatsapp.net", ""))}`;
+  }
+  if (/^\d+$/.test(targetId)) return `+${targetId}`;
+  return targetId;
+}
+
 async function whatsappGroupHasParticipant(
   group: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
   whatsappNumber: string,
@@ -147,6 +158,10 @@ async function whatsappGroupHasParticipant(
   }
 
   return false;
+}
+
+function withMentions(mentions: AgentDeliveryMention[]): Pick<AgentDeliveryConfig, "mentions"> {
+  return mentions.length > 0 ? { mentions } : {};
 }
 
 function localDateInTimezone(now: Date, timezone: string): string {
@@ -380,10 +395,14 @@ export class AgentRunService {
         if (delivery.targetId !== user.slack_user_id) {
           throw new AgentDeliveryTargetError("Slack DM delivery must target the current user");
         }
-        return {
+        const normalized = {
           ...delivery,
           targetId: user.slack_user_id,
           label: user.email ? `${user.name} <${user.email}>` : user.name,
+        };
+        return {
+          ...normalized,
+          ...withMentions(await this.resolveDeliveryMentions(normalized)),
         };
       }
 
@@ -394,10 +413,14 @@ export class AgentRunService {
       if (!(await slack.isUserInChannel(delivery.targetId, user.slack_user_id))) {
         throw new AgentDeliveryTargetError("Slack channel is not available for this user");
       }
-      return {
+      const normalized = {
         ...delivery,
         targetId: channel.id,
         label: `#${channel.name}`,
+      };
+      return {
+        ...normalized,
+        ...withMentions(await this.resolveDeliveryMentions(normalized)),
       };
     }
 
@@ -424,11 +447,81 @@ export class AgentRunService {
       throw new AgentDeliveryTargetError("WhatsApp group is not available for this user");
     }
 
-    return {
+    const normalized = {
       ...delivery,
       targetId: group.jid,
       label: group.name,
     };
+    return {
+      ...normalized,
+      ...withMentions(await this.resolveDeliveryMentions(normalized, { whatsappGroup: groupMetadata })),
+    };
+  }
+
+  private async resolveDeliveryMentions(
+    delivery: AgentDeliveryConfig,
+    context: { whatsappGroup?: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>> } = {},
+  ): Promise<AgentDeliveryMention[]> {
+    const mentions = delivery.mentions ?? [];
+    if (mentions.length === 0) return [];
+
+    const resolved: AgentDeliveryMention[] = [];
+    const seen = new Set<string>();
+
+    for (const mention of mentions) {
+      if (mention.platform !== delivery.platform) {
+        throw new AgentDeliveryTargetError("Delivery mention platform must match the delivery platform");
+      }
+
+      if (mention.platform === "slack") {
+        const user = await this.deps.users.findBySlackId(mention.targetId);
+        if (!user || user.type === "agent" || !user.slack_user_id) {
+          throw new AgentDeliveryTargetError("Slack mention target is not available");
+        }
+        if (delivery.targetType === "channel") {
+          const slack = this.deps.getSlack?.() ?? null;
+          if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+          if (!(await slack.isUserInChannel(delivery.targetId, user.slack_user_id))) {
+            throw new AgentDeliveryTargetError("Slack mention target is not in the delivery channel");
+          }
+        }
+        const key = `${mention.platform}:${user.slack_user_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        resolved.push({
+          platform: "slack",
+          targetId: user.slack_user_id,
+          label: user.email ? `${user.name} <${user.email}>` : user.name,
+        });
+        continue;
+      }
+
+      const whatsappNumber = normalizeWhatsappMentionTarget(mention.targetId);
+      const user = await this.deps.users.findByWhatsappNumber(whatsappNumber);
+      if (!user || user.type === "agent" || !user.whatsapp_number) {
+        throw new AgentDeliveryTargetError("WhatsApp mention target is not available");
+      }
+      if (delivery.targetType === "group") {
+        const whatsapp = this.deps.getWhatsApp?.() ?? null;
+        if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
+        const group = context.whatsappGroup ?? (await whatsapp.getGroupMetadata(delivery.targetId));
+        if (
+          !(await whatsappGroupHasParticipant(
+            group,
+            user.whatsapp_number,
+            async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+          ))
+        ) {
+          throw new AgentDeliveryTargetError("WhatsApp mention target is not in the delivery group");
+        }
+      }
+      const key = `${mention.platform}:${user.whatsapp_number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      resolved.push({ platform: "whatsapp", targetId: user.whatsapp_number, label: user.name });
+    }
+
+    return resolved;
   }
 
   async resolveSourceConfigsForUser(

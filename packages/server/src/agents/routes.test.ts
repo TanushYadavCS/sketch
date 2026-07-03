@@ -37,6 +37,7 @@ describe("agentRoutes", () => {
       targetType: "dm" as const,
       targetId: "U_SELF",
       label: "Agent User <user@example.com>",
+      mentions: [{ platform: "slack" as const, targetId: "U_OWNER", label: "Owner" }],
     };
     const service = createService({
       resolveDeliveryConfigForUser: vi.fn(async () => resolved),
@@ -54,6 +55,7 @@ describe("agentRoutes", () => {
           targetType: "dm",
           targetId: "U_SELF",
           label: "Spoofed",
+          mentions: [{ platform: "slack", targetId: "U_OWNER", label: "Spoofed Owner" }],
         },
       }),
     });
@@ -64,6 +66,38 @@ describe("agentRoutes", () => {
       "user-1",
       expect.objectContaining({ delivery: resolved }),
     );
+    expect(service.resolveDeliveryConfigForUser).toHaveBeenCalledWith(
+      "user-1",
+      expect.objectContaining({
+        mentions: [{ platform: "slack", targetId: "U_OWNER", label: "Spoofed Owner" }],
+      }),
+    );
+  });
+
+  it("rejects delivery mentions for the wrong platform", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request("/api/agents/daily-brief/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        delivery: {
+          enabled: true,
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C_DAILY",
+          label: "#daily",
+          mentions: [{ platform: "whatsapp", targetId: "+15551234567", label: "Ada" }],
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "delivery mention platform must match delivery.platform" },
+    });
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
   });
 
   it("rejects unauthorized delivery config before saving it", async () => {

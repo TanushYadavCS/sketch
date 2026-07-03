@@ -28,41 +28,101 @@ function item(overrides: Partial<AgentApiItem> = {}): AgentApiItem {
 }
 
 describe("renderAgentOutputForDelivery", () => {
-  it("renders Slack formatting with linked source titles", () => {
+  it("renders readable Slack formatting with linked source titles and mentions", () => {
+    const text = renderAgentOutputForDelivery({
+      title: "Daily Brief",
+      sections,
+      platform: "slack",
+      mentions: [{ platform: "slack", targetId: "U123", label: "Ada" }],
+      output: {
+        outputDate: "2026-06-26",
+        masthead: { title: "Daily Brief", summary: "Start with the launch follow-up." },
+        sections: { todos: [item()], customer_updates: [] },
+      },
+    });
+
+    expect(text).toContain("*Daily Brief | Jun 26*");
+    expect(text).toContain("Cc: <@U123>");
+    expect(text).toContain("Start with the launch follow-up.");
+    expect(text).toContain("*To-dos*");
+    expect(text).toContain(
+      "- *<https://linear.app/sketch-ai/issue/SKE-235/example|Follow up with Acme>* - Acme asked for the launch timeline.",
+    );
+    expect(text).toContain("_High priority / SKE-235_");
+  });
+
+  it("renders readable WhatsApp formatting with plain source URLs and text mentions", () => {
+    const text = renderAgentOutputForDelivery({
+      title: "Daily Brief",
+      sections,
+      platform: "whatsapp",
+      mentions: [{ platform: "whatsapp", targetId: "+15551234567", label: "Ada Lovelace" }],
+      output: {
+        outputDate: "2026-06-26",
+        masthead: { title: "Daily Brief", summary: "Start with the launch follow-up." },
+        sections: { todos: [item()], customer_updates: [] },
+      },
+    });
+
+    expect(text).toContain("Daily Brief | Jun 26");
+    expect(text).toContain("Cc: @AdaLovelace");
+    expect(text).toContain("To-dos");
+    expect(text).toContain("- Follow up with Acme - Acme asked for the launch timeline.");
+    expect(text).toContain("  High priority | SKE-235");
+    expect(text).toContain("  Source: https://linear.app/sketch-ai/issue/SKE-235/example");
+  });
+
+  it("clips busy sections for delivery while preserving the web output", () => {
     const text = renderAgentOutputForDelivery({
       title: "Daily Brief",
       sections,
       platform: "slack",
       output: {
         outputDate: "2026-06-26",
-        masthead: { title: "Daily Brief", summary: "Start with the launch follow-up." },
-        sections: { todos: [item()], customer_updates: [] },
+        masthead: { title: "Daily Brief", summary: "Long ".repeat(150) },
+        sections: {
+          todos: [item({ id: "1" }), item({ id: "2" }), item({ id: "3" }), item({ id: "4" }), item({ id: "5" })],
+          customer_updates: [],
+        },
       },
     });
 
-    expect(text).toContain("*Daily Brief - Jun 26*");
-    expect(text).toContain("Start with the launch follow-up.");
-    expect(text).toContain("*To-dos*");
-    expect(text).toContain(
-      "- High: <https://linear.app/sketch-ai/issue/SKE-235/example|Follow up with Acme> (SKE-235) - Acme asked for the launch timeline.",
-    );
+    expect(text).toContain("Long");
+    expect(text).toContain("...");
+    expect(text).toContain("_+1 more in Sketch_");
   });
 
-  it("renders WhatsApp formatting with plain source URLs", () => {
+  it("escapes Slack control characters outside configured mentions", () => {
     const text = renderAgentOutputForDelivery({
       title: "Daily Brief",
       sections,
-      platform: "whatsapp",
+      platform: "slack",
+      mentions: [
+        { platform: "slack", targetId: "UCONFIGURED", label: "Configured" },
+        { platform: "slack", targetId: "<!channel>", label: "Invalid" },
+      ],
       output: {
         outputDate: "2026-06-26",
-        masthead: { title: "Daily Brief", summary: "Start with the launch follow-up." },
-        sections: { todos: [item()], customer_updates: [] },
+        masthead: { title: "Daily Brief", summary: "Do not ping <@U_OTHER> or <#C_OTHER|ops>." },
+        sections: {
+          todos: [
+            item({
+              title: "Check <@U_OTHER>",
+              summary: "Avoid <@U_OTHER> and *format* injection.",
+              displayRef: "<#C_OTHER|ops>",
+              sourceUrl: null,
+            }),
+          ],
+          customer_updates: [],
+        },
       },
     });
 
-    expect(text).toContain("Daily Brief - Jun 26");
-    expect(text).toContain("To-dos");
-    expect(text).toContain("- High: Follow up with Acme (SKE-235) - Acme asked for the launch timeline.");
-    expect(text).toContain("  https://linear.app/sketch-ai/issue/SKE-235/example");
+    expect(text).toContain("Cc: <@UCONFIGURED>");
+    expect(text).not.toContain("<@<!channel>>");
+    expect(text).not.toContain("<@U_OTHER>");
+    expect(text).not.toContain("<#C_OTHER|ops>");
+    expect(text).toContain("(@UOTHER)");
+    expect(text).toContain("(#COTHER/ops)");
   });
 });
