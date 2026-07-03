@@ -35,6 +35,16 @@ const OUTBOUND_TIMEOUT_MS = 30_000;
 const ERROR_BODY_SNIPPET_LIMIT = 500;
 
 const e164PhoneSchema = z.string().trim().regex(E164_PHONE_PATTERN);
+const optionalStringSchema = z
+  .string()
+  .nullish()
+  .transform((value) => value ?? undefined);
+const optionalTrimmedStringSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .nullish()
+  .transform((value) => value ?? undefined);
 
 const inboundEventEnvelopeSchema = z
   .object({
@@ -49,20 +59,20 @@ const inboundMessageEventSchema = z.object({
   provider: z.string().trim().min(1),
   providerMessageId: z.string().trim().min(1),
   providerConversationId: z.string().trim().min(1),
-  providerTimestamp: z.string().optional(),
+  providerTimestamp: optionalStringSchema,
   senderPhoneE164: e164PhoneSchema,
-  senderName: z.string().trim().min(1).optional(),
-  tenantUserId: z.string().trim().min(1).optional(),
-  tenantUserEmail: z.string().trim().min(1).optional(),
-  text: z.string().optional(),
-  mediaType: z.string().trim().min(1).optional(),
+  senderName: optionalTrimmedStringSchema,
+  tenantUserId: optionalTrimmedStringSchema,
+  tenantUserEmail: optionalTrimmedStringSchema,
+  text: optionalStringSchema,
+  mediaType: optionalTrimmedStringSchema,
   quotedMessage: z
     .object({
       providerMessageId: z.string().trim().min(1),
-      text: z.string().nullable().optional(),
+      text: optionalStringSchema,
     })
-    .nullable()
-    .optional(),
+    .nullish()
+    .transform((value) => value ?? undefined),
 });
 
 export interface ManagedWhatsAppConfig {

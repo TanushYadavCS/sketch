@@ -107,6 +107,54 @@ describe("POST /api/system/whatsapp/managed/events", () => {
     expect(handleInboundEvent).toHaveBeenCalledWith(payload);
   });
 
+  it("accepts explicit null optional fields as omitted text message metadata", async () => {
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+    });
+    const handler = vi.fn(async (_message: WhatsAppInboundMessage) => undefined);
+    provider.inboundProvider.onMessage(handler);
+    const app = new Hono();
+    app.route(
+      "/api/system",
+      systemRoutes(createSettingsRepository(db), {
+        systemSecret: SYSTEM_SECRET,
+        managedWhatsappInbound: provider,
+      }),
+    );
+
+    const res = await app.request("/api/system/whatsapp/managed/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: `Bearer ${SYSTEM_SECRET}` },
+      body: JSON.stringify(
+        validPayload({
+          providerTimestamp: null,
+          senderName: null,
+          tenantUserId: null,
+          tenantUserEmail: null,
+          mediaType: null,
+          quotedMessage: null,
+        }),
+      ),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(handler).toHaveBeenCalledOnce();
+    const [message] = handler.mock.calls[0] as [WhatsAppInboundMessage];
+    expect(message).toEqual(
+      expect.objectContaining({
+        text: "hello",
+        providerTimestamp: null,
+        senderName: "+15551234567",
+        senderPhoneE164: "+15551234567",
+      }),
+    );
+    expect(message).not.toHaveProperty("mediaType");
+    expect(message).not.toHaveProperty("quotedMessage");
+  });
+
   it("returns bad request when the managed provider rejects the event schema", async () => {
     const provider = createManagedWhatsAppProvider({
       platformUrl: "https://app.getsketch.ai",
