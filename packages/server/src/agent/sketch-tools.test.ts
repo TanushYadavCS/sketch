@@ -45,6 +45,7 @@ function makeInboxMessagesRepoMock() {
     create: vi.fn(),
     listPendingForRecipient: vi.fn(),
     hasPendingForRecipientByKind: vi.fn().mockResolvedValue(false),
+    listPendingForRecipientByKind: vi.fn().mockResolvedValue([{ id: "inbox-1" }]),
     markConsumed: vi.fn(),
     findById: vi.fn(),
     findUnresolvedByRecipientAndKind: vi.fn(),

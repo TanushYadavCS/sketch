@@ -18,6 +18,18 @@ export interface ProactiveDeliveryTextSend {
   sent: WhatsAppSendResult | null;
 }
 
+export class ProactiveDeliveryTextSendError extends Error {
+  readonly cause: unknown;
+  readonly textSends: ProactiveDeliveryTextSend[];
+
+  constructor(cause: unknown, textSends: ProactiveDeliveryTextSend[]) {
+    super(cause instanceof Error ? cause.message : "WhatsApp text send failed");
+    this.name = "ProactiveDeliveryTextSendError";
+    this.cause = cause;
+    this.textSends = textSends;
+  }
+}
+
 export interface ProactiveDeliveryResult {
   mode: ProactiveDeliveryMode;
   sent: WhatsAppSendResult | null;
@@ -32,7 +44,7 @@ export interface DeliverProactiveDmParams {
   text: string;
   whatsapp: Pick<WhatsAppRuntime, "getCapabilities" | "sendText" | "sendTemplate">;
   conversations: Pick<ReturnType<typeof createConversationRepository>, "findLatestInboundWhatsAppDmFromRecipient">;
-  inboxMessages: Pick<ReturnType<typeof createInboxMessagesRepository>, "create" | "hasPendingForRecipientByKind">;
+  inboxMessages: Pick<ReturnType<typeof createInboxMessagesRepository>, "create" | "listPendingForRecipientByKind">;
   logger: Pick<Logger, "debug">;
   recipientName?: string | null | undefined;
   recipientPhoneE164?: string | null | undefined;
@@ -72,10 +84,6 @@ export async function deliverProactiveDm(params: DeliverProactiveDmParams): Prom
 
 async function parkThenNudge(params: DeliverProactiveDmParams): Promise<ProactiveDeliveryResult> {
   const kind = params.inboxKind ?? WORKFLOW_OUTPUT_INBOX_KIND;
-  const hadPendingWorkflowOutput = await params.inboxMessages.hasPendingForRecipientByKind(
-    params.recipientUserId,
-    kind,
-  );
   const inboxMessage = await params.inboxMessages.create({
     senderUserId: params.senderUserId,
     recipientUserId: params.recipientUserId,
@@ -87,7 +95,7 @@ async function parkThenNudge(params: DeliverProactiveDmParams): Promise<Proactiv
     channelId: params.target.kind === "dm" ? params.target.phoneE164 : params.target.groupId,
   });
 
-  if (hadPendingWorkflowOutput) {
+  if (!(await shouldSendNudgeForInboxMessage(params, kind, inboxMessage.id))) {
     params.logger.debug(
       {
         recipientUserId: params.recipientUserId,
@@ -107,13 +115,32 @@ async function parkThenNudge(params: DeliverProactiveDmParams): Promise<Proactiv
   return { mode: "nudge", sent, textSends: [], inboxMessageId: inboxMessage.id };
 }
 
+/**
+ * The nudge winner is the earliest unconsumed and unresolved row ordered by
+ * created_at, then id. Each delivery inserts its durable inbox row before this
+ * read, so concurrent contenders that can see the same pending set choose the
+ * same winner without dialect-specific locks or unique constraints.
+ */
+async function shouldSendNudgeForInboxMessage(
+  params: DeliverProactiveDmParams,
+  kind: string,
+  inboxMessageId: string,
+): Promise<boolean> {
+  const pending = await params.inboxMessages.listPendingForRecipientByKind(params.recipientUserId, kind);
+  return pending[0]?.id === inboxMessageId;
+}
+
 async function sendTextChunks(
   params: Pick<DeliverProactiveDmParams, "target" | "text" | "whatsapp">,
 ): Promise<ProactiveDeliveryTextSend[]> {
   const textSends: ProactiveDeliveryTextSend[] = [];
   for (const chunk of chunkText(params.text, WHATSAPP_TEXT_LIMIT)) {
-    const sent = await params.whatsapp.sendText(params.target, chunk);
-    textSends.push({ text: chunk, sent });
+    try {
+      const sent = await params.whatsapp.sendText(params.target, chunk);
+      textSends.push({ text: chunk, sent });
+    } catch (cause) {
+      throw new ProactiveDeliveryTextSendError(cause, textSends);
+    }
   }
   return textSends;
 }
@@ -150,6 +177,7 @@ function shouldParkAfterTextError(error: unknown): boolean {
 }
 
 function providerCodeFromError(error: unknown): string | null {
+  if (error instanceof ProactiveDeliveryTextSendError) return providerCodeFromError(error.cause);
   if (!error || typeof error !== "object" || !("providerCode" in error)) return null;
   const code = (error as { providerCode?: unknown }).providerCode;
   return typeof code === "string" ? code : null;

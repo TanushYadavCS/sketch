@@ -78,6 +78,19 @@ export function createInboxMessagesRepository(db: Kysely<DB>) {
       return Boolean(row);
     },
 
+    async listPendingForRecipientByKind(recipientUserId: string, kind: string) {
+      return db
+        .selectFrom("inbox_messages")
+        .selectAll()
+        .where("recipient_user_id", "=", recipientUserId)
+        .where("kind", "=", kind)
+        .where("consumed_at", "is", null)
+        .where("resolved_at", "is", null)
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .execute();
+    },
+
     async findById(id: string) {
       return db.selectFrom("inbox_messages").selectAll().where("id", "=", id).executeTakeFirst();
     },

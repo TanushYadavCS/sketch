@@ -161,6 +161,7 @@ function buildDeps(
     inboxMessagesRepo: {
       create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
       hasPendingForRecipientByKind: vi.fn().mockResolvedValue(false),
+      listPendingForRecipientByKind: vi.fn().mockResolvedValue([{ id: "inbox-1" }]),
     },
     sendDm: vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" }),
     _mockRunAgent: mockRunAgent,

@@ -10,8 +10,16 @@ import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
-import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
-import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import {
+  type ProactiveDeliveryTextSend,
+  ProactiveDeliveryTextSendError,
+  deliverProactiveDm,
+} from "../whatsapp/proactive-delivery";
+import {
+  type WhatsAppTarget,
+  whatsappDeliveryTargetFromTarget,
+  whatsappTargetFromDeliveryTarget,
+} from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId } from "../workflows/delivery";
 import { type RenderableAgentOutput, renderAgentOutputForDelivery } from "./output-renderer";
@@ -77,36 +85,32 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
 
     if (target.kind === "dm") {
-      const result = await deliverProactiveDm({
-        target,
-        recipientUserId: output.userId,
-        senderUserId: output.userId,
-        text,
-        whatsapp: deps.whatsapp,
-        conversations,
-        inboxMessages,
-        logger: deps.logger,
-        recipientName: delivery.label,
-        recipientPhoneE164: target.phoneE164,
-        inboxMetadata: { source: "agent_output", outputId: output.id, agentKey: output.agentKey },
-      });
-      if (result.mode === "text") {
-        const refs: string[] = [];
-        for (const textSend of result.textSends) {
-          const messageRef = textSend.sent?.providerMessageId;
-          if (!messageRef) continue;
-          refs.push(messageRef);
-          await capture.captureWhatsApp({
-            deliveryTarget: whatsappDeliveryTargetFromTarget(target),
-            messageRef,
-            providerTimestamp: textSend.sent?.providerTimestamp ?? null,
-            text: textSend.text,
-          });
+      try {
+        const result = await deliverProactiveDm({
+          target,
+          recipientUserId: output.userId,
+          senderUserId: output.userId,
+          text,
+          whatsapp: deps.whatsapp,
+          conversations,
+          inboxMessages,
+          logger: deps.logger,
+          recipientName: delivery.label,
+          recipientPhoneE164: target.phoneE164,
+          inboxMetadata: { source: "agent_output", outputId: output.id, agentKey: output.agentKey },
+        });
+        if (result.mode === "text") {
+          return captureWhatsAppDmTextSends(target, result.textSends);
         }
-        return refs;
+        const messageRef = result.sent?.providerMessageId;
+        return [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref));
+      } catch (err) {
+        if (err instanceof ProactiveDeliveryTextSendError) {
+          await captureWhatsAppDmTextSends(target, err.textSends);
+          throw err.cause ?? err;
+        }
+        throw err;
       }
-      const messageRef = result.sent?.providerMessageId;
-      return [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref));
     }
 
     const refs: string[] = [];
@@ -120,6 +124,25 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
         messageRef,
         providerTimestamp: sent.providerTimestamp,
         text: chunk,
+      });
+    }
+    return refs;
+  }
+
+  async function captureWhatsAppDmTextSends(
+    target: WhatsAppTarget & { kind: "dm" },
+    textSends: ProactiveDeliveryTextSend[],
+  ): Promise<string[]> {
+    const refs: string[] = [];
+    for (const textSend of textSends) {
+      const messageRef = textSend.sent?.providerMessageId;
+      if (!messageRef) continue;
+      refs.push(messageRef);
+      await capture.captureWhatsApp({
+        deliveryTarget: whatsappDeliveryTargetFromTarget(target),
+        messageRef,
+        providerTimestamp: textSend.sent?.providerTimestamp ?? null,
+        text: textSend.text,
       });
     }
     return refs;

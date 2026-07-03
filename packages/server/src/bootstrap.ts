@@ -63,6 +63,7 @@ import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
+import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 export interface ServerHandle {
   config: Config;
@@ -282,6 +283,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     userId,
     platform,
     message,
+    template,
     senderUserId,
     inboxKind,
     inboxMetadata,
@@ -289,6 +291,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     userId: string;
     platform: string;
     message: string;
+    template?: WhatsAppTemplateRequest;
     senderUserId?: string;
     /**
      * This adapter does not create a duplicate inbox row for successful
@@ -324,6 +327,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
       const target = { kind: "dm" as const, phoneE164: recipient.whatsapp_number };
       const channelId = whatsappDeliveryTargetFromTarget(target);
+      if (template) {
+        const sent = await whatsappRuntime.sendTemplate(target, template);
+        return { channelId, messageRef: sent?.providerMessageId ?? "" };
+      }
+
       const result = await deliverProactiveDm({
         target,
         recipientUserId: userId,

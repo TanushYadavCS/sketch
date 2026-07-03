@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { WHATSAPP_TEXT_LIMIT } from "./chunking";
-import { type DeliverProactiveDmParams, deliverProactiveDm } from "./proactive-delivery";
+import {
+  type DeliverProactiveDmParams,
+  ProactiveDeliveryTextSendError,
+  deliverProactiveDm,
+} from "./proactive-delivery";
 import type { WhatsAppCapabilities, WhatsAppSendResult, WhatsAppTarget } from "./provider";
 import { WHATSAPP_TEMPLATE_KEYS } from "./templates";
 
@@ -41,7 +45,7 @@ function buildDeps(
     capabilities?: WhatsAppCapabilities;
     lastInbound?: { receivedAt: string; providerTimestamp: string | null } | null;
     sendText?: ReturnType<typeof vi.fn>;
-    hasPending?: ReturnType<typeof vi.fn>;
+    listPending?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   return {
@@ -55,7 +59,7 @@ function buildDeps(
     } as unknown as DeliverProactiveDmParams["conversations"],
     inboxMessages: {
       create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
-      hasPendingForRecipientByKind: overrides.hasPending ?? vi.fn().mockResolvedValue(false),
+      listPendingForRecipientByKind: overrides.listPending ?? vi.fn().mockResolvedValue([{ id: "inbox-1" }]),
     } as unknown as DeliverProactiveDmParams["inboxMessages"],
     logger: { debug: vi.fn() },
   };
@@ -183,19 +187,80 @@ describe("deliverProactiveDm", () => {
     expect(deps.whatsapp.sendTemplate).toHaveBeenCalledOnce();
   });
 
-  it("skips duplicate nudges while another workflow output is pending", async () => {
-    const hasPending = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    const deps = buildDeps({ hasPending });
+  it("sends one deterministic nudge when concurrent deliveries park for the same recipient", async () => {
+    let releaseBothCreates!: () => void;
+    const bothCreates = new Promise<void>((resolve) => {
+      releaseBothCreates = resolve;
+    });
+    const createdRows: Array<{ id: string; created_at: string }> = [];
+    const create = vi.fn(async (data: { message: string }) => {
+      const row = {
+        id: data.message === "first" ? "inbox-b" : "inbox-a",
+        created_at: "2026-07-03T10:00:00.000Z",
+      };
+      createdRows.push(row);
+      if (createdRows.length === 2) releaseBothCreates();
+      return row;
+    });
+    const listPending = vi.fn(async () => {
+      await bothCreates;
+      return [...createdRows].sort((left, right) => {
+        const byCreatedAt = left.created_at.localeCompare(right.created_at);
+        return byCreatedAt === 0 ? left.id.localeCompare(right.id) : byCreatedAt;
+      });
+    });
+    const deps = buildDeps({ listPending });
+    deps.inboxMessages.create = create as unknown as DeliverProactiveDmParams["inboxMessages"]["create"];
 
-    await deliverProactiveDm({ target, recipientUserId: "user-1", senderUserId: "user-1", text: "first", ...deps });
-    await deliverProactiveDm({ target, recipientUserId: "user-1", senderUserId: "user-1", text: "second", ...deps });
+    const [first, second] = await Promise.all([
+      deliverProactiveDm({ target, recipientUserId: "user-1", senderUserId: "user-1", text: "first", ...deps }),
+      deliverProactiveDm({ target, recipientUserId: "user-1", senderUserId: "user-1", text: "second", ...deps }),
+    ]);
 
     expect(deps.inboxMessages.create).toHaveBeenCalledTimes(2);
     expect(deps.whatsapp.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(first).toMatchObject({ mode: "parked", inboxMessageId: "inbox-b" });
+    expect(second).toMatchObject({ mode: "nudge", inboxMessageId: "inbox-a" });
     expect(deps.logger.debug).toHaveBeenCalledWith(
-      expect.objectContaining({ recipientUserId: "user-1", inboxKind: "workflow_output", nudgeSent: false }),
+      expect.objectContaining({
+        recipientUserId: "user-1",
+        inboxMessageId: "inbox-b",
+        inboxKind: "workflow_output",
+        nudgeSent: false,
+      }),
       "WhatsApp proactive delivery parked without duplicate nudge",
     );
+  });
+
+  it("throws chunked text failures with already-sent refs attached", async () => {
+    const firstSent = { ...sentText, providerMessageId: "text-1" };
+    const cause = new Error("second chunk failed");
+    const sendText = vi.fn().mockResolvedValueOnce(firstSent).mockRejectedValueOnce(cause);
+    const deps = buildDeps({
+      lastInbound: { receivedAt: "2026-07-03T09:00:00.000Z", providerTimestamp: null },
+      sendText,
+    });
+    const text = `${"a".repeat(WHATSAPP_TEXT_LIMIT)} ${"b".repeat(WHATSAPP_TEXT_LIMIT)} ${"c".repeat(12)}`;
+
+    let thrown: unknown;
+    try {
+      await deliverProactiveDm({
+        target,
+        recipientUserId: "user-1",
+        senderUserId: "user-1",
+        text,
+        now: new Date("2026-07-03T10:00:00.000Z"),
+        ...deps,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ProactiveDeliveryTextSendError);
+    expect(thrown).toMatchObject({
+      cause,
+      textSends: [{ text: "a".repeat(WHATSAPP_TEXT_LIMIT), sent: firstSent }],
+    });
   });
 
   it.each(["contact_not_found", "window_expired"])(

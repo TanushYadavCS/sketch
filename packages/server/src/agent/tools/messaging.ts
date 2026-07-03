@@ -240,7 +240,9 @@ export function createMessagingTools(deps: SketchMcpDeps) {
         storeInInbox: z
           .boolean()
           .optional()
-          .describe("Whether to store the sent message in each recipient's inbox. Defaults to true."),
+          .describe(
+            "Whether to store the sent message in each recipient's inbox. Defaults to true. WhatsApp out-of-window content is always parked in the inbox regardless of this setting so it is not lost.",
+          ),
       },
       async (params) => handleSendMessageToUsers(params, deps),
     ),

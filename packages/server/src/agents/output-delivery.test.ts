@@ -327,6 +327,109 @@ describe("createAgentOutputDeliveryService", () => {
     expect(captured.every((row) => row.text.length <= WHATSAPP_TEXT_LIMIT)).toBe(true);
   });
 
+  it("captures successful WhatsApp DM chunks before propagating a later chunk failure", async () => {
+    const conversations = createConversationRepository(db);
+    const conversation = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+15551234567" },
+      "Alice",
+    );
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "wa-inbound-1",
+      senderJid: "+15551234567",
+      senderName: "Alice",
+      senderUserId: "user-delivery",
+      isBot: false,
+      addressedToSketch: true,
+      text: "latest inbound",
+      providerTimestamp: new Date(Date.now() - 1_000).toISOString(),
+      receivedAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const cause = new Error("second chunk failed");
+    const sendText = vi.fn(async (_target: unknown, _text: string) => {
+      if (sendText.mock.calls.length === 2) throw cause;
+      return {
+        providerMessageId: `wa-dm-${sendText.mock.calls.length}`,
+        providerConversationId: "dm:+15551234567",
+        providerTimestamp: new Date().toISOString(),
+      };
+    });
+    const whatsapp = createMockWhatsApp({
+      isConnected: true,
+      sendText,
+    });
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+    const deliverySections = Array.from({ length: 7 }, (_, index) => ({
+      key: `section_${index}`,
+      title: `Section ${index}`,
+      enabledByDefault: true,
+      labels: ["todo"],
+    }));
+    const definition = { ...dailyBriefDefinition, sections: deliverySections };
+    const makeItem = (sectionKey: string, index: number) => ({
+      id: `${sectionKey}-${index}`,
+      sectionKey,
+      title: `Important ${sectionKey} ${index} ${"T".repeat(140)}`,
+      summary: `Detailed update ${sectionKey} ${index} ${"S".repeat(360)}`,
+      priority: "high" as const,
+      label: "todo",
+      displayRef: `REF-${sectionKey}-${index}`,
+      actionType: "generic",
+      actionLabel: "Plan with Sketch",
+      actionPrompt: "Plan it.",
+      sourceUrl: null,
+      knowledgeRefs: { entityIds: [`entity-${sectionKey}-${index}`], fileIds: [] },
+      structuredPayload: null,
+      sortOrder: index,
+    });
+    const sections = Object.fromEntries(
+      deliverySections.map((section) => [
+        section.key,
+        Array.from({ length: 4 }, (_, index) => makeItem(section.key, index)),
+      ]),
+    );
+
+    await expect(
+      service.deliver({
+        definition,
+        delivery: {
+          enabled: true,
+          platform: "whatsapp",
+          targetType: "dm",
+          targetId: "dm:+15551234567",
+          label: "Alice",
+        },
+        output: {
+          id: "output-delivery",
+          userId: "user-delivery",
+          agentKey: dailyBriefDefinition.key,
+          outputDate: "2026-06-26",
+          masthead: { title: "Daily Brief", summary: "Executive summary ".repeat(40) },
+          sections,
+        },
+      }),
+    ).rejects.toBe(cause);
+
+    expect(sendText).toHaveBeenCalledTimes(2);
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .select(["text", "provider_message_id", "is_bot"])
+      .where("is_bot", "=", 1)
+      .execute();
+    expect(captured).toHaveLength(1);
+    expect(captured[0].provider_message_id).toBe("wa-dm-1");
+    expect(captured[0].text.length).toBeLessThanOrEqual(WHATSAPP_TEXT_LIMIT);
+    const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
+    expect(attempt.status).toBe("failed");
+    expect(attempt.error_message).toBe("second chunk failed");
+  });
+
   it("records a failed attempt when the target platform is unavailable", async () => {
     const whatsapp = createMockWhatsApp();
     const service = createAgentOutputDeliveryService({
